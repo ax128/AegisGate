@@ -1,34 +1,39 @@
 # AegisGate
 
-AegisGate 是一个面向 LLM 的安全网关，提供 OpenAI 兼容接口，支持请求脱敏、响应强检查、风险确认放行、流式阻断与审计。
+AegisGate 是面向 LLM 调用的**安全网关**：Agent 与业务只对接网关，不直连上游模型，在网关层统一做**请求脱敏与拦截、响应检测与阻断、高风险确认放行**，实现「单点防御、可追溯」。
 
-项目定位：
-- Agent 侧 `baseUrl` 固定指向网关
-- 真实上游通过请求头 `X-Upstream-Base` 动态指定
-- 所有请求必须携带 `gateway-key`（默认值：`agent`）
+**隐私与数据**：本网关**不记录任何业务数据**，仅作为本地中间层做过滤与转发；请求与响应内容不落盘、不上报，从机制上避免经第三方转发导致隐私数据泄露。
+
+**防御思路**：请求进入前做最小充分检查（脱敏 + 泄露/越权/注入检测），转发前不暴露上游地址与密钥；响应返回前做强检查（异常与投毒检测、必要时清洗或阻断）；流式响应支持分段检查与中途阻断；命中高风险时要求用户确认后再放行一次，避免自动执行危险指令。
+
+**项目定位**：
+- Agent 侧 `baseUrl` 固定指向网关，不持有真实上游地址
+- 真实上游由请求头 `X-Upstream-Base` 动态指定，由网关校验与转发
+- 所有请求必须携带 `gateway-key`（默认值：`agent`），缺一即拒
 
 ## 1. 核心能力
 
-- OpenAI 兼容接口
-  - `POST /v1/chat/completions`
-  - `POST /v1/responses`
-- 请求侧安全（最小充分检查）
-  - 可逆脱敏（redaction）
-  - 泄露检查与高置信越权/注入拦截
-- 响应侧安全（强检查）
-  - 异常/投毒检测、恢复后再检查、必要时清洗或阻断
-- 高风险确认放行
-  - 命中高风险时返回确认模板，用户 `yes/no` 决定是否执行一次
-- 流式处理
-  - 支持 SSE 透传
-  - 支持流式增量检查与中途阻断
-- 存储后端
-  - `sqlite` / `redis` / `postgres`
-- 语义模块
-  - 独立异步语义服务调用（超时 + 熔断 + 缓存）
-- 可选边界能力
-  - loopback 限制
-  - HMAC 验签 + nonce 防重放
+**接口与协议**
+- OpenAI 兼容：`POST /v1/chat/completions`、`POST /v1/responses`，以及 `/v1/*` 通用代理
+- 流式：SSE 透传，支持流式增量检查与中途阻断
+
+**请求侧防御**
+- 可逆脱敏（redaction）：敏感内容在网关侧脱敏后转发，降低泄露面
+- 泄露检查：防止 prompt/密钥/内部信息随请求流出
+- 越权与注入拦截：高置信命中时直接拒绝，不转发上游
+
+**响应侧防御**
+- 异常与投毒检测：对模型输出做规则与策略检查
+- 恢复后再检查：解码/还原后再次校验，必要时对内容清洗或整段阻断
+- 流式分段检查：边收边检，发现问题可立即断流
+
+**风险可控**
+- 高风险确认放行：命中高风险时返回确认模板，用户 `yes/no` 决定是否执行一次，避免自动执行危险操作
+
+**审计与扩展**
+- 存储后端：`sqlite` / `redis` / `postgres`，用于审计与状态落盘
+- 语义模块（可选）：独立异步语义服务，超时 + 熔断 + 缓存，用于灰区语义风险判断
+- 边界加固（可选）：loopback 限制、HMAC 验签、nonce 防重放
 
 ## 2. 请求转发模型
 
@@ -90,19 +95,28 @@ curl http://127.0.0.1:18080/health
 
 ## 4. Docker 一键部署
 
-### 4.1 启动
+### 4.1 下载
+
+从 GitHub 克隆仓库：
+
+```bash
+git clone https://github.com/ax128/AegisGate.git
+cd AegisGate
+```
+
+### 4.2 启动
 
 ```bash
 docker compose up -d --build
 ```
 
-### 4.2 查看日志
+### 4.3 查看日志
 
 ```bash
 docker compose logs -f aegisgate
 ```
 
-### 4.3 停止
+### 4.4 停止
 
 ```bash
 docker compose down
@@ -258,25 +272,7 @@ pending 记录包含：`confirm_id / payload_hash / status / expires_at / retain
   - `AEGIS_REQUEST_REPLAY_WINDOW_SECONDS`
   - `AEGIS_NONCE_CACHE_BACKEND`：`memory|redis`
 
-## 9. 上传 GitHub 前建议
-
-本仓库已按发布场景处理：
-- 已清理本地运行数据：`logs/*.db`、`logs/*.log`、`logs/audit.jsonl`
-- 新增 `.gitignore`，默认不提交：
-  - `logs/` 运行数据（保留 `logs/.gitkeep`）
-  - `docs/`
-  - `.env*`
-  - 测试缓存与编辑器文件
-
-可直接执行：
-
-```bash
-git init
-git add .
-git commit -m "feat: prepare aegisgate for github release"
-```
-
-## 10. 项目结构
+## 9. 项目结构
 
 ```text
 aegisgate/
