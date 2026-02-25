@@ -1,4 +1,7 @@
-"""Request-side redaction using externalized rules."""
+"""Request-side redaction using externalized rules.
+
+仅做占位替换，不拦截请求；不受 security_level 放宽影响，规则保持原样。
+"""
 
 from __future__ import annotations
 

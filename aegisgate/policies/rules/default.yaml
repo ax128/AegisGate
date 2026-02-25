@@ -7,4 +7,5 @@ enabled_filters:
   - restoration
   - post_restore_guard
   - output_sanitizer
-risk_threshold: 0.70
+# 0.85：仅较高风险时拦截，降低误拦（可改为 0.7 提高严格度）
+risk_threshold: 0.85

@@ -524,8 +524,9 @@ action_map:
   sanitizer:
     system_leak: block
   request_sanitizer:
-    secret_exfiltration: block
-    privilege_escalation: block
+    # review=仅记录不拦截，降低误拦；改为 block 可恢复严格拦截
+    secret_exfiltration: review
+    privilege_escalation: review
     rule_bypass: block
     leak_check: block
     shape_anomaly: sanitize

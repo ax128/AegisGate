@@ -322,7 +322,7 @@ pending 记录包含：`confirm_id / payload_hash / status / expires_at / retain
   - `AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS`
   - `AEGIS_UPSTREAM_WHITELIST_URL_LIST`（逗号分隔）
 - 安全策略
-  - `AEGIS_SECURITY_LEVEL`：`high|medium|low`（默认 `medium`）
+  - `AEGIS_SECURITY_LEVEL`：`high|medium|low`（默认 `medium`；三档均已整体放宽阈值、减少误拦，机制成熟前建议用 medium 或 low）。**脱敏（redaction）仅做替换、不参与拦截**，不受此档位放宽影响，保持原有规则。
   - `AEGIS_CONFIRMATION_TTL_SECONDS`
   - `AEGIS_PENDING_DATA_TTL_SECONDS`（默认 24h）
 - 存储

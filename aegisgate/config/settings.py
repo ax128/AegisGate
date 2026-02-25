@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     gateway_key: str = "agent"
     confirmation_ttl_seconds: int = 300
     pending_data_ttl_seconds: int = 86400
+    # high|medium|low 三档均已整体放宽，medium 为默认
     security_level: str = "medium"
     enable_semantic_module: bool = False  # 默认关闭；仅在具备 1G 1vCPU 可用的语义模型或接受内置正则占位时设为 True
     semantic_gray_low: float = 0.25

@@ -484,7 +484,7 @@ _DEBUG_HEADERS_REDACT = frozenset(
 
 
 def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str) -> None:
-    """当 AEGIS_LOG_LEVEL=debug 时，打一条完整请求内容（头脱敏、body 可截断），便于调试。"""
+    """当 AEGIS_LOG_LEVEL=debug 时，打完整请求内容（头脱敏）；body 先裁剪再整段打印，避免被日志系统截断。"""
     if not logger.isEnabledFor(logging.DEBUG):
         return
     headers_safe = {}
@@ -494,20 +494,29 @@ def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str)
             headers_safe[k] = "***"
         else:
             headers_safe[k] = v
-    try:
-        body_str = json.dumps(payload, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        body_str = str(payload)
-    if len(body_str) > _DEBUG_REQUEST_BODY_MAX_CHARS:
-        body_str = body_str[:_DEBUG_REQUEST_BODY_MAX_CHARS] + "\n... [truncated]"
     logger.debug(
-        "incoming request method=%s path=%s route=%s headers=%s body=%s",
+        "incoming request method=%s path=%s route=%s headers=%s",
         request.method,
         request.url.path,
         route,
         headers_safe,
-        body_str,
     )
+    try:
+        body_str = json.dumps(payload, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        body_str = str(payload)
+    total_len = len(body_str)
+    if total_len > _DEBUG_REQUEST_BODY_MAX_CHARS:
+        body_excerpt = body_str[:_DEBUG_REQUEST_BODY_MAX_CHARS]
+        logger.debug(
+            "incoming request body (excerpt %d of %d chars):\n%s",
+            _DEBUG_REQUEST_BODY_MAX_CHARS,
+            total_len,
+            body_excerpt,
+        )
+        logger.debug("incoming request body truncated, total %d chars", total_len)
+    else:
+        logger.debug("incoming request body (%d chars):\n%s", total_len, body_str)
 
 
 def _extract_sse_data_payload(line: bytes) -> str | None:
@@ -2148,6 +2157,20 @@ async def chat_completions(payload: dict, request: Request):
         _write_audit_event(ctx_preview, boundary=boundary)
         return to_chat_response(expired_resp)
 
+    # 用户回复了 yes 但未匹配到任何 pending：不再对当前 body 跑请求管道，避免再次被 request_sanitizer 拦截
+    if decision.value == "yes" and not pending:
+        no_pending_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text="未找到待确认记录。请使用与触发确认时相同的 session_id，或在消息中包含确认编号（如 yes cfm-xxx）。\nNo pending confirmation found. Use the same session_id as the blocked request or include the confirm_id in your message (e.g. yes cfm-xxx).",
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("no_pending_for_yes")
+        _attach_security_metadata(no_pending_resp, ctx_preview, boundary=boundary)
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_chat_response(no_pending_resp)
+
     if _should_stream(payload):
         return await _execute_chat_stream_once(
             payload=payload,
@@ -2329,6 +2352,20 @@ async def responses(payload: dict, request: Request):
         )
         _write_audit_event(ctx_preview, boundary=boundary)
         return to_responses_output(expired_resp)
+
+    # 用户回复了 yes 但未匹配到任何 pending：不再对当前 body 跑请求管道
+    if decision.value == "yes" and not pending:
+        no_pending_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text="未找到待确认记录。请使用与触发确认时相同的 session_id，或在消息中包含确认编号（如 yes cfm-xxx）。\nNo pending confirmation found. Use the same session_id as the blocked request or include the confirm_id in your message (e.g. yes cfm-xxx).",
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("no_pending_for_yes")
+        _attach_security_metadata(no_pending_resp, ctx_preview, boundary=boundary)
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_responses_output(no_pending_resp)
 
     if _should_stream(payload):
         return await _execute_responses_stream_once(
