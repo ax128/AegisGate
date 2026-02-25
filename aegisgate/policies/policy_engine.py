@@ -15,6 +15,22 @@ from aegisgate.core.errors import PolicyResolutionError
 from aegisgate.util.logger import logger
 
 
+# 当策略文件不存在（如 config 挂载为空）时使用的内置默认，与 default.yaml 一致
+_BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
+    "enabled_filters": [
+        "redaction",
+        "request_sanitizer",
+        "anomaly_detector",
+        "injection_detector",
+        "privilege_guard",
+        "restoration",
+        "post_restore_guard",
+        "output_sanitizer",
+    ],
+    "risk_threshold": 0.85,
+}
+
+
 class PolicyEngine:
     def __init__(self, rules_dir: str = "aegisgate/policies/rules") -> None:
         self.rules_dir = Path(rules_dir)
@@ -24,6 +40,12 @@ class PolicyEngine:
     def _load_policy(self, policy_name: str) -> dict[str, Any]:
         rule_path = self.rules_dir / f"{policy_name}.yaml"
         if not rule_path.exists():
+            if policy_name == "default":
+                logger.warning(
+                    "policy file not found, using built-in default policy path=%s",
+                    rule_path,
+                )
+                return dict(_BUILTIN_DEFAULT_POLICY)
             raise PolicyResolutionError(f"policy not found: {policy_name}")
 
         mtime_ns = rule_path.stat().st_mtime_ns
