@@ -55,39 +55,6 @@ def _blocked_response(status_code: int, reason: str) -> JSONResponse:
 
 
 @app.middleware("http")
-async def gw_token_rewrite_middleware(request: Request, call_next):
-    """将 /v1/__gw__/t/{token}/... 重写为 /v1/... 并注入 X-Upstream-Base、gateway-key。"""
-    path = request.url.path or "/"
-    m = _GW_TOKEN_PATH_RE.match(path)
-    if not m:
-        return await call_next(request)
-    token, rest = m.group(1), m.group(2)
-    mapping = gw_tokens_get(token)
-    if not mapping:
-        logger.warning("gw_token not found token=%s path=%s", token, path)
-        return JSONResponse(status_code=404, content={"error": "token_not_found", "detail": "token invalid or expired"})
-    new_path = f"/v1/{rest}" if rest else "/v1"
-    ub = mapping["upstream_base"]
-    gk = mapping["gateway_key"]
-    scope = dict(request.scope)
-    scope["path"] = new_path
-    scope["root_path"] = ""
-    headers = list(scope.get("headers") or [])
-    # 使用 token 访问时以映射为准：移除客户端可能携带的网关相关 header（含下划线形式），避免与 token 映射冲突
-    ub_name = settings.upstream_base_header.encode("latin-1")
-    gk_name = settings.gateway_key_header.encode("latin-1")
-    ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
-    gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
-    skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
-    headers = [(k, v) for k, v in headers if k.lower() not in skip]
-    headers.append((ub_name, ub.encode("utf-8")))
-    headers.append((gk_name, gk.encode("utf-8")))
-    scope["headers"] = headers
-    new_request = StarletteRequest(scope, request.receive)
-    return await call_next(new_request)
-
-
-@app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary = {
         "loopback_only": settings.enforce_loopback_only,
@@ -201,6 +168,43 @@ async def security_boundary_middleware(request: Request, call_next):
         bool(boundary.get("auth_verified")),
     )
     return response
+
+
+@app.middleware("http")
+async def gw_token_rewrite_middleware(request: Request, call_next):
+    """
+    将 /v1/__gw__/t/{token}/... 重写为 /v1/... 并注入 X-Upstream-Base、gateway-key。
+    必须最后注册以便最先执行，这样路由才能收到重写后的 path。
+    """
+    path = request.url.path or "/"
+    m = _GW_TOKEN_PATH_RE.match(path)
+    if not m:
+        return await call_next(request)
+    token, rest = m.group(1), m.group(2)
+    mapping = gw_tokens_get(token)
+    if not mapping:
+        logger.warning("gw_token not found token=%s path=%s", token, path)
+        return JSONResponse(status_code=404, content={"error": "token_not_found", "detail": "token invalid or expired"})
+    new_path = f"/v1/{rest}" if rest else "/v1"
+    ub = mapping["upstream_base"]
+    gk = mapping["gateway_key"]
+    scope = dict(request.scope)
+    scope["path"] = new_path
+    scope["root_path"] = ""
+    scope["raw_path"] = new_path.encode("utf-8")
+    headers = list(scope.get("headers") or [])
+    # 使用 token 访问时以映射为准：移除客户端可能携带的网关相关 header（含下划线形式），避免与 token 映射冲突
+    ub_name = settings.upstream_base_header.encode("latin-1")
+    gk_name = settings.gateway_key_header.encode("latin-1")
+    ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
+    gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
+    skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
+    headers = [(k, v) for k, v in headers if k.lower() not in skip]
+    headers.append((ub_name, ub.encode("utf-8")))
+    headers.append((gk_name, gk.encode("utf-8")))
+    scope["headers"] = headers
+    new_request = StarletteRequest(scope, request.receive)
+    return await call_next(new_request)
 
 
 # 注册时禁止使用的示例/占位 upstream_base，避免用户未替换就提交
