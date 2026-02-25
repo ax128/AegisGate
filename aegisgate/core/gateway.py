@@ -7,8 +7,6 @@ import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
 
 from aegisgate.adapters.openai_compat.router import (
     clear_pending_confirmations_on_startup,
@@ -40,6 +38,61 @@ if settings.enable_relay_endpoint:
 _nonce_cache = build_nonce_cache()
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _pending_prune_task: asyncio.Task | None = None
+
+
+class GWTokenRewriteMiddleware:
+    """
+    在路由匹配前重写 token 路径，避免 /v1/__gw__/t/{token}/... 被 generic 路由误接管。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path") or "/")
+        matched = _GW_TOKEN_PATH_RE.match(path)
+        if not matched:
+            await self.app(scope, receive, send)
+            return
+
+        token, rest = matched.group(1), matched.group(2)
+        mapping = gw_tokens_get(token)
+        if not mapping:
+            logger.warning("gw_token not found token=%s path=%s", token, path)
+            response = JSONResponse(
+                status_code=404,
+                content={"error": "token_not_found", "detail": "token invalid or expired"},
+            )
+            await response(scope, receive, send)
+            return
+
+        new_path = f"/v1/{rest}" if rest else "/v1"
+        logger.info("gw_token_rewrite path=%s -> %s token=%s", path, new_path, token)
+
+        ub = mapping["upstream_base"]
+        gk = mapping["gateway_key"]
+        new_scope = dict(scope)
+        new_scope["path"] = new_path
+        new_scope["root_path"] = ""
+        new_scope["raw_path"] = new_path.encode("utf-8")
+
+        headers = list(new_scope.get("headers") or [])
+        # token 访问时以映射为准：移除客户端携带的同名/下划线头，避免冲突。
+        ub_name = settings.upstream_base_header.encode("latin-1")
+        gk_name = settings.gateway_key_header.encode("latin-1")
+        ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
+        gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
+        skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
+        headers = [(k, v) for k, v in headers if k.lower() not in skip]
+        headers.append((ub_name, ub.encode("utf-8")))
+        headers.append((gk_name, gk.encode("utf-8")))
+        new_scope["headers"] = headers
+
+        await self.app(new_scope, receive, send)
 
 
 def _blocked_response(status_code: int, reason: str) -> JSONResponse:
@@ -170,43 +223,6 @@ async def security_boundary_middleware(request: Request, call_next):
         bool(boundary.get("auth_verified")),
     )
     return response
-
-
-async def _gw_token_rewrite_dispatch(request: Request, call_next):
-    """
-    将 /v1/__gw__/t/{token}/... 重写为 /v1/... 并注入 X-Upstream-Base、gateway-key。
-    通过 add_middleware 最后添加，保证最先执行，路由才能收到重写后的 path。
-    """
-    path = request.url.path or "/"
-    m = _GW_TOKEN_PATH_RE.match(path)
-    if not m:
-        return await call_next(request)
-    token, rest = m.group(1), m.group(2)
-    mapping = gw_tokens_get(token)
-    if not mapping:
-        logger.warning("gw_token not found token=%s path=%s", token, path)
-        return JSONResponse(status_code=404, content={"error": "token_not_found", "detail": "token invalid or expired"})
-    new_path = f"/v1/{rest}" if rest else "/v1"
-    logger.info("gw_token_rewrite path=%s -> %s token=%s", path, new_path, token)
-    ub = mapping["upstream_base"]
-    gk = mapping["gateway_key"]
-    scope = dict(request.scope)
-    scope["path"] = new_path
-    scope["root_path"] = ""
-    scope["raw_path"] = new_path.encode("utf-8")
-    headers = list(scope.get("headers") or [])
-    # 使用 token 访问时以映射为准：移除客户端可能携带的网关相关 header（含下划线形式），避免与 token 映射冲突
-    ub_name = settings.upstream_base_header.encode("latin-1")
-    gk_name = settings.gateway_key_header.encode("latin-1")
-    ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
-    gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
-    skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
-    headers = [(k, v) for k, v in headers if k.lower() not in skip]
-    headers.append((ub_name, ub.encode("utf-8")))
-    headers.append((gk_name, gk.encode("utf-8")))
-    scope["headers"] = headers
-    new_request = StarletteRequest(scope, request.receive)
-    return await call_next(new_request)
 
 
 # 注册时禁止使用的示例/占位 upstream_base，避免用户未替换就提交
@@ -364,5 +380,5 @@ async def startup_background_tasks() -> None:
         _pending_prune_task = asyncio.create_task(_pending_prune_loop(), name="aegisgate-pending-prune")
 
 
-# Token 重写必须最先执行：用 add_middleware 最后添加，使其成为最外层
-app.add_middleware(BaseHTTPMiddleware, dispatch=_gw_token_rewrite_dispatch)
+# Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。
+app.add_middleware(GWTokenRewriteMiddleware)
