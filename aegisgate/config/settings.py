@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     upstream_base_header: str = "x-upstream-base"
     upstream_whitelist_url_list: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
+    sqlite_db_path: str = "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_key_prefix: str = "aegisgate"
     postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"

@@ -17,4 +17,4 @@ def create_store():
             dsn=settings.postgres_dsn,
             schema=settings.postgres_schema,
         )
-    return SqliteKVStore()
+    return SqliteKVStore(db_path=settings.sqlite_db_path)
