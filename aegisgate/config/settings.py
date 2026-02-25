@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     semantic_circuit_open_seconds: int = 30
     default_policy: str = "default"
     security_rules_path: str = "aegisgate/policies/rules/security_filters.yaml"
+    # token 映射表路径（config/gw_tokens.json），启动时加载，注册/删除时写入
+    gw_tokens_path: str = "config/gw_tokens.json"
     enforce_loopback_only: bool = True
 
     enable_request_hmac_auth: bool = False

@@ -10,9 +10,6 @@ import re
 import threading
 import time
 from typing import Any, AsyncGenerator, AsyncIterable, Generator, Iterable, Mapping
-from urllib.parse import urlparse, urlunparse
-
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
@@ -21,6 +18,29 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_internal_chat,
     to_internal_responses,
     to_responses_output,
+)
+from aegisgate.adapters.openai_compat.stream_utils import (
+    _build_streaming_response,
+    _extract_sse_data_payload,
+    _extract_stream_text_from_event,
+    _stream_block_reason,
+    _stream_block_sse_chunk,
+    _stream_confirmation_sse_chunk,
+    _stream_done_sse_chunk,
+    _stream_error_sse_chunk,
+)
+from aegisgate.adapters.openai_compat.upstream import (
+    _build_forward_headers,
+    _build_upstream_url,
+    _effective_gateway_headers,
+    _forward_json,
+    _forward_stream_lines,
+    _is_upstream_whitelisted,
+    _resolve_gateway_key,
+    _resolve_upstream_base,
+    _safe_error_detail,
+    _validate_gateway_headers,
+    close_upstream_async_client,
 )
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import write_audit
@@ -66,24 +86,12 @@ semantic_service_client = SemanticServiceClient(
     open_seconds=settings.semantic_circuit_open_seconds,
 )
 _GATEWAY_PREFIX = "/v1"
-_HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
 _STREAM_WINDOW_MAX_CHARS = 8000
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
-_upstream_async_client: httpx.AsyncClient | None = None
-_upstream_client_lock: Any = None
 _pipeline_local = threading.local()
 
 
@@ -112,251 +120,8 @@ def _get_pipeline() -> Pipeline:
     return pipeline
 
 
-def _upstream_http_limits() -> httpx.Limits:
-    return httpx.Limits(
-        max_connections=max(10, int(settings.upstream_max_connections)),
-        max_keepalive_connections=max(5, int(settings.upstream_max_keepalive_connections)),
-    )
-
-
-def _upstream_http_timeout() -> httpx.Timeout:
-    timeout = float(settings.upstream_timeout_seconds)
-    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout)
-
-
-async def _get_upstream_async_client() -> httpx.AsyncClient:
-    global _upstream_async_client, _upstream_client_lock
-    if _upstream_async_client is not None:
-        return _upstream_async_client
-    if _upstream_client_lock is None:
-        _upstream_client_lock = asyncio.Lock()
-    async with _upstream_client_lock:
-        if _upstream_async_client is None:
-            _upstream_async_client = httpx.AsyncClient(
-                http2=False,
-                timeout=_upstream_http_timeout(),
-                limits=_upstream_http_limits(),
-            )
-    return _upstream_async_client
-
-
-async def close_upstream_async_client() -> None:
-    global _upstream_async_client
-    if _upstream_async_client is not None:
-        await _upstream_async_client.aclose()
-        _upstream_async_client = None
-
-
 async def close_semantic_async_client() -> None:
     await semantic_service_client.aclose()
-
-
-def _normalize_upstream_base(raw_base: str) -> str:
-    candidate = raw_base.strip()
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("invalid_upstream_scheme")
-    if not parsed.netloc:
-        raise ValueError("invalid_upstream_host")
-    if parsed.query or parsed.fragment:
-        raise ValueError("invalid_upstream_query_fragment")
-    cleaned_path = parsed.path.rstrip("/")
-    return urlunparse((parsed.scheme, parsed.netloc, cleaned_path, "", "", ""))
-
-
-def _header_value(headers: Mapping[str, str], target: str) -> str:
-    for key, value in headers.items():
-        if key.lower() == target.lower():
-            return value
-    return ""
-
-
-def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
-    raw = _header_value(headers, settings.upstream_base_header)
-    if not raw.strip():
-        raise ValueError("missing_upstream_base")
-    return _normalize_upstream_base(raw)
-
-
-def _resolve_gateway_key(headers: Mapping[str, str]) -> str:
-    primary = _header_value(headers, settings.gateway_key_header)
-    if primary.strip():
-        return primary.strip()
-    # Accept underscore style for compatibility with some client SDKs.
-    fallback = _header_value(headers, settings.gateway_key_header.replace("-", "_"))
-    return fallback.strip()
-
-
-def _validate_gateway_headers(headers: Mapping[str, str]) -> tuple[bool, str, str]:
-    upstream_raw = _header_value(headers, settings.upstream_base_header).strip()
-    gateway_key_raw = _resolve_gateway_key(headers).strip()
-    if not upstream_raw or not gateway_key_raw:
-        logger.warning(
-            "gateway header validation failed missing upstream_or_key upstream_present=%s key_present=%s",
-            bool(upstream_raw),
-            bool(gateway_key_raw),
-        )
-        return False, "invalid_parameters", "X-Upstream-Base or gateway-key is missing"
-    if not settings.gateway_key:
-        logger.error("gateway header validation failed gateway-key misconfigured on server")
-        return False, "gateway_misconfigured", "gateway-key is not configured on server"
-    if gateway_key_raw != settings.gateway_key:
-        logger.warning("gateway header validation failed key mismatch")
-        return False, "gateway_auth_failed", "gateway-key is invalid"
-    logger.debug("gateway header validation passed")
-    return True, "", ""
-
-
-def _build_upstream_url(request_path: str, upstream_base: str) -> str:
-    route_path = request_path or "/"
-    if route_path == _GATEWAY_PREFIX:
-        route_path = "/"
-    elif route_path.startswith(f"{_GATEWAY_PREFIX}/"):
-        route_path = route_path[len(_GATEWAY_PREFIX) :]
-    if not route_path.startswith("/"):
-        route_path = f"/{route_path}"
-    return f"{upstream_base}{route_path}"
-
-
-def _parse_whitelist_bases() -> set[str]:
-    raw = settings.upstream_whitelist_url_list.strip()
-    if not raw:
-        return set()
-    values: set[str] = set()
-    for item in raw.split(","):
-        candidate = item.strip()
-        if not candidate:
-            continue
-        try:
-            values.add(_normalize_upstream_base(candidate))
-        except ValueError:
-            logger.warning("ignore invalid whitelist upstream base: %s", candidate)
-    return values
-
-
-def _is_upstream_whitelisted(upstream_base: str) -> bool:
-    whitelist = _parse_whitelist_bases()
-    if not whitelist:
-        return False
-    return _normalize_upstream_base(upstream_base) in whitelist
-
-
-def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    forwarded: dict[str, str] = {}
-    excluded = {
-        "host",
-        "content-length",
-        settings.upstream_base_header.lower(),
-        settings.gateway_key_header.lower(),
-        settings.gateway_key_header.replace("-", "_").lower(),
-        *_HOP_BY_HOP_HEADERS,
-    }
-    for key, value in headers.items():
-        lowered = key.lower()
-        if lowered in excluded:
-            continue
-        if lowered.startswith("x-aegis-"):
-            continue
-        forwarded[key] = value
-
-    if not any(name.lower() == "content-type" for name in forwarded):
-        forwarded["Content-Type"] = "application/json"
-    return forwarded
-
-
-def _decode_json_or_text(body: bytes) -> dict[str, Any] | str:
-    text = body.decode("utf-8", errors="replace")
-    if not text:
-        return ""
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-        return text
-    except json.JSONDecodeError:
-        return text
-
-
-async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str, str]) -> tuple[int, dict[str, Any] | str]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    logger.debug("forward_json start url=%s payload_bytes=%d", url, len(body))
-    client = await _get_upstream_async_client()
-    try:
-        response = await client.post(url=url, content=body, headers=dict(headers))
-        logger.debug("forward_json done url=%s status=%s", url, response.status_code)
-        return response.status_code, _decode_json_or_text(response.content)
-    except httpx.HTTPError as exc:
-        detail = str(exc)
-        logger.warning("forward_json http_error url=%s error=%s", url, detail)
-        raise RuntimeError(f"upstream_unreachable: {detail}") from exc
-
-
-async def _forward_stream_lines(
-    url: str,
-    payload: dict[str, Any],
-    headers: Mapping[str, str],
-) -> AsyncGenerator[bytes, None]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    logger.debug("forward_stream start url=%s payload_bytes=%d", url, len(body))
-    client = await _get_upstream_async_client()
-    try:
-        async with client.stream("POST", url=url, content=body, headers=dict(headers)) as resp:
-            logger.debug("forward_stream connected url=%s status=%s", url, resp.status_code)
-            if resp.status_code >= 400:
-                detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
-                raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
-            async for line in resp.aiter_lines():
-                yield f"{line}\n".encode("utf-8")
-    except httpx.HTTPError as exc:
-        detail = str(exc)
-        logger.warning("forward_stream http_error url=%s error=%s", url, detail)
-        raise RuntimeError(f"upstream_unreachable: {detail}") from exc
-
-
-def _flatten_stream_content(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "".join(_flatten_stream_content(item) for item in value)
-    if isinstance(value, dict):
-        if isinstance(value.get("text"), str):
-            return value["text"]
-        for key in ("content", "delta", "output_text", "text"):
-            if key in value:
-                text = _flatten_stream_content(value[key])
-                if text:
-                    return text
-    return ""
-
-
-def _extract_stream_text_from_event(data_payload: str) -> str:
-    try:
-        event = json.loads(data_payload)
-    except json.JSONDecodeError:
-        return ""
-
-    if not isinstance(event, dict):
-        return ""
-
-    choices = event.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, dict):
-            delta = first.get("delta")
-            text = _flatten_stream_content(delta)
-            if text:
-                return text
-            message = first.get("message")
-            text2 = _flatten_stream_content(message)
-            if text2:
-                return text2
-
-    for key in ("delta", "output_text", "text", "output"):
-        if key in event:
-            text = _flatten_stream_content(event[key])
-            if text:
-                return text
-    return ""
 
 
 def _should_stream(payload: dict[str, Any]) -> bool:
@@ -368,112 +133,6 @@ def _trim_stream_window(current: str, chunk: str) -> str:
     if len(merged) <= _STREAM_WINDOW_MAX_CHARS:
         return merged
     return merged[-_STREAM_WINDOW_MAX_CHARS:]
-
-
-def _stream_block_reason(ctx: RequestContext) -> str | None:
-    if ctx.response_disposition == "block":
-        if ctx.disposition_reasons:
-            return ctx.disposition_reasons[-1]
-        return "response_blocked"
-    if ctx.response_disposition == "sanitize":
-        return "response_sanitized"
-    if ctx.requires_human_review and any(tag.startswith("response_") for tag in ctx.security_tags):
-        return "response_human_review_required"
-
-    high_risk_tags = {
-        "response_privilege_abuse",
-        "response_injection_system_exfil",
-        "response_injection_unicode_bidi",
-        "response_semantic_leak",
-        "response_semantic_privilege",
-    }
-    for tag in high_risk_tags:
-        if tag in ctx.security_tags:
-            return tag
-    if ctx.risk_score >= max(ctx.risk_threshold, 0.9):
-        return "response_high_risk"
-    return None
-
-
-def _stream_block_message(reason: str) -> str:
-    return f"[AegisGate] stream blocked by security policy: {reason}"
-
-
-def _stream_block_sse_chunk(ctx: RequestContext, model: str, reason: str, route: str) -> bytes:
-    if route == "/v1/responses":
-        payload = {
-            "id": ctx.request_id,
-            "object": "response.chunk",
-            "model": model,
-            "type": "response.output_text.delta",
-            "delta": _stream_block_message(reason),
-            "aegisgate": {
-                "action": "block",
-                "risk_score": round(ctx.risk_score, 4),
-                "reason": reason,
-                "security_tags": sorted(ctx.security_tags),
-            },
-        }
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-    payload = {
-        "id": ctx.request_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": _stream_block_message(reason)},
-                "finish_reason": "stop",
-            }
-        ],
-        "aegisgate": {
-            "action": "block",
-            "risk_score": round(ctx.risk_score, 4),
-            "reason": reason,
-            "security_tags": sorted(ctx.security_tags),
-        },
-    }
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-
-def _stream_error_sse_chunk(message: str) -> bytes:
-    payload = {"error": message}
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-
-def _stream_done_sse_chunk() -> bytes:
-    return b"data: [DONE]\n\n"
-
-
-def _stream_confirmation_sse_chunk(
-    ctx: RequestContext,
-    model: str,
-    route: str,
-    content: str,
-    confirmation_meta: dict[str, Any],
-) -> bytes:
-    """流式返回一条「确认放行」内容，带 aegisgate.confirmation 元数据（非 block）。"""
-    if route == "/v1/responses":
-        payload = {
-            "id": ctx.request_id,
-            "object": "response.chunk",
-            "model": model,
-            "type": "response.output_text.delta",
-            "delta": content,
-            "aegisgate": {"confirmation": confirmation_meta, "action": "awaiting_confirmation"},
-        }
-    else:
-        payload = {
-            "id": ctx.request_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [
-                {"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": "stop"}
-            ],
-            "aegisgate": {"confirmation": confirmation_meta, "action": "awaiting_confirmation"},
-        }
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
 # 调试时完整请求内容最大输出长度，避免日志过长
@@ -527,25 +186,6 @@ def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str)
         )
         offset += _DEBUG_REQUEST_BODY_MAX_CHARS
 
-
-def _extract_sse_data_payload(line: bytes) -> str | None:
-    if not line:
-        return None
-    stripped = line.strip()
-    if not stripped.startswith(b"data:"):
-        return None
-    return stripped[5:].strip().decode("utf-8", errors="replace")
-
-
-def _build_streaming_response(generator: Iterable[bytes] | AsyncIterable[bytes]) -> StreamingResponse:
-    return StreamingResponse(
-        generator,
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 def _flatten_text(value: Any) -> str:
     if isinstance(value, str):
@@ -740,14 +380,6 @@ def _passthrough_responses_output(upstream_body: dict[str, Any] | str, req: Any)
             output_text=str(upstream_body),
         )
     )
-
-
-def _safe_error_detail(payload: dict[str, Any] | str) -> str:
-    if isinstance(payload, str):
-        return payload[:600]
-    if isinstance(payload.get("error"), str):
-        return payload["error"][:600]
-    return json.dumps(payload, ensure_ascii=False)[:600]
 
 
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
@@ -1043,11 +675,13 @@ def _error_response(status_code: int, reason: str, detail: str, ctx: RequestCont
     ctx.disposition_reasons.append(reason)
     ctx.enforcement_actions.append(f"upstream:{reason}")
     _write_audit_event(ctx, boundary=boundary)
+    # 保证 agent 端能拿到非空原因（error + detail）
+    detail_str = (detail or "").strip() or reason
     return JSONResponse(
         status_code=status_code,
         content={
             "error": reason,
-            "detail": detail,
+            "detail": detail_str,
             "aegisgate": {
                 "action": _resolve_action(ctx),
                 "risk_score": round(ctx.risk_score, 4),
@@ -1108,7 +742,7 @@ async def _execute_chat_stream_once(
                 ctx.response_disposition = "block"
                 ctx.disposition_reasons.append(reason)
                 ctx.enforcement_actions.append(f"upstream:{reason}")
-                yield _stream_error_sse_chunk(detail)
+                yield _stream_error_sse_chunk(detail, code=reason)
                 yield _stream_done_sse_chunk()
             finally:
                 _write_audit_event(ctx, boundary=boundary)
@@ -1222,7 +856,7 @@ async def _execute_chat_stream_once(
             ctx.disposition_reasons.append(reason)
             ctx.enforcement_actions.append(f"upstream:{reason}")
             logger.error("chat stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
-            yield _stream_error_sse_chunk(detail)
+            yield _stream_error_sse_chunk(detail, code=reason)
             yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
@@ -1272,7 +906,7 @@ async def _execute_responses_stream_once(
                 ctx.response_disposition = "block"
                 ctx.disposition_reasons.append(reason)
                 ctx.enforcement_actions.append(f"upstream:{reason}")
-                yield _stream_error_sse_chunk(detail)
+                yield _stream_error_sse_chunk(detail, code=reason)
                 yield _stream_done_sse_chunk()
             finally:
                 _write_audit_event(ctx, boundary=boundary)
@@ -1385,7 +1019,7 @@ async def _execute_responses_stream_once(
             ctx.disposition_reasons.append(reason)
             ctx.enforcement_actions.append(f"upstream:{reason}")
             logger.error("responses stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
-            yield _stream_error_sse_chunk(detail)
+            yield _stream_error_sse_chunk(detail, code=reason)
             yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
@@ -2021,7 +1655,7 @@ async def chat_completions(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(request.headers)
+    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
     if not ok:
         return _error_response(
             status_code=_to_status_code(reason),
@@ -2102,7 +1736,7 @@ async def chat_completions(payload: dict, request: Request):
 
             executed = await _execute_chat_once(
                 payload=pending_payload,
-                request_headers=request.headers,
+                request_headers=_effective_gateway_headers(request),
                 request_path=request.url.path,
                 boundary=boundary,
                 skip_confirmation=True,
@@ -2179,7 +1813,7 @@ async def chat_completions(payload: dict, request: Request):
     if _should_stream(payload):
         return await _execute_chat_stream_once(
             payload=payload,
-            request_headers=request.headers,
+            request_headers=_effective_gateway_headers(request),
             request_path=request.url.path,
             boundary=boundary,
             forced_upstream_base=None,
@@ -2187,7 +1821,7 @@ async def chat_completions(payload: dict, request: Request):
 
     return await _execute_chat_once(
         payload=payload,
-        request_headers=request.headers,
+        request_headers=_effective_gateway_headers(request),
         request_path=request.url.path,
         boundary=boundary,
         skip_confirmation=False,
@@ -2217,7 +1851,7 @@ async def responses(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(request.headers)
+    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
     if not ok:
         return _error_response(
             status_code=_to_status_code(reason),
@@ -2298,7 +1932,7 @@ async def responses(payload: dict, request: Request):
 
             executed = await _execute_responses_once(
                 payload=pending_payload,
-                request_headers=request.headers,
+                request_headers=_effective_gateway_headers(request),
                 request_path=request.url.path,
                 boundary=boundary,
                 skip_confirmation=True,
@@ -2375,7 +2009,7 @@ async def responses(payload: dict, request: Request):
     if _should_stream(payload):
         return await _execute_responses_stream_once(
             payload=payload,
-            request_headers=request.headers,
+            request_headers=_effective_gateway_headers(request),
             request_path=request.url.path,
             boundary=boundary,
             forced_upstream_base=None,
@@ -2383,7 +2017,7 @@ async def responses(payload: dict, request: Request):
 
     return await _execute_responses_once(
         payload=payload,
-        request_headers=request.headers,
+        request_headers=_effective_gateway_headers(request),
         request_path=request.url.path,
         boundary=boundary,
         skip_confirmation=False,
@@ -2401,7 +2035,7 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
         return JSONResponse(status_code=404, content={"error": "not_found"})
 
     boundary = getattr(request.state, "security_boundary", {})
-    ok, reason, detail = _validate_gateway_headers(request.headers)
+    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
     if not ok:
         preview_ctx = RequestContext(
             request_id=str(payload.get("request_id") or "preview-generic"),
@@ -2418,7 +2052,7 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
 
     return await _execute_generic_once(
         payload=payload,
-        request_headers=request.headers,
+        request_headers=_effective_gateway_headers(request),
         request_path=route_path,
         boundary=boundary,
     )

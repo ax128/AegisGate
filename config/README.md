@@ -43,6 +43,10 @@ cp aegisgate/policies/rules/*.yaml config/
 
 完整列表见项目 README 的「环境变量」章节。
 
+### 3. Token 映射表（gw_tokens.json）
+
+通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `config/gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，可手动编辑该文件，**同一组 upstream_base + gateway_key 建议只保留一条**，重启后生效。
+
 ---
 
-修改 YAML 或 `.env` 后执行：`docker compose restart aegisgate`
+修改 YAML、`.env` 或 `gw_tokens.json` 后执行：`docker compose restart aegisgate`

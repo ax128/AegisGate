@@ -1,4 +1,4 @@
-from aegisgate.adapters.openai_compat.router import (
+from aegisgate.adapters.openai_compat.upstream import (
     _build_forward_headers,
     _build_upstream_url,
     _is_upstream_whitelisted,

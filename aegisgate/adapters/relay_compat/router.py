@@ -9,6 +9,11 @@ from aegisgate.adapters.openai_compat.router import (
     _execute_chat_once,
     _execute_chat_stream_once,
 )
+from aegisgate.adapters.openai_compat.upstream import (
+    _effective_gateway_headers,
+    _header_value,
+    _resolve_gateway_key,
+)
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
@@ -46,14 +51,9 @@ def _relay_to_chat_payload(payload: dict) -> dict:
 
 @router.post("/generate")
 async def relay_generate(payload: dict, request: Request):
-    upstream_base = request.headers.get(settings.upstream_base_header, "").strip() or request.headers.get(
-        settings.upstream_base_header.replace("-", "_"),
-        "",
-    ).strip()
-    gateway_key = request.headers.get(settings.gateway_key_header, "").strip() or request.headers.get(
-        settings.gateway_key_header.replace("-", "_"),
-        "",
-    ).strip()
+    headers = _effective_gateway_headers(request)
+    upstream_base = (_header_value(headers, settings.upstream_base_header) or "").strip()
+    gateway_key = _resolve_gateway_key(headers).strip()
     if not upstream_base:
         return JSONResponse(status_code=400, content={"error": "invalid_parameters", "detail": "missing upstream base header"})
     if not settings.gateway_key:
@@ -68,7 +68,7 @@ async def relay_generate(payload: dict, request: Request):
     if bool(mapped_payload.get("stream")):
         return await _execute_chat_stream_once(
             payload=mapped_payload,
-            request_headers=request.headers,
+            request_headers=headers,
             request_path="/v1/chat/completions",
             boundary=boundary,
             forced_upstream_base=None,
@@ -76,7 +76,7 @@ async def relay_generate(payload: dict, request: Request):
 
     return await _execute_chat_once(
         payload=mapped_payload,
-        request_headers=request.headers,
+        request_headers=headers,
         request_path="/v1/chat/completions",
         boundary=boundary,
         skip_confirmation=False,
