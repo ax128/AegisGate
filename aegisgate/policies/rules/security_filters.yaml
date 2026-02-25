@@ -5,6 +5,10 @@ languages:
 
 redaction:
   request_prefix_max_len: 12
+  normalize_nfkc: true
+  strip_invisible_chars: true
+  # 字段感知脱敏阈值：避免把过短普通值误判为敏感数据
+  field_value_min_len: 12
   pii_patterns:
     - id: EMAIL
       regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'

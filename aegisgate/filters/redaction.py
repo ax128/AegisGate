@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from typing import Any
 
 from aegisgate.config.security_rules import load_security_rules
@@ -19,6 +20,8 @@ from aegisgate.util.logger import logger
 
 
 _MAX_LOG_MARKERS = 10
+_DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
+_DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
 
 
 def _normalize_for_log(value: str) -> str:
@@ -51,6 +54,11 @@ class RedactionFilter(BaseFilter):
 
         redaction_rules = load_security_rules().get("redaction", {})
         self._prefix_max_len = int(redaction_rules.get("request_prefix_max_len", 12))
+        self._normalize_nfkc = bool(redaction_rules.get("normalize_nfkc", True))
+        self._strip_invisible_chars = bool(redaction_rules.get("strip_invisible_chars", True))
+        self._invisible_chars = set(redaction_rules.get("unicode_invisible_chars", [])) or set(_DEFAULT_INVISIBLE_CHARS)
+        self._bidi_chars = set(redaction_rules.get("unicode_bidi_chars", [])) or set(_DEFAULT_BIDI_CHARS)
+        self._field_value_min_len = max(8, int(redaction_rules.get("field_value_min_len", 12)))
 
         compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
         for item in redaction_rules.get("pii_patterns", []):
@@ -69,6 +77,54 @@ class RedactionFilter(BaseFilter):
                 )
         self._pii_patterns = compiled_patterns
 
+        self._field_patterns = self._build_field_patterns(redaction_rules.get("field_value_patterns", []))
+
+    def _build_field_patterns(self, items: list[dict] | list[str]) -> list[tuple[str, re.Pattern[str]]]:
+        compiled: list[tuple[str, re.Pattern[str]]] = []
+        if items:
+            for item in items:
+                if isinstance(item, dict):
+                    pattern_id = str(item.get("id", "FIELD_SECRET")).upper()
+                    regex = item.get("regex")
+                else:
+                    pattern_id = "FIELD_SECRET"
+                    regex = item
+                if not regex:
+                    continue
+                try:
+                    compiled.append((pattern_id, re.compile(str(regex), re.IGNORECASE)))
+                except re.error as e:
+                    logger.warning(
+                        "redaction field_pattern skipped (invalid regex) id=%s error=%s regex_excerpt=%s",
+                        pattern_id,
+                        e,
+                        (str(regex)[:80] + "…") if len(str(regex)) > 80 else regex,
+                    )
+            return compiled
+
+        min_len = self._field_value_min_len
+        defaults: list[tuple[str, str]] = [
+            (
+                "FIELD_SECRET",
+                rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{min_len},}}",
+            ),
+            (
+                "AUTH_BEARER",
+                rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{min_len},}}",
+            ),
+        ]
+        for pattern_id, regex in defaults:
+            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+        return compiled
+
+    def _normalize_input(self, text: str) -> str:
+        normalized = text
+        if self._normalize_nfkc:
+            normalized = unicodedata.normalize("NFKC", normalized)
+        if self._strip_invisible_chars and normalized:
+            normalized = "".join(ch for ch in normalized if ch not in self._invisible_chars and ch not in self._bidi_chars)
+        return normalized
+
     def _request_prefix(self, request_id: str) -> str:
         token = re.sub(r"[^A-Za-z0-9]", "", request_id)
         return (token[: self._prefix_max_len] or "REQ").upper()
@@ -78,6 +134,7 @@ class RedactionFilter(BaseFilter):
         original_text = " ".join(m.content for m in req.messages).strip()
 
         mapping: dict[str, str] = {}
+        value_to_placeholder: dict[str, str] = {}
         log_markers: list[dict[str, Any]] = []
         serial = 0
         request_prefix = self._request_prefix(ctx.request_id)
@@ -87,10 +144,15 @@ class RedactionFilter(BaseFilter):
 
             def _replace_match(match: re.Match[str], kind: str) -> str:
                 nonlocal serial
+                raw_value = match.group(0)
+                existing = value_to_placeholder.get(raw_value)
+                if existing:
+                    return existing
+
                 serial += 1
                 placeholder = f"{{{{AG_{request_prefix}_{kind}_{serial}}}}}"
-                raw_value = match.group(0)
                 mapping[placeholder] = raw_value
+                value_to_placeholder[raw_value] = placeholder
                 if len(log_markers) < _MAX_LOG_MARKERS:
                     log_markers.append(
                         {
@@ -105,10 +167,13 @@ class RedactionFilter(BaseFilter):
 
             for kind, pattern in self._pii_patterns:
                 text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
+            for kind, pattern in self._field_patterns:
+                text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
             return text
 
         for msg in req.messages:
-            msg.content = replace_in_text(msg.content)
+            normalized = self._normalize_input(msg.content)
+            msg.content = replace_in_text(normalized)
 
         if mapping:
             debug_log_original("redaction_applied", original_text, reason=f"replacements={len(mapping)}", max_len=180)

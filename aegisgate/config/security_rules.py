@@ -16,6 +16,9 @@ from aegisgate.util.logger import logger
 _DEFAULT_RULES: dict[str, Any] = {
     "redaction": {
         "request_prefix_max_len": 12,
+        "normalize_nfkc": True,
+        "strip_invisible_chars": True,
+        "field_value_min_len": 12,
         "pii_patterns": [
             {"id": "EMAIL", "regex": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"},
             {"id": "TOKEN", "regex": r"\\b(?:sk|rk|pk)-[A-Za-z0-9\\-_]{10,}\\b"},

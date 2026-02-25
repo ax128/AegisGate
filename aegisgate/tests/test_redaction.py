@@ -67,3 +67,58 @@ def test_redaction_log_masks_sensitive_value(tmp_path, monkeypatch):
     assert _mask_for_log(raw_secret) in last_log
     assert "redaction_applied" in last_log
     assert "marker" in last_log
+
+
+def test_redaction_field_aware_bearer_token(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    plugin = RedactionFilter(store)
+
+    req = InternalRequest(
+        request_id="r4",
+        session_id="s1",
+        route="/v1/chat/completions",
+        model="gpt",
+        messages=[InternalMessage(role="user", content="Authorization: Bearer abcdefghijklmnopQRST1234")],
+    )
+    ctx = RequestContext(request_id="r4", session_id="s1", route=req.route, enabled_filters={"redaction"})
+
+    out = plugin.process_request(req, ctx)
+    assert "{{AG_R4_AUTH_BEARER_1}}" in out.messages[0].content
+    assert ctx.redaction_mapping["{{AG_R4_AUTH_BEARER_1}}"].startswith("Authorization: Bearer ")
+
+
+def test_redaction_reuses_placeholder_for_same_value(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    plugin = RedactionFilter(store)
+
+    secret = "token=sk-abcdeABCDE1234567890xyz"
+    req = InternalRequest(
+        request_id="r5",
+        session_id="s1",
+        route="/v1/chat/completions",
+        model="gpt",
+        messages=[InternalMessage(role="user", content=f"{secret} and again {secret}")],
+    )
+    ctx = RequestContext(request_id="r5", session_id="s1", route=req.route, enabled_filters={"redaction"})
+
+    out = plugin.process_request(req, ctx)
+    marker = "{{AG_R5_TOKEN_1}}"
+    assert out.messages[0].content.count(marker) == 2
+    assert len(ctx.redaction_mapping) == 1
+
+
+def test_redaction_normalizes_invisible_chars_before_matching(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    plugin = RedactionFilter(store)
+
+    req = InternalRequest(
+        request_id="r6",
+        session_id="s1",
+        route="/v1/chat/completions",
+        model="gpt",
+        messages=[InternalMessage(role="user", content="my email is a\u200bb@c.com")],
+    )
+    ctx = RequestContext(request_id="r6", session_id="s1", route=req.route, enabled_filters={"redaction"})
+
+    out = plugin.process_request(req, ctx)
+    assert "{{AG_R6_EMAIL_1}}" in out.messages[0].content
