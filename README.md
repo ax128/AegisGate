@@ -63,6 +63,73 @@ AegisGate 是面向 LLM 调用的**安全网关**：Agent 与业务只对接网�
 4. 响应侧强检查（含流式分段检查）。
 5. 命中高风险则进入确认流程；否则直接返回。
 
+### 2.3 请求处理流程示意（代码路径）
+
+以下流程图对应项目内从接收到响应的完整代码路径，便于对照源码阅读。
+
+```mermaid
+flowchart TB
+    subgraph entry["入口 (gateway.py)"]
+        A[客户端请求] --> B[security_boundary_middleware]
+        B --> B1{/health?}
+        B1 -->|是| Z1[直接返回健康检查]
+        B1 -->|否| B2[Body 大小 / loopback / HMAC 校验]
+        B2 --> B3{通过?}
+        B3 -->|否| Z2[4xx 拒绝]
+        B3 -->|是| C[进入路由]
+    end
+
+    subgraph router["路由层 (adapters/openai_compat/router.py)"]
+        C --> D{路由}
+        D -->|POST /v1/chat/completions| E[chat_completions]
+        D -->|POST /v1/responses| F[responses]
+        D -->|POST /v1/*| G[generic_provider_proxy]
+        E --> H[校验 payload 限制]
+        F --> H
+        G --> H
+        H --> I[校验网关头 X-Upstream-Base + gateway-key]
+        I --> J{白名单?}
+        J -->|是| Z3[透传上游，不做过滤]
+        J -->|否| K[解析策略 + 加载安全规则]
+    end
+
+    subgraph request_phase["请求侧"]
+        K --> L[请求侧过滤器管道 run_request]
+        L --> L1[redaction / request_sanitizer / ...]
+        L1 --> M{拦截?}
+        M -->|是| Z4[返回 200 + block 说明]
+        M -->|否| N[转发上游]
+    end
+
+    subgraph upstream["上游与响应侧"]
+        N --> O[HTTP 请求上游模型]
+        O --> P[接收响应 / 流式 chunk]
+        P --> Q[响应侧过滤器管道 run_response]
+        Q --> Q1[restoration / output_sanitizer / post_restore_guard / anomaly_detector / ...]
+        Q1 --> R{高风险?}
+        R -->|是| S[写入 pending_confirmation，返回确认模板]
+        R -->|否| T[返回正常响应]
+        S --> T2[用户 yes/no 后可再次请求放行]
+    end
+
+    subgraph audit["审计"]
+        Z4 --> U[write_audit 入队]
+        T --> U
+        S --> U
+    end
+```
+
+**对应文件与位置**：
+
+| 阶段 | 文件 | 说明 |
+|------|------|------|
+| 入口与边界 | `aegisgate/core/gateway.py` | 中间件约 50–165 行；路由挂载约 29–30 行 |
+| 路由与校验 | `aegisgate/adapters/openai_compat/router.py` | `chat_completions` 约 1743 行，`responses` 约 1924 行，`generic_provider_proxy` 约 2105 行；网关头校验、白名单、策略解析在各自处理函数内 |
+| 请求侧过滤 | 同上 + `aegisgate/filters/*`、`aegisgate/policies/*` | `_run_request_pipeline` 约 736 行；策略与规则决定启用哪些 filter |
+| 转发上游 | 同上 | `_execute_chat_once` / `_execute_chat_stream_once`、`_execute_responses_*` 等 |
+| 响应侧过滤 | 同上 | `_run_response_pipeline` 约 740 行 |
+| 确认与审计 | 同上 + `aegisgate/core/audit.py` | 高风险写入 store（pending_confirmation）；`write_audit` 入队写审计 |
+
 ## 3. 本地开发运行
 
 ### 3.1 安装
@@ -239,7 +306,7 @@ pending 记录包含：`confirm_id / payload_hash / status / expires_at / retain
 ## 8. 关键环境变量
 
 - 基础
-  - `AEGIS_LOG_LEVEL`：日志等级（大小写不敏感：`debug|info|warning|error|critical`，默认 `info`）
+  - `AEGIS_LOG_LEVEL`：日志等级（大小写不敏感：`debug|info|warning|error|critical`，默认 `info`）。设为 `debug` 时：① 每次收到转发请求会打印完整请求（method/path/headers/body，敏感头已脱敏）；② 在请求/响应过滤与拦截、脱敏、block 处会打印**原文摘要**（截断约 500 字），便于排查哪段内容触发了拦截。
   - `AEGIS_HOST`（默认 `127.0.0.1`）
   - `AEGIS_PORT`（默认 `18080`）
   - `AEGIS_GATEWAY_KEY`（默认 `agent`）

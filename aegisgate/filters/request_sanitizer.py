@@ -9,6 +9,7 @@ from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
+from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 
 
@@ -194,6 +195,8 @@ class RequestSanitizer(BaseFilter):
                 return req
 
             if self._sanitize_shape(req):
+                original_text = " ".join(m.content for m in req.messages).strip()
+                debug_log_original("request_sanitizer_sanitized", original_text, reason="request_shape_sanitized")
                 ctx.request_disposition = "sanitize"
                 ctx.disposition_reasons.append("request_shape_sanitized")
                 ctx.security_tags.add("request_sanitized")

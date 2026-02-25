@@ -11,6 +11,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
 from aegisgate.storage.kv import KVStore
+from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 
 
@@ -63,6 +64,7 @@ class RedactionFilter(BaseFilter):
 
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "replacements": 0}
+        original_text = " ".join(m.content for m in req.messages).strip()
 
         mapping: dict[str, str] = {}
         log_markers: list[dict[str, Any]] = []
@@ -98,6 +100,7 @@ class RedactionFilter(BaseFilter):
             msg.content = replace_in_text(msg.content)
 
         if mapping:
+            debug_log_original("redaction_applied", original_text, reason=f"replacements={len(mapping)}")
             # Keep request-scoped mapping in context to avoid extra DB read on the hot path.
             ctx.redaction_mapping = dict(mapping)
             ctx.redaction_created_at = time.time()

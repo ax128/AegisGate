@@ -9,6 +9,7 @@ from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
+from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 
 
@@ -74,6 +75,7 @@ class OutputSanitizer(BaseFilter):
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "action": "none"}
         text = resp.output_text
         if "response_injection_unicode_bidi" in ctx.security_tags:
+            debug_log_original("output_sanitizer_blocked", text, reason="response_unicode_bidi")
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("response_unicode_bidi")
             ctx.requires_human_review = True
@@ -101,6 +103,7 @@ class OutputSanitizer(BaseFilter):
             ctx.security_tags.add("system_prompt_leak_signal")
             self._apply_action(ctx, "system_leak")
             if not discussion_context:
+                debug_log_original("output_sanitizer_blocked", text, reason="response_system_prompt_leak")
                 ctx.response_disposition = "block"
                 ctx.disposition_reasons.append("response_system_prompt_leak")
                 ctx.requires_human_review = True
@@ -117,6 +120,7 @@ class OutputSanitizer(BaseFilter):
 
         # Block only on high-confidence risk and non-discussion context.
         if ctx.risk_score >= max(ctx.risk_threshold, self._block_threshold) and not discussion_context:
+            debug_log_original("output_sanitizer_blocked", text, reason="response_high_risk")
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("response_high_risk")
             ctx.requires_human_review = True
@@ -156,6 +160,7 @@ class OutputSanitizer(BaseFilter):
                 cleaned = pattern.sub(self._markup_replacement, cleaned)
 
             if cleaned != resp.output_text:
+                debug_log_original("output_sanitizer_sanitized", resp.output_text, reason="response_sanitized")
                 resp.output_text = f"{self._sanitize_prefix}{cleaned}"
                 ctx.response_disposition = "sanitize"
                 ctx.disposition_reasons.append("response_sanitized")

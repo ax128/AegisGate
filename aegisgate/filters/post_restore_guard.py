@@ -8,6 +8,7 @@ from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
+from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 
 
@@ -63,6 +64,7 @@ class PostRestoreGuard(BaseFilter):
 
         action = self._apply_action(ctx, "restored_secret_lure", "sanitize")
         if action == "block":
+            debug_log_original("post_restore_guard_blocked", text, reason="response_post_restore_blocked")
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("response_post_restore_blocked")
             ctx.requires_human_review = True
@@ -77,6 +79,7 @@ class PostRestoreGuard(BaseFilter):
             masked = pattern.sub(self._replacement, masked)
 
         if masked != text:
+            debug_log_original("post_restore_guard_sanitized", text, reason="response_post_restore_masked")
             resp.output_text = masked
             ctx.response_disposition = "sanitize"
             ctx.disposition_reasons.append("response_post_restore_masked")
