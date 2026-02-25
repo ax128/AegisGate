@@ -59,7 +59,7 @@ class PolicyEngine:
         # Redaction is mandatory baseline protection and is not downgraded by security level.
         if feature_flags.redaction:
             enabled.add("redaction")
-        raw_threshold = float(data.get("risk_threshold", 0.7))
+        raw_threshold = float(data.get("risk_threshold", 0.85))
         security_level = normalize_security_level()
         threshold = apply_threshold(raw_threshold, level=security_level)
         ctx.enabled_filters = enabled

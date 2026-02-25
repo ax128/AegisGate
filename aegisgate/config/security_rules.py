@@ -368,10 +368,11 @@ _DEFAULT_RULES: dict[str, Any] = {
             "system_leak": "block",
         },
         "request_sanitizer": {
-            "secret_exfiltration": "block",
-            "privilege": "block",
-            "command_payload": "sanitize",
-            "encoded_payload": "sanitize",
+            "secret_exfiltration": "review",
+            "privilege_escalation": "review",
+            "rule_bypass": "block",
+            "leak_check": "block",
+            "shape_anomaly": "sanitize",
         },
     },
 }
