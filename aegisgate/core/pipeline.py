@@ -15,18 +15,18 @@ class Pipeline:
 
     def run_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         current = req
+        logger.debug("request filter running: %s", [plugin.name for plugin in self.request_filters])
         for plugin in self.request_filters:
             if plugin.enabled(ctx):
-                logger.debug("request filter running: %s", plugin.name)
                 current = plugin.process_request(current, ctx)
                 ctx.add_report(plugin.report())
         return current
 
     def run_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         current = resp
+        logger.debug("response filter running: %s", [plugin.name for plugin in self.response_filters])
         for plugin in self.response_filters:
             if plugin.enabled(ctx):
-                logger.debug("response filter running: %s", plugin.name)
                 current = plugin.process_response(current, ctx)
                 ctx.add_report(plugin.report())
         return current
