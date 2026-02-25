@@ -21,6 +21,7 @@ from aegisgate.adapters.relay_compat.router import router as relay_router
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.gw_tokens import find_token as gw_tokens_find_token, get as gw_tokens_get, load as gw_tokens_load, register as gw_tokens_register, unregister as gw_tokens_unregister
+from aegisgate.init_config import ensure_config_dir
 from aegisgate.core.security_boundary import (
     build_nonce_cache,
     build_signature_payload,
@@ -343,6 +344,10 @@ async def _pending_prune_loop() -> None:
 
 @app.on_event("startup")
 async def startup_background_tasks() -> None:
+    try:
+        ensure_config_dir()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("init_config on startup failed: %s", exc)
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover

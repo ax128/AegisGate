@@ -2,6 +2,10 @@
 
 Docker 运行时挂载本目录，**改本目录内文件后重启容器即生效**，无需重建镜像。
 
+## 首次启动（自动生成）
+
+**无需手动复制**：首次 Docker 或本地启动时，若本目录（或容器内挂载的策略目录）缺少 `.env` 与策略 YAML，应用会从内置默认自动生成，不覆盖已有文件。直接 `docker compose up -d` 或本地运行即可；生成后可在本目录编辑 `.env` 与 YAML，重启生效。
+
 ## 两类配置
 
 ### 1. 策略与规则（YAML）
@@ -47,7 +51,7 @@ cp aegisgate/policies/rules/*.yaml config/
 
 通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `config/gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，可手动编辑该文件，**同一组 upstream_base + gateway_key 建议只保留一条**，重启后生效。
 
-- **Docker 部署**：Compose 中已设置 `AEGIS_GW_TOKENS_PATH=logs/gw_tokens.json`，token 文件落在挂载的 `./logs` 下（即宿主机 `./logs/gw_tokens.json`），**可写且重启后 token 仍有效**。若未设置该变量，token 会写在容器内 `config/`，重启后丢失。
+- **Docker 部署**：Compose 默认设 `AEGIS_GW_TOKENS_PATH=/tmp/gw_tokens.json`（与 sqlite/audit 一样用 `/tmp`，保证容器内可写），**重启容器后 token 会丢失，需重新注册**。若需持久化：挂载可写卷并设置路径，例如增加 volume `- ./logs:/data` 且 `AEGIS_GW_TOKENS_PATH=/data/gw_tokens.json`（并确保宿主机 `./logs` 对容器用户可写）。
 
 ---
 

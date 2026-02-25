@@ -6,8 +6,10 @@ services:
     container_name: aegisgate
     ports:
       - "127.0.0.1:18080:18080"
+    # 首次启动时 config/.env 不存在也可启动；应用会从默认生成，之后可编辑 config/.env 覆盖
     env_file:
-      - ./config/.env
+      - path: ./config/.env
+        required: false
     environment:
       # 必改：容器内监听与生产标识
       AEGIS_ENV: "prod"
@@ -20,11 +22,11 @@ services:
       AEGIS_ENFORCE_LOOPBACK_ONLY: "false"
       # 必改：实际上游地址（或通过请求头 x-upstream-base 覆盖）
       AEGIS_UPSTREAM_BASE_URL: "https://your-upstream.example.com/v1"
-      # Token 映射表写到已挂载的 logs 目录（可写且重启保留）；config 挂载为策略目录可能只读
-      AEGIS_GW_TOKENS_PATH: "logs/gw_tokens.json"
+      # Token 映射表：用 /tmp 保证容器内可写（与 sqlite/audit 一致）；重启后 token 会丢失，需重新注册
+      # 若需持久化，可挂载卷并设为本路径如 AEGIS_GW_TOKENS_PATH=/data/gw_tokens.json
+      AEGIS_GW_TOKENS_PATH: "/tmp/gw_tokens.json"
     volumes:
       - ./logs:/app/logs
-      # 策略与规则：宿主机 ./config 覆盖容器内策略目录，改 YAML 后重启即生效
-      # 首次运行前请复制 aegisgate/policies/rules/* 到 ./config（含 default.yaml、security_filters.yaml 等）
+      # 策略与 config：宿主机 ./config 挂载为容器内策略目录；首次为空时应用会自动生成 .env 与 YAML
       - ./config:/app/aegisgate/policies/rules
     restart: unless-stopped

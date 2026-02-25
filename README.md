@@ -234,15 +234,9 @@ git clone https://github.com/ax128/AegisGate.git
 cd AegisGate
 ```
 
-### 4.2 首次运行前准备
+### 4.2 首次运行（配置自动生成）
 
-Compose 会读取 `config/.env`（仓库中仅提供 `config/.env.example`）。**首次启动前**若该文件不存在，请执行：
-
-```bash
-cp config/.env.example config/.env
-```
-
-可按需编辑 `config/.env`（如 `AEGIS_LOG_LEVEL`、`AEGIS_GATEWAY_KEY`、`AEGIS_UPSTREAM_BASE_URL` 等）。若已存在 `config/.env` 可跳过此步。策略与规则 YAML 可选：将 `aegisgate/policies/rules/*.yaml` 复制到 `config/` 可覆盖默认策略，详见 `config/README.md`；不复制则使用内置默认策略。
+宿主机 `./config` 会挂载为容器内策略目录。**首次启动时若目录为空**，应用会在启动时自动从内置默认生成 `.env` 与策略 YAML 到该目录，无需手动复制。直接执行 4.3 启动即可；如需提前自定义，可先创建 `config/` 并放入自己的 `.env` 或 YAML，再启动。
 
 ### 4.3 启动
 

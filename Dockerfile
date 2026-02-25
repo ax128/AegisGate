@@ -7,6 +7,8 @@ WORKDIR /app
 
 COPY pyproject.toml README.md /app/
 COPY aegisgate /app/aegisgate
+# 首次启动时 init_config 会从本路径复制 .env 与策略 YAML 到挂载目录（若缺失）
+COPY config/.env.example /app/config/.env.example
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir . \
