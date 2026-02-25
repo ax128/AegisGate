@@ -47,6 +47,8 @@ cp aegisgate/policies/rules/*.yaml config/
 
 通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `config/gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，可手动编辑该文件，**同一组 upstream_base + gateway_key 建议只保留一条**，重启后生效。
 
+- **Docker 部署**：Compose 中已设置 `AEGIS_GW_TOKENS_PATH=aegisgate/policies/rules/gw_tokens.json`，token 文件落在挂载的 `./config` 下（即宿主机 `./config/gw_tokens.json`），**重启容器后 token 仍有效**。若未设置该变量，token 会写在容器内 `config/`，重启后丢失。
+
 ---
 
 修改 YAML、`.env` 或 `gw_tokens.json` 后执行：`docker compose restart aegisgate`

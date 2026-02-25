@@ -20,6 +20,8 @@ services:
       AEGIS_ENFORCE_LOOPBACK_ONLY: "false"
       # 必改：实际上游地址（或通过请求头 x-upstream-base 覆盖）
       AEGIS_UPSTREAM_BASE_URL: "https://your-upstream.example.com/v1"
+      # Token 映射表写到已挂载的 config，重启后仍有效（不设则写容器内 config/，重启丢失）
+      AEGIS_GW_TOKENS_PATH: "aegisgate/policies/rules/gw_tokens.json"
     volumes:
       - ./logs:/app/logs
       # 策略与规则：宿主机 ./config 覆盖容器内策略目录，改 YAML 后重启即生效
