@@ -1,0 +1,37 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Test/cache artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Local runtime data
+logs/*
+!logs/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Local config secrets
+.env
+.env.*
+!.env.example
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Do not publish local docs directory (lowercase or uppercase)
+docs/
+DOC/

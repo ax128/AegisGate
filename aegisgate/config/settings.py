@@ -1,0 +1,79 @@
+"""Runtime settings."""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AEGIS_", extra="ignore")
+
+    app_name: str = "AegisGate"
+    env: str = "dev"
+    log_level: str = "info"
+    host: str = "127.0.0.1"
+    port: int = 18080
+    enable_relay_endpoint: bool = False
+
+    upstream_base_url: str = "https://your-upstream.example.com/v1"
+    upstream_timeout_seconds: float = 60.0
+    upstream_max_connections: int = 100
+    upstream_max_keepalive_connections: int = 20
+    enable_thread_offload: bool = False
+    upstream_base_header: str = "x-upstream-base"
+    upstream_whitelist_url_list: str = ""
+    storage_backend: str = "sqlite"  # sqlite | redis | postgres
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_key_prefix: str = "aegisgate"
+    postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"
+    postgres_schema: str = "public"
+    max_request_body_bytes: int = 2_000_000
+    max_messages_count: int = 100
+    max_content_length_per_message: int = 50_000
+    max_pending_payload_bytes: int = 100_000
+    max_response_length: int = 500_000
+    gateway_key_header: str = "gateway-key"
+    gateway_key: str = "agent"
+    confirmation_ttl_seconds: int = 300
+    pending_data_ttl_seconds: int = 86400
+    security_level: str = "medium"
+    enable_semantic_module: bool = False  # 默认关闭；仅在具备 1G 1vCPU 可用的语义模型或接受内置正则占位时设为 True
+    semantic_gray_low: float = 0.25
+    semantic_gray_high: float = 0.75
+    semantic_timeout_ms: int = 150
+    semantic_cache_ttl_seconds: int = 300
+    semantic_cache_max_entries: int = 5000
+    semantic_service_url: str = ""
+    semantic_circuit_failure_threshold: int = 3
+    semantic_circuit_open_seconds: int = 30
+    default_policy: str = "default"
+    security_rules_path: str = "aegisgate/policies/rules/security_filters.yaml"
+    enforce_loopback_only: bool = True
+
+    enable_request_hmac_auth: bool = False
+    request_hmac_secret: str = ""
+    request_signature_header: str = "x-aegis-signature"
+    request_timestamp_header: str = "x-aegis-timestamp"
+    request_nonce_header: str = "x-aegis-nonce"
+    request_replay_window_seconds: int = 300
+    request_nonce_cache_size: int = 50000
+    nonce_cache_backend: str = "memory"  # memory | redis
+
+    enable_pending_prune_task: bool = True
+    pending_prune_interval_seconds: int = 60
+
+    enable_redaction: bool = True
+    enable_restoration: bool = True
+    enable_injection_detector: bool = True
+    enable_privilege_guard: bool = True
+    enable_anomaly_detector: bool = True
+    enable_request_sanitizer: bool = True
+    enable_output_sanitizer: bool = True
+    enable_post_restore_guard: bool = True
+    enable_system_prompt_guard: bool = False
+    enable_untrusted_content_guard: bool = True
+    enable_tool_call_guard: bool = False
+
+    risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
+settings = Settings()

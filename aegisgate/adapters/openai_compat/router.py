@@ -1,0 +1,2134 @@
+"""OpenAI-compatible routes."""
+
+from __future__ import annotations
+
+import copy
+import json
+import asyncio
+import re
+import threading
+import time
+from typing import Any, AsyncGenerator, AsyncIterable, Generator, Iterable, Mapping
+from urllib.parse import urlparse, urlunparse
+
+import httpx
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+
+from aegisgate.adapters.openai_compat.mapper import (
+    to_chat_response,
+    to_internal_chat,
+    to_internal_responses,
+    to_responses_output,
+)
+from aegisgate.config.settings import settings
+from aegisgate.core.audit import write_audit
+from aegisgate.core.confirmation import (
+    confirmation_template,
+    make_confirm_id,
+    parse_confirmation_decision,
+    payload_hash,
+)
+from aegisgate.core.context import RequestContext
+from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
+from aegisgate.core.semantic import SemanticServiceClient
+from aegisgate.core.pipeline import Pipeline
+from aegisgate.filters.anomaly_detector import AnomalyDetector
+from aegisgate.filters.injection_detector import PromptInjectionDetector
+from aegisgate.filters.post_restore_guard import PostRestoreGuard
+from aegisgate.filters.privilege_guard import PrivilegeGuard
+from aegisgate.filters.request_sanitizer import RequestSanitizer
+from aegisgate.filters.redaction import RedactionFilter
+from aegisgate.filters.restoration import RestorationFilter
+from aegisgate.filters.sanitizer import OutputSanitizer
+from aegisgate.filters.tool_call_guard import ToolCallGuard
+from aegisgate.policies.policy_engine import PolicyEngine
+from aegisgate.storage import create_store
+from aegisgate.util.logger import logger
+
+
+router = APIRouter()
+store = create_store()
+policy_engine = PolicyEngine()
+semantic_service_client = SemanticServiceClient(
+    service_url=settings.semantic_service_url,
+    cache_ttl_seconds=settings.semantic_cache_ttl_seconds,
+    max_cache_entries=settings.semantic_cache_max_entries,
+    failure_threshold=settings.semantic_circuit_failure_threshold,
+    open_seconds=settings.semantic_circuit_open_seconds,
+)
+_GATEWAY_PREFIX = "/v1"
+_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+_CONFIRMATION_REASONS = {
+    "response_high_risk": "高风险响应",
+    "response_system_prompt_leak": "疑似系统提示泄露",
+    "response_unicode_bidi": "疑似Unicode双向字符投毒",
+    "response_post_restore_masked": "恢复后疑似敏感信息外传",
+    "response_post_restore_blocked": "恢复后高风险外传阻断",
+    "response_sanitized": "响应内容已触发安全清洗",
+}
+_STREAM_WINDOW_MAX_CHARS = 8000
+_STREAM_SEMANTIC_CHECK_INTERVAL = 4
+_TRUNCATED_SUFFIX = " [TRUNCATED]"
+_PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
+_GENERIC_EXTRACT_MAX_CHARS = 16000
+_GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
+_upstream_async_client: httpx.AsyncClient | None = None
+_upstream_client_lock: Any = None
+_pipeline_local = threading.local()
+
+
+def _build_pipeline() -> Pipeline:
+    request_filters = [
+        RedactionFilter(store),
+        RequestSanitizer(),
+    ]
+    response_filters = [
+        AnomalyDetector(),
+        PromptInjectionDetector(),
+        PrivilegeGuard(),
+        ToolCallGuard(),
+        RestorationFilter(store),
+        PostRestoreGuard(),
+        OutputSanitizer(),
+    ]
+    return Pipeline(request_filters=request_filters, response_filters=response_filters)
+
+
+def _get_pipeline() -> Pipeline:
+    pipeline = getattr(_pipeline_local, "pipeline", None)
+    if pipeline is None:
+        pipeline = _build_pipeline()
+        _pipeline_local.pipeline = pipeline
+    return pipeline
+
+
+def _upstream_http_limits() -> httpx.Limits:
+    return httpx.Limits(
+        max_connections=max(10, int(settings.upstream_max_connections)),
+        max_keepalive_connections=max(5, int(settings.upstream_max_keepalive_connections)),
+    )
+
+
+def _upstream_http_timeout() -> httpx.Timeout:
+    timeout = float(settings.upstream_timeout_seconds)
+    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout)
+
+
+async def _get_upstream_async_client() -> httpx.AsyncClient:
+    global _upstream_async_client, _upstream_client_lock
+    if _upstream_async_client is not None:
+        return _upstream_async_client
+    if _upstream_client_lock is None:
+        _upstream_client_lock = asyncio.Lock()
+    async with _upstream_client_lock:
+        if _upstream_async_client is None:
+            _upstream_async_client = httpx.AsyncClient(
+                http2=False,
+                timeout=_upstream_http_timeout(),
+                limits=_upstream_http_limits(),
+            )
+    return _upstream_async_client
+
+
+async def close_upstream_async_client() -> None:
+    global _upstream_async_client
+    if _upstream_async_client is not None:
+        await _upstream_async_client.aclose()
+        _upstream_async_client = None
+
+
+async def close_semantic_async_client() -> None:
+    await semantic_service_client.aclose()
+
+
+def _normalize_upstream_base(raw_base: str) -> str:
+    candidate = raw_base.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("invalid_upstream_scheme")
+    if not parsed.netloc:
+        raise ValueError("invalid_upstream_host")
+    if parsed.query or parsed.fragment:
+        raise ValueError("invalid_upstream_query_fragment")
+    cleaned_path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme, parsed.netloc, cleaned_path, "", "", ""))
+
+
+def _header_value(headers: Mapping[str, str], target: str) -> str:
+    for key, value in headers.items():
+        if key.lower() == target.lower():
+            return value
+    return ""
+
+
+def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
+    raw = _header_value(headers, settings.upstream_base_header)
+    if not raw.strip():
+        raise ValueError("missing_upstream_base")
+    return _normalize_upstream_base(raw)
+
+
+def _resolve_gateway_key(headers: Mapping[str, str]) -> str:
+    primary = _header_value(headers, settings.gateway_key_header)
+    if primary.strip():
+        return primary.strip()
+    # Accept underscore style for compatibility with some client SDKs.
+    fallback = _header_value(headers, settings.gateway_key_header.replace("-", "_"))
+    return fallback.strip()
+
+
+def _validate_gateway_headers(headers: Mapping[str, str]) -> tuple[bool, str, str]:
+    upstream_raw = _header_value(headers, settings.upstream_base_header).strip()
+    gateway_key_raw = _resolve_gateway_key(headers).strip()
+    if not upstream_raw or not gateway_key_raw:
+        logger.warning(
+            "gateway header validation failed missing upstream_or_key upstream_present=%s key_present=%s",
+            bool(upstream_raw),
+            bool(gateway_key_raw),
+        )
+        return False, "invalid_parameters", "X-Upstream-Base or gateway-key is missing"
+    if not settings.gateway_key:
+        logger.error("gateway header validation failed gateway-key misconfigured on server")
+        return False, "gateway_misconfigured", "gateway-key is not configured on server"
+    if gateway_key_raw != settings.gateway_key:
+        logger.warning("gateway header validation failed key mismatch")
+        return False, "gateway_auth_failed", "gateway-key is invalid"
+    logger.debug("gateway header validation passed")
+    return True, "", ""
+
+
+def _build_upstream_url(request_path: str, upstream_base: str) -> str:
+    route_path = request_path or "/"
+    if route_path == _GATEWAY_PREFIX:
+        route_path = "/"
+    elif route_path.startswith(f"{_GATEWAY_PREFIX}/"):
+        route_path = route_path[len(_GATEWAY_PREFIX) :]
+    if not route_path.startswith("/"):
+        route_path = f"/{route_path}"
+    return f"{upstream_base}{route_path}"
+
+
+def _parse_whitelist_bases() -> set[str]:
+    raw = settings.upstream_whitelist_url_list.strip()
+    if not raw:
+        return set()
+    values: set[str] = set()
+    for item in raw.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        try:
+            values.add(_normalize_upstream_base(candidate))
+        except ValueError:
+            logger.warning("ignore invalid whitelist upstream base: %s", candidate)
+    return values
+
+
+def _is_upstream_whitelisted(upstream_base: str) -> bool:
+    whitelist = _parse_whitelist_bases()
+    if not whitelist:
+        return False
+    return _normalize_upstream_base(upstream_base) in whitelist
+
+
+def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    forwarded: dict[str, str] = {}
+    excluded = {
+        "host",
+        "content-length",
+        settings.upstream_base_header.lower(),
+        settings.gateway_key_header.lower(),
+        settings.gateway_key_header.replace("-", "_").lower(),
+        *_HOP_BY_HOP_HEADERS,
+    }
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered in excluded:
+            continue
+        if lowered.startswith("x-aegis-"):
+            continue
+        forwarded[key] = value
+
+    if not any(name.lower() == "content-type" for name in forwarded):
+        forwarded["Content-Type"] = "application/json"
+    return forwarded
+
+
+def _decode_json_or_text(body: bytes) -> dict[str, Any] | str:
+    text = body.decode("utf-8", errors="replace")
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return text
+    except json.JSONDecodeError:
+        return text
+
+
+async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str, str]) -> tuple[int, dict[str, Any] | str]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    logger.debug("forward_json start url=%s payload_bytes=%d", url, len(body))
+    client = await _get_upstream_async_client()
+    try:
+        response = await client.post(url=url, content=body, headers=dict(headers))
+        logger.debug("forward_json done url=%s status=%s", url, response.status_code)
+        return response.status_code, _decode_json_or_text(response.content)
+    except httpx.HTTPError as exc:
+        detail = str(exc)
+        logger.warning("forward_json http_error url=%s error=%s", url, detail)
+        raise RuntimeError(f"upstream_unreachable: {detail}") from exc
+
+
+async def _forward_stream_lines(
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+) -> AsyncGenerator[bytes, None]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    logger.debug("forward_stream start url=%s payload_bytes=%d", url, len(body))
+    client = await _get_upstream_async_client()
+    try:
+        async with client.stream("POST", url=url, content=body, headers=dict(headers)) as resp:
+            logger.debug("forward_stream connected url=%s status=%s", url, resp.status_code)
+            if resp.status_code >= 400:
+                detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
+                raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
+            async for line in resp.aiter_lines():
+                yield f"{line}\n".encode("utf-8")
+    except httpx.HTTPError as exc:
+        detail = str(exc)
+        logger.warning("forward_stream http_error url=%s error=%s", url, detail)
+        raise RuntimeError(f"upstream_unreachable: {detail}") from exc
+
+
+def _flatten_stream_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_flatten_stream_content(item) for item in value)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        for key in ("content", "delta", "output_text", "text"):
+            if key in value:
+                text = _flatten_stream_content(value[key])
+                if text:
+                    return text
+    return ""
+
+
+def _extract_stream_text_from_event(data_payload: str) -> str:
+    try:
+        event = json.loads(data_payload)
+    except json.JSONDecodeError:
+        return ""
+
+    if not isinstance(event, dict):
+        return ""
+
+    choices = event.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            text = _flatten_stream_content(delta)
+            if text:
+                return text
+            message = first.get("message")
+            text2 = _flatten_stream_content(message)
+            if text2:
+                return text2
+
+    for key in ("delta", "output_text", "text", "output"):
+        if key in event:
+            text = _flatten_stream_content(event[key])
+            if text:
+                return text
+    return ""
+
+
+def _should_stream(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("stream") is True)
+
+
+def _trim_stream_window(current: str, chunk: str) -> str:
+    merged = f"{current}{chunk}"
+    if len(merged) <= _STREAM_WINDOW_MAX_CHARS:
+        return merged
+    return merged[-_STREAM_WINDOW_MAX_CHARS:]
+
+
+def _stream_block_reason(ctx: RequestContext) -> str | None:
+    if ctx.response_disposition == "block":
+        if ctx.disposition_reasons:
+            return ctx.disposition_reasons[-1]
+        return "response_blocked"
+    if ctx.response_disposition == "sanitize":
+        return "response_sanitized"
+    if ctx.requires_human_review and any(tag.startswith("response_") for tag in ctx.security_tags):
+        return "response_human_review_required"
+
+    high_risk_tags = {
+        "response_privilege_abuse",
+        "response_injection_system_exfil",
+        "response_injection_unicode_bidi",
+        "response_semantic_leak",
+        "response_semantic_privilege",
+    }
+    for tag in high_risk_tags:
+        if tag in ctx.security_tags:
+            return tag
+    if ctx.risk_score >= max(ctx.risk_threshold, 0.9):
+        return "response_high_risk"
+    return None
+
+
+def _stream_block_message(reason: str) -> str:
+    return f"[AegisGate] stream blocked by security policy: {reason}"
+
+
+def _stream_block_sse_chunk(ctx: RequestContext, model: str, reason: str, route: str) -> bytes:
+    if route == "/v1/responses":
+        payload = {
+            "id": ctx.request_id,
+            "object": "response.chunk",
+            "model": model,
+            "type": "response.output_text.delta",
+            "delta": _stream_block_message(reason),
+            "aegisgate": {
+                "action": "block",
+                "risk_score": round(ctx.risk_score, 4),
+                "reason": reason,
+                "security_tags": sorted(ctx.security_tags),
+            },
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    payload = {
+        "id": ctx.request_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": _stream_block_message(reason)},
+                "finish_reason": "stop",
+            }
+        ],
+        "aegisgate": {
+            "action": "block",
+            "risk_score": round(ctx.risk_score, 4),
+            "reason": reason,
+            "security_tags": sorted(ctx.security_tags),
+        },
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _stream_error_sse_chunk(message: str) -> bytes:
+    payload = {"error": message}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _stream_done_sse_chunk() -> bytes:
+    return b"data: [DONE]\n\n"
+
+
+def _extract_sse_data_payload(line: bytes) -> str | None:
+    if not line:
+        return None
+    stripped = line.strip()
+    if not stripped.startswith(b"data:"):
+        return None
+    return stripped[5:].strip().decode("utf-8", errors="replace")
+
+
+def _build_streaming_response(generator: Iterable[bytes] | AsyncIterable[bytes]) -> StreamingResponse:
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+def _flatten_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(part for part in (_flatten_text(item) for item in value) if part)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        for key in ("content", "message", "output", "choices"):
+            if key in value:
+                chunk = _flatten_text(value[key])
+                if chunk:
+                    return chunk
+    return ""
+
+
+def _extract_chat_output_text(upstream_body: dict[str, Any] | str) -> str:
+    if isinstance(upstream_body, str):
+        return upstream_body
+    choices = upstream_body.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            text = _flatten_text(first.get("message", {}).get("content", ""))
+            if text:
+                return text
+    for key in ("output_text", "text", "output"):
+        if key in upstream_body:
+            text = _flatten_text(upstream_body[key])
+            if text:
+                return text
+    return json.dumps(upstream_body, ensure_ascii=False)
+
+
+def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
+    if isinstance(upstream_body, str):
+        return upstream_body
+    for key in ("output_text", "output", "text", "choices"):
+        if key in upstream_body:
+            text = _flatten_text(upstream_body[key])
+            if text:
+                return text
+    return json.dumps(upstream_body, ensure_ascii=False)
+
+
+def _is_structured_content(value: Any) -> bool:
+    return isinstance(value, (list, dict))
+
+
+def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
+    upstream_payload = dict(payload)
+    original_messages = payload.get("messages", [])
+    updated_messages: list[dict[str, Any]] = []
+    for idx, message in enumerate(sanitized_req_messages):
+        merged: dict[str, Any] = {}
+        if idx < len(original_messages) and isinstance(original_messages[idx], dict):
+            merged = dict(original_messages[idx])
+        merged["role"] = message.role
+        original_content = merged.get("content")
+        if _is_structured_content(original_content):
+            # Preserve multimodal structure (image/audio/video/file parts) for upstream compatibility.
+            merged["content"] = original_content
+            logger.debug("chat upstream keeps structured content index=%d role=%s", idx, message.role)
+        else:
+            merged["content"] = message.content
+            logger.debug("chat upstream uses sanitized text content index=%d role=%s", idx, message.role)
+        if message.source:
+            merged["source"] = message.source
+        if message.metadata:
+            merged["metadata"] = message.metadata
+        updated_messages.append(merged)
+    upstream_payload["messages"] = updated_messages
+    return upstream_payload
+
+
+def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
+    upstream_payload = dict(payload)
+    if sanitized_req_messages:
+        original_input = payload.get("input")
+        if _is_structured_content(original_input):
+            upstream_payload["input"] = original_input
+            logger.debug("responses upstream keeps structured input")
+        else:
+            upstream_payload["input"] = sanitized_req_messages[0].content
+            logger.debug("responses upstream uses sanitized text input")
+    return upstream_payload
+
+
+def _extract_generic_analysis_text(value: Any) -> str:
+    chunks: list[str] = []
+    remaining = _GENERIC_EXTRACT_MAX_CHARS
+
+    def _append_text(raw: str) -> None:
+        nonlocal remaining
+        if remaining <= 0:
+            return
+        text = raw.strip()
+        if not text:
+            return
+        if text.lower().startswith(("data:image/", "data:audio/", "data:video/")):
+            text = "[BINARY_CONTENT]"
+        elif len(text) > 1024 and _GENERIC_BINARY_RE.search(text):
+            text = "[BINARY_CONTENT]"
+        if len(text) > remaining:
+            text = text[:remaining]
+        chunks.append(text)
+        remaining -= len(text)
+
+    def _walk(node: Any) -> None:
+        if remaining <= 0:
+            return
+        if isinstance(node, str):
+            _append_text(node)
+            return
+        if isinstance(node, (int, float, bool)):
+            _append_text(str(node))
+            return
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+                if remaining <= 0:
+                    break
+            return
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if key in {"image", "image_url", "audio", "video", "file", "input_image", "input_audio"}:
+                    _append_text("[BINARY_CONTENT]")
+                    continue
+                _walk(item)
+                if remaining <= 0:
+                    break
+
+    _walk(value)
+    return " ".join(chunks).strip()
+
+
+def _render_chat_response(upstream_body: dict[str, Any] | str, final_resp: InternalResponse) -> dict[str, Any]:
+    if isinstance(upstream_body, dict):
+        out = copy.deepcopy(upstream_body)
+        choices = out.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if not isinstance(first, dict):
+                first = {}
+            message = first.get("message")
+            if not isinstance(message, dict):
+                message = {"role": "assistant"}
+            message["content"] = final_resp.output_text
+            first["message"] = message
+            choices[0] = first
+            out["choices"] = choices
+            out.setdefault("id", final_resp.request_id)
+            out.setdefault("object", "chat.completion")
+            out.setdefault("model", final_resp.model)
+            if final_resp.metadata.get("aegisgate"):
+                out["aegisgate"] = final_resp.metadata["aegisgate"]
+            return out
+    return to_chat_response(final_resp)
+
+
+def _passthrough_chat_response(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
+    if isinstance(upstream_body, dict):
+        return upstream_body
+    return to_chat_response(
+        InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text=str(upstream_body),
+        )
+    )
+
+
+def _render_responses_output(upstream_body: dict[str, Any] | str, final_resp: InternalResponse) -> dict[str, Any]:
+    if isinstance(upstream_body, dict):
+        out = copy.deepcopy(upstream_body)
+        out["output_text"] = final_resp.output_text
+        out.setdefault("id", final_resp.request_id)
+        out.setdefault("object", "response")
+        out.setdefault("model", final_resp.model)
+        if final_resp.metadata.get("aegisgate"):
+            out["aegisgate"] = final_resp.metadata["aegisgate"]
+        return out
+    return to_responses_output(final_resp)
+
+
+def _passthrough_responses_output(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
+    if isinstance(upstream_body, dict):
+        return upstream_body
+    return to_responses_output(
+        InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text=str(upstream_body),
+        )
+    )
+
+
+def _safe_error_detail(payload: dict[str, Any] | str) -> str:
+    if isinstance(payload, str):
+        return payload[:600]
+    if isinstance(payload.get("error"), str):
+        return payload["error"][:600]
+    return json.dumps(payload, ensure_ascii=False)[:600]
+
+
+def _serialized_payload_size(payload: dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _validate_payload_limits(payload: dict[str, Any], route: str) -> tuple[bool, int, str, str]:
+    max_body = int(settings.max_request_body_bytes)
+    if max_body > 0:
+        body_size = _serialized_payload_size(payload)
+        if body_size > max_body:
+            return False, 413, "request_body_too_large", f"payload bytes={body_size} exceeds max={max_body}"
+
+    max_messages = int(settings.max_messages_count)
+    if route == "/v1/chat/completions":
+        messages = payload.get("messages", [])
+        if not isinstance(messages, list):
+            return False, 400, "invalid_messages_format", "messages must be a list"
+        if max_messages > 0 and len(messages) > max_messages:
+            return False, 400, "messages_too_many", f"messages count={len(messages)} exceeds max={max_messages}"
+
+    return True, 200, "", ""
+
+
+def _cap_response_text(text: str, ctx: RequestContext) -> str:
+    max_len = int(settings.max_response_length)
+    if max_len <= 0 or len(text) <= max_len:
+        return text
+    ctx.security_tags.add("response_truncated")
+    ctx.enforcement_actions.append("response:length_cap")
+    ctx.disposition_reasons.append("response_length_truncated")
+    return f"{text[:max_len]}{_TRUNCATED_SUFFIX}"
+
+
+def _prepare_pending_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str, bool, int]:
+    payload_size = _serialized_payload_size(payload)
+    max_pending_bytes = int(settings.max_pending_payload_bytes)
+    if max_pending_bytes > 0 and payload_size > max_pending_bytes:
+        omitted_payload = {
+            _PENDING_PAYLOAD_OMITTED_KEY: True,
+            "payload_size_bytes": payload_size,
+        }
+        return omitted_payload, payload_hash(omitted_payload), True, payload_size
+    return payload, payload_hash(payload), False, payload_size
+
+
+def _is_pending_payload_omitted(payload: Any) -> bool:
+    return isinstance(payload, dict) and bool(payload.get(_PENDING_PAYLOAD_OMITTED_KEY))
+
+
+def prune_pending_confirmations(now_ts: int) -> int:
+    return int(store.prune_pending_confirmations(now_ts))
+
+
+async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
+    if settings.enable_thread_offload:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    return func(*args, **kwargs)
+
+
+async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContext) -> Any:
+    return await _maybe_offload(pipeline.run_request, req, ctx)
+
+
+async def _run_response_pipeline(pipeline: Pipeline, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+    return await _maybe_offload(pipeline.run_response, resp, ctx)
+
+
+async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
+    method = getattr(store, method_name)
+    return await _maybe_offload(method, *args, **kwargs)
+
+
+def _extract_chat_user_text(payload: dict[str, Any]) -> str:
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list):
+        return ""
+    for item in reversed(messages):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role", "user") != "user":
+            continue
+        content = item.get("content", "")
+        if isinstance(content, list):
+            return " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content).strip()
+        return str(content).strip()
+    return ""
+
+
+def _extract_responses_user_text(payload: dict[str, Any]) -> str:
+    return str(payload.get("input", "")).strip()
+
+
+def _needs_confirmation(ctx: RequestContext) -> bool:
+    if ctx.response_disposition in {"block", "sanitize"}:
+        return True
+    if ctx.requires_human_review:
+        return True
+    return any(tag.startswith("response_") for tag in ctx.security_tags)
+
+
+def _confirmation_reason_and_summary(ctx: RequestContext) -> tuple[str, str]:
+    reason_key = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
+    reason = _CONFIRMATION_REASONS.get(reason_key, reason_key)
+    tags = [tag for tag in sorted(ctx.security_tags) if tag.startswith("response_")]
+    summary_tags = "、".join(tags[:3]) if tags else "检测到高风险指令/投毒信号"
+    summary = f"触发信号：{summary_tags}"
+    return reason, summary
+
+
+def _semantic_gray_zone_enabled(ctx: RequestContext) -> bool:
+    if not settings.enable_semantic_module:
+        return False
+    low = min(float(settings.semantic_gray_low), float(settings.semantic_gray_high))
+    high = max(float(settings.semantic_gray_low), float(settings.semantic_gray_high))
+    return low < ctx.risk_score < high
+
+
+async def _apply_semantic_review(ctx: RequestContext, text: str, phase: str) -> None:
+    if not _semantic_gray_zone_enabled(ctx):
+        return
+
+    result = await semantic_service_client.analyze(text=text, timeout_ms=settings.semantic_timeout_ms)
+    ctx.add_report(
+        {
+            "filter": "semantic_module",
+            "phase": phase,
+            "hit": bool(result.tags),
+            "timed_out": result.timed_out,
+            "cache_hit": result.cache_hit,
+            "risk_score": result.risk_score,
+            "tags": result.tags,
+            "reasons": result.reasons,
+            "duration_ms": round(result.duration_ms, 3),
+        }
+    )
+
+    if result.timed_out:
+        ctx.security_tags.add("semantic_timeout")
+        ctx.enforcement_actions.append("semantic:timeout_degraded")
+        return
+    if "semantic_circuit_open" in result.reasons:
+        ctx.security_tags.add("semantic_circuit_open")
+        ctx.enforcement_actions.append("semantic:circuit_open_degraded")
+        return
+    if "semantic_service_unavailable" in result.reasons:
+        ctx.security_tags.add("semantic_service_unavailable")
+        ctx.enforcement_actions.append("semantic:service_unavailable_degraded")
+        return
+    if "semantic_service_unconfigured" in result.reasons:
+        ctx.security_tags.add("semantic_service_unconfigured")
+        ctx.enforcement_actions.append("semantic:service_unconfigured_degraded")
+        return
+
+    if not result.tags:
+        return
+
+    for tag in result.tags:
+        ctx.security_tags.add(f"{phase}_{tag}")
+    for reason in result.reasons:
+        ctx.disposition_reasons.append(reason)
+
+    previous = ctx.risk_score
+    ctx.risk_score = max(ctx.risk_score, float(result.risk_score))
+    if ctx.risk_score > previous:
+        ctx.enforcement_actions.append("semantic:risk_escalated")
+    if ctx.risk_score >= ctx.risk_threshold:
+        ctx.requires_human_review = True
+
+
+def _to_status_code(reason: str) -> int:
+    if reason in {"invalid_parameters"}:
+        return 400
+    if reason in {"gateway_auth_failed"}:
+        return 401
+    if reason in {"gateway_misconfigured"}:
+        return 500
+    return 400
+
+
+def _extract_confirm_id(text: str) -> str:
+    import re
+
+    match = re.search(r"\bcfm-[a-f0-9]{12}\b", text.lower())
+    return match.group(0) if match else ""
+
+
+def _resolve_pending_confirmation(payload: dict[str, Any], user_text: str, now_ts: int) -> dict[str, Any] | None:
+    confirm_id = _extract_confirm_id(user_text)
+    if confirm_id:
+        record = store.get_pending_confirmation(confirm_id)
+        if not record:
+            return None
+        if str(record.get("status")) != "pending":
+            return None
+        if int(record.get("expires_at", 0)) <= int(now_ts):
+            store.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
+            return None
+        return record
+
+    session_id = str(payload.get("session_id") or payload.get("request_id") or "").strip()
+    if not session_id:
+        return None
+    return store.get_latest_pending_confirmation(session_id=session_id, now_ts=now_ts)
+
+
+def _attach_confirmation_metadata(
+    resp: InternalResponse,
+    *,
+    confirm_id: str,
+    status: str,
+    reason: str,
+    summary: str,
+    payload_omitted: bool = False,
+) -> None:
+    metadata = resp.metadata.setdefault("aegisgate", {})
+    metadata["confirmation"] = {
+        "required": status == "pending",
+        "confirm_id": confirm_id,
+        "status": status,
+        "reason": reason,
+        "summary": summary,
+        "payload_omitted": payload_omitted,
+    }
+
+
+def _build_confirmation_message(confirm_id: str, reason: str, summary: str, note: str = "") -> str:
+    base = confirmation_template(confirm_id=confirm_id, reason=reason, summary=summary)
+    if not note:
+        return base
+    return f"{note}\n\n{base}"
+
+
+def _resolve_action(ctx: RequestContext) -> str:
+    if ctx.request_disposition == "block" or ctx.response_disposition == "block":
+        return "block"
+    if ctx.request_disposition == "sanitize" or ctx.response_disposition == "sanitize":
+        return "sanitize"
+    return "allow"
+
+
+def _attach_security_metadata(resp: InternalResponse, ctx: RequestContext, boundary: dict | None = None) -> None:
+    action = _resolve_action(ctx)
+    resp.metadata["aegisgate"] = {
+        "action": action,
+        "risk_score": round(ctx.risk_score, 4),
+        "risk_threshold": ctx.risk_threshold,
+        "requires_human_review": ctx.requires_human_review,
+        "request_disposition": ctx.request_disposition,
+        "response_disposition": ctx.response_disposition,
+        "reasons": sorted(set(ctx.disposition_reasons)),
+        "security_tags": sorted(ctx.security_tags),
+        "enforcement_actions": ctx.enforcement_actions,
+        "security_boundary": boundary or {},
+    }
+
+
+def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> None:
+    write_audit(
+        {
+            "request_id": ctx.request_id,
+            "session_id": ctx.session_id,
+            "route": ctx.route,
+            "risk_score": ctx.risk_score,
+            "risk_threshold": ctx.risk_threshold,
+            "requires_human_review": ctx.requires_human_review,
+            "request_disposition": ctx.request_disposition,
+            "response_disposition": ctx.response_disposition,
+            "disposition_reasons": ctx.disposition_reasons,
+            "security_tags": sorted(ctx.security_tags),
+            "enforcement_actions": ctx.enforcement_actions,
+            "action": _resolve_action(ctx),
+            "security_boundary": boundary or {},
+            "report": ctx.report_items,
+        }
+    )
+
+
+def _error_response(status_code: int, reason: str, detail: str, ctx: RequestContext, boundary: dict | None = None) -> JSONResponse:
+    ctx.response_disposition = "block"
+    ctx.disposition_reasons.append(reason)
+    ctx.enforcement_actions.append(f"upstream:{reason}")
+    _write_audit_event(ctx, boundary=boundary)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": reason,
+            "detail": detail,
+            "aegisgate": {
+                "action": _resolve_action(ctx),
+                "risk_score": round(ctx.risk_score, 4),
+                "reasons": sorted(set(ctx.disposition_reasons)),
+                "security_tags": sorted(ctx.security_tags),
+            },
+        },
+    )
+
+
+def _stream_runtime_reason(error_detail: str) -> str:
+    if error_detail.startswith("upstream_http_error"):
+        return "upstream_http_error"
+    if error_detail.startswith("upstream_unreachable"):
+        return "upstream_unreachable"
+    return "upstream_stream_error"
+
+
+async def _execute_chat_stream_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    forced_upstream_base: str | None = None,
+) -> StreamingResponse | JSONResponse:
+    req = to_internal_chat(payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+
+    try:
+        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+
+    if _is_upstream_whitelisted(upstream_base):
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        logger.info("chat stream bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
+
+        async def whitelist_generator() -> AsyncGenerator[bytes, None]:
+            try:
+                async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
+                    yield line
+            except RuntimeError as exc:
+                detail = str(exc)
+                reason = _stream_runtime_reason(detail)
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append(reason)
+                ctx.enforcement_actions.append(f"upstream:{reason}")
+                yield _stream_error_sse_chunk(detail)
+                yield _stream_done_sse_chunk()
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(whitelist_generator())
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    base_reports = list(ctx.report_items)
+
+    if ctx.request_disposition == "block":
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("request_blocked")
+        logger.info("chat stream request blocked request_id=%s", ctx.request_id)
+
+        def blocked_generator() -> Generator[bytes, None, None]:
+            try:
+                yield _stream_block_sse_chunk(ctx, req.model, "request_blocked", req.route)
+                yield _stream_done_sse_chunk()
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(blocked_generator())
+
+    upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
+
+    async def guarded_generator() -> AsyncGenerator[bytes, None]:
+        stream_window = ""
+        chunk_count = 0
+        try:
+            async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
+                payload_text = _extract_sse_data_payload(line)
+                if payload_text is None:
+                    yield line
+                    continue
+
+                if payload_text == "[DONE]":
+                    yield line
+                    break
+
+                chunk_text = _extract_stream_text_from_event(payload_text)
+                if chunk_text:
+                    stream_window = _trim_stream_window(stream_window, chunk_text)
+                    chunk_count += 1
+
+                    # Keep stream memory bounded by carrying request reports + latest stream check only.
+                    ctx.report_items = list(base_reports)
+                    probe_resp = InternalResponse(
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        output_text=stream_window,
+                        raw={"stream": True},
+                    )
+                    await _run_response_pipeline(pipeline, probe_resp, ctx)
+
+                    if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                        await _apply_semantic_review(ctx, stream_window, phase="response")
+
+                    block_reason = _stream_block_reason(ctx)
+                    if block_reason:
+                        ctx.response_disposition = "block"
+                        if block_reason not in ctx.disposition_reasons:
+                            ctx.disposition_reasons.append(block_reason)
+                        ctx.enforcement_actions.append("stream:block")
+                        logger.info("chat stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
+                        yield _stream_block_sse_chunk(ctx, req.model, block_reason, req.route)
+                        yield _stream_done_sse_chunk()
+                        break
+
+                yield line
+        except RuntimeError as exc:
+            detail = str(exc)
+            reason = _stream_runtime_reason(detail)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append(reason)
+            ctx.enforcement_actions.append(f"upstream:{reason}")
+            logger.error("chat stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+            yield _stream_error_sse_chunk(detail)
+            yield _stream_done_sse_chunk()
+        finally:
+            _write_audit_event(ctx, boundary=boundary)
+
+    return _build_streaming_response(guarded_generator())
+
+
+async def _execute_responses_stream_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    forced_upstream_base: str | None = None,
+) -> StreamingResponse | JSONResponse:
+    req = to_internal_responses(payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+
+    try:
+        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+
+    if _is_upstream_whitelisted(upstream_base):
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        logger.info("responses stream bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
+
+        async def whitelist_generator() -> AsyncGenerator[bytes, None]:
+            try:
+                async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
+                    yield line
+            except RuntimeError as exc:
+                detail = str(exc)
+                reason = _stream_runtime_reason(detail)
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append(reason)
+                ctx.enforcement_actions.append(f"upstream:{reason}")
+                yield _stream_error_sse_chunk(detail)
+                yield _stream_done_sse_chunk()
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(whitelist_generator())
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    base_reports = list(ctx.report_items)
+
+    if ctx.request_disposition == "block":
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("request_blocked")
+        logger.info("responses stream request blocked request_id=%s", ctx.request_id)
+
+        def blocked_generator() -> Generator[bytes, None, None]:
+            try:
+                yield _stream_block_sse_chunk(ctx, req.model, "request_blocked", req.route)
+                yield _stream_done_sse_chunk()
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(blocked_generator())
+
+    upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
+
+    async def guarded_generator() -> AsyncGenerator[bytes, None]:
+        stream_window = ""
+        chunk_count = 0
+        try:
+            async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
+                payload_text = _extract_sse_data_payload(line)
+                if payload_text is None:
+                    yield line
+                    continue
+
+                if payload_text == "[DONE]":
+                    yield line
+                    break
+
+                chunk_text = _extract_stream_text_from_event(payload_text)
+                if chunk_text:
+                    stream_window = _trim_stream_window(stream_window, chunk_text)
+                    chunk_count += 1
+
+                    ctx.report_items = list(base_reports)
+                    probe_resp = InternalResponse(
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        output_text=stream_window,
+                        raw={"stream": True},
+                    )
+                    await _run_response_pipeline(pipeline, probe_resp, ctx)
+
+                    if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                        await _apply_semantic_review(ctx, stream_window, phase="response")
+
+                    block_reason = _stream_block_reason(ctx)
+                    if block_reason:
+                        ctx.response_disposition = "block"
+                        if block_reason not in ctx.disposition_reasons:
+                            ctx.disposition_reasons.append(block_reason)
+                        ctx.enforcement_actions.append("stream:block")
+                        logger.info("responses stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
+                        yield _stream_block_sse_chunk(ctx, req.model, block_reason, req.route)
+                        yield _stream_done_sse_chunk()
+                        break
+
+                yield line
+        except RuntimeError as exc:
+            detail = str(exc)
+            reason = _stream_runtime_reason(detail)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append(reason)
+            ctx.enforcement_actions.append(f"upstream:{reason}")
+            logger.error("responses stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+            yield _stream_error_sse_chunk(detail)
+            yield _stream_done_sse_chunk()
+        finally:
+            _write_audit_event(ctx, boundary=boundary)
+
+    return _build_streaming_response(guarded_generator())
+
+
+async def _execute_chat_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    skip_confirmation: bool = False,
+    forced_upstream_base: str | None = None,
+) -> dict | JSONResponse:
+    req = to_internal_chat(payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+
+    try:
+        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+
+    if _is_upstream_whitelisted(upstream_base):
+        try:
+            status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
+        except RuntimeError as exc:
+            logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+            return _error_response(
+                status_code=502,
+                reason="upstream_unreachable",
+                detail=str(exc),
+                ctx=ctx,
+                boundary=boundary,
+            )
+
+        if status_code >= 400:
+            detail = _safe_error_detail(upstream_body)
+            logger.warning("upstream http error request_id=%s status=%s detail=%s", ctx.request_id, status_code, detail)
+            return _error_response(
+                status_code=status_code,
+                reason="upstream_http_error",
+                detail=detail,
+                ctx=ctx,
+                boundary=boundary,
+            )
+
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("chat completion bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
+        return _passthrough_chat_response(upstream_body, req)
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    if ctx.request_disposition == "block":
+        blocked_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text="[AegisGate] request blocked by security policy.",
+        )
+        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("chat completion blocked request_id=%s", ctx.request_id)
+        return to_chat_response(blocked_resp)
+
+    upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
+
+    try:
+        status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)
+    except RuntimeError as exc:
+        logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        logger.warning("upstream http error request_id=%s status=%s detail=%s", ctx.request_id, status_code, detail)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_text = _extract_chat_output_text(upstream_body)
+    capped_upstream_text = _cap_response_text(upstream_text, ctx)
+    internal_resp = InternalResponse(
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+        output_text=capped_upstream_text,
+        raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": upstream_body},
+    )
+
+    final_resp = await _run_response_pipeline(pipeline, internal_resp, ctx)
+    if not skip_confirmation:
+        await _apply_semantic_review(ctx, final_resp.output_text, phase="response")
+    if skip_confirmation and final_resp.output_text.startswith("[AegisGate] response blocked by security policy."):
+        final_resp.output_text = capped_upstream_text
+        ctx.response_disposition = "allow"
+        ctx.disposition_reasons.append("confirmed_release_override")
+        ctx.enforcement_actions.append("confirmation:confirmed_release")
+        ctx.security_tags.add("confirmed_release")
+
+    if not skip_confirmation and _needs_confirmation(ctx):
+        reason, summary = _confirmation_reason_and_summary(ctx)
+        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(upstream_payload)
+        confirm_id = make_confirm_id()
+        now_ts = int(time.time())
+        await _store_call(
+            "save_pending_confirmation",
+            confirm_id=confirm_id,
+            session_id=req.session_id,
+            route=req.route,
+            request_id=req.request_id,
+            model=req.model,
+            upstream_base=upstream_base,
+            pending_request_payload=pending_payload,
+            pending_request_hash=pending_payload_hash,
+            reason=reason,
+            summary=summary,
+            created_at=now_ts,
+            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+        )
+        if pending_payload_omitted:
+            ctx.security_tags.add("pending_payload_omitted")
+            ctx.enforcement_actions.append("pending:payload_omitted")
+            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("awaiting_user_confirmation")
+        ctx.security_tags.add("confirmation_required")
+        ctx.enforcement_actions.append("confirmation:pending")
+
+        confirmation_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary),
+        )
+        _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
+        _attach_confirmation_metadata(
+            confirmation_resp,
+            confirm_id=confirm_id,
+            status="pending",
+            reason=reason,
+            summary=summary,
+            payload_omitted=pending_payload_omitted,
+        )
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("chat completion requires confirmation request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
+        return to_chat_response(confirmation_resp)
+
+    _attach_security_metadata(final_resp, ctx, boundary=boundary)
+    _write_audit_event(ctx, boundary=boundary)
+    logger.info("chat completion completed request_id=%s", ctx.request_id)
+    return _render_chat_response(upstream_body, final_resp)
+
+
+async def _execute_responses_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    skip_confirmation: bool = False,
+    forced_upstream_base: str | None = None,
+) -> dict | JSONResponse:
+    req = to_internal_responses(payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+
+    try:
+        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+
+    if _is_upstream_whitelisted(upstream_base):
+        try:
+            status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
+        except RuntimeError as exc:
+            logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+            return _error_response(
+                status_code=502,
+                reason="upstream_unreachable",
+                detail=str(exc),
+                ctx=ctx,
+                boundary=boundary,
+            )
+
+        if status_code >= 400:
+            detail = _safe_error_detail(upstream_body)
+            logger.warning("upstream http error request_id=%s status=%s detail=%s", ctx.request_id, status_code, detail)
+            return _error_response(
+                status_code=status_code,
+                reason="upstream_http_error",
+                detail=detail,
+                ctx=ctx,
+                boundary=boundary,
+            )
+
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("responses endpoint bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
+        return _passthrough_responses_output(upstream_body, req)
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    if ctx.request_disposition == "block":
+        blocked_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text="[AegisGate] request blocked by security policy.",
+        )
+        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("responses endpoint blocked request_id=%s", ctx.request_id)
+        return to_responses_output(blocked_resp)
+
+    upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
+
+    try:
+        status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)
+    except RuntimeError as exc:
+        logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        logger.warning("upstream http error request_id=%s status=%s detail=%s", ctx.request_id, status_code, detail)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_text = _extract_responses_output_text(upstream_body)
+    capped_upstream_text = _cap_response_text(upstream_text, ctx)
+    internal_resp = InternalResponse(
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+        output_text=capped_upstream_text,
+        raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": upstream_body},
+    )
+
+    final_resp = await _run_response_pipeline(pipeline, internal_resp, ctx)
+    if not skip_confirmation:
+        await _apply_semantic_review(ctx, final_resp.output_text, phase="response")
+    if skip_confirmation and final_resp.output_text.startswith("[AegisGate] response blocked by security policy."):
+        final_resp.output_text = capped_upstream_text
+        ctx.response_disposition = "allow"
+        ctx.disposition_reasons.append("confirmed_release_override")
+        ctx.enforcement_actions.append("confirmation:confirmed_release")
+        ctx.security_tags.add("confirmed_release")
+
+    if not skip_confirmation and _needs_confirmation(ctx):
+        reason, summary = _confirmation_reason_and_summary(ctx)
+        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(upstream_payload)
+        confirm_id = make_confirm_id()
+        now_ts = int(time.time())
+        await _store_call(
+            "save_pending_confirmation",
+            confirm_id=confirm_id,
+            session_id=req.session_id,
+            route=req.route,
+            request_id=req.request_id,
+            model=req.model,
+            upstream_base=upstream_base,
+            pending_request_payload=pending_payload,
+            pending_request_hash=pending_payload_hash,
+            reason=reason,
+            summary=summary,
+            created_at=now_ts,
+            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+        )
+        if pending_payload_omitted:
+            ctx.security_tags.add("pending_payload_omitted")
+            ctx.enforcement_actions.append("pending:payload_omitted")
+            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("awaiting_user_confirmation")
+        ctx.security_tags.add("confirmation_required")
+        ctx.enforcement_actions.append("confirmation:pending")
+
+        confirmation_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary),
+        )
+        _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
+        _attach_confirmation_metadata(
+            confirmation_resp,
+            confirm_id=confirm_id,
+            status="pending",
+            reason=reason,
+            summary=summary,
+            payload_omitted=pending_payload_omitted,
+        )
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("responses endpoint requires confirmation request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
+        return to_responses_output(confirmation_resp)
+
+    _attach_security_metadata(final_resp, ctx, boundary=boundary)
+    _write_audit_event(ctx, boundary=boundary)
+    logger.info("responses endpoint completed request_id=%s", ctx.request_id)
+    return _render_responses_output(upstream_body, final_resp)
+
+
+def _passthrough_any_response(body: dict[str, Any] | str) -> JSONResponse | PlainTextResponse:
+    if isinstance(body, dict):
+        return JSONResponse(status_code=200, content=body)
+    return PlainTextResponse(status_code=200, content=str(body))
+
+
+async def _execute_generic_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+) -> JSONResponse | PlainTextResponse:
+    request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
+    session_id = str(payload.get("session_id") or request_id)
+    model = str(payload.get("model") or payload.get("target_model") or "generic-model")
+    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    logger.info("generic proxy start request_id=%s route=%s", ctx.request_id, request_path)
+
+    try:
+        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+        logger.debug("generic proxy upstream request_id=%s base=%s url=%s", ctx.request_id, upstream_base, upstream_url)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+    if _is_upstream_whitelisted(upstream_base):
+        try:
+            status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
+        except RuntimeError as exc:
+            logger.error("generic upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+            return _error_response(
+                status_code=502,
+                reason="upstream_unreachable",
+                detail=str(exc),
+                ctx=ctx,
+                boundary=boundary,
+            )
+        if status_code >= 400:
+            detail = _safe_error_detail(upstream_body)
+            return _error_response(
+                status_code=status_code,
+                reason="upstream_http_error",
+                detail=detail,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        _write_audit_event(ctx, boundary=boundary)
+        return _passthrough_any_response(upstream_body)
+
+    analysis_text = _extract_generic_analysis_text(payload)
+    req = InternalRequest(
+        request_id=request_id,
+        session_id=session_id,
+        route=request_path,
+        model=model,
+        messages=[InternalMessage(role="user", content=analysis_text or "[NON_TEXT_PAYLOAD]", source="user")],
+        metadata={"raw": payload},
+    )
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    logger.debug(
+        "generic proxy request evaluated request_id=%s disposition=%s reasons=%s",
+        ctx.request_id,
+        ctx.request_disposition,
+        ctx.disposition_reasons,
+    )
+    if ctx.request_disposition == "block":
+        blocked_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text="[AegisGate] request blocked by security policy.",
+        )
+        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
+        _write_audit_event(ctx, boundary=boundary)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "request_blocked",
+                "detail": "generic provider request blocked by security policy",
+                "aegisgate": blocked_resp.metadata.get("aegisgate", {}),
+            },
+        )
+    # Generic provider schemas are not rewritten for sanitize. Use block-on-sanitize to avoid unsafe partial mutations.
+    if ctx.request_disposition == "sanitize" and sanitized_req.messages[0].content != (analysis_text or "[NON_TEXT_PAYLOAD]"):
+        return _error_response(
+            status_code=403,
+            reason="generic_request_sanitize_unsupported",
+            detail="generic provider payload requires sanitize but schema-safe rewrite is unavailable",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    try:
+        status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
+    except RuntimeError as exc:
+        logger.error("generic upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_text = _extract_generic_analysis_text(upstream_body)
+    capped_upstream_text = _cap_response_text(upstream_text, ctx)
+    internal_resp = InternalResponse(
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+        output_text=capped_upstream_text,
+        raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": str(upstream_body)},
+    )
+    await _run_response_pipeline(pipeline, internal_resp, ctx)
+    if settings.enable_semantic_module:
+        await _apply_semantic_review(ctx, internal_resp.output_text, phase="response")
+    logger.debug(
+        "generic proxy response evaluated request_id=%s disposition=%s reasons=%s",
+        ctx.request_id,
+        ctx.response_disposition,
+        ctx.disposition_reasons,
+    )
+    if _needs_confirmation(ctx):
+        return _error_response(
+            status_code=403,
+            reason="generic_response_blocked",
+            detail="generic provider response blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    _write_audit_event(ctx, boundary=boundary)
+    logger.info("generic proxy completed request_id=%s route=%s", ctx.request_id, request_path)
+    return _passthrough_any_response(upstream_body)
+
+
+@router.post("/chat/completions")
+async def chat_completions(payload: dict, request: Request):
+    boundary = getattr(request.state, "security_boundary", {})
+    request_id = str(payload.get("request_id") or "preview-chat")
+    session_id = str(payload.get("session_id") or request_id)
+    ctx_preview = RequestContext(request_id=request_id, session_id=session_id, route="/v1/chat/completions")
+
+    ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
+    if not ok_payload:
+        return _error_response(
+            status_code=status_code,
+            reason=reason,
+            detail=detail,
+            ctx=ctx_preview,
+            boundary=boundary,
+        )
+
+    req_preview = to_internal_chat(payload)
+    ctx_preview.request_id = req_preview.request_id
+    ctx_preview.session_id = req_preview.session_id
+
+    ok, reason, detail = _validate_gateway_headers(request.headers)
+    if not ok:
+        return _error_response(
+            status_code=_to_status_code(reason),
+            reason=reason,
+            detail=detail,
+            ctx=ctx_preview,
+            boundary=boundary,
+        )
+
+    now_ts = int(time.time())
+    user_text = _extract_chat_user_text(payload)
+    decision = parse_confirmation_decision(user_text)
+    pending = await _maybe_offload(_resolve_pending_confirmation, payload, user_text, now_ts)
+    confirm_id_hint = _extract_confirm_id(user_text)
+
+    if pending:
+        pending_route = str(pending.get("route", ""))
+        confirm_id = str(pending["confirm_id"])
+        reason_text = str(pending.get("reason", "高风险响应"))
+        summary_text = str(pending.get("summary", "检测到高风险信号"))
+        if pending_route != req_preview.route:
+            return _error_response(
+                status_code=409,
+                reason="confirmation_route_mismatch",
+                detail=f"pending confirmation belongs to {pending_route}",
+                ctx=ctx_preview,
+                boundary=boundary,
+            )
+
+        if decision.value == "no":
+            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="canceled", now_ts=now_ts)
+            canceled_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=f"已取消执行。确认编号：{confirm_id}\nCanceled. Confirmation ID: {confirm_id}",
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_canceled")
+            _attach_security_metadata(canceled_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                canceled_resp,
+                confirm_id=confirm_id,
+                status="canceled",
+                reason=reason_text,
+                summary=summary_text,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_chat_response(canceled_resp)
+
+        if decision.value == "yes":
+            pending_payload = pending.get("pending_request_payload", {})
+            if not isinstance(pending_payload, dict):
+                return _error_response(
+                    status_code=409,
+                    reason="pending_payload_invalid",
+                    detail="pending payload is invalid",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+            if _is_pending_payload_omitted(pending_payload):
+                await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="expired", now_ts=now_ts)
+                return _error_response(
+                    status_code=409,
+                    reason="pending_payload_omitted",
+                    detail="pending payload was omitted due to size limit, please resend the original request",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
+                return _error_response(
+                    status_code=409,
+                    reason="pending_hash_mismatch",
+                    detail="pending request hash mismatch",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+
+            executed = await _execute_chat_once(
+                payload=pending_payload,
+                request_headers=request.headers,
+                request_path=request.url.path,
+                boundary=boundary,
+                skip_confirmation=True,
+                forced_upstream_base=str(pending.get("upstream_base", "")),
+            )
+            if isinstance(executed, JSONResponse):
+                return executed
+            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="executed", now_ts=int(time.time()))
+            aegis = executed.setdefault("aegisgate", {})
+            aegis["confirmation"] = {
+                "required": False,
+                "confirm_id": confirm_id,
+                "status": "executed",
+                "reason": reason_text,
+                "summary": summary_text,
+                "payload_omitted": False,
+            }
+            return executed
+
+        note = "输入不明确，请仅回复 yes 或 no。" if decision.value == "ambiguous" else "请仅回复 yes 或 no。"
+        pending_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason_text, summary=summary_text, note=note),
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("awaiting_user_confirmation")
+        _attach_security_metadata(pending_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            pending_resp,
+            confirm_id=confirm_id,
+            status="pending",
+            reason=reason_text,
+            summary=summary_text,
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_chat_response(pending_resp)
+
+    if confirm_id_hint:
+        expired_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=f"确认已过期，请重新发起请求。确认编号：{confirm_id_hint}\nConfirmation expired. Please send the request again.",
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("confirmation_expired")
+        _attach_security_metadata(expired_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            expired_resp,
+            confirm_id=confirm_id_hint,
+            status="expired",
+            reason="确认已过期",
+            summary="未找到可执行的 pending 记录",
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_chat_response(expired_resp)
+
+    if _should_stream(payload):
+        return await _execute_chat_stream_once(
+            payload=payload,
+            request_headers=request.headers,
+            request_path=request.url.path,
+            boundary=boundary,
+            forced_upstream_base=None,
+        )
+
+    return await _execute_chat_once(
+        payload=payload,
+        request_headers=request.headers,
+        request_path=request.url.path,
+        boundary=boundary,
+        skip_confirmation=False,
+        forced_upstream_base=None,
+    )
+
+
+@router.post("/responses")
+async def responses(payload: dict, request: Request):
+    boundary = getattr(request.state, "security_boundary", {})
+    request_id = str(payload.get("request_id") or "preview-responses")
+    session_id = str(payload.get("session_id") or request_id)
+    ctx_preview = RequestContext(request_id=request_id, session_id=session_id, route="/v1/responses")
+
+    ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
+    if not ok_payload:
+        return _error_response(
+            status_code=status_code,
+            reason=reason,
+            detail=detail,
+            ctx=ctx_preview,
+            boundary=boundary,
+        )
+
+    req_preview = to_internal_responses(payload)
+    ctx_preview.request_id = req_preview.request_id
+    ctx_preview.session_id = req_preview.session_id
+
+    ok, reason, detail = _validate_gateway_headers(request.headers)
+    if not ok:
+        return _error_response(
+            status_code=_to_status_code(reason),
+            reason=reason,
+            detail=detail,
+            ctx=ctx_preview,
+            boundary=boundary,
+        )
+
+    now_ts = int(time.time())
+    user_text = _extract_responses_user_text(payload)
+    decision = parse_confirmation_decision(user_text)
+    pending = await _maybe_offload(_resolve_pending_confirmation, payload, user_text, now_ts)
+    confirm_id_hint = _extract_confirm_id(user_text)
+
+    if pending:
+        pending_route = str(pending.get("route", ""))
+        confirm_id = str(pending["confirm_id"])
+        reason_text = str(pending.get("reason", "高风险响应"))
+        summary_text = str(pending.get("summary", "检测到高风险信号"))
+        if pending_route != req_preview.route:
+            return _error_response(
+                status_code=409,
+                reason="confirmation_route_mismatch",
+                detail=f"pending confirmation belongs to {pending_route}",
+                ctx=ctx_preview,
+                boundary=boundary,
+            )
+
+        if decision.value == "no":
+            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="canceled", now_ts=now_ts)
+            canceled_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=f"已取消执行。确认编号：{confirm_id}\nCanceled. Confirmation ID: {confirm_id}",
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_canceled")
+            _attach_security_metadata(canceled_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                canceled_resp,
+                confirm_id=confirm_id,
+                status="canceled",
+                reason=reason_text,
+                summary=summary_text,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_responses_output(canceled_resp)
+
+        if decision.value == "yes":
+            pending_payload = pending.get("pending_request_payload", {})
+            if not isinstance(pending_payload, dict):
+                return _error_response(
+                    status_code=409,
+                    reason="pending_payload_invalid",
+                    detail="pending payload is invalid",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+            if _is_pending_payload_omitted(pending_payload):
+                await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="expired", now_ts=now_ts)
+                return _error_response(
+                    status_code=409,
+                    reason="pending_payload_omitted",
+                    detail="pending payload was omitted due to size limit, please resend the original request",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
+                return _error_response(
+                    status_code=409,
+                    reason="pending_hash_mismatch",
+                    detail="pending request hash mismatch",
+                    ctx=ctx_preview,
+                    boundary=boundary,
+                )
+
+            executed = await _execute_responses_once(
+                payload=pending_payload,
+                request_headers=request.headers,
+                request_path=request.url.path,
+                boundary=boundary,
+                skip_confirmation=True,
+                forced_upstream_base=str(pending.get("upstream_base", "")),
+            )
+            if isinstance(executed, JSONResponse):
+                return executed
+            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="executed", now_ts=int(time.time()))
+            aegis = executed.setdefault("aegisgate", {})
+            aegis["confirmation"] = {
+                "required": False,
+                "confirm_id": confirm_id,
+                "status": "executed",
+                "reason": reason_text,
+                "summary": summary_text,
+                "payload_omitted": False,
+            }
+            return executed
+
+        note = "输入不明确，请仅回复 yes 或 no。" if decision.value == "ambiguous" else "请仅回复 yes 或 no。"
+        pending_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason_text, summary=summary_text, note=note),
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("awaiting_user_confirmation")
+        _attach_security_metadata(pending_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            pending_resp,
+            confirm_id=confirm_id,
+            status="pending",
+            reason=reason_text,
+            summary=summary_text,
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_responses_output(pending_resp)
+
+    if confirm_id_hint:
+        expired_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=f"确认已过期，请重新发起请求。确认编号：{confirm_id_hint}\nConfirmation expired. Please send the request again.",
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("confirmation_expired")
+        _attach_security_metadata(expired_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            expired_resp,
+            confirm_id=confirm_id_hint,
+            status="expired",
+            reason="确认已过期",
+            summary="未找到可执行的 pending 记录",
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        return to_responses_output(expired_resp)
+
+    if _should_stream(payload):
+        return await _execute_responses_stream_once(
+            payload=payload,
+            request_headers=request.headers,
+            request_path=request.url.path,
+            boundary=boundary,
+            forced_upstream_base=None,
+        )
+
+    return await _execute_responses_once(
+        payload=payload,
+        request_headers=request.headers,
+        request_path=request.url.path,
+        boundary=boundary,
+        skip_confirmation=False,
+        forced_upstream_base=None,
+    )
+
+
+@router.post("/{subpath:path}")
+async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
+    normalized = subpath.strip("/")
+    logger.info("generic proxy route hit subpath=%s", normalized)
+    if normalized in {"chat/completions", "responses"}:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+
+    boundary = getattr(request.state, "security_boundary", {})
+    route_path = f"/v1/{normalized}" if normalized else "/v1"
+    ok, reason, detail = _validate_gateway_headers(request.headers)
+    if not ok:
+        preview_ctx = RequestContext(
+            request_id=str(payload.get("request_id") or "preview-generic"),
+            session_id=str(payload.get("session_id") or payload.get("request_id") or "preview-generic"),
+            route=route_path,
+        )
+        return _error_response(
+            status_code=_to_status_code(reason),
+            reason=reason,
+            detail=detail,
+            ctx=preview_ctx,
+            boundary=boundary,
+        )
+
+    return await _execute_generic_once(
+        payload=payload,
+        request_headers=request.headers,
+        request_path=route_path,
+        boundary=boundary,
+    )

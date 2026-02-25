@@ -1,0 +1,8 @@
+enabled_filters:
+  - redaction
+  - request_sanitizer
+  - anomaly_detector
+  - restoration
+  - post_restore_guard
+  - output_sanitizer
+risk_threshold: 0.85

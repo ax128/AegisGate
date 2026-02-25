@@ -1,0 +1,38 @@
+services:
+  aegisgate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aegisgate
+    ports:
+      - "127.0.0.1:18080:18080"
+    environment:
+      AEGIS_ENV: "prod"
+      AEGIS_LOG_LEVEL: "info"
+      AEGIS_HOST: "0.0.0.0"
+      AEGIS_PORT: "18080"
+      AEGIS_ENFORCE_LOOPBACK_ONLY: "false"
+      AEGIS_ENABLE_REQUEST_HMAC_AUTH: "false"
+      AEGIS_UPSTREAM_BASE_URL: "https://your-upstream.example.com/v1"
+      AEGIS_UPSTREAM_WHITELIST_URL_LIST: ""
+      AEGIS_UPSTREAM_TIMEOUT_SECONDS: "60"
+      AEGIS_UPSTREAM_MAX_CONNECTIONS: "100"
+      AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS: "20"
+      AEGIS_MAX_REQUEST_BODY_BYTES: "2000000"
+      AEGIS_MAX_MESSAGES_COUNT: "100"
+      AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE: "50000"
+      AEGIS_MAX_PENDING_PAYLOAD_BYTES: "100000"
+      AEGIS_MAX_RESPONSE_LENGTH: "500000"
+      AEGIS_GATEWAY_KEY: "agent"
+      AEGIS_SECURITY_LEVEL: "medium"
+      AEGIS_ENABLE_SEMANTIC_MODULE: "false"
+      AEGIS_SEMANTIC_SERVICE_URL: ""
+      AEGIS_SEMANTIC_GRAY_LOW: "0.25"
+      AEGIS_SEMANTIC_GRAY_HIGH: "0.75"
+      AEGIS_SEMANTIC_TIMEOUT_MS: "150"
+      AEGIS_SEMANTIC_CACHE_TTL_SECONDS: "300"
+      AEGIS_SEMANTIC_CIRCUIT_FAILURE_THRESHOLD: "3"
+      AEGIS_SEMANTIC_CIRCUIT_OPEN_SECONDS: "30"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
