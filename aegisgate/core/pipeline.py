@@ -12,10 +12,11 @@ class Pipeline:
     def __init__(self, request_filters: list[BaseFilter], response_filters: list[BaseFilter]) -> None:
         self.request_filters = request_filters
         self.response_filters = response_filters
+        logger.debug("request filter running: %s", [plugin.name for plugin in self.request_filters])
+        logger.debug("response filter running: %s", [plugin.name for plugin in self.response_filters])
 
     def run_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         current = req
-        logger.debug("request filter running: %s", [plugin.name for plugin in self.request_filters])
         for plugin in self.request_filters:
             if plugin.enabled(ctx):
                 current = plugin.process_request(current, ctx)
@@ -24,7 +25,6 @@ class Pipeline:
 
     def run_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         current = resp
-        logger.debug("response filter running: %s", [plugin.name for plugin in self.response_filters])
         for plugin in self.response_filters:
             if plugin.enabled(ctx):
                 current = plugin.process_response(current, ctx)
