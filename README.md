@@ -89,6 +89,12 @@ uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
 
 ### 3.3 健康检查
 
+网关提供健康检查接口，请求后返回 `{"status":"ok"}` 表示运行正常。
+
+- **健康测试链接**（本地启动后可在浏览器打开或用于监控探测）：  
+  [http://127.0.0.1:18080/health](http://127.0.0.1:18080/health)
+- 命令行校验：
+
 ```bash
 curl http://127.0.0.1:18080/health
 ```
@@ -109,6 +115,8 @@ cd AegisGate
 ```bash
 docker compose up -d --build
 ```
+
+启动后可用同一健康测试链接确认网关已就绪：[http://127.0.0.1:18080/health](http://127.0.0.1:18080/health)（返回 `{"status":"ok"}`）。
 
 ### 4.3 查看日志
 

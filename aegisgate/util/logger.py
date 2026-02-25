@@ -27,8 +27,6 @@ def _normalize_level(raw: str) -> int:
 
 
 def _build_logger() -> logging.Logger:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     configured_logger = logging.getLogger("aegisgate")
     if configured_logger.handlers:
         return configured_logger
@@ -44,18 +42,23 @@ def _build_logger() -> logging.Logger:
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(resolved_level)
     stream_handler.setFormatter(formatter)
-
-    rotating_handler = RotatingFileHandler(
-        LOG_FILE,
-        maxBytes=MAX_BYTES,
-        backupCount=BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    rotating_handler.setLevel(resolved_level)
-    rotating_handler.setFormatter(formatter)
-
     configured_logger.addHandler(stream_handler)
-    configured_logger.addHandler(rotating_handler)
+
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        rotating_handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=MAX_BYTES,
+            backupCount=BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        rotating_handler.setLevel(resolved_level)
+        rotating_handler.setFormatter(formatter)
+        configured_logger.addHandler(rotating_handler)
+    except (OSError, PermissionError):
+        # 无法写文件时仅使用 stderr（如 Docker 挂载的 logs 目录无写权限）
+        pass
+
     configured_logger.propagate = False
     return configured_logger
 

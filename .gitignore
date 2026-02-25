@@ -20,6 +20,8 @@ logs/*
 *.db-shm
 *.db-wal
 *.log
+使用教程.log
+docker-compose-me.yml
 
 # Local config secrets
 .env
