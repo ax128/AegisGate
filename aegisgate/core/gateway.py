@@ -7,6 +7,7 @@ import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
 from aegisgate.adapters.openai_compat.router import (
@@ -170,11 +171,10 @@ async def security_boundary_middleware(request: Request, call_next):
     return response
 
 
-@app.middleware("http")
-async def gw_token_rewrite_middleware(request: Request, call_next):
+async def _gw_token_rewrite_dispatch(request: Request, call_next):
     """
     将 /v1/__gw__/t/{token}/... 重写为 /v1/... 并注入 X-Upstream-Base、gateway-key。
-    必须最后注册以便最先执行，这样路由才能收到重写后的 path。
+    通过 add_middleware 最后添加，保证最先执行，路由才能收到重写后的 path。
     """
     path = request.url.path or "/"
     m = _GW_TOKEN_PATH_RE.match(path)
@@ -186,6 +186,7 @@ async def gw_token_rewrite_middleware(request: Request, call_next):
         logger.warning("gw_token not found token=%s path=%s", token, path)
         return JSONResponse(status_code=404, content={"error": "token_not_found", "detail": "token invalid or expired"})
     new_path = f"/v1/{rest}" if rest else "/v1"
+    logger.info("gw_token_rewrite path=%s -> %s token=%s", path, new_path, token)
     ub = mapping["upstream_base"]
     gk = mapping["gateway_key"]
     scope = dict(request.scope)
@@ -356,3 +357,7 @@ async def startup_background_tasks() -> None:
     global _pending_prune_task
     if settings.enable_pending_prune_task and _pending_prune_task is None:
         _pending_prune_task = asyncio.create_task(_pending_prune_loop(), name="aegisgate-pending-prune")
+
+
+# Token 重写必须最先执行：用 add_middleware 最后添加，使其成为最外层
+app.add_middleware(BaseHTTPMiddleware, dispatch=_gw_token_rewrite_dispatch)
