@@ -365,3 +365,13 @@ class PostgresKVStore(KVStore):
                 removed = int(cur.rowcount or 0)
             conn.commit()
         return removed
+
+    def clear_all_pending_confirmations(self) -> int:
+        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        pending_table = f"{self.schema}.pending_confirmation"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {pending_table}")
+                removed = int(cur.rowcount or 0)
+            conn.commit()
+        return removed

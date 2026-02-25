@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from aegisgate.adapters.openai_compat.router import (
+    clear_pending_confirmations_on_startup,
     close_semantic_async_client,
     close_upstream_async_client,
     prune_pending_confirmations,
@@ -200,6 +201,13 @@ async def _pending_prune_loop() -> None:
 
 @app.on_event("startup")
 async def startup_background_tasks() -> None:
+    # 重启后清空待确认记录，仅本次运行期间的新请求可被确认放行
+    try:
+        n = clear_pending_confirmations_on_startup()
+        if n:
+            logger.info("cleared %d pending confirmation(s) on startup", n)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("clear pending confirmations on startup failed: %s", exc)
     global _pending_prune_task
     if settings.enable_pending_prune_task and _pending_prune_task is None:
         _pending_prune_task = asyncio.create_task(_pending_prune_loop(), name="aegisgate-pending-prune")

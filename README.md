@@ -277,6 +277,10 @@ curl -X POST http://127.0.0.1:18080/v1/models/your-model:generateContent \
 
 pending 记录包含：`confirm_id / payload_hash / status / expires_at / retained_until`。
 
+**回复 yes 后要能放行**：下一次请求必须满足其一：① 使用与「触发确认的那次请求」相同的 `session_id`；② 或在本次消息内容中包含确认编号（例如 `yes cfm-abc123def456`）。否则网关无法关联到待放行记录。放行时网关会跳过请求侧过滤，直接转发原请求到上游。
+
+**重启后不保留旧待确认**：每次网关进程启动时会清空数据库中的全部 pending 记录，因此只有本次运行期间产生的新请求可被确认放行；重启前的「错误请求」或未确认记录不会保留。
+
 ## 7. 语义服务接入（异步）
 
 网关语义模块调用外部 HTTP 服务（灰区触发）：

@@ -791,6 +791,13 @@ def prune_pending_confirmations(now_ts: int) -> int:
     return int(store.prune_pending_confirmations(now_ts))
 
 
+def clear_pending_confirmations_on_startup() -> int:
+    """启动时清空所有待确认记录，使重启后仅新请求的确认有效。"""
+    if hasattr(store, "clear_all_pending_confirmations"):
+        return store.clear_all_pending_confirmations()
+    return 0
+
+
 async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
     if settings.enable_thread_offload:
         return await asyncio.to_thread(func, *args, **kwargs)
@@ -1430,62 +1437,67 @@ async def _execute_chat_once(
         logger.info("chat completion bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_chat_response(upstream_body, req)
 
-    request_user_text = _request_user_text_for_excerpt(payload, req.route)
-    debug_log_original("request_before_filters", request_user_text)
+    # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
+    if forced_upstream_base and skip_confirmation:
+        upstream_payload = _build_chat_upstream_payload(payload, req.messages)
+        ctx.enforcement_actions.append("confirmation:request_filters_skipped")
+    else:
+        request_user_text = _request_user_text_for_excerpt(payload, req.route)
+        debug_log_original("request_before_filters", request_user_text)
 
-    pipeline = _get_pipeline()
-    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
-    if ctx.request_disposition == "block":
-        block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
-        debug_log_original("request_blocked", request_user_text, reason=block_reason)
-        reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
-        confirm_id = make_confirm_id()
-        now_ts = int(time.time())
-        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
-            payload
-        )
-        await _store_call(
-            "save_pending_confirmation",
-            confirm_id=confirm_id,
-            session_id=req.session_id,
-            route=req.route,
-            request_id=req.request_id,
-            model=req.model,
-            upstream_base=upstream_base,
-            pending_request_payload=pending_payload,
-            pending_request_hash=pending_payload_hash,
-            reason=reason,
-            summary=summary,
-            created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
-            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-        )
-        if pending_payload_omitted:
-            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-        ctx.disposition_reasons.append("awaiting_user_confirmation")
-        ctx.security_tags.add("confirmation_required")
-        ctx.enforcement_actions.append("confirmation:pending")
-        confirmation_resp = InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST),
-        )
-        _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-        _attach_confirmation_metadata(
-            confirmation_resp,
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason,
-            summary=summary,
-            phase=PHASE_REQUEST,
-            payload_omitted=pending_payload_omitted,
-        )
-        _write_audit_event(ctx, boundary=boundary)
-        logger.info("chat completion request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
-        return to_chat_response(confirmation_resp)
+        pipeline = _get_pipeline()
+        sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+        if ctx.request_disposition == "block":
+            block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
+            debug_log_original("request_blocked", request_user_text, reason=block_reason)
+            reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+            confirm_id = make_confirm_id()
+            now_ts = int(time.time())
+            pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
+                payload
+            )
+            await _store_call(
+                "save_pending_confirmation",
+                confirm_id=confirm_id,
+                session_id=req.session_id,
+                route=req.route,
+                request_id=req.request_id,
+                model=req.model,
+                upstream_base=upstream_base,
+                pending_request_payload=pending_payload,
+                pending_request_hash=pending_payload_hash,
+                reason=reason,
+                summary=summary,
+                created_at=now_ts,
+                expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+            )
+            if pending_payload_omitted:
+                summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+            ctx.disposition_reasons.append("awaiting_user_confirmation")
+            ctx.security_tags.add("confirmation_required")
+            ctx.enforcement_actions.append("confirmation:pending")
+            confirmation_resp = InternalResponse(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                model=req.model,
+                output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST),
+            )
+            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
+            _attach_confirmation_metadata(
+                confirmation_resp,
+                confirm_id=confirm_id,
+                status="pending",
+                reason=reason,
+                summary=summary,
+                phase=PHASE_REQUEST,
+                payload_omitted=pending_payload_omitted,
+            )
+            _write_audit_event(ctx, boundary=boundary)
+            logger.info("chat completion request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
+            return to_chat_response(confirmation_resp)
 
-    upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
+        upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
 
     try:
         status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)
@@ -1647,61 +1659,66 @@ async def _execute_responses_once(
         logger.info("responses endpoint bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_responses_output(upstream_body, req)
 
-    request_user_text = _request_user_text_for_excerpt(payload, req.route)
-    debug_log_original("request_before_filters", request_user_text)
+    # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
+    if forced_upstream_base and skip_confirmation:
+        upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+        ctx.enforcement_actions.append("confirmation:request_filters_skipped")
+    else:
+        request_user_text = _request_user_text_for_excerpt(payload, req.route)
+        debug_log_original("request_before_filters", request_user_text)
 
-    pipeline = _get_pipeline()
-    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
-    if ctx.request_disposition == "block":
-        block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
-        debug_log_original("request_blocked", request_user_text, reason=block_reason)
-        reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
-        confirm_id = make_confirm_id()
-        now_ts = int(time.time())
-        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
-            payload
-        )
-        await _store_call(
-            "save_pending_confirmation",
-            confirm_id=confirm_id,
-            session_id=req.session_id,
-            route=req.route,
-            request_id=req.request_id,
-            model=req.model,
-            upstream_base=upstream_base,
-            pending_request_payload=pending_payload,
-            pending_request_hash=pending_payload_hash,
-            reason=reason,
-            summary=summary,
-            created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
-            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-        )
-        if pending_payload_omitted:
-            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-        ctx.disposition_reasons.append("awaiting_user_confirmation")
-        ctx.security_tags.add("confirmation_required")
-        confirmation_resp = InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST),
-        )
-        _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-        _attach_confirmation_metadata(
-            confirmation_resp,
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason,
-            summary=summary,
-            phase=PHASE_REQUEST,
-            payload_omitted=pending_payload_omitted,
-        )
-        _write_audit_event(ctx, boundary=boundary)
-        logger.info("responses endpoint request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
-        return to_responses_output(confirmation_resp)
+        pipeline = _get_pipeline()
+        sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+        if ctx.request_disposition == "block":
+            block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
+            debug_log_original("request_blocked", request_user_text, reason=block_reason)
+            reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+            confirm_id = make_confirm_id()
+            now_ts = int(time.time())
+            pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
+                payload
+            )
+            await _store_call(
+                "save_pending_confirmation",
+                confirm_id=confirm_id,
+                session_id=req.session_id,
+                route=req.route,
+                request_id=req.request_id,
+                model=req.model,
+                upstream_base=upstream_base,
+                pending_request_payload=pending_payload,
+                pending_request_hash=pending_payload_hash,
+                reason=reason,
+                summary=summary,
+                created_at=now_ts,
+                expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+            )
+            if pending_payload_omitted:
+                summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+            ctx.disposition_reasons.append("awaiting_user_confirmation")
+            ctx.security_tags.add("confirmation_required")
+            confirmation_resp = InternalResponse(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                model=req.model,
+                output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST),
+            )
+            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
+            _attach_confirmation_metadata(
+                confirmation_resp,
+                confirm_id=confirm_id,
+                status="pending",
+                reason=reason,
+                summary=summary,
+                phase=PHASE_REQUEST,
+                payload_omitted=pending_payload_omitted,
+            )
+            _write_audit_event(ctx, boundary=boundary)
+            logger.info("responses endpoint request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
+            return to_responses_output(confirmation_resp)
 
-    upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
+        upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
 
     try:
         status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)

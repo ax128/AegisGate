@@ -203,3 +203,21 @@ class RedisKVStore(KVStore):
             removed += 1
         pipe.execute()
         return removed
+
+    def clear_all_pending_confirmations(self) -> int:
+        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        retention_idx = self._pending_retention_key()
+        all_ids = self.client.zrange(retention_idx, 0, -1)
+        if not all_ids:
+            return 0
+        pipe = self.client.pipeline()
+        for raw_id in all_ids:
+            confirm_id = _to_str(raw_id)
+            key = self._pending_key(confirm_id)
+            session_id = _to_str(self.client.hget(key, "session_id") or "")
+            pipe.delete(key)
+            pipe.zrem(retention_idx, confirm_id)
+            if session_id:
+                pipe.zrem(self._pending_session_key(session_id), confirm_id)
+        pipe.execute()
+        return len(all_ids)

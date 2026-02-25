@@ -315,6 +315,15 @@ class SqliteKVStore(KVStore):
 
         return self._with_retry(_delete)
 
+    def clear_all_pending_confirmations(self) -> int:
+        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        def _delete() -> int:
+            with self._connect() as conn:
+                cursor = conn.execute("DELETE FROM pending_confirmation")
+                conn.commit()
+                return int(cursor.rowcount or 0)
+        return self._with_retry(_delete)
+
 
 def json_dumps(data: dict[str, Any]) -> str:
     import json
