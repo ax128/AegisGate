@@ -17,7 +17,7 @@ class Pipeline:
         current = req
         for plugin in self.request_filters:
             if plugin.enabled(ctx):
-                logger.info("request filter running: %s", plugin.name)
+                logger.debug("request filter running: %s", plugin.name)
                 current = plugin.process_request(current, ctx)
                 ctx.add_report(plugin.report())
         return current
@@ -26,7 +26,7 @@ class Pipeline:
         current = resp
         for plugin in self.response_filters:
             if plugin.enabled(ctx):
-                logger.info("response filter running: %s", plugin.name)
+                logger.debug("response filter running: %s", plugin.name)
                 current = plugin.process_response(current, ctx)
                 ctx.add_report(plugin.report())
         return current
