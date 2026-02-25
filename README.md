@@ -13,6 +13,11 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/{subpath}` 通用代理
+- Claude 系列 API（通用代理）：
+  - `POST /v1/messages`
+  - `POST /v1/messages/count_tokens`
+  - `stream=true` 流式透传
+  - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
 - 请求侧：redaction、request_sanitizer、注入/异常/越权检测
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
 - 高风险确认：命中高风险可返回确认模板，用户 `yes/no` 后一次性执行或取消
@@ -74,6 +79,27 @@ curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7/responses \
 辅助接口：
 - 查询：`POST /__gw__/lookup`
 - 删除：`POST /__gw__/unregister`
+
+### 2.3 Claude 接入快速示例
+
+```bash
+# 非流式
+curl -X POST 'http://127.0.0.1:18080/v1/messages' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Upstream-Base: https://your-upstream.example.com/v1' \
+  -H 'gateway-key: agent' \
+  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+
+# 流式
+curl -N -X POST 'http://127.0.0.1:18080/v1/messages' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Upstream-Base: https://your-upstream.example.com/v1' \
+  -H 'gateway-key: agent' \
+  -d '{"model":"claude-3-5-sonnet-latest","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+更多终端/客户端（Codex CLI、OpenClaw、Cherry、VS Code、Cursor、WSL2）接入见：  
+- [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)
 
 ## 3. 本地开发
 
@@ -156,6 +182,7 @@ docker compose logs -f aegisgate
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
   - 在入口网关（Nginx/Caddy/WAF）上加 IP 白名单、限流与访问控制
   - 限制管理端点 `POST /__gw__/register|lookup|unregister` 的访问来源
+- OAuth 托管登录模式通常无法配置 Base URL/Header，不适合接入 AegisGate；建议统一使用 API Key + Base URL 模式。
 
 ## 7. 测试
 

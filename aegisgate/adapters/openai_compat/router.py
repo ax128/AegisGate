@@ -490,6 +490,15 @@ def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
     return _extract_chat_user_text(payload)
 
 
+def _request_target_path(request: Request, *, fallback_path: str | None = None) -> str:
+    """返回 path+query 形式的上游目标路径，确保 query 参数可透传到上游。"""
+    base_path = fallback_path or request.url.path or "/"
+    query = request.url.query
+    if query:
+        return f"{base_path}?{query}"
+    return base_path
+
+
 def _needs_confirmation(ctx: RequestContext) -> bool:
     if ctx.response_disposition in {"block", "sanitize"}:
         return True
@@ -1476,6 +1485,148 @@ def _passthrough_any_response(body: dict[str, Any] | str) -> JSONResponse | Plai
     return PlainTextResponse(status_code=200, content=str(body))
 
 
+async def _execute_generic_stream_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+) -> StreamingResponse | JSONResponse:
+    request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
+    session_id = str(payload.get("session_id") or request_id)
+    model = str(payload.get("model") or payload.get("target_model") or "generic-model")
+    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    logger.info("generic proxy stream start request_id=%s route=%s", ctx.request_id, request_path)
+
+    try:
+        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+        logger.debug("generic stream upstream request_id=%s base=%s url=%s", ctx.request_id, upstream_base, upstream_url)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _build_forward_headers(request_headers)
+
+    if _is_upstream_whitelisted(upstream_base):
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+
+        async def whitelist_generator() -> AsyncGenerator[bytes, None]:
+            try:
+                async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
+                    yield line
+            except RuntimeError as exc:
+                detail = str(exc)
+                reason = _stream_runtime_reason(detail)
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append(reason)
+                ctx.enforcement_actions.append(f"upstream:{reason}")
+                logger.error("generic stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(whitelist_generator())
+
+    analysis_text = _extract_generic_analysis_text(payload)
+    debug_log_original("request_before_filters", analysis_text or "[NON_TEXT_PAYLOAD]", max_len=180)
+    req = InternalRequest(
+        request_id=request_id,
+        session_id=session_id,
+        route=request_path,
+        model=model,
+        messages=[InternalMessage(role="user", content=analysis_text or "[NON_TEXT_PAYLOAD]", source="user")],
+        metadata={"raw": payload},
+    )
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    if ctx.request_disposition == "block":
+        block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
+        debug_log_original("request_blocked", analysis_text or "[NON_TEXT_PAYLOAD]", reason=block_reason)
+        blocked_resp = InternalResponse(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            output_text="[AegisGate] request blocked by security policy.",
+        )
+        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
+        _write_audit_event(ctx, boundary=boundary)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "request_blocked",
+                "detail": "generic provider request blocked by security policy",
+                "aegisgate": blocked_resp.metadata.get("aegisgate", {}),
+            },
+        )
+    if ctx.request_disposition == "sanitize" and sanitized_req.messages[0].content != (analysis_text or "[NON_TEXT_PAYLOAD]"):
+        return _error_response(
+            status_code=403,
+            reason="generic_request_sanitize_unsupported",
+            detail="generic provider payload requires sanitize but schema-safe rewrite is unavailable",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    base_reports = list(ctx.report_items)
+
+    async def guarded_generator() -> AsyncGenerator[bytes, None]:
+        stream_window = ""
+        chunk_count = 0
+        try:
+            async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
+                payload_text = _extract_sse_data_payload(line)
+                if payload_text is not None and payload_text != "[DONE]":
+                    chunk_text = _extract_stream_text_from_event(payload_text)
+                    if chunk_text:
+                        stream_window = _trim_stream_window(stream_window, chunk_text)
+                        chunk_count += 1
+
+                        ctx.report_items = list(base_reports)
+                        probe_resp = InternalResponse(
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            output_text=stream_window,
+                            raw={"stream": True, "generic": True},
+                        )
+                        await _run_response_pipeline(pipeline, probe_resp, ctx)
+
+                        if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                            await _apply_semantic_review(ctx, stream_window, phase="response")
+
+                        block_reason = _stream_block_reason(ctx)
+                        if block_reason:
+                            debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
+                            ctx.response_disposition = "block"
+                            if block_reason not in ctx.disposition_reasons:
+                                ctx.disposition_reasons.append(block_reason)
+                            ctx.enforcement_actions.append("stream:block")
+                            logger.info("generic stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
+                            break
+
+                yield line
+        except RuntimeError as exc:
+            detail = str(exc)
+            reason = _stream_runtime_reason(detail)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append(reason)
+            ctx.enforcement_actions.append(f"upstream:{reason}")
+            logger.error("generic stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+        finally:
+            _write_audit_event(ctx, boundary=boundary)
+
+    return _build_streaming_response(guarded_generator())
+
+
 async def _execute_generic_once(
     *,
     payload: dict[str, Any],
@@ -1737,7 +1888,7 @@ async def chat_completions(payload: dict, request: Request):
             executed = await _execute_chat_once(
                 payload=pending_payload,
                 request_headers=_effective_gateway_headers(request),
-                request_path=request.url.path,
+                request_path=_request_target_path(request),
                 boundary=boundary,
                 skip_confirmation=True,
                 forced_upstream_base=str(pending.get("upstream_base", "")),
@@ -1814,7 +1965,7 @@ async def chat_completions(payload: dict, request: Request):
         return await _execute_chat_stream_once(
             payload=payload,
             request_headers=_effective_gateway_headers(request),
-            request_path=request.url.path,
+            request_path=_request_target_path(request),
             boundary=boundary,
             forced_upstream_base=None,
         )
@@ -1822,7 +1973,7 @@ async def chat_completions(payload: dict, request: Request):
     return await _execute_chat_once(
         payload=payload,
         request_headers=_effective_gateway_headers(request),
-        request_path=request.url.path,
+        request_path=_request_target_path(request),
         boundary=boundary,
         skip_confirmation=False,
         forced_upstream_base=None,
@@ -1933,7 +2084,7 @@ async def responses(payload: dict, request: Request):
             executed = await _execute_responses_once(
                 payload=pending_payload,
                 request_headers=_effective_gateway_headers(request),
-                request_path=request.url.path,
+                request_path=_request_target_path(request),
                 boundary=boundary,
                 skip_confirmation=True,
                 forced_upstream_base=str(pending.get("upstream_base", "")),
@@ -2010,7 +2161,7 @@ async def responses(payload: dict, request: Request):
         return await _execute_responses_stream_once(
             payload=payload,
             request_headers=_effective_gateway_headers(request),
-            request_path=request.url.path,
+            request_path=_request_target_path(request),
             boundary=boundary,
             forced_upstream_base=None,
         )
@@ -2018,7 +2169,7 @@ async def responses(payload: dict, request: Request):
     return await _execute_responses_once(
         payload=payload,
         request_headers=_effective_gateway_headers(request),
-        request_path=request.url.path,
+        request_path=_request_target_path(request),
         boundary=boundary,
         skip_confirmation=False,
         forced_upstream_base=None,
@@ -2028,7 +2179,8 @@ async def responses(payload: dict, request: Request):
 @router.post("/{subpath:path}")
 async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
     normalized = subpath.strip("/")
-    route_path = f"/v1/{normalized}" if normalized else "/v1"
+    route_base_path = f"/v1/{normalized}" if normalized else "/v1"
+    route_path = _request_target_path(request, fallback_path=route_base_path)
     _log_request_if_debug(request, payload, route_path)
     logger.info("generic proxy route hit subpath=%s", normalized)
     if normalized in {"chat/completions", "responses"}:
@@ -2047,6 +2199,14 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
             reason=reason,
             detail=detail,
             ctx=preview_ctx,
+            boundary=boundary,
+        )
+
+    if _should_stream(payload):
+        return await _execute_generic_stream_once(
+            payload=payload,
+            request_headers=_effective_gateway_headers(request),
+            request_path=route_path,
             boundary=boundary,
         )
 

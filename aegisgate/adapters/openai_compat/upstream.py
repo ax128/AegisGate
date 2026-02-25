@@ -130,13 +130,19 @@ def _validate_gateway_headers(headers: Mapping[str, str]) -> tuple[bool, str, st
 
 def _build_upstream_url(request_path: str, upstream_base: str) -> str:
     route_path = request_path or "/"
+    query = ""
+    if "?" in route_path:
+        route_path, query = route_path.split("?", 1)
     if route_path == GATEWAY_PREFIX:
         route_path = "/"
     elif route_path.startswith(f"{GATEWAY_PREFIX}/"):
         route_path = route_path[len(GATEWAY_PREFIX):]
     if not route_path.startswith("/"):
         route_path = f"/{route_path}"
-    return f"{upstream_base}{route_path}"
+    url = f"{upstream_base}{route_path}"
+    if query:
+        return f"{url}?{query}"
+    return url
 
 
 def _parse_whitelist_bases() -> set[str]:

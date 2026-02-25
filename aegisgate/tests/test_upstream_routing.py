@@ -16,6 +16,12 @@ def test_build_upstream_url_replaces_gateway_base_segment():
     assert url == "https://upstream.example.com/v1/chat/completions"
 
 
+def test_build_upstream_url_keeps_query_string():
+    base = "https://upstream.example.com/v1"
+    url = _build_upstream_url("/v1/messages?anthropic-version=2023-06-01", base)
+    assert url == "https://upstream.example.com/v1/messages?anthropic-version=2023-06-01"
+
+
 def test_build_forward_headers_strips_internal_headers():
     headers = {
         "Host": "127.0.0.1:18080",
