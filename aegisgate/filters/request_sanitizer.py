@@ -196,7 +196,7 @@ class RequestSanitizer(BaseFilter):
 
             if self._sanitize_shape(req):
                 original_text = " ".join(m.content for m in req.messages).strip()
-                debug_log_original("request_sanitizer_sanitized", original_text, reason="request_shape_sanitized")
+                debug_log_original("request_sanitizer_sanitized", original_text, reason="request_shape_sanitized", max_len=180)
                 ctx.request_disposition = "sanitize"
                 ctx.disposition_reasons.append("request_shape_sanitized")
                 ctx.security_tags.add("request_sanitized")

@@ -93,7 +93,7 @@ class PolicyEngine:
         ctx.enabled_filters = enabled
         ctx.risk_threshold = float(threshold)
 
-        logger.info(
+        logger.debug(
             "policy resolved: request_id=%s policy=%s security_level=%s filters=%s threshold=%s raw_threshold=%s",
             ctx.request_id,
             policy_name,

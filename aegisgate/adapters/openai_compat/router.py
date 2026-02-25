@@ -609,10 +609,8 @@ def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages
         if _is_structured_content(original_content):
             # Preserve multimodal structure (image/audio/video/file parts) for upstream compatibility.
             merged["content"] = original_content
-            logger.debug("chat upstream keeps structured content index=%d role=%s", idx, message.role)
         else:
             merged["content"] = message.content
-            logger.debug("chat upstream uses sanitized text content index=%d role=%s", idx, message.role)
         if message.source:
             merged["source"] = message.source
         if message.metadata:
@@ -628,10 +626,8 @@ def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_mes
         original_input = payload.get("input")
         if _is_structured_content(original_input):
             upstream_payload["input"] = original_input
-            logger.debug("responses upstream keeps structured input")
         else:
             upstream_payload["input"] = sanitized_req_messages[0].content
-            logger.debug("responses upstream uses sanitized text input")
     return upstream_payload
 
 
@@ -1120,7 +1116,7 @@ async def _execute_chat_stream_once(
         return _build_streaming_response(whitelist_generator())
 
     request_user_text = _request_user_text_for_excerpt(payload, req.route)
-    debug_log_original("request_before_filters", request_user_text)
+    debug_log_original("request_before_filters", request_user_text, max_len=180)
 
     pipeline = _get_pipeline()
     sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
@@ -1284,7 +1280,7 @@ async def _execute_responses_stream_once(
         return _build_streaming_response(whitelist_generator())
 
     request_user_text = _request_user_text_for_excerpt(payload, req.route)
-    debug_log_original("request_before_filters", request_user_text)
+    debug_log_original("request_before_filters", request_user_text, max_len=180)
 
     pipeline = _get_pipeline()
     sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
@@ -1461,7 +1457,7 @@ async def _execute_chat_once(
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
-        debug_log_original("request_before_filters", request_user_text)
+        debug_log_original("request_before_filters", request_user_text, max_len=180)
 
         pipeline = _get_pipeline()
         sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
@@ -1683,7 +1679,7 @@ async def _execute_responses_once(
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
-        debug_log_original("request_before_filters", request_user_text)
+        debug_log_original("request_before_filters", request_user_text, max_len=180)
 
         pipeline = _get_pipeline()
         sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
@@ -1902,7 +1898,7 @@ async def _execute_generic_once(
         return _passthrough_any_response(upstream_body)
 
     analysis_text = _extract_generic_analysis_text(payload)
-    debug_log_original("request_before_filters", analysis_text or "[NON_TEXT_PAYLOAD]")
+    debug_log_original("request_before_filters", analysis_text or "[NON_TEXT_PAYLOAD]", max_len=180)
     req = InternalRequest(
         request_id=request_id,
         session_id=session_id,

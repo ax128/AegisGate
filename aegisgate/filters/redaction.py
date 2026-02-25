@@ -111,7 +111,7 @@ class RedactionFilter(BaseFilter):
             msg.content = replace_in_text(msg.content)
 
         if mapping:
-            debug_log_original("redaction_applied", original_text, reason=f"replacements={len(mapping)}")
+            debug_log_original("redaction_applied", original_text, reason=f"replacements={len(mapping)}", max_len=180)
             # Keep request-scoped mapping in context to avoid extra DB read on the hot path.
             ctx.redaction_mapping = dict(mapping)
             ctx.redaction_created_at = time.time()
