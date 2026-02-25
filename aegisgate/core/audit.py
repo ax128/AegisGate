@@ -9,19 +9,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
 
-AUDIT_PATH = Path("logs") / "audit.jsonl"
 _AUDIT_QUEUE: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=10000)
 _AUDIT_WORKER: threading.Thread | None = None
 _AUDIT_LOCK = threading.Lock()
 
 
 def _append_payload(payload: dict[str, Any]) -> None:
-    AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with AUDIT_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    path_str = (settings.audit_log_path or "").strip()
+    if not path_str:
+        return
+    path = Path(path_str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("audit worker write failed: %s", exc)
 
 
 def _worker_loop() -> None:

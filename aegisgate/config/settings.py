@@ -61,6 +61,7 @@ class Settings(BaseSettings):
 
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60
+    audit_log_path: str = "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl
 
     enable_redaction: bool = True
     enable_restoration: bool = True

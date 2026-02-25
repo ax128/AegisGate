@@ -10,6 +10,7 @@ services:
       AEGIS_ENV: "prod"
       AEGIS_LOG_LEVEL: "info"
       AEGIS_SQLITE_DB_PATH: "/tmp/aegisgate.db"
+      AEGIS_AUDIT_LOG_PATH: "/tmp/audit.jsonl"
       AEGIS_HOST: "0.0.0.0"
       AEGIS_PORT: "18080"
       AEGIS_ENFORCE_LOOPBACK_ONLY: "false"
