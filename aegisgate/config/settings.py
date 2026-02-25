@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     app_name: str = "AegisGate"
     env: str = "dev"
     log_level: str = "info"
+    # DEBUG 下是否打印完整请求正文；False 时只打 method/path/route/headers + body_size，不打正文
+    log_full_request_body: bool = False
     host: str = "127.0.0.1"
     port: int = 18080
     enable_relay_endpoint: bool = False

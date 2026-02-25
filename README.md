@@ -310,7 +310,8 @@ pending 记录包含：`confirm_id / payload_hash / status / expires_at / retain
 ## 8. 关键环境变量
 
 - 基础
-  - `AEGIS_LOG_LEVEL`：日志等级（大小写不敏感：`debug|info|warning|error|critical`，默认 `info`）。设为 `debug` 时：① 每次收到转发请求会打印完整请求（method/path/headers/body，敏感头已脱敏）；② 在请求/响应过滤与拦截、脱敏、block 处会打印**原文摘要**（截断约 500 字），便于排查哪段内容触发了拦截。
+  - `AEGIS_LOG_LEVEL`：日志等级（`debug|info|warning|error|critical`，默认 `info`）。设为 `debug` 时：① 每次请求会打印 method/path/route/headers 及 **body_size**（不打印正文除非开启下一项）；② 拦截/脱敏/block 处仍会打印**相关原文摘要**（截断约 500 字）。
+  - `AEGIS_LOG_FULL_REQUEST_BODY`：默认 `false`。仅在 **DEBUG** 下生效：为 `true` 时在①中额外打印完整请求正文（过大则分段打印）；为 `false` 时只打 body_size，不打印正文。
   - `AEGIS_HOST`（默认 `127.0.0.1`）
   - `AEGIS_PORT`（默认 `18080`）
   - `AEGIS_GATEWAY_KEY`（默认 `agent`）

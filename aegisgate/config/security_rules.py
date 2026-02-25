@@ -19,7 +19,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         "pii_patterns": [
             {"id": "EMAIL", "regex": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"},
             {"id": "TOKEN", "regex": r"\\b(?:sk|rk|pk)-[A-Za-z0-9\\-_]{10,}\\b"},
-            {"id": "PHONE", "regex": r"\\b(?:\\+?1[-.\\s]?)?(?:\\(?\\d{3}\\)?[-.\\s]?)\\d{3}[-.\\s]?\\d{4}\\b"},
+            {"id": "PHONE", "regex": r"\b(?:\+?1[-.\s]?)?(?:[(]?\d{3}[)]?[-.\s]?)\d{3}[-.\s]?\d{4}\b"},
             {"id": "SSN", "regex": r"\\b\\d{3}-\\d{2}-\\d{4}\\b"},
             {"id": "CARD", "regex": r"\\b(?:\\d[ -]*?){13,16}\\b"},
             {"id": "CN_MOBILE", "regex": r"(?<!\\d)1[3-9]\\d{9}(?!\\d)"},

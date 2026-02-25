@@ -484,7 +484,7 @@ _DEBUG_HEADERS_REDACT = frozenset(
 
 
 def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str) -> None:
-    """当 AEGIS_LOG_LEVEL=debug 时，打完整请求内容（头脱敏）；body 先裁剪再整段打印，避免被日志系统截断。"""
+    """当 AEGIS_LOG_LEVEL=debug 时打请求概要（method/path/route/headers）；正文按 log_full_request_body 决定是否打印、分段打印。"""
     if not logger.isEnabledFor(logging.DEBUG):
         return
     headers_safe = {}
@@ -494,29 +494,38 @@ def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str)
             headers_safe[k] = "***"
         else:
             headers_safe[k] = v
-    logger.debug(
-        "incoming request method=%s path=%s route=%s headers=%s",
-        request.method,
-        request.url.path,
-        route,
-        headers_safe,
-    )
     try:
         body_str = json.dumps(payload, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         body_str = str(payload)
     total_len = len(body_str)
-    if total_len > _DEBUG_REQUEST_BODY_MAX_CHARS:
-        body_excerpt = body_str[:_DEBUG_REQUEST_BODY_MAX_CHARS]
-        logger.debug(
-            "incoming request body (excerpt %d of %d chars):\n%s",
-            _DEBUG_REQUEST_BODY_MAX_CHARS,
-            total_len,
-            body_excerpt,
-        )
-        logger.debug("incoming request body truncated, total %d chars", total_len)
-    else:
+    logger.debug(
+        "incoming request method=%s path=%s route=%s headers=%s body_size=%d",
+        request.method,
+        request.url.path,
+        route,
+        headers_safe,
+        total_len,
+    )
+    if not settings.log_full_request_body:
+        return
+    if total_len <= _DEBUG_REQUEST_BODY_MAX_CHARS:
         logger.debug("incoming request body (%d chars):\n%s", total_len, body_str)
+        return
+    offset = 0
+    segment = 0
+    while offset < total_len:
+        chunk = body_str[offset : offset + _DEBUG_REQUEST_BODY_MAX_CHARS]
+        segment += 1
+        logger.debug(
+            "incoming request body segment %d (chars %d-%d of %d):\n%s",
+            segment,
+            offset + 1,
+            min(offset + _DEBUG_REQUEST_BODY_MAX_CHARS, total_len),
+            total_len,
+            chunk,
+        )
+        offset += _DEBUG_REQUEST_BODY_MAX_CHARS
 
 
 def _extract_sse_data_payload(line: bytes) -> str | None:

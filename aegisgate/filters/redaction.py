@@ -58,7 +58,15 @@ class RedactionFilter(BaseFilter):
             regex = item.get("regex")
             if not regex:
                 continue
-            compiled_patterns.append((pattern_id, re.compile(regex)))
+            try:
+                compiled_patterns.append((pattern_id, re.compile(regex)))
+            except re.error as e:
+                logger.warning(
+                    "redaction pii_pattern skipped (invalid regex) id=%s error=%s regex_excerpt=%s",
+                    pattern_id,
+                    e,
+                    (regex[:80] + "…") if len(regex) > 80 else regex,
+                )
         self._pii_patterns = compiled_patterns
 
     def _request_prefix(self, request_id: str) -> str:
