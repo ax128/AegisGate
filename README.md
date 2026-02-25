@@ -177,7 +177,17 @@ git clone https://github.com/ax128/AegisGate.git
 cd AegisGate
 ```
 
-### 4.2 启动
+### 4.2 首次运行前准备
+
+Compose 会读取 `config/.env`（仓库中仅提供 `config/.env.example`）。**首次启动前**若该文件不存在，请执行：
+
+```bash
+cp config/.env.example config/.env
+```
+
+可按需编辑 `config/.env`（如 `AEGIS_LOG_LEVEL`、`AEGIS_GATEWAY_KEY`、`AEGIS_UPSTREAM_BASE_URL` 等）。若已存在 `config/.env` 可跳过此步。
+
+### 4.3 启动
 
 ```bash
 docker compose up -d --build
@@ -191,7 +201,7 @@ docker compose up -d --build
 docker compose logs -f aegisgate
 ```
 
-### 4.4 停止
+### 4.5 停止
 
 ```bash
 docker compose down
