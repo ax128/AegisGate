@@ -961,6 +961,65 @@ async def test_responses_confirmation_yes_replays_cached_stream_text_as_sse_when
 
 
 @pytest.mark.asyncio
+async def test_responses_confirmation_yes_replays_fallback_message_when_cached_stream_text_empty(monkeypatch):
+    confirm_id = "cfm-cacheresp-empty"
+    reason = "高风险响应"
+    summary = "cached stream replay empty"
+    pending_payload = openai_router._build_response_pending_payload(
+        route="/v1/responses",
+        request_id="resp-cached-empty",
+        session_id="s-cache-resp-empty",
+        model="gpt-test",
+        fmt=openai_router._PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+        content="",
+    )
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    monkeypatch.setattr(openai_router, "_build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        },
+        path="/v1/responses",
+    )
+    stream = await openai_router.responses(
+        {
+            "request_id": "resp-confirm-cache-empty",
+            "session_id": "s-cache-resp-empty",
+            "model": "gpt-test",
+            "stream": True,
+            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
+        },
+        request,
+    )
+
+    chunks = list(stream)
+    body = b"".join(chunks).decode("utf-8", errors="replace")
+    assert "未包含可回放文本" in body
+    assert '"status": "executed"' in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
 async def test_responses_confirmation_no_deletes_pending_cache(monkeypatch):
     confirm_id = "cfm-cancelresp001"
     reason = "高风险响应"
