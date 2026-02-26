@@ -160,3 +160,40 @@ def test_responses_upstream_payload_preserves_structured_input():
     req = to_internal_responses(payload)
     upstream_payload = _build_responses_upstream_payload(payload, req.messages)
     assert isinstance(upstream_payload["input"], list)
+
+
+def test_responses_upstream_payload_drops_gateway_confirmation_template_from_history():
+    payload = {
+        "input": [
+            {
+                "role": "assistant",
+                "content": (
+                    "⚠️ 安全确认（高风险操作）\n"
+                    "放行（复制这一行）：yes cfm-abc123def456 act-bada1fe8dd\n"
+                    "取消（复制这一行）：no cfm-abc123def456 act-bada1fe8dd\n"
+                    "确认编号：cfm-abc123def456"
+                ),
+            },
+            {"role": "user", "content": "继续分析这个问题"},
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    assert items[0]["role"] == "user"
+
+
+def test_responses_upstream_payload_keeps_normal_assistant_history():
+    payload = {
+        "input": [
+            {"role": "assistant", "content": "这是正常回答，不是网关确认模板。"},
+            {"role": "user", "content": "继续"},
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 2
