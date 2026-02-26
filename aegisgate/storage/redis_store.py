@@ -310,6 +310,16 @@ class RedisKVStore(KVStore):
             pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
         pipe.execute()
 
+    def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
+        key = self._pending_key(confirm_id)
+        session_id = _to_str(self.client.hget(key, "session_id") or "")
+        tenant_id = _to_str(self.client.hget(key, "tenant_id") or "default")
+        removed = int(self.client.delete(key) or 0)
+        self.client.zrem(self._pending_retention_key(), confirm_id)
+        if session_id:
+            self.client.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
+        return removed > 0
+
     def prune_pending_confirmations(self, now_ts: int) -> int:
         retention_idx = self._pending_retention_key()
         candidate_ids = self.client.zrangebyscore(retention_idx, min="-inf", max=now_ts)

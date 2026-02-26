@@ -583,6 +583,19 @@ async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
     return await _maybe_offload(method, *args, **kwargs)
 
 
+async def _delete_pending_confirmation(confirm_id: str) -> bool:
+    method = getattr(store, "delete_pending_confirmation", None)
+    if not callable(method):
+        return False
+    try:
+        return bool(await _maybe_offload(method, confirm_id=confirm_id))
+    except TypeError:
+        return bool(await _maybe_offload(method, confirm_id))
+    except Exception as exc:
+        logger.warning("delete pending confirmation failed confirm_id=%s error=%s", confirm_id, exc)
+        return False
+
+
 def _extract_chat_user_text(payload: dict[str, Any]) -> str:
     messages = payload.get("messages", [])
     if not isinstance(messages, list):
@@ -2653,6 +2666,7 @@ async def chat_completions(payload: dict, request: Request):
         bool(pending),
         tail_preview,
     )
+    confirmation_bypass_reason = "no_explicit_confirmation_command"
 
     if pending:
         pending_route = str(pending.get("route", ""))
@@ -2675,87 +2689,31 @@ async def chat_completions(payload: dict, request: Request):
             decision_source,
             bool(provided_action_token),
         )
+        invalid_reason = ""
         if explicit_confirm_id and not provided_action_token:
-            required_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_action_token_required_text(confirm_id, expected_action_token),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_action_token_required")
-            _attach_security_metadata(required_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                required_resp,
-                confirm_id=confirm_id,
-                status="action_token_required",
-                reason=reason_text,
-                summary=summary_text,
-                action_token=expected_action_token,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
+            invalid_reason = "missing_action_token"
+        elif explicit_confirm_id and provided_action_token != expected_action_token:
+            invalid_reason = "action_token_mismatch"
+        elif pending_route != req_preview.route:
+            invalid_reason = "route_mismatch"
+        elif decision_value not in {"yes", "no"}:
+            invalid_reason = f"unsupported_decision_{decision_value}"
+        if invalid_reason:
+            confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
-                "confirmation action token missing request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
+                req_preview.route,
                 confirm_id,
+                decision_value,
+                decision_source,
+                invalid_reason,
+                bool(provided_action_token),
+                bool(provided_action_token and provided_action_token == expected_action_token),
             )
-            return to_chat_response(required_resp)
-        if explicit_confirm_id and provided_action_token and provided_action_token != expected_action_token:
-            mismatch_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_action_token_mismatch_text(confirm_id, provided_action_token, expected_action_token),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_action_token_mismatch")
-            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_resp,
-                confirm_id=confirm_id,
-                status="action_token_mismatch",
-                reason=reason_text,
-                summary=summary_text,
-                action_token=expected_action_token,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation action token mismatch request_id=%s session_id=%s tenant_id=%s confirm_id=%s provided=%s expected=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-                provided_action_token,
-                expected_action_token,
-            )
-            return to_chat_response(mismatch_resp)
-        if pending_route != req_preview.route:
-            mismatch_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_route_mismatch_text(
-                    confirm_id=confirm_id,
-                    pending_route=pending_route,
-                    current_route=req_preview.route,
-                ),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_route_mismatch")
-            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_resp,
-                confirm_id=confirm_id,
-                status="route_mismatch",
-                reason=reason_text,
-                summary=summary_text,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            return to_chat_response(mismatch_resp)
-
-        if decision_value == "no":
+        elif decision_value == "no":
             changed = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -2782,6 +2740,7 @@ async def chat_completions(payload: dict, request: Request):
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_chat_response(done_resp)
 
+            deleted = await _delete_pending_confirmation(confirm_id)
             canceled_resp = InternalResponse(
                 request_id=req_preview.request_id,
                 session_id=req_preview.session_id,
@@ -2806,9 +2765,17 @@ async def chat_completions(payload: dict, request: Request):
                 tenant_id,
                 confirm_id,
             )
+            logger.info(
+                "confirmation pending cache deleted request_id=%s session_id=%s tenant_id=%s confirm_id=%s deleted=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+                deleted,
+            )
             return to_chat_response(canceled_resp)
 
-        if decision_value == "yes":
+        elif decision_value == "yes":
             logger.info(
                 "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
@@ -3045,144 +3012,22 @@ async def chat_completions(payload: dict, request: Request):
                 reason=reason_text,
                 summary=summary_text,
             )
-
-        note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
-        pending_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason_text, summary=summary_text, note=note),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("awaiting_user_confirmation")
-        _attach_security_metadata(pending_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            pending_resp,
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason_text,
-            summary=summary_text,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.info(
-            "confirmation pending await clear decision request_id=%s session_id=%s tenant_id=%s confirm_id=%s decision=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            confirm_id,
-            decision_value,
-        )
-        return to_chat_response(pending_resp)
-
-    if decision_value in {"yes", "no"} and not confirm_id_hint:
-        requirement_detail = "当前会话没有唯一可执行的待确认记录（可能没有 pending，或存在多条 pending）。"
-        invalid_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_confirmation_command_requirements_text(
-                detail=requirement_detail,
-            ),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            invalid_resp,
-            confirm_id="",
-            status="command_invalid",
-            reason="确认指令不符合放行要求",
-            summary=requirement_detail,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s tail_preview=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            decision_value,
-            requirement_detail,
-            tail_preview,
-        )
-        return to_chat_response(invalid_resp)
-
-    if confirm_id_hint:
-        hint_record = await _maybe_offload(
-            _load_single_pending_for_session,
-            payload,
-            now_ts,
-            expected_route=req_preview.route,
-            tenant_id=tenant_id,
-        )
-        hinted_id = str((hint_record or {}).get("confirm_id", "")).strip()
-        if hinted_id and hinted_id != confirm_id_hint:
-            mismatch_hint = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_id_mismatch_hint_text(confirm_id_hint, hinted_id),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_id_mismatch")
-            _attach_security_metadata(mismatch_hint, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_hint,
-                confirm_id=confirm_id_hint,
-                status="id_mismatch",
-                reason="确认编号不匹配",
-                summary=f"当前会话唯一可用确认编号：{hinted_id}",
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation id mismatch request_id=%s session_id=%s tenant_id=%s provided=%s expected=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id_hint,
-                hinted_id,
-            )
-            return to_chat_response(mismatch_hint)
-        requirement_detail = "确认编号无可执行 pending（可能已过期、已处理或不属于当前会话）。"
-        invalid_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_confirmation_command_requirements_text(
-                detail=requirement_detail,
-                confirm_id=confirm_id_hint,
-            ),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            invalid_resp,
-            confirm_id=confirm_id_hint,
-            status="command_invalid",
-            reason="确认指令不符合放行要求",
-            summary=requirement_detail,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s tail_preview=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            decision_value,
-            confirm_id_hint,
-            requirement_detail,
-            tail_preview,
-        )
-        return to_chat_response(invalid_resp)
+    elif decision_value in {"yes", "no"}:
+        if confirm_id_hint:
+            confirmation_bypass_reason = "confirmation_command_no_matching_pending"
+        else:
+            confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
     logger.info(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true tail_preview=%s",
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
         req_preview.route,
+        confirmation_bypass_reason,
+        bool(pending),
+        decision_value,
+        confirm_id_hint or "-",
         tail_preview,
     )
 
@@ -3269,6 +3114,7 @@ async def responses(payload: dict, request: Request):
         bool(pending),
         tail_preview,
     )
+    confirmation_bypass_reason = "no_explicit_confirmation_command"
 
     if pending:
         pending_route = str(pending.get("route", ""))
@@ -3291,87 +3137,31 @@ async def responses(payload: dict, request: Request):
             decision_source,
             bool(provided_action_token),
         )
+        invalid_reason = ""
         if explicit_confirm_id and not provided_action_token:
-            required_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_action_token_required_text(confirm_id, expected_action_token),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_action_token_required")
-            _attach_security_metadata(required_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                required_resp,
-                confirm_id=confirm_id,
-                status="action_token_required",
-                reason=reason_text,
-                summary=summary_text,
-                action_token=expected_action_token,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
+            invalid_reason = "missing_action_token"
+        elif explicit_confirm_id and provided_action_token != expected_action_token:
+            invalid_reason = "action_token_mismatch"
+        elif pending_route != req_preview.route:
+            invalid_reason = "route_mismatch"
+        elif decision_value not in {"yes", "no"}:
+            invalid_reason = f"unsupported_decision_{decision_value}"
+        if invalid_reason:
+            confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
-                "confirmation action token missing request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
+                req_preview.route,
                 confirm_id,
+                decision_value,
+                decision_source,
+                invalid_reason,
+                bool(provided_action_token),
+                bool(provided_action_token and provided_action_token == expected_action_token),
             )
-            return to_responses_output(required_resp)
-        if explicit_confirm_id and provided_action_token and provided_action_token != expected_action_token:
-            mismatch_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_action_token_mismatch_text(confirm_id, provided_action_token, expected_action_token),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_action_token_mismatch")
-            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_resp,
-                confirm_id=confirm_id,
-                status="action_token_mismatch",
-                reason=reason_text,
-                summary=summary_text,
-                action_token=expected_action_token,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation action token mismatch request_id=%s session_id=%s tenant_id=%s confirm_id=%s provided=%s expected=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-                provided_action_token,
-                expected_action_token,
-            )
-            return to_responses_output(mismatch_resp)
-        if pending_route != req_preview.route:
-            mismatch_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_route_mismatch_text(
-                    confirm_id=confirm_id,
-                    pending_route=pending_route,
-                    current_route=req_preview.route,
-                ),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_route_mismatch")
-            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_resp,
-                confirm_id=confirm_id,
-                status="route_mismatch",
-                reason=reason_text,
-                summary=summary_text,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            return to_responses_output(mismatch_resp)
-
-        if decision_value == "no":
+        elif decision_value == "no":
             changed = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -3398,6 +3188,7 @@ async def responses(payload: dict, request: Request):
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_responses_output(done_resp)
 
+            deleted = await _delete_pending_confirmation(confirm_id)
             canceled_resp = InternalResponse(
                 request_id=req_preview.request_id,
                 session_id=req_preview.session_id,
@@ -3422,9 +3213,17 @@ async def responses(payload: dict, request: Request):
                 tenant_id,
                 confirm_id,
             )
+            logger.info(
+                "confirmation pending cache deleted request_id=%s session_id=%s tenant_id=%s confirm_id=%s deleted=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+                deleted,
+            )
             return to_responses_output(canceled_resp)
 
-        if decision_value == "yes":
+        elif decision_value == "yes":
             logger.info(
                 "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
@@ -3661,144 +3460,22 @@ async def responses(payload: dict, request: Request):
                 reason=reason_text,
                 summary=summary_text,
             )
-
-        note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
-        pending_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_build_confirmation_message(confirm_id=confirm_id, reason=reason_text, summary=summary_text, note=note),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("awaiting_user_confirmation")
-        _attach_security_metadata(pending_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            pending_resp,
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason_text,
-            summary=summary_text,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.info(
-            "confirmation pending await clear decision request_id=%s session_id=%s tenant_id=%s confirm_id=%s decision=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            confirm_id,
-            decision_value,
-        )
-        return to_responses_output(pending_resp)
-
-    if decision_value in {"yes", "no"} and not confirm_id_hint:
-        requirement_detail = "当前会话没有唯一可执行的待确认记录（可能没有 pending，或存在多条 pending）。"
-        invalid_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_confirmation_command_requirements_text(
-                detail=requirement_detail,
-            ),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            invalid_resp,
-            confirm_id="",
-            status="command_invalid",
-            reason="确认指令不符合放行要求",
-            summary=requirement_detail,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s tail_preview=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            decision_value,
-            requirement_detail,
-            tail_preview,
-        )
-        return to_responses_output(invalid_resp)
-
-    if confirm_id_hint:
-        hint_record = await _maybe_offload(
-            _load_single_pending_for_session,
-            payload,
-            now_ts,
-            expected_route=req_preview.route,
-            tenant_id=tenant_id,
-        )
-        hinted_id = str((hint_record or {}).get("confirm_id", "")).strip()
-        if hinted_id and hinted_id != confirm_id_hint:
-            mismatch_hint = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=_confirmation_id_mismatch_hint_text(confirm_id_hint, hinted_id),
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_id_mismatch")
-            _attach_security_metadata(mismatch_hint, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                mismatch_hint,
-                confirm_id=confirm_id_hint,
-                status="id_mismatch",
-                reason="确认编号不匹配",
-                summary=f"当前会话唯一可用确认编号：{hinted_id}",
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation id mismatch request_id=%s session_id=%s tenant_id=%s provided=%s expected=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id_hint,
-                hinted_id,
-            )
-            return to_responses_output(mismatch_hint)
-        requirement_detail = "确认编号无可执行 pending（可能已过期、已处理或不属于当前会话）。"
-        invalid_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text=_confirmation_command_requirements_text(
-                detail=requirement_detail,
-                confirm_id=confirm_id_hint,
-            ),
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-        _attach_confirmation_metadata(
-            invalid_resp,
-            confirm_id=confirm_id_hint,
-            status="command_invalid",
-            reason="确认指令不符合放行要求",
-            summary=requirement_detail,
-        )
-        _write_audit_event(ctx_preview, boundary=boundary)
-        logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s tail_preview=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            decision_value,
-            confirm_id_hint,
-            requirement_detail,
-            tail_preview,
-        )
-        return to_responses_output(invalid_resp)
+    elif decision_value in {"yes", "no"}:
+        if confirm_id_hint:
+            confirmation_bypass_reason = "confirmation_command_no_matching_pending"
+        else:
+            confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
     logger.info(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true tail_preview=%s",
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
         req_preview.route,
+        confirmation_bypass_reason,
+        bool(pending),
+        decision_value,
+        confirm_id_hint or "-",
         tail_preview,
     )
 

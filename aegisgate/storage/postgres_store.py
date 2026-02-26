@@ -452,6 +452,18 @@ class PostgresKVStore(KVStore):
                 )
             conn.commit()
 
+    def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
+        pending_table = f"{self.schema}.pending_confirmation"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM {pending_table} WHERE confirm_id = %s",
+                    (confirm_id,),
+                )
+                removed = int(cur.rowcount or 0)
+            conn.commit()
+        return removed > 0
+
     def prune_pending_confirmations(self, now_ts: int) -> int:
         pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
