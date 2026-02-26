@@ -143,7 +143,7 @@ def test_parse_explicit_confirmation_command_ignores_template_prefixed_line():
 
 
 @pytest.mark.asyncio
-async def test_chat_yes_without_pending_returns_confirmation_requirements(monkeypatch):
+async def test_chat_yes_without_pending_is_forwarded(monkeypatch):
     async def fake_execute_chat_once(**kwargs):
         return {"ok": True}
 
@@ -163,9 +163,7 @@ async def test_chat_yes_without_pending_returns_confirmation_requirements(monkey
         },
         request,
     )
-    assert isinstance(result, dict)
-    assert result["aegisgate"]["confirmation"]["status"] == "command_invalid"
-    assert "确认指令不符合放行要求" in result["choices"][0]["message"]["content"]
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -250,7 +248,7 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypatch):
+async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
     confirm_id = "cfm-route000000"
     reason = "高风险响应"
     summary = "route mismatch"
@@ -267,7 +265,11 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
             "pending_request_payload": {},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -285,10 +287,7 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
         request,
     )
 
-    assert isinstance(result, dict)
-    content = result["choices"][0]["message"]["content"]
-    assert "当前接口不匹配" in content
-    assert result["aegisgate"]["confirmation"]["status"] == "route_mismatch"
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -338,7 +337,7 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_requires_action_token_when_confirm_id_provided(monkeypatch):
+async def test_chat_confirmation_missing_action_token_is_forwarded(monkeypatch):
     confirm_id = "cfm-a1b2c3d4e5f6"
     reason = "高风险响应"
     summary = "action binding"
@@ -355,7 +354,11 @@ async def test_chat_confirmation_requires_action_token_when_confirm_id_provided(
             "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -373,13 +376,11 @@ async def test_chat_confirmation_requires_action_token_when_confirm_id_provided(
         request,
     )
 
-    assert isinstance(result, dict)
-    assert result["aegisgate"]["confirmation"]["status"] == "action_token_required"
-    assert "动作摘要码" in result["choices"][0]["message"]["content"]
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_rejects_wrong_action_token(monkeypatch):
+async def test_chat_confirmation_wrong_action_token_is_forwarded(monkeypatch):
     confirm_id = "cfm-abcdef123456"
     reason = "高风险响应"
     summary = "action mismatch"
@@ -396,7 +397,11 @@ async def test_chat_confirmation_rejects_wrong_action_token(monkeypatch):
             "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -414,9 +419,7 @@ async def test_chat_confirmation_rejects_wrong_action_token(monkeypatch):
         request,
     )
 
-    assert isinstance(result, dict)
-    assert result["aegisgate"]["confirmation"]["status"] == "action_token_mismatch"
-    assert "不匹配" in result["choices"][0]["message"]["content"]
+    assert result == {"ok": True}
 
 
 def test_resolve_pending_confirmation_rejects_cross_tenant_confirm_id(monkeypatch):
@@ -479,7 +482,7 @@ def test_resolve_pending_confirmation_recovers_stale_executing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_wrong_confirm_id_returns_correction_hint(monkeypatch):
+async def test_chat_wrong_confirm_id_is_forwarded(monkeypatch):
     provided_id = "cfm-aaaaaaaaaaaa"
     expected_id = "cfm-bbbbbbbbbbbb"
 
@@ -494,6 +497,10 @@ async def test_chat_wrong_confirm_id_returns_correction_hint(monkeypatch):
             "route": "/v1/chat/completions",
         },
     )
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -511,10 +518,7 @@ async def test_chat_wrong_confirm_id_returns_correction_hint(monkeypatch):
         request,
     )
 
-    assert isinstance(result, dict)
-    content = result["choices"][0]["message"]["content"]
-    assert expected_id in content
-    assert result["aegisgate"]["confirmation"]["status"] == "id_mismatch"
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -659,6 +663,60 @@ async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_confirmation_no_deletes_pending_cache(monkeypatch):
+    confirm_id = "cfm-cancelchat001"
+    reason = "高风险响应"
+    summary = "cancel and delete"
+    pending_payload = {"model": "gpt-test", "messages": [{"role": "user", "content": "hello"}]}
+    delete_calls: list[str] = []
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    async def fake_delete_pending_confirmation(_confirm_id):
+        delete_calls.append(_confirm_id)
+        return True
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+    monkeypatch.setattr(openai_router, "_delete_pending_confirmation", fake_delete_pending_confirmation)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    result = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-cancel-1",
+            "session_id": "s-cancel-chat",
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": f"no {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "canceled"
+    assert confirm_id in result["choices"][0]["message"]["content"]
+    assert delete_calls == [confirm_id]
+
+
+@pytest.mark.asyncio
 async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatch):
     confirm_id = "cfm-cacheresp001"
     reason = "高风险响应"
@@ -718,6 +776,61 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_responses_confirmation_no_deletes_pending_cache(monkeypatch):
+    confirm_id = "cfm-cancelresp001"
+    reason = "高风险响应"
+    summary = "cancel and delete"
+    pending_payload = {"model": "gpt-test", "input": "hello"}
+    delete_calls: list[str] = []
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    async def fake_delete_pending_confirmation(_confirm_id):
+        delete_calls.append(_confirm_id)
+        return True
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+    monkeypatch.setattr(openai_router, "_delete_pending_confirmation", fake_delete_pending_confirmation)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        },
+        path="/v1/responses",
+    )
+    result = await openai_router.responses(
+        {
+            "request_id": "resp-confirm-cancel-1",
+            "session_id": "s-cancel-resp",
+            "model": "gpt-test",
+            "input": f"no {confirm_id} {_action_token(confirm_id, reason, summary)}",
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "canceled"
+    assert confirm_id in result["output_text"]
+    assert delete_calls == [confirm_id]
+
+
+@pytest.mark.asyncio
 async def test_responses_ignores_stale_confirm_id_from_non_user_history(monkeypatch):
     async def fake_execute_responses_once(**kwargs):
         return {"ok": True}
@@ -753,7 +866,7 @@ async def test_responses_ignores_stale_confirm_id_from_non_user_history(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_responses_yes_without_pending_returns_confirmation_requirements(monkeypatch):
+async def test_responses_yes_without_pending_is_forwarded(monkeypatch):
     async def fake_execute_responses_once(**kwargs):
         return {"ok": True}
 
@@ -775,6 +888,4 @@ async def test_responses_yes_without_pending_returns_confirmation_requirements(m
         request,
     )
 
-    assert isinstance(result, dict)
-    assert result["aegisgate"]["confirmation"]["status"] == "command_invalid"
-    assert "确认指令不符合放行要求" in result["output_text"]
+    assert result == {"ok": True}

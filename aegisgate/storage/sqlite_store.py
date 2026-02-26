@@ -394,6 +394,21 @@ class SqliteKVStore(KVStore):
 
         self._with_retry(_write)
 
+    def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
+        def _delete() -> bool:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM pending_confirmation
+                    WHERE confirm_id = ?
+                    """,
+                    (confirm_id,),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+        return bool(self._with_retry(_delete))
+
     def prune_pending_confirmations(self, now_ts: int) -> int:
         def _delete() -> int:
             with self._connect() as conn:
