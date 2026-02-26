@@ -142,6 +142,22 @@ def test_parse_explicit_confirmation_command_ignores_template_prefixed_line():
     assert confirm_id == ""
 
 
+def test_parse_explicit_confirmation_command_accepts_metadata_prefixed_line():
+    decision, confirm_id = openai_router._parse_explicit_confirmation_command(
+        "[Telegram Andrew Landry (@vibrant_stars_99) id:6422563350 +1m 2026-02-26 21:11 GMT+1] yes cfm-abc123def456 act-bada1fe8dd"
+    )
+    assert decision == "yes"
+    assert confirm_id == "cfm-abc123def456"
+
+
+def test_parse_explicit_confirmation_command_accepts_bound_token_with_em_dash():
+    decision, confirm_id = openai_router._parse_explicit_confirmation_command(
+        "yes cfm-abc123def456——act-bada1fe8dd"
+    )
+    assert decision == "yes"
+    assert confirm_id == "cfm-abc123def456"
+
+
 @pytest.mark.asyncio
 async def test_chat_yes_without_pending_is_forwarded(monkeypatch):
     async def fake_execute_chat_once(**kwargs):

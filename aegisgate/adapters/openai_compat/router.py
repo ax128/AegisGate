@@ -777,10 +777,47 @@ def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
         r"^[\s`\"'*_=\-~>#\[\]\(\)\{\}\|:：,，]*?(?P<cmd>yes|y|no|n)\b(?P<tail>.*)$",
         re.IGNORECASE,
     )
+    bind_pair_re = re.compile(
+        r"(?P<confirm_id>cfm-[a-f0-9]{12})\s*(?:[-—–_:/|：]|\s){1,6}(?P<action>act-[a-f0-9]{8,16})\b",
+        re.IGNORECASE,
+    )
+    wrapped_cmd_re = re.compile(
+        r"(?:^|[\]\)\}>:：\|])\s*(?P<cmd>yes|y|no|n)\s+(?P<confirm_id>cfm-[a-f0-9]{12})\b(?:\s+act-[a-f0-9]{8,16})?\s*$",
+        re.IGNORECASE,
+    )
+    template_markers = ("copy this line", "复制这一行")
     for raw in reversed(lines[-6:]):
         line = raw.strip()
+        lowered = line.lower()
+        if any(marker in lowered for marker in template_markers):
+            continue
+        bind_match = bind_pair_re.search(line)
+        if bind_match:
+            confirm_id = str(bind_match.group("confirm_id") or "").lower()
+            prefix = line[: bind_match.start()]
+            decision = "unknown"
+            cmd_tokens = re.findall(r"\b(?:yes|y|no|n)\b", prefix, flags=re.IGNORECASE)
+            if cmd_tokens:
+                last_cmd = str(cmd_tokens[-1]).lower()
+                if last_cmd in {"yes", "y"}:
+                    decision = "yes"
+                elif last_cmd in {"no", "n"}:
+                    decision = "no"
+            if decision not in {"yes", "no"}:
+                decision = parse_confirmation_decision(prefix).value
+            if decision in {"yes", "no"} and confirm_id:
+                return decision, confirm_id
         match = cmd_re.match(line)
         if not match:
+            wrapped = wrapped_cmd_re.search(line)
+            if not wrapped:
+                continue
+            cmd = str(wrapped.group("cmd") or "").lower()
+            confirm_id = str(wrapped.group("confirm_id") or "").lower()
+            if cmd in {"yes", "y"}:
+                return "yes", confirm_id
+            if cmd in {"no", "n"}:
+                return "no", confirm_id
             continue
         cmd = str(match.group("cmd") or "").lower()
         tail = str(match.group("tail") or "")
