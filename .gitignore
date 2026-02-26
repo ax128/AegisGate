@@ -37,3 +37,7 @@ Thumbs.db
 # Do not publish local docs directory (lowercase or uppercase)
 docs/
 DOC/
+
+# Local/internal reports and checklists (do not upload)
+PRODUCTION_READINESS_TEST_REPORT.md
+OPEN_SOURCE_CHECKLIST.md

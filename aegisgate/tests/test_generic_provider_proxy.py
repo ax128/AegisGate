@@ -83,7 +83,8 @@ async def test_generic_provider_proxy_requires_gateway_headers():
         response = await openai_router.generic_provider_proxy("messages", {"model": "generic-model"}, request)
         assert response.status_code == 400
         body = json.loads(response.body.decode("utf-8"))
-        assert body["error"] == "invalid_parameters"
+        assert body["error"]["code"] == "invalid_parameters"
+        assert "missing" in body["error"]["message"].lower()
     finally:
         settings.enforce_loopback_only = original_loopback
 
@@ -153,5 +154,45 @@ async def test_generic_provider_proxy_streaming_for_claude_payload(monkeypatch):
         body = b"".join(chunks)
         assert b"content_block_delta" in body
         assert b"message_stop" in body
+    finally:
+        settings.enforce_loopback_only = original_loopback
+
+
+@pytest.mark.asyncio
+async def test_generic_provider_proxy_streaming_returns_error_chunk_when_upstream_fails(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:  # pragma: no cover - keeps async generator type
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns resolution failed")
+
+    monkeypatch.setattr(openai_router, "_forward_stream_lines", fake_forward_stream_lines)
+    original_loopback = settings.enforce_loopback_only
+    try:
+        settings.enforce_loopback_only = False
+        request = _build_request(
+            headers={
+                "X-Upstream-Base": "https://upstream.example.com/v1",
+                "gateway-key": settings.gateway_key,
+            }
+        )
+        response = await openai_router.generic_provider_proxy(
+            "messages",
+            {
+                "model": "claude-3-5-sonnet-latest",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            request,
+        )
+        assert hasattr(response, "__aiter__")
+        chunks: list[bytes] = []
+        async for chunk in response:
+            chunks.append(chunk)
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+        assert '"code": "upstream_unreachable"' in body
+        assert "dns resolution failed" in body
+        assert "data: [DONE]" in body
     finally:
         settings.enforce_loopback_only = original_loopback

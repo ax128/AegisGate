@@ -95,11 +95,18 @@ class GWTokenRewriteMiddleware:
         await self.app(new_scope, receive, send)
 
 
-def _blocked_response(status_code: int, reason: str) -> JSONResponse:
+def _blocked_response(status_code: int, reason: str, detail: str | None = None) -> JSONResponse:
+    detail_text = (detail or reason).strip() or reason
     return JSONResponse(
         status_code=status_code,
         content={
-            "error": reason,
+            "error": {
+                "message": detail_text,
+                "type": "aegisgate_error",
+                "code": reason,
+            },
+            "error_code": reason,
+            "detail": detail_text,
             "aegisgate": {
                 "action": "block",
                 "risk_score": 1.0,
@@ -213,7 +220,16 @@ async def security_boundary_middleware(request: Request, call_next):
         boundary["auth_verified"] = True
         logger.info("boundary hmac verified path=%s", request.url.path)
 
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # pragma: no cover - fail-safe
+        logger.exception("gateway unhandled exception path=%s", request.url.path)
+        boundary["rejected_reason"] = "gateway_internal_error"
+        return _blocked_response(
+            status_code=500,
+            reason="gateway_internal_error",
+            detail=f"gateway internal error: {exc}",
+        )
     if boundary.get("auth_verified"):
         response.headers["x-aegis-auth-verified"] = "true"
     logger.debug(

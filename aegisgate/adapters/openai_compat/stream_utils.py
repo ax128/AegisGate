@@ -126,10 +126,21 @@ def _stream_block_sse_chunk(ctx: RequestContext, model: str, reason: str, route:
 
 
 def _stream_error_sse_chunk(message: str, code: str | None = None) -> bytes:
-    """SSE chunk 携带上游失败原因，供 agent 解析。"""
-    payload: dict[str, Any] = {"error": (message or "upstream_error").strip() or "upstream_error"}
-    if code:
-        payload["code"] = code
+    """SSE chunk 携带上游失败原因，兼容 error.message / error.code 解析。"""
+    detail = (message or "upstream_error").strip() or "upstream_error"
+    error_code = (code or "upstream_error").strip() or "upstream_error"
+    payload: dict[str, Any] = {
+        "type": "error",
+        "error": {
+            "message": detail,
+            "type": "aegisgate_error",
+            "code": error_code,
+        },
+        "aegisgate": {
+            "action": "block",
+            "reason": error_code,
+        },
+    }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 

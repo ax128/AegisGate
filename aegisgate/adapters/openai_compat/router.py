@@ -683,14 +683,23 @@ def _error_response(status_code: int, reason: str, detail: str, ctx: RequestCont
     ctx.response_disposition = "block"
     ctx.disposition_reasons.append(reason)
     ctx.enforcement_actions.append(f"upstream:{reason}")
-    _write_audit_event(ctx, boundary=boundary)
     # 保证 agent 端能拿到非空原因（error + detail）
-    detail_str = (detail or "").strip() or reason
+    detail_str = ((detail or "").strip() or reason)[:600]
+    try:
+        _write_audit_event(ctx, boundary=boundary)
+    except Exception as exc:  # pragma: no cover - operational guard
+        logger.warning("audit write failed on error response request_id=%s error=%s", ctx.request_id, exc)
     return JSONResponse(
         status_code=status_code,
         content={
-            "error": reason,
+            "error": {
+                "message": detail_str,
+                "type": "aegisgate_error",
+                "code": reason,
+            },
+            "error_code": reason,
             "detail": detail_str,
+            "request_id": ctx.request_id,
             "aegisgate": {
                 "action": _resolve_action(ctx),
                 "risk_score": round(ctx.risk_score, 4),
@@ -752,6 +761,14 @@ async def _execute_chat_stream_once(
                 ctx.disposition_reasons.append(reason)
                 ctx.enforcement_actions.append(f"upstream:{reason}")
                 yield _stream_error_sse_chunk(detail, code=reason)
+                yield _stream_done_sse_chunk()
+            except Exception as exc:  # pragma: no cover - fail-safe
+                detail = f"gateway_internal_error: {exc}"
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append("gateway_internal_error")
+                ctx.enforcement_actions.append("upstream:gateway_internal_error")
+                logger.exception("chat stream unexpected failure request_id=%s", ctx.request_id)
+                yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
                 yield _stream_done_sse_chunk()
             finally:
                 _write_audit_event(ctx, boundary=boundary)
@@ -867,6 +884,14 @@ async def _execute_chat_stream_once(
             logger.error("chat stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
             yield _stream_error_sse_chunk(detail, code=reason)
             yield _stream_done_sse_chunk()
+        except Exception as exc:  # pragma: no cover - fail-safe
+            detail = f"gateway_internal_error: {exc}"
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("gateway_internal_error")
+            ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            logger.exception("chat stream unexpected failure request_id=%s", ctx.request_id)
+            yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+            yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
 
@@ -916,6 +941,14 @@ async def _execute_responses_stream_once(
                 ctx.disposition_reasons.append(reason)
                 ctx.enforcement_actions.append(f"upstream:{reason}")
                 yield _stream_error_sse_chunk(detail, code=reason)
+                yield _stream_done_sse_chunk()
+            except Exception as exc:  # pragma: no cover - fail-safe
+                detail = f"gateway_internal_error: {exc}"
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append("gateway_internal_error")
+                ctx.enforcement_actions.append("upstream:gateway_internal_error")
+                logger.exception("responses stream unexpected failure request_id=%s", ctx.request_id)
+                yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
                 yield _stream_done_sse_chunk()
             finally:
                 _write_audit_event(ctx, boundary=boundary)
@@ -1029,6 +1062,14 @@ async def _execute_responses_stream_once(
             ctx.enforcement_actions.append(f"upstream:{reason}")
             logger.error("responses stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
             yield _stream_error_sse_chunk(detail, code=reason)
+            yield _stream_done_sse_chunk()
+        except Exception as exc:  # pragma: no cover - fail-safe
+            detail = f"gateway_internal_error: {exc}"
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("gateway_internal_error")
+            ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            logger.exception("responses stream unexpected failure request_id=%s", ctx.request_id)
+            yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
             yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
@@ -1530,6 +1571,16 @@ async def _execute_generic_stream_once(
                 ctx.disposition_reasons.append(reason)
                 ctx.enforcement_actions.append(f"upstream:{reason}")
                 logger.error("generic stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+                yield _stream_error_sse_chunk(detail, code=reason)
+                yield _stream_done_sse_chunk()
+            except Exception as exc:  # pragma: no cover - fail-safe
+                detail = f"gateway_internal_error: {exc}"
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append("gateway_internal_error")
+                ctx.enforcement_actions.append("upstream:gateway_internal_error")
+                logger.exception("generic stream unexpected failure request_id=%s", ctx.request_id)
+                yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+                yield _stream_done_sse_chunk()
             finally:
                 _write_audit_event(ctx, boundary=boundary)
 
@@ -1551,21 +1602,12 @@ async def _execute_generic_stream_once(
     if ctx.request_disposition == "block":
         block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
         debug_log_original("request_blocked", analysis_text or "[NON_TEXT_PAYLOAD]", reason=block_reason)
-        blocked_resp = InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text="[AegisGate] request blocked by security policy.",
-        )
-        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
-        _write_audit_event(ctx, boundary=boundary)
-        return JSONResponse(
+        return _error_response(
             status_code=403,
-            content={
-                "error": "request_blocked",
-                "detail": "generic provider request blocked by security policy",
-                "aegisgate": blocked_resp.metadata.get("aegisgate", {}),
-            },
+            reason="request_blocked",
+            detail="generic provider request blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
         )
     if ctx.request_disposition == "sanitize" and sanitized_req.messages[0].content != (analysis_text or "[NON_TEXT_PAYLOAD]"):
         return _error_response(
@@ -1621,6 +1663,16 @@ async def _execute_generic_stream_once(
             ctx.disposition_reasons.append(reason)
             ctx.enforcement_actions.append(f"upstream:{reason}")
             logger.error("generic stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+            yield _stream_error_sse_chunk(detail, code=reason)
+            yield _stream_done_sse_chunk()
+        except Exception as exc:  # pragma: no cover - fail-safe
+            detail = f"gateway_internal_error: {exc}"
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("gateway_internal_error")
+            ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            logger.exception("generic stream unexpected failure request_id=%s", ctx.request_id)
+            yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+            yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
 
@@ -1704,21 +1756,12 @@ async def _execute_generic_once(
     if ctx.request_disposition == "block":
         block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
         debug_log_original("request_blocked", analysis_text or "[NON_TEXT_PAYLOAD]", reason=block_reason)
-        blocked_resp = InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text="[AegisGate] request blocked by security policy.",
-        )
-        _attach_security_metadata(blocked_resp, ctx, boundary=boundary)
-        _write_audit_event(ctx, boundary=boundary)
-        return JSONResponse(
+        return _error_response(
             status_code=403,
-            content={
-                "error": "request_blocked",
-                "detail": "generic provider request blocked by security policy",
-                "aegisgate": blocked_resp.metadata.get("aegisgate", {}),
-            },
+            reason="request_blocked",
+            detail="generic provider request blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
         )
     # Generic provider schemas are not rewritten for sanitize. Use block-on-sanitize to avoid unsafe partial mutations.
     if ctx.request_disposition == "sanitize" and sanitized_req.messages[0].content != (analysis_text or "[NON_TEXT_PAYLOAD]"):
