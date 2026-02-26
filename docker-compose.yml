@@ -26,9 +26,13 @@ services:
       AEGIS_AUDIT_LOG_PATH: "/app/logs/audit.jsonl"
       # token 映射落到宿主机 ./config/gw_tokens.json，重启后仍可用
       AEGIS_GW_TOKENS_PATH: "/app/aegisgate/policies/rules/gw_tokens.json"
+      # 一键启动：容器启动时自动回填策略 YAML（default/security_filters/permissive/strict）
+      AEGIS_INIT_STRICT: "true"
+      AEGIS_BOOTSTRAP_RULES_DIR: "/app/bootstrap/rules"
+      AEGIS_SECURITY_RULES_PATH: "/app/aegisgate/policies/rules/security_filters.yaml"
     volumes:
       # 宿主机 ./logs 需可写：先执行 chown 10001:10001 logs 再 docker compose up
       - ./logs:/app/logs
-      # 策略与 config：宿主机 ./config 挂载为容器内策略目录；首次为空时应用会自动生成 .env 与 YAML
+      # 策略与 config：宿主机 ./config 挂载为容器内策略目录；首次为空会自动生成策略文件
       - ./config:/app/aegisgate/policies/rules
     restart: unless-stopped

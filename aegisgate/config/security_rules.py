@@ -432,6 +432,18 @@ _CACHE_MTIME_NS = -1
 _CACHE_RULES: dict[str, Any] | None = None
 
 
+def _resolve_rules_file(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    app_root = Path(__file__).resolve().parents[2]
+    candidates = [Path.cwd() / candidate, app_root / candidate]
+    for item in candidates:
+        if item.exists():
+            return item.resolve()
+    return candidates[-1].resolve()
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     for key, value in override.items():
         if key in base and isinstance(base[key], dict) and isinstance(value, dict):
@@ -444,7 +456,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def load_security_rules(path: str | None = None) -> dict[str, Any]:
     global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
 
-    rules_path = Path(path or settings.security_rules_path)
+    rules_path = _resolve_rules_file(path or settings.security_rules_path)
     path_key = str(rules_path.resolve())
     mtime_ns = rules_path.stat().st_mtime_ns if rules_path.exists() else -1
 
