@@ -41,3 +41,5 @@ DOC/
 # Local/internal reports and checklists (do not upload)
 PRODUCTION_READINESS_TEST_REPORT.md
 OPEN_SOURCE_CHECKLIST.md
+PR_DESCRIPTION_2026-02-26-security-hardening.md
+.github/pull_request_template.md
