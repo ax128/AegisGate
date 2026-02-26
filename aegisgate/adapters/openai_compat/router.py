@@ -158,6 +158,20 @@ _DEBUG_HEADERS_REDACT = frozenset(
 )
 
 
+def _sanitize_payload_for_log(value: Any) -> Any:
+    """Remove verbose fields (for example tool schema parameters) from request debug logs."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "parameters":
+                continue
+            sanitized[key] = _sanitize_payload_for_log(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_payload_for_log(item) for item in value]
+    return value
+
+
 def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str) -> None:
     """当 AEGIS_LOG_LEVEL=debug 时打请求概要（method/path/route/headers）；正文按 log_full_request_body 决定是否打印、分段打印。"""
     if not logger.isEnabledFor(logging.DEBUG):
@@ -169,10 +183,11 @@ def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str)
             headers_safe[k] = "***"
         else:
             headers_safe[k] = v
+    payload_for_log = _sanitize_payload_for_log(payload)
     try:
-        body_str = json.dumps(payload, ensure_ascii=False, indent=2)
+        body_str = json.dumps(payload_for_log, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
-        body_str = str(payload)
+        body_str = str(payload_for_log)
     total_len = len(body_str)
     logger.debug(
         "incoming request method=%s path=%s route=%s headers=%s body_size=%d",
