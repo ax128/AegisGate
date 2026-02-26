@@ -8,16 +8,20 @@ services:
     user: "0:0"
     ports:
       - "127.0.0.1:18080:18080"
+    expose:
+      - "18080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # 首次启动时 config/.env 不存在也可启动；应用会从默认生成，之后可编辑 config/.env 覆盖
     env_file:
       - path: ./config/.env
         required: false
     environment:
-      # 必改：容器内监听与生产标识
+      # 容器内监听与生产标识
       AEGIS_ENV: "prod"
       AEGIS_HOST: "0.0.0.0"
       AEGIS_PORT: "18080"
-      # 必改：允许非本机访问网关
+      # Docker bridge 来源不是 loopback，需关闭该校验；对外暴露由 ports 绑定控制（当前仅 127.0.0.1）
       AEGIS_ENFORCE_LOOPBACK_ONLY: "false"
       # 必改：实际上游地址（或通过请求头 x-upstream-base 覆盖）
       AEGIS_UPSTREAM_BASE_URL: "https://your-upstream.example.com/v1"
