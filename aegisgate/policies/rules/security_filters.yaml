@@ -173,6 +173,24 @@ injection_detector:
       regex: '\[[^\]]+\]\(https?://[^)]+\).*(按|执行|遵循).*(指令|说明)'
     - id: url_instruction_zh
       regex: 'https?://\S+.*(按|执行|遵循).*(指令|说明)'
+  indirect_injection_patterns:
+    - id: retrieved_override_en
+      regex: '(retrieved|document|knowledge\s*base|web\s*page).*(ignore|override|bypass).*(instructions|policy|guardrails?)'
+    - id: context_priority_hijack_en
+      regex: '(treat|use).*(this|retrieved|external).*(as|with).*(highest|top).*(priority|authority)'
+    - id: retrieved_override_zh
+      regex: '(检索|文档|知识库|网页).*(忽略|覆盖|绕过).*(指令|规则|策略|安全)'
+    - id: context_priority_hijack_zh
+      regex: '(将|把).*(检索内容|外部内容|文档).*(作为|设为).*(最高|最高级).*(优先级|权威)'
+  remote_content_instruction_patterns:
+    - id: copy_paste_terminal_en
+      regex: '(copy|paste).*(terminal|shell|powershell|cmd)|(run|execute).*(from|in).*(url|link|document)'
+    - id: remote_tool_invocation_en
+      regex: '(follow|execute).*(tool|function|api).*(from|in).*(link|url|document)'
+    - id: copy_paste_terminal_zh
+      regex: '(复制|粘贴).*(终端|shell|powershell|cmd)|(按|执行).*(链接|网页|文档).*(命令|脚本)'
+    - id: remote_tool_invocation_zh
+      regex: '(根据|按照).*(链接|文档|网页).*(调用|执行).*(工具|函数|接口)'
   typoglycemia_targets:
     - ignore
     - bypass
@@ -222,6 +240,12 @@ injection_detector:
       remote_content:
         bucket: hijack
         severity: 8
+      remote_content_instruction:
+        bucket: hijack
+        severity: 9
+      indirect_injection:
+        bucket: hijack
+        severity: 9
       typoglycemia:
         bucket: hijack
         severity: 7
@@ -244,6 +268,41 @@ injection_detector:
     quoted_instruction_patterns:
       - '["''`].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`]'
       - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
+
+rag_poison_guard:
+  ingestion_risk_score: 0.90
+  retrieval_risk_score: 0.86
+  propagation_risk_score: 0.88
+  traceback_excerpt_max_chars: 180
+  ingestion_poison_patterns:
+    - id: ingestion_override_en
+      regex: '(ignore|override|bypass).*(instructions|policy|guardrails?)'
+    - id: ingestion_exfil_en
+      regex: '(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)'
+    - id: ingestion_override_zh
+      regex: '(忽略|覆盖|绕过).*(指令|规则|策略|安全)'
+    - id: ingestion_exfil_zh
+      regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
+    - id: hidden_markup_payload
+      regex: '(<!--[\s\S]{0,300}(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)'
+  retrieval_poison_patterns:
+    - id: retrieval_instruction_en
+      regex: '(retrieved|document|web|link).*(follow|execute|run|copy|paste).*(instruction|command|script|shell)'
+    - id: retrieval_tool_en
+      regex: '(call|invoke|use).*(tool|function|api).*(from|according to).*(retrieved|document|web|link)'
+    - id: retrieval_instruction_zh
+      regex: '(检索|文档|网页|链接).*(按|执行|运行|复制|粘贴).*(指令|命令|脚本|shell)'
+    - id: retrieval_tool_zh
+      regex: '(调用|使用|执行).*(工具|函数|接口).*(根据|按照).*(检索|文档|网页|链接)'
+  propagation_patterns:
+    - id: propagation_cmd_en
+      regex: '(run|execute|copy|paste).*(shell|powershell|cmd|bash)|curl\s+[^|]+\|\s*(sh|bash)'
+    - id: propagation_exfil_en
+      regex: '(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)'
+    - id: propagation_cmd_zh
+      regex: '(执行|运行|复制|粘贴).*(命令|脚本|终端|shell)'
+    - id: propagation_exfil_zh
+      regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
 
 privilege_guard:
   request_risk_floor: 0.9
@@ -510,9 +569,15 @@ action_map:
     unicode_bidi: block
     unicode_invisible: review
     remote_content: review
+    remote_content_instruction: review
+    indirect_injection: review
     direct: downgrade
     typoglycemia: review
     html_markdown: sanitize
+  rag_poison_guard:
+    ingestion_poison: block
+    retrieval_poison: review
+    poison_propagation: block
   untrusted_content_guard:
     suspicious_untrusted: review
   restoration:

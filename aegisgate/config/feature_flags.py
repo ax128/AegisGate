@@ -18,6 +18,7 @@ class FeatureFlags:
     system_prompt_guard: bool = settings.enable_system_prompt_guard
     untrusted_content_guard: bool = settings.enable_untrusted_content_guard
     tool_call_guard: bool = settings.enable_tool_call_guard
+    rag_poison_guard: bool = settings.enable_rag_poison_guard
 
 
 feature_flags = FeatureFlags()

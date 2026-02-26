@@ -111,12 +111,13 @@ def build_confirmation_message(
     summary: str,
     phase: str = PHASE_RESPONSE,
     note: str = "",
+    action_token: str = "",
 ) -> str:
     """
     生成统一的安全确认文案（中英双语）。
     phase 仅用于可选差异化，目前共用同一模板。
     """
-    base = confirmation_template(confirm_id=confirm_id, reason=reason, summary=summary)
+    base = confirmation_template(confirm_id=confirm_id, reason=reason, summary=summary, action_token=action_token)
     if note:
         return f"{note}\n\n{base}"
     return base
@@ -129,6 +130,7 @@ def build_confirmation_metadata(
     summary: str,
     phase: str = PHASE_RESPONSE,
     payload_omitted: bool = False,
+    action_token: str = "",
 ) -> dict[str, Any]:
     """
     生成响应中 aegisgate.confirmation 的统一结构。
@@ -142,4 +144,5 @@ def build_confirmation_metadata(
         "summary": summary,
         "phase": phase,
         "payload_omitted": payload_omitted,
+        "action_token": action_token,
     }

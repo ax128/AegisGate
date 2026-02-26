@@ -25,6 +25,10 @@ class RequestContext:
     untrusted_input_detected: bool = False
     requires_human_review: bool = False
     report_items: list[dict] = field(default_factory=list)
+    poison_traceback: list[dict] = field(default_factory=list)
 
     def add_report(self, item: dict) -> None:
         self.report_items.append(item)
+
+    def add_poison_trace(self, item: dict) -> None:
+        self.poison_traceback.append(item)

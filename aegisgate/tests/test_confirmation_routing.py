@@ -37,6 +37,10 @@ def _hash_payload(payload: dict) -> str:
     return payload_hash(payload)
 
 
+def _action_token(confirm_id: str, reason: str, summary: str) -> str:
+    return openai_router.make_action_bind_token(f"{confirm_id}|{reason}|{summary}")
+
+
 def test_resolve_pending_confirmation_requires_confirm_id(monkeypatch):
     def _should_not_call(*args, **kwargs):
         raise AssertionError("get_pending_confirmation should not be called without confirm_id")
@@ -131,6 +135,8 @@ async def test_chat_yes_without_confirm_id_is_not_forced_into_pending(monkeypatc
 @pytest.mark.asyncio
 async def test_chat_pending_payload_omitted_returns_visible_confirmation_message(monkeypatch):
     confirm_id = "cfm-f43e7cbb7ca0"
+    reason = "高风险响应"
+    summary = "触发信号：request_shape_sanitized"
     omitted_payload = {
         "_aegisgate_pending_payload_omitted": True,
         "payload_size_bytes": 181801,
@@ -140,8 +146,8 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
         return {
             "confirm_id": confirm_id,
             "route": expected_route,
-            "reason": "高风险响应",
-            "summary": "触发信号：request_shape_sanitized",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": _hash_payload(omitted_payload),
@@ -170,7 +176,7 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
             "request_id": "chat-confirm-2",
             "session_id": "s-confirm-2",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -186,13 +192,15 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
 @pytest.mark.asyncio
 async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypatch):
     confirm_id = "cfm-route000000"
+    reason = "高风险响应"
+    summary = "route mismatch"
 
     def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
         return {
             "confirm_id": confirm_id,
             "route": "/v1/responses",
-            "reason": "高风险响应",
-            "summary": "route mismatch",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": "hash",
@@ -212,7 +220,7 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
             "request_id": "chat-confirm-3",
             "session_id": "s-confirm-3",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -226,13 +234,15 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
 @pytest.mark.asyncio
 async def test_chat_confirmation_already_processed_returns_visible_message(monkeypatch):
     confirm_id = "cfm-processed0"
+    reason = "高风险响应"
+    summary = "already processed"
 
     def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
         return {
             "confirm_id": confirm_id,
             "route": expected_route,
-            "reason": "高风险响应",
-            "summary": "already processed",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": "hash",
@@ -256,7 +266,7 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
             "request_id": "chat-confirm-4",
             "session_id": "s-confirm-4",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -265,6 +275,88 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
     content = result["choices"][0]["message"]["content"]
     assert "已被处理" in content
     assert result["aegisgate"]["confirmation"]["status"] == "already_processed"
+
+
+@pytest.mark.asyncio
+async def test_chat_confirmation_requires_action_token_when_confirm_id_provided(monkeypatch):
+    confirm_id = "cfm-a1b2c3d4e5f6"
+    reason = "高风险响应"
+    summary = "action binding"
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": "hash",
+            "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
+        }
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    result = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-action-1",
+            "session_id": "s-confirm-action-1",
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": f"yes {confirm_id}"}],
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "action_token_required"
+    assert "动作摘要码" in result["choices"][0]["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_chat_confirmation_rejects_wrong_action_token(monkeypatch):
+    confirm_id = "cfm-abcdef123456"
+    reason = "高风险响应"
+    summary = "action mismatch"
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": "hash",
+            "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
+        }
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    result = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-action-2",
+            "session_id": "s-confirm-action-2",
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": f"yes {confirm_id} act-deadbeef00"}],
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "action_token_mismatch"
+    assert "不匹配" in result["choices"][0]["message"]["content"]
 
 
 def test_resolve_pending_confirmation_rejects_cross_tenant_confirm_id(monkeypatch):
@@ -368,6 +460,8 @@ async def test_chat_wrong_confirm_id_returns_correction_hint(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypatch):
     confirm_id = "cfm-1234abcdefff"
+    reason = "高风险响应"
+    summary = "tail yes"
 
     def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
         pending_payload = {"model": "gpt-test", "messages": [{"role": "user", "content": "hello"}]}
@@ -375,8 +469,8 @@ async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypat
             "confirm_id": confirm_id,
             "tenant_id": tenant_id,
             "route": expected_route,
-            "reason": "高风险响应",
-            "summary": "tail yes",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": payload_hash(pending_payload),
@@ -402,9 +496,9 @@ async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypat
     )
     noisy_input = (
         "请单独发送以下可复制消息之一（不要附加其它内容）：\n"
-        f"放行（复制这一行）：yes {confirm_id}\n"
-        f"取消（复制这一行）：no {confirm_id}\n"
-        f"yes {confirm_id} -- 我确认执行\n"
+        f"放行（复制这一行）：yes {confirm_id} {_action_token(confirm_id, reason, summary)}\n"
+        f"取消（复制这一行）：no {confirm_id} {_action_token(confirm_id, reason, summary)}\n"
+        f"yes {confirm_id} {_action_token(confirm_id, reason, summary)} -- 我确认执行\n"
     )
     result = await openai_router.chat_completions(
         {
@@ -443,6 +537,8 @@ def test_resolve_pending_decision_uses_id_context_when_base_ambiguous():
 @pytest.mark.asyncio
 async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatch):
     confirm_id = "cfm-cachechat001"
+    reason = "高风险响应"
+    summary = "cached release"
     cached_body = {
         "id": "chat-cached-1",
         "object": "chat.completion",
@@ -463,8 +559,8 @@ async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatc
             "confirm_id": confirm_id,
             "tenant_id": tenant_id,
             "route": expected_route,
-            "reason": "高风险响应",
-            "summary": "cached release",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": payload_hash(pending_payload),
@@ -492,7 +588,7 @@ async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatc
             "request_id": "chat-confirm-cache-1",
             "session_id": "s-cache-chat",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -505,6 +601,8 @@ async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatc
 @pytest.mark.asyncio
 async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatch):
     confirm_id = "cfm-cacheresp001"
+    reason = "高风险响应"
+    summary = "cached stream release"
     pending_payload = openai_router._build_response_pending_payload(
         route="/v1/responses",
         request_id="resp-cached-1",
@@ -519,8 +617,8 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
             "confirm_id": confirm_id,
             "tenant_id": tenant_id,
             "route": expected_route,
-            "reason": "高风险响应",
-            "summary": "cached stream release",
+            "reason": reason,
+            "summary": summary,
             "status": "pending",
             "expires_at": 9999999999,
             "pending_request_hash": payload_hash(pending_payload),
@@ -549,7 +647,7 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
             "request_id": "resp-confirm-cache-1",
             "session_id": "s-cache-resp",
             "model": "gpt-test",
-            "input": f"yes {confirm_id}",
+            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
         },
         request,
     )

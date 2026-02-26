@@ -1,6 +1,7 @@
 enabled_filters:
   - redaction
   - request_sanitizer
+  - rag_poison_guard
   - anomaly_detector
   - injection_detector
   - privilege_guard

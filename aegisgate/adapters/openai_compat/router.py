@@ -46,6 +46,7 @@ from aegisgate.config.settings import settings
 from aegisgate.core.audit import write_audit
 from aegisgate.core.confirmation import (
     make_confirm_id,
+    make_action_bind_token,
     parse_confirmation_decision,
     payload_hash,
 )
@@ -65,6 +66,7 @@ from aegisgate.filters.injection_detector import PromptInjectionDetector
 from aegisgate.filters.post_restore_guard import PostRestoreGuard
 from aegisgate.filters.privilege_guard import PrivilegeGuard
 from aegisgate.filters.request_sanitizer import RequestSanitizer
+from aegisgate.filters.rag_poison_guard import RagPoisonGuard
 from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.filters.restoration import RestorationFilter
 from aegisgate.filters.sanitizer import OutputSanitizer
@@ -111,10 +113,12 @@ def _build_pipeline() -> Pipeline:
     request_filters = [
         RedactionFilter(store),
         RequestSanitizer(),
+        RagPoisonGuard(),
     ]
     response_filters = [
         AnomalyDetector(),
         PromptInjectionDetector(),
+        RagPoisonGuard(),
         PrivilegeGuard(),
         ToolCallGuard(),
         RestorationFilter(store),
@@ -706,6 +710,21 @@ def _extract_confirm_id(text: str) -> str:
     return str(matches[-1])
 
 
+def _extract_action_token(text: str) -> str:
+    matches = re.findall(r"\bact-[a-f0-9]{8,16}\b", str(text or "").lower())
+    if not matches:
+        return ""
+    return str(matches[-1])
+
+
+def _pending_action_bind_token(record: Mapping[str, Any]) -> str:
+    confirm_id = str(record.get("confirm_id", ""))
+    reason = str(record.get("reason", ""))
+    summary = str(record.get("summary", ""))
+    seed = f"{confirm_id}|{reason}|{summary}"
+    return make_action_bind_token(seed)
+
+
 def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
     """
     优先解析“最后几行”中的确认命令，避免把整段模板里的 yes/no 一起算成 ambiguous。
@@ -895,7 +914,11 @@ def _attach_confirmation_metadata(
     summary: str,
     phase: str = PHASE_RESPONSE,
     payload_omitted: bool = False,
+    action_token: str = "",
 ) -> None:
+    resolved_action_token = action_token
+    if not resolved_action_token and confirm_id and reason and summary:
+        resolved_action_token = make_action_bind_token(f"{confirm_id}|{reason}|{summary}")
     metadata = resp.metadata.setdefault("aegisgate", {})
     metadata["confirmation"] = _flow_confirmation_metadata(
         confirm_id=confirm_id,
@@ -904,13 +927,29 @@ def _attach_confirmation_metadata(
         summary=summary,
         phase=phase,
         payload_omitted=payload_omitted,
+        action_token=resolved_action_token,
     )
 
 
 def _build_confirmation_message(
-    confirm_id: str, reason: str, summary: str, phase: str = PHASE_RESPONSE, note: str = ""
+    confirm_id: str,
+    reason: str,
+    summary: str,
+    phase: str = PHASE_RESPONSE,
+    note: str = "",
+    action_token: str = "",
 ) -> str:
-    return _flow_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=phase, note=note)
+    resolved_action_token = action_token
+    if not resolved_action_token and confirm_id and reason and summary:
+        resolved_action_token = make_action_bind_token(f"{confirm_id}|{reason}|{summary}")
+    return _flow_confirmation_message(
+        confirm_id=confirm_id,
+        reason=reason,
+        summary=summary,
+        phase=phase,
+        note=note,
+        action_token=resolved_action_token,
+    )
 
 
 def _pending_payload_omitted_text(confirm_id: str) -> str:
@@ -942,6 +981,36 @@ def _confirmation_execute_failed_text(confirm_id: str) -> str:
         "Confirmation received, but executing the upstream request failed.\n"
         f"Confirmation ID: {confirm_id}\n"
         "Please retry later."
+    )
+
+
+def _confirmation_action_token_required_text(confirm_id: str, action_token: str) -> str:
+    return (
+        "确认消息缺少动作摘要码，无法校验放行目标。\n"
+        f"确认编号：{confirm_id}\n"
+        f"动作摘要码：{action_token}\n\n"
+        "请单独发送以下任一可复制消息：\n"
+        f"yes {confirm_id} {action_token}\n"
+        f"no {confirm_id} {action_token}\n\n"
+        "Missing action bind token in confirmation message.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        f"Action Bind Token: {action_token}\n"
+        "Send one standalone line:\n"
+        f"yes {confirm_id} {action_token}\n"
+        f"no {confirm_id} {action_token}"
+    )
+
+
+def _confirmation_action_token_mismatch_text(confirm_id: str, provided: str, expected: str) -> str:
+    return (
+        "动作摘要码不匹配，已拒绝执行。\n"
+        f"确认编号：{confirm_id}\n"
+        f"提供：{provided or '-'}\n"
+        f"期望：{expected}\n\n"
+        "Action bind token mismatch; execution rejected.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        f"Provided: {provided or '-'}\n"
+        f"Expected: {expected}"
     )
 
 
@@ -1051,6 +1120,7 @@ def _attach_security_metadata(resp: InternalResponse, ctx: RequestContext, bound
         "security_tags": sorted(ctx.security_tags),
         "enforcement_actions": ctx.enforcement_actions,
         "security_boundary": boundary or {},
+        "poison_traceback": ctx.poison_traceback,
     }
 
 
@@ -1071,6 +1141,7 @@ def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> Non
             "enforcement_actions": ctx.enforcement_actions,
             "action": _resolve_action(ctx),
             "security_boundary": boundary or {},
+            "poison_traceback": ctx.poison_traceback,
             "report": ctx.report_items,
         }
     )
@@ -1213,6 +1284,7 @@ async def _execute_chat_stream_once(
         confirmation_meta = _flow_confirmation_metadata(
             confirm_id=confirm_id, status="pending", reason=reason, summary=summary,
             phase=PHASE_REQUEST, payload_omitted=pending_payload_omitted,
+            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
         )
         message_text = _build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST)
 
@@ -1309,6 +1381,7 @@ async def _execute_chat_stream_once(
                             summary=summary,
                             phase=PHASE_RESPONSE,
                             payload_omitted=False,
+                            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
                         )
                         message_text = _build_confirmation_message(
                             confirm_id=confirm_id,
@@ -1462,6 +1535,7 @@ async def _execute_responses_stream_once(
         confirmation_meta = _flow_confirmation_metadata(
             confirm_id=confirm_id, status="pending", reason=reason, summary=summary,
             phase=PHASE_REQUEST, payload_omitted=pending_payload_omitted,
+            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
         )
         message_text = _build_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST)
 
@@ -1557,6 +1631,7 @@ async def _execute_responses_stream_once(
                             summary=summary,
                             phase=PHASE_RESPONSE,
                             payload_omitted=False,
+                            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
                         )
                         message_text = _build_confirmation_message(
                             confirm_id=confirm_id,
@@ -2467,8 +2542,11 @@ async def chat_completions(payload: dict, request: Request):
         decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
+        expected_action_token = _pending_action_bind_token(pending)
+        provided_action_token = _extract_action_token(user_text)
+        explicit_confirm_id = bool(confirm_id_hint)
         logger.info(
-            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s",
+            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
@@ -2477,7 +2555,64 @@ async def chat_completions(payload: dict, request: Request):
             pending_route,
             decision_value,
             decision_source,
+            bool(provided_action_token),
         )
+        if explicit_confirm_id and not provided_action_token:
+            required_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_action_token_required_text(confirm_id, expected_action_token),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_action_token_required")
+            _attach_security_metadata(required_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                required_resp,
+                confirm_id=confirm_id,
+                status="action_token_required",
+                reason=reason_text,
+                summary=summary_text,
+                action_token=expected_action_token,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation action token missing request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
+            return to_chat_response(required_resp)
+        if explicit_confirm_id and provided_action_token and provided_action_token != expected_action_token:
+            mismatch_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_action_token_mismatch_text(confirm_id, provided_action_token, expected_action_token),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_action_token_mismatch")
+            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_resp,
+                confirm_id=confirm_id,
+                status="action_token_mismatch",
+                reason=reason_text,
+                summary=summary_text,
+                action_token=expected_action_token,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation action token mismatch request_id=%s session_id=%s tenant_id=%s confirm_id=%s provided=%s expected=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+                provided_action_token,
+                expected_action_token,
+            )
+            return to_chat_response(mismatch_resp)
         if pending_route != req_preview.route:
             mismatch_resp = InternalResponse(
                 request_id=req_preview.request_id,
@@ -2973,8 +3108,11 @@ async def responses(payload: dict, request: Request):
         decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
+        expected_action_token = _pending_action_bind_token(pending)
+        provided_action_token = _extract_action_token(user_text)
+        explicit_confirm_id = bool(confirm_id_hint)
         logger.info(
-            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s",
+            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
@@ -2983,7 +3121,64 @@ async def responses(payload: dict, request: Request):
             pending_route,
             decision_value,
             decision_source,
+            bool(provided_action_token),
         )
+        if explicit_confirm_id and not provided_action_token:
+            required_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_action_token_required_text(confirm_id, expected_action_token),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_action_token_required")
+            _attach_security_metadata(required_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                required_resp,
+                confirm_id=confirm_id,
+                status="action_token_required",
+                reason=reason_text,
+                summary=summary_text,
+                action_token=expected_action_token,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation action token missing request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
+            return to_responses_output(required_resp)
+        if explicit_confirm_id and provided_action_token and provided_action_token != expected_action_token:
+            mismatch_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_action_token_mismatch_text(confirm_id, provided_action_token, expected_action_token),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_action_token_mismatch")
+            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_resp,
+                confirm_id=confirm_id,
+                status="action_token_mismatch",
+                reason=reason_text,
+                summary=summary_text,
+                action_token=expected_action_token,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation action token mismatch request_id=%s session_id=%s tenant_id=%s confirm_id=%s provided=%s expected=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+                provided_action_token,
+                expected_action_token,
+            )
+            return to_responses_output(mismatch_resp)
         if pending_route != req_preview.route:
             mismatch_resp = InternalResponse(
                 request_id=req_preview.request_id,
