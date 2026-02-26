@@ -785,6 +785,64 @@ async def test_chat_confirmation_no_deletes_pending_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_confirmation_yes_replays_cached_stream_text_as_sse_when_stream_true(monkeypatch):
+    confirm_id = "cfm-cachechat002"
+    reason = "高风险响应"
+    summary = "chat cached stream replay as sse"
+    pending_payload = openai_router._build_response_pending_payload(
+        route="/v1/chat/completions",
+        request_id="chat-cached-2",
+        session_id="s-cache-chat-2",
+        model="gpt-test",
+        fmt=openai_router._PENDING_FORMAT_CHAT_STREAM_TEXT,
+        content="chat stream cached unsafe answer",
+    )
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    monkeypatch.setattr(openai_router, "_build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    stream = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-cache-2",
+            "session_id": "s-cache-chat-2",
+            "model": "gpt-test",
+            "stream": True,
+            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+        },
+        request,
+    )
+
+    chunks = list(stream)
+    body = b"".join(chunks).decode("utf-8", errors="replace")
+    assert "chat stream cached unsafe answer" in body
+    assert '"status": "executed"' in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
 async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatch):
     confirm_id = "cfm-cacheresp001"
     reason = "高风险响应"
@@ -841,6 +899,65 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
     assert isinstance(result, dict)
     assert result["output_text"] == "stream cached unsafe answer"
     assert result["aegisgate"]["confirmation"]["status"] == "executed"
+
+
+@pytest.mark.asyncio
+async def test_responses_confirmation_yes_replays_cached_stream_text_as_sse_when_stream_true(monkeypatch):
+    confirm_id = "cfm-cacheresp002"
+    reason = "高风险响应"
+    summary = "cached stream replay as sse"
+    pending_payload = openai_router._build_response_pending_payload(
+        route="/v1/responses",
+        request_id="resp-cached-2",
+        session_id="s-cache-resp-2",
+        model="gpt-test",
+        fmt=openai_router._PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+        content="stream cached unsafe answer",
+    )
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    monkeypatch.setattr(openai_router, "_build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        },
+        path="/v1/responses",
+    )
+    stream = await openai_router.responses(
+        {
+            "request_id": "resp-confirm-cache-2",
+            "session_id": "s-cache-resp-2",
+            "model": "gpt-test",
+            "stream": True,
+            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
+        },
+        request,
+    )
+
+    chunks = list(stream)
+    body = b"".join(chunks).decode("utf-8", errors="replace")
+    assert "stream cached unsafe answer" in body
+    assert '"status": "executed"' in body
+    assert "data: [DONE]" in body
 
 
 @pytest.mark.asyncio

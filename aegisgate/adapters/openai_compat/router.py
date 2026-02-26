@@ -681,6 +681,73 @@ def _render_cached_responses_confirmation_output(
     return None
 
 
+def _render_cached_chat_confirmation_stream_output(
+    *,
+    request_id: str,
+    model: str,
+    content: str,
+    confirm_id: str,
+    reason: str,
+    summary: str,
+) -> StreamingResponse:
+    confirmation_meta = {
+        "required": False,
+        "confirm_id": confirm_id,
+        "status": "executed",
+        "reason": reason,
+        "summary": summary,
+        "payload_omitted": False,
+    }
+
+    def _generator() -> Generator[bytes, None, None]:
+        payload = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            ],
+            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield _stream_done_sse_chunk()
+
+    return _build_streaming_response(_generator())
+
+
+def _render_cached_responses_confirmation_stream_output(
+    *,
+    request_id: str,
+    model: str,
+    content: str,
+    confirm_id: str,
+    reason: str,
+    summary: str,
+) -> StreamingResponse:
+    confirmation_meta = {
+        "required": False,
+        "confirm_id": confirm_id,
+        "status": "executed",
+        "reason": reason,
+        "summary": summary,
+        "payload_omitted": False,
+    }
+
+    def _generator() -> Generator[bytes, None, None]:
+        payload = {
+            "id": request_id,
+            "object": "response.chunk",
+            "model": model,
+            "type": "response.output_text.delta",
+            "delta": content,
+            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield _stream_done_sse_chunk()
+
+    return _build_streaming_response(_generator())
+
+
 def _is_pending_payload_omitted(payload: Any) -> bool:
     return isinstance(payload, dict) and bool(payload.get(_PENDING_PAYLOAD_OMITTED_KEY))
 
@@ -3151,6 +3218,31 @@ async def chat_completions(payload: dict, request: Request):
                 return to_chat_response(mismatch_resp)
 
             if _is_response_pending_payload(pending_payload):
+                pending_fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
+                pending_content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
+                if _should_stream(payload) and pending_fmt == _PENDING_FORMAT_CHAT_STREAM_TEXT and isinstance(pending_content, str):
+                    await _try_transition_pending_status(
+                        confirm_id=confirm_id,
+                        expected_status="executing",
+                        new_status="executed",
+                        now_ts=int(time.time()),
+                    )
+                    logger.info(
+                        "confirmation released cached stream response request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                        req_preview.request_id,
+                        req_preview.session_id,
+                        tenant_id,
+                        confirm_id,
+                    )
+                    return _render_cached_chat_confirmation_stream_output(
+                        request_id=req_preview.request_id,
+                        model=req_preview.model,
+                        content=pending_content,
+                        confirm_id=confirm_id,
+                        reason=reason_text,
+                        summary=summary_text,
+                    )
+
                 released = _render_cached_chat_confirmation_output(
                     pending_payload,
                     fallback_request_id=req_preview.request_id,
@@ -3648,6 +3740,31 @@ async def responses(payload: dict, request: Request):
                 return to_responses_output(mismatch_resp)
 
             if _is_response_pending_payload(pending_payload):
+                pending_fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
+                pending_content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
+                if _should_stream(payload) and pending_fmt == _PENDING_FORMAT_RESPONSES_STREAM_TEXT and isinstance(pending_content, str):
+                    await _try_transition_pending_status(
+                        confirm_id=confirm_id,
+                        expected_status="executing",
+                        new_status="executed",
+                        now_ts=int(time.time()),
+                    )
+                    logger.info(
+                        "confirmation released cached stream response request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                        req_preview.request_id,
+                        req_preview.session_id,
+                        tenant_id,
+                        confirm_id,
+                    )
+                    return _render_cached_responses_confirmation_stream_output(
+                        request_id=req_preview.request_id,
+                        model=req_preview.model,
+                        content=pending_content,
+                        confirm_id=confirm_id,
+                        reason=reason_text,
+                        summary=summary_text,
+                    )
+
                 released = _render_cached_responses_confirmation_output(
                     pending_payload,
                     fallback_request_id=req_preview.request_id,
