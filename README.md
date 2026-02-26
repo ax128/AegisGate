@@ -148,10 +148,31 @@ curl http://127.0.0.1:18080/health
 docker compose up -d --build
 ```
 
+默认端口策略：
+- `127.0.0.1:18080:18080`：仅宿主机本机可访问，不对公网直接暴露。
+- `expose: 18080`：同 Docker 网络内其它容器可通过服务名 `aegisgate:18080` 访问。
+- `extra_hosts: host.docker.internal:host-gateway`：容器内可访问宿主机服务（Linux/WSL2 也可用）。
+
 查看日志：
 
 ```bash
 docker compose logs -f aegisgate
+```
+
+连通性快速自检（注册 + 响应）：
+
+```bash
+# 1) 宿主机 -> 容器：健康检查
+curl -sS http://127.0.0.1:18080/health
+
+# 2) 宿主机 -> 容器：注册 token（检查 baseUrl）
+curl -sS -X POST http://127.0.0.1:18080/__gw__/register \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_base":"https://your-real-upstream.example.com/v1","gateway_key":"agent"}'
+
+# 3) 同网络容器 -> aegisgate（需要在同一 compose network）
+docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
+  -sS http://aegisgate:18080/health
 ```
 
 校验 token 是否持久化：
