@@ -1726,12 +1726,15 @@ async def _execute_chat_stream_once(
 
                 yield line
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
+                detail = "upstream stream closed without [DONE] terminator"
+                ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 logger.warning(
                     "chat stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
                     ctx.request_id,
                     chunk_count,
                     len(stream_window),
                 )
+                yield _stream_error_sse_chunk(detail, code="upstream_eof_no_done")
                 yield _stream_done_sse_chunk()
         except RuntimeError as exc:
             detail = str(exc)
@@ -2012,12 +2015,15 @@ async def _execute_responses_stream_once(
 
                 yield line
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
+                detail = "upstream stream closed without [DONE] terminator"
+                ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 logger.warning(
                     "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
                     ctx.request_id,
                     chunk_count,
                     len(stream_window),
                 )
+                yield _stream_error_sse_chunk(detail, code="upstream_eof_no_done")
                 yield _stream_done_sse_chunk()
         except RuntimeError as exc:
             detail = str(exc)
