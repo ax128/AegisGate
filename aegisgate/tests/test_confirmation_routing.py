@@ -655,3 +655,38 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
     assert isinstance(result, dict)
     assert result["output_text"] == "stream cached unsafe answer"
     assert result["aegisgate"]["confirmation"]["status"] == "executed"
+
+
+@pytest.mark.asyncio
+async def test_responses_ignores_stale_confirm_id_from_non_user_history(monkeypatch):
+    async def fake_execute_responses_once(**kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(openai_router, "_execute_responses_once", fake_execute_responses_once)
+
+    stale_confirm_id = "cfm-6a5aac9b09ac"
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        },
+        path="/v1/responses",
+    )
+    result = await openai_router.responses(
+        {
+            "request_id": "resp-history-noise-1",
+            "session_id": "s-history-noise-1",
+            "model": "gpt-test",
+            "input": [
+                {"role": "developer", "content": "安全规则：只允许在用户明确同意后执行高风险操作。"},
+                {
+                    "role": "assistant",
+                    "content": f"放行（复制）：yes {stale_confirm_id}\n取消（复制）：no {stale_confirm_id}",
+                },
+                {"role": "user", "content": "请解释上面的结果"},
+            ],
+        },
+        request,
+    )
+
+    assert result == {"ok": True}

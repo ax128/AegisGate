@@ -599,8 +599,35 @@ def _extract_chat_user_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_latest_user_text_from_responses_input(raw_input: Any) -> str:
+    if isinstance(raw_input, str):
+        return raw_input.strip()
+    if isinstance(raw_input, list):
+        for item in reversed(raw_input):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role", "")).strip().lower() != "user":
+                continue
+            if "content" in item:
+                return _flatten_text(item.get("content")).strip()
+            return _flatten_text(item).strip()
+        return _flatten_text(raw_input).strip()
+    if isinstance(raw_input, dict):
+        role = str(raw_input.get("role", "")).strip().lower()
+        if role == "user":
+            if "content" in raw_input:
+                return _flatten_text(raw_input.get("content")).strip()
+            return _flatten_text(raw_input).strip()
+        if "input" in raw_input:
+            return _extract_latest_user_text_from_responses_input(raw_input.get("input"))
+        if "content" in raw_input:
+            return _flatten_text(raw_input.get("content")).strip()
+        return _flatten_text(raw_input).strip()
+    return str(raw_input or "").strip()
+
+
 def _extract_responses_user_text(payload: dict[str, Any]) -> str:
-    return str(payload.get("input", "")).strip()
+    return _extract_latest_user_text_from_responses_input(payload.get("input", ""))
 
 
 def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
