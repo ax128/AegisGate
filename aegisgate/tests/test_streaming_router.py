@@ -231,7 +231,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
         return b"".join(out)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-    assert "回复 是 / yes" in text
+    assert "放行（复制这一行）：yes cfm-" in text
     assert "确认编号：cfm-" in text
     assert "data: [DONE]" in text
 
@@ -280,6 +280,6 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
         return b"".join(out)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-    assert "回复 是 / yes" in text
+    assert "放行（复制这一行）：yes cfm-" in text
     assert "确认编号：cfm-" in text
     assert "data: [DONE]" in text

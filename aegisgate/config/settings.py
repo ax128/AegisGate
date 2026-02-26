@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     sqlite_db_path: str = "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_key_prefix: str = "aegisgate"
+    redis_pending_scan_batch_size: int = 200
+    redis_pending_scan_max_entries: int = 5000
     postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"
     postgres_schema: str = "public"
     max_request_body_bytes: int = 2_000_000
@@ -36,7 +38,9 @@ class Settings(BaseSettings):
     max_response_length: int = 500_000
     gateway_key_header: str = "gateway-key"
     gateway_key: str = "agent"
+    tenant_id_header: str = "x-tenant-id"
     confirmation_ttl_seconds: int = 300
+    confirmation_executing_timeout_seconds: int = 120
     pending_data_ttl_seconds: int = 86400
     # high|medium|low 三档均已整体放宽，medium 为默认
     security_level: str = "medium"

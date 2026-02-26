@@ -65,3 +65,95 @@ def test_pending_confirmation_expires(tmp_path):
     by_id = store.get_pending_confirmation("cfm-expire000001")
     assert by_id is not None
     assert by_id["status"] == "expired"
+
+
+def test_pending_confirmation_tenant_isolation(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    now = int(time.time())
+    payload = {"model": "gpt", "messages": [{"role": "user", "content": "hello"}]}
+    request_hash = payload_hash(payload)
+
+    store.save_pending_confirmation(
+        confirm_id="cfm-tenant00001",
+        session_id="shared-session",
+        tenant_id="tenant-a",
+        route="/v1/chat/completions",
+        request_id="r-a",
+        model="gpt",
+        upstream_base="https://example.com/v1",
+        pending_request_payload=payload,
+        pending_request_hash=request_hash,
+        reason="高风险响应",
+        summary="tenant-a",
+        created_at=now,
+        expires_at=now + 300,
+        retained_until=now + 3600,
+    )
+    store.save_pending_confirmation(
+        confirm_id="cfm-tenant00002",
+        session_id="shared-session",
+        tenant_id="tenant-b",
+        route="/v1/chat/completions",
+        request_id="r-b",
+        model="gpt",
+        upstream_base="https://example.com/v1",
+        pending_request_payload=payload,
+        pending_request_hash=request_hash,
+        reason="高风险响应",
+        summary="tenant-b",
+        created_at=now + 1,
+        expires_at=now + 300,
+        retained_until=now + 3600,
+    )
+
+    pending_a = store.get_single_pending_confirmation(
+        session_id="shared-session",
+        route="/v1/chat/completions",
+        now_ts=now + 2,
+        tenant_id="tenant-a",
+        recover_executing_before=None,
+    )
+    pending_b = store.get_single_pending_confirmation(
+        session_id="shared-session",
+        route="/v1/chat/completions",
+        now_ts=now + 2,
+        tenant_id="tenant-b",
+        recover_executing_before=None,
+    )
+    assert pending_a is not None and pending_a["confirm_id"] == "cfm-tenant00001"
+    assert pending_b is not None and pending_b["confirm_id"] == "cfm-tenant00002"
+
+
+def test_pending_confirmation_recovers_stale_executing(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    now = int(time.time())
+    payload = {"model": "gpt", "messages": [{"role": "user", "content": "hello"}]}
+    request_hash = payload_hash(payload)
+
+    store.save_pending_confirmation(
+        confirm_id="cfm-execstale01",
+        session_id="s-exec",
+        tenant_id="default",
+        route="/v1/chat/completions",
+        request_id="r-exec",
+        model="gpt",
+        upstream_base="https://example.com/v1",
+        pending_request_payload=payload,
+        pending_request_hash=request_hash,
+        reason="高风险响应",
+        summary="executing stale",
+        created_at=now - 100,
+        expires_at=now + 300,
+        retained_until=now + 3600,
+    )
+    store.update_pending_confirmation_status(confirm_id="cfm-execstale01", status="executing", now_ts=now - 90)
+
+    recovered = store.get_single_pending_confirmation(
+        session_id="s-exec",
+        route="/v1/chat/completions",
+        now_ts=now,
+        tenant_id="default",
+        recover_executing_before=now - 30,
+    )
+    assert recovered is not None
+    assert recovered["status"] == "pending"

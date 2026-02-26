@@ -588,23 +588,126 @@ def _extract_confirm_id(text: str) -> str:
     return match.group(0) if match else ""
 
 
-def _resolve_pending_confirmation(payload: dict[str, Any], user_text: str, now_ts: int) -> dict[str, Any] | None:
-    confirm_id = _extract_confirm_id(user_text)
-    if confirm_id:
-        record = store.get_pending_confirmation(confirm_id)
-        if not record:
-            return None
-        if str(record.get("status")) != "pending":
-            return None
-        if int(record.get("expires_at", 0)) <= int(now_ts):
-            store.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
-            return None
-        return record
+def _header_lookup(headers: Mapping[str, str], target: str) -> str:
+    needle = target.strip().lower()
+    if not needle:
+        return ""
+    for key, value in headers.items():
+        if key.lower() == needle:
+            return str(value).strip()
+    return ""
 
+
+def _resolve_tenant_id(
+    *,
+    payload: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
+    boundary: Mapping[str, Any] | None = None,
+) -> str:
+    if payload:
+        for key in ("tenant_id", "tenant", "org_id"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+    if headers:
+        for key in (settings.tenant_id_header, "x-tenant-id", "x-aegis-tenant-id"):
+            value = _header_lookup(headers, key)
+            if value:
+                return value
+    if boundary:
+        value = str(boundary.get("tenant_id") or "").strip()
+        if value:
+            return value
+    return "default"
+
+
+def _executing_recover_before(now_ts: int) -> int | None:
+    timeout_seconds = int(settings.confirmation_executing_timeout_seconds)
+    if timeout_seconds <= 0:
+        return None
+    return int(now_ts) - max(5, timeout_seconds)
+
+
+def _load_single_pending_for_session(
+    payload: dict[str, Any],
+    now_ts: int,
+    *,
+    expected_route: str,
+    tenant_id: str,
+) -> dict[str, Any] | None:
     session_id = str(payload.get("session_id") or payload.get("request_id") or "").strip()
     if not session_id:
         return None
-    return store.get_latest_pending_confirmation(session_id=session_id, now_ts=now_ts)
+    getter = getattr(store, "get_single_pending_confirmation", None)
+    if not callable(getter):
+        return None
+    recover_before = _executing_recover_before(now_ts)
+    record = getter(
+        session_id=session_id,
+        route=expected_route,
+        now_ts=now_ts,
+        tenant_id=tenant_id,
+        recover_executing_before=recover_before,
+    )
+    if not record:
+        return None
+    if str(record.get("status")) != "pending":
+        return None
+    if int(record.get("expires_at", 0)) <= int(now_ts):
+        store.update_pending_confirmation_status(confirm_id=str(record.get("confirm_id", "")), status="expired", now_ts=now_ts)
+        return None
+    return record
+
+
+def _resolve_pending_confirmation(
+    payload: dict[str, Any],
+    user_text: str,
+    now_ts: int,
+    *,
+    expected_route: str,
+    tenant_id: str,
+) -> dict[str, Any] | None:
+    confirm_id = _extract_confirm_id(user_text)
+    if not confirm_id:
+        # 兼容简化确认：当用户明确 yes/y/confirm 且池中仅有 1 条 pending 时，可不带 confirm_id。
+        decision = parse_confirmation_decision(user_text)
+        implicit_yes = decision.value == "yes"
+        if not implicit_yes:
+            return None
+        return _load_single_pending_for_session(
+            payload,
+            now_ts,
+            expected_route=expected_route,
+            tenant_id=tenant_id,
+        )
+    record = store.get_pending_confirmation(confirm_id)
+    if not record:
+        return None
+    if str(record.get("tenant_id") or "default") != tenant_id:
+        return None
+    status = str(record.get("status"))
+    recover_before = _executing_recover_before(now_ts)
+    if status == "executing" and recover_before is not None and int(record.get("updated_at", 0)) <= int(recover_before):
+        method = getattr(store, "compare_and_update_pending_confirmation_status", None)
+        changed = False
+        if callable(method):
+            changed = bool(
+                method(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=now_ts,
+                )
+            )
+        if changed:
+            record = store.get_pending_confirmation(confirm_id) or {}
+            status = str(record.get("status"))
+    if status != "pending":
+        return None
+    if int(record.get("expires_at", 0)) <= int(now_ts):
+        store.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
+        return None
+    return record
 
 
 def _attach_confirmation_metadata(
@@ -634,6 +737,112 @@ def _build_confirmation_message(
     return _flow_confirmation_message(confirm_id=confirm_id, reason=reason, summary=summary, phase=phase, note=note)
 
 
+def _pending_payload_omitted_text(confirm_id: str) -> str:
+    return (
+        "该确认编号对应的原始请求体过大，网关未缓存完整原文，当前无法直接放行执行。\n"
+        f"确认编号：{confirm_id}\n"
+        "请重新发送原始请求，再按确认提示操作。\n"
+        "后续普通消息不受该确认记录影响（除非再次携带该确认编号）。\n\n"
+        "The original payload for this confirmation was too large and was not fully cached.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        "Please resend the original request, then follow the confirmation prompt again.\n"
+        "Subsequent normal messages are not blocked by this confirmation unless you include this ID again."
+    )
+
+
+def _confirmation_already_processed_text(confirm_id: str) -> str:
+    return (
+        "该确认请求已被处理（可能已执行、取消或过期），请勿重复确认。\n"
+        f"确认编号：{confirm_id}\n\n"
+        "This confirmation has already been processed (executed, canceled, or expired).\n"
+        f"Confirmation ID: {confirm_id}"
+    )
+
+
+def _confirmation_id_mismatch_hint_text(provided_id: str, expected_id: str) -> str:
+    return (
+        "未找到你提供的确认编号，当前会话存在唯一待确认请求。\n"
+        f"你提供的确认编号：{provided_id}\n"
+        f"可用确认编号：{expected_id}\n\n"
+        "请单独发送以下任一可复制消息：\n"
+        f"yes {expected_id}\n"
+        f"no {expected_id}\n\n"
+        "The provided confirmation ID was not found, but this session has exactly one pending confirmation.\n"
+        f"Provided ID: {provided_id}\n"
+        f"Expected ID: {expected_id}\n\n"
+        "Send one standalone copy-ready line:\n"
+        f"yes {expected_id}\n"
+        f"no {expected_id}"
+    )
+
+
+def _confirmation_route_mismatch_text(confirm_id: str, pending_route: str, current_route: str) -> str:
+    return (
+        "确认编号与当前接口不匹配，无法执行。\n"
+        f"确认编号：{confirm_id}\n"
+        f"确认原路由：{pending_route}\n"
+        f"当前路由：{current_route}\n\n"
+        "The confirmation ID does not match the current endpoint.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        f"Pending route: {pending_route}\n"
+        f"Current route: {current_route}"
+    )
+
+
+def _pending_payload_invalid_text(confirm_id: str) -> str:
+    return (
+        "该确认编号对应的待执行请求数据已损坏，无法放行执行。\n"
+        f"确认编号：{confirm_id}\n"
+        "请重新发送原始请求。\n\n"
+        "The pending payload for this confirmation is invalid and cannot be executed.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        "Please resend the original request."
+    )
+
+
+def _pending_hash_mismatch_text(confirm_id: str) -> str:
+    return (
+        "该确认编号的请求校验失败（hash 不一致），为安全起见已拒绝执行。\n"
+        f"确认编号：{confirm_id}\n"
+        "请重新发送原始请求。\n\n"
+        "Pending request hash verification failed for this confirmation.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        "Please resend the original request."
+    )
+
+
+async def _try_transition_pending_status(
+    *,
+    confirm_id: str,
+    expected_status: str,
+    new_status: str,
+    now_ts: int,
+) -> bool:
+    method = getattr(store, "compare_and_update_pending_confirmation_status", None)
+    if callable(method):
+        result = await _maybe_offload(
+            method,
+            confirm_id=confirm_id,
+            expected_status=expected_status,
+            new_status=new_status,
+            now_ts=now_ts,
+        )
+        return bool(result)
+
+    record = await _store_call("get_pending_confirmation", confirm_id)
+    if not record:
+        return False
+    if str(record.get("status")) != expected_status:
+        return False
+    await _store_call(
+        "update_pending_confirmation_status",
+        confirm_id=confirm_id,
+        status=new_status,
+        now_ts=now_ts,
+    )
+    return True
+
+
 def _resolve_action(ctx: RequestContext) -> str:
     if ctx.request_disposition == "block" or ctx.response_disposition == "block":
         return "block"
@@ -646,6 +855,7 @@ def _attach_security_metadata(resp: InternalResponse, ctx: RequestContext, bound
     action = _resolve_action(ctx)
     resp.metadata["aegisgate"] = {
         "action": action,
+        "tenant_id": ctx.tenant_id,
         "risk_score": round(ctx.risk_score, 4),
         "risk_threshold": ctx.risk_threshold,
         "requires_human_review": ctx.requires_human_review,
@@ -663,6 +873,7 @@ def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> Non
         {
             "request_id": ctx.request_id,
             "session_id": ctx.session_id,
+            "tenant_id": ctx.tenant_id,
             "route": ctx.route,
             "risk_score": ctx.risk_score,
             "risk_threshold": ctx.risk_threshold,
@@ -724,10 +935,11 @@ async def _execute_chat_stream_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     req = to_internal_chat(payload)
-    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -803,6 +1015,7 @@ async def _execute_chat_stream_once(
             pending_request_hash=pending_payload_hash,
             reason=reason,
             summary=summary,
+            tenant_id=ctx.tenant_id,
             created_at=now_ts,
             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -885,6 +1098,7 @@ async def _execute_chat_stream_once(
                             pending_request_hash=pending_payload_hash,
                             reason=reason,
                             summary=summary,
+                            tenant_id=ctx.tenant_id,
                             created_at=now_ts,
                             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
                             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -957,10 +1171,11 @@ async def _execute_responses_stream_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     req = to_internal_responses(payload)
-    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -1036,6 +1251,7 @@ async def _execute_responses_stream_once(
             pending_request_hash=pending_payload_hash,
             reason=reason,
             summary=summary,
+            tenant_id=ctx.tenant_id,
             created_at=now_ts,
             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1117,6 +1333,7 @@ async def _execute_responses_stream_once(
                             pending_request_hash=pending_payload_hash,
                             reason=reason,
                             summary=summary,
+                            tenant_id=ctx.tenant_id,
                             created_at=now_ts,
                             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
                             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1189,11 +1406,12 @@ async def _execute_chat_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
     skip_confirmation: bool = False,
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
     req = to_internal_chat(payload)
-    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -1272,6 +1490,7 @@ async def _execute_chat_once(
                 pending_request_hash=pending_payload_hash,
                 reason=reason,
                 summary=summary,
+                tenant_id=ctx.tenant_id,
                 created_at=now_ts,
                 expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
                 retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1366,6 +1585,7 @@ async def _execute_chat_once(
             pending_request_hash=pending_payload_hash,
             reason=reason,
             summary=summary,
+            tenant_id=ctx.tenant_id,
             created_at=now_ts,
             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1411,11 +1631,12 @@ async def _execute_responses_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
     skip_confirmation: bool = False,
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
     req = to_internal_responses(payload)
-    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -1494,6 +1715,7 @@ async def _execute_responses_once(
                 pending_request_hash=pending_payload_hash,
                 reason=reason,
                 summary=summary,
+                tenant_id=ctx.tenant_id,
                 created_at=now_ts,
                 expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
                 retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1587,6 +1809,7 @@ async def _execute_responses_once(
             pending_request_hash=pending_payload_hash,
             reason=reason,
             summary=summary,
+            tenant_id=ctx.tenant_id,
             created_at=now_ts,
             expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
@@ -1638,11 +1861,12 @@ async def _execute_generic_stream_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
 ) -> StreamingResponse | JSONResponse:
     request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
     session_id = str(payload.get("session_id") or request_id)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
-    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path)
+    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     logger.info("generic proxy stream start request_id=%s route=%s", ctx.request_id, request_path)
 
@@ -1791,11 +2015,12 @@ async def _execute_generic_once(
     request_headers: Mapping[str, str],
     request_path: str,
     boundary: dict | None,
+    tenant_id: str = "default",
 ) -> JSONResponse | PlainTextResponse:
     request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
     session_id = str(payload.get("session_id") or request_id)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
-    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path)
+    ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     logger.info("generic proxy start request_id=%s route=%s", ctx.request_id, request_path)
 
@@ -1937,9 +2162,16 @@ async def _execute_generic_once(
 async def chat_completions(payload: dict, request: Request):
     _log_request_if_debug(request, payload, "/v1/chat/completions")
     boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=payload, headers=gateway_headers, boundary=boundary)
     request_id = str(payload.get("request_id") or "preview-chat")
     session_id = str(payload.get("session_id") or request_id)
-    ctx_preview = RequestContext(request_id=request_id, session_id=session_id, route="/v1/chat/completions")
+    ctx_preview = RequestContext(
+        request_id=request_id,
+        session_id=session_id,
+        route="/v1/chat/completions",
+        tenant_id=tenant_id,
+    )
 
     ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
     if not ok_payload:
@@ -1955,7 +2187,7 @@ async def chat_completions(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
+    ok, reason, detail = _validate_gateway_headers(gateway_headers)
     if not ok:
         return _error_response(
             status_code=_to_status_code(reason),
@@ -1968,7 +2200,14 @@ async def chat_completions(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision = parse_confirmation_decision(user_text)
-    pending = await _maybe_offload(_resolve_pending_confirmation, payload, user_text, now_ts)
+    pending = await _maybe_offload(
+        _resolve_pending_confirmation,
+        payload,
+        user_text,
+        now_ts,
+        expected_route=req_preview.route,
+        tenant_id=tenant_id,
+    )
     confirm_id_hint = _extract_confirm_id(user_text)
 
     if pending:
@@ -1977,16 +2216,56 @@ async def chat_completions(payload: dict, request: Request):
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
         if pending_route != req_preview.route:
-            return _error_response(
-                status_code=409,
-                reason="confirmation_route_mismatch",
-                detail=f"pending confirmation belongs to {pending_route}",
-                ctx=ctx_preview,
-                boundary=boundary,
+            mismatch_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_route_mismatch_text(
+                    confirm_id=confirm_id,
+                    pending_route=pending_route,
+                    current_route=req_preview.route,
+                ),
             )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_route_mismatch")
+            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_resp,
+                confirm_id=confirm_id,
+                status="route_mismatch",
+                reason=reason_text,
+                summary=summary_text,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_chat_response(mismatch_resp)
 
         if decision.value == "no":
-            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="canceled", now_ts=now_ts)
+            changed = await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="pending",
+                new_status="canceled",
+                now_ts=now_ts,
+            )
+            if not changed:
+                done_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_already_processed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_already_processed")
+                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    done_resp,
+                    confirm_id=confirm_id,
+                    status="already_processed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(done_resp)
+
             canceled_resp = InternalResponse(
                 request_id=req_preview.request_id,
                 session_id=req_preview.session_id,
@@ -2007,44 +2286,144 @@ async def chat_completions(payload: dict, request: Request):
             return to_chat_response(canceled_resp)
 
         if decision.value == "yes":
+            locked = await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="pending",
+                new_status="executing",
+                now_ts=now_ts,
+            )
+            if not locked:
+                done_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_already_processed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_already_processed")
+                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    done_resp,
+                    confirm_id=confirm_id,
+                    status="already_processed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(done_resp)
+
             pending_payload = pending.get("pending_request_payload", {})
             if not isinstance(pending_payload, dict):
-                return _error_response(
-                    status_code=409,
-                    reason="pending_payload_invalid",
-                    detail="pending payload is invalid",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                invalid_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_payload_invalid_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_payload_invalid")
+                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    invalid_resp,
+                    confirm_id=confirm_id,
+                    status="payload_invalid",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(invalid_resp)
             if _is_pending_payload_omitted(pending_payload):
-                await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="expired", now_ts=now_ts)
-                return _error_response(
-                    status_code=409,
-                    reason="pending_payload_omitted",
-                    detail="pending payload was omitted due to size limit, please resend the original request",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                omitted_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_payload_omitted_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_payload_omitted")
+                ctx_preview.security_tags.add("pending_payload_omitted")
+                ctx_preview.enforcement_actions.append("confirmation:payload_omitted")
+                _attach_security_metadata(omitted_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    omitted_resp,
+                    confirm_id=confirm_id,
+                    status="payload_omitted",
+                    reason=reason_text,
+                    summary=summary_text,
+                    payload_omitted=True,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(omitted_resp)
             if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
-                return _error_response(
-                    status_code=409,
-                    reason="pending_hash_mismatch",
-                    detail="pending request hash mismatch",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                mismatch_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_hash_mismatch_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
+                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    mismatch_resp,
+                    confirm_id=confirm_id,
+                    status="hash_mismatch",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(mismatch_resp)
 
-            executed = await _execute_chat_once(
-                payload=pending_payload,
-                request_headers=_effective_gateway_headers(request),
-                request_path=_request_target_path(request),
-                boundary=boundary,
-                skip_confirmation=True,
-                forced_upstream_base=str(pending.get("upstream_base", "")),
-            )
+            try:
+                executed = await _execute_chat_once(
+                    payload=pending_payload,
+                    request_headers=gateway_headers,
+                    request_path=_request_target_path(request),
+                    boundary=boundary,
+                    tenant_id=str(pending.get("tenant_id") or tenant_id),
+                    skip_confirmation=True,
+                    forced_upstream_base=str(pending.get("upstream_base", "")),
+                )
+            except Exception:
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=int(time.time()),
+                )
+                raise
             if isinstance(executed, JSONResponse):
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=int(time.time()),
+                )
                 return executed
-            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="executed", now_ts=int(time.time()))
+            await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="executing",
+                new_status="executed",
+                now_ts=int(time.time()),
+            )
             aegis = executed.setdefault("aegisgate", {})
             aegis["confirmation"] = {
                 "required": False,
@@ -2077,6 +2456,33 @@ async def chat_completions(payload: dict, request: Request):
         return to_chat_response(pending_resp)
 
     if confirm_id_hint:
+        hint_record = await _maybe_offload(
+            _load_single_pending_for_session,
+            payload,
+            now_ts,
+            expected_route=req_preview.route,
+            tenant_id=tenant_id,
+        )
+        hinted_id = str((hint_record or {}).get("confirm_id", "")).strip()
+        if hinted_id and hinted_id != confirm_id_hint:
+            mismatch_hint = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_id_mismatch_hint_text(confirm_id_hint, hinted_id),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_id_mismatch")
+            _attach_security_metadata(mismatch_hint, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_hint,
+                confirm_id=confirm_id_hint,
+                status="id_mismatch",
+                reason="确认编号不匹配",
+                summary=f"当前会话唯一可用确认编号：{hinted_id}",
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_chat_response(mismatch_hint)
         expired_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
@@ -2096,34 +2502,22 @@ async def chat_completions(payload: dict, request: Request):
         _write_audit_event(ctx_preview, boundary=boundary)
         return to_chat_response(expired_resp)
 
-    # 用户回复了 yes 但未匹配到任何 pending：不再对当前 body 跑请求管道，避免再次被 request_sanitizer 拦截
-    if decision.value == "yes" and not pending:
-        no_pending_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text="未找到待确认记录。请使用与触发确认时相同的 session_id，或在消息中包含确认编号（如 yes cfm-xxx）。\nNo pending confirmation found. Use the same session_id as the blocked request or include the confirm_id in your message (e.g. yes cfm-xxx).",
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("no_pending_for_yes")
-        _attach_security_metadata(no_pending_resp, ctx_preview, boundary=boundary)
-        _write_audit_event(ctx_preview, boundary=boundary)
-        return to_chat_response(no_pending_resp)
-
     if _should_stream(payload):
         return await _execute_chat_stream_once(
             payload=payload,
-            request_headers=_effective_gateway_headers(request),
+            request_headers=gateway_headers,
             request_path=_request_target_path(request),
             boundary=boundary,
+            tenant_id=tenant_id,
             forced_upstream_base=None,
         )
 
     return await _execute_chat_once(
         payload=payload,
-        request_headers=_effective_gateway_headers(request),
+        request_headers=gateway_headers,
         request_path=_request_target_path(request),
         boundary=boundary,
+        tenant_id=tenant_id,
         skip_confirmation=False,
         forced_upstream_base=None,
     )
@@ -2133,9 +2527,16 @@ async def chat_completions(payload: dict, request: Request):
 async def responses(payload: dict, request: Request):
     _log_request_if_debug(request, payload, "/v1/responses")
     boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=payload, headers=gateway_headers, boundary=boundary)
     request_id = str(payload.get("request_id") or "preview-responses")
     session_id = str(payload.get("session_id") or request_id)
-    ctx_preview = RequestContext(request_id=request_id, session_id=session_id, route="/v1/responses")
+    ctx_preview = RequestContext(
+        request_id=request_id,
+        session_id=session_id,
+        route="/v1/responses",
+        tenant_id=tenant_id,
+    )
 
     ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
     if not ok_payload:
@@ -2151,7 +2552,7 @@ async def responses(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
+    ok, reason, detail = _validate_gateway_headers(gateway_headers)
     if not ok:
         return _error_response(
             status_code=_to_status_code(reason),
@@ -2164,7 +2565,14 @@ async def responses(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision = parse_confirmation_decision(user_text)
-    pending = await _maybe_offload(_resolve_pending_confirmation, payload, user_text, now_ts)
+    pending = await _maybe_offload(
+        _resolve_pending_confirmation,
+        payload,
+        user_text,
+        now_ts,
+        expected_route=req_preview.route,
+        tenant_id=tenant_id,
+    )
     confirm_id_hint = _extract_confirm_id(user_text)
 
     if pending:
@@ -2173,16 +2581,56 @@ async def responses(payload: dict, request: Request):
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
         if pending_route != req_preview.route:
-            return _error_response(
-                status_code=409,
-                reason="confirmation_route_mismatch",
-                detail=f"pending confirmation belongs to {pending_route}",
-                ctx=ctx_preview,
-                boundary=boundary,
+            mismatch_resp = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_route_mismatch_text(
+                    confirm_id=confirm_id,
+                    pending_route=pending_route,
+                    current_route=req_preview.route,
+                ),
             )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_route_mismatch")
+            _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_resp,
+                confirm_id=confirm_id,
+                status="route_mismatch",
+                reason=reason_text,
+                summary=summary_text,
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_responses_output(mismatch_resp)
 
         if decision.value == "no":
-            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="canceled", now_ts=now_ts)
+            changed = await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="pending",
+                new_status="canceled",
+                now_ts=now_ts,
+            )
+            if not changed:
+                done_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_already_processed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_already_processed")
+                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    done_resp,
+                    confirm_id=confirm_id,
+                    status="already_processed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(done_resp)
+
             canceled_resp = InternalResponse(
                 request_id=req_preview.request_id,
                 session_id=req_preview.session_id,
@@ -2203,44 +2651,144 @@ async def responses(payload: dict, request: Request):
             return to_responses_output(canceled_resp)
 
         if decision.value == "yes":
+            locked = await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="pending",
+                new_status="executing",
+                now_ts=now_ts,
+            )
+            if not locked:
+                done_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_already_processed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_already_processed")
+                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    done_resp,
+                    confirm_id=confirm_id,
+                    status="already_processed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(done_resp)
+
             pending_payload = pending.get("pending_request_payload", {})
             if not isinstance(pending_payload, dict):
-                return _error_response(
-                    status_code=409,
-                    reason="pending_payload_invalid",
-                    detail="pending payload is invalid",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                invalid_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_payload_invalid_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_payload_invalid")
+                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    invalid_resp,
+                    confirm_id=confirm_id,
+                    status="payload_invalid",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(invalid_resp)
             if _is_pending_payload_omitted(pending_payload):
-                await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="expired", now_ts=now_ts)
-                return _error_response(
-                    status_code=409,
-                    reason="pending_payload_omitted",
-                    detail="pending payload was omitted due to size limit, please resend the original request",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                omitted_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_payload_omitted_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_payload_omitted")
+                ctx_preview.security_tags.add("pending_payload_omitted")
+                ctx_preview.enforcement_actions.append("confirmation:payload_omitted")
+                _attach_security_metadata(omitted_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    omitted_resp,
+                    confirm_id=confirm_id,
+                    status="payload_omitted",
+                    reason=reason_text,
+                    summary=summary_text,
+                    payload_omitted=True,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(omitted_resp)
             if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
-                return _error_response(
-                    status_code=409,
-                    reason="pending_hash_mismatch",
-                    detail="pending request hash mismatch",
-                    ctx=ctx_preview,
-                    boundary=boundary,
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
                 )
+                mismatch_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_hash_mismatch_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
+                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    mismatch_resp,
+                    confirm_id=confirm_id,
+                    status="hash_mismatch",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(mismatch_resp)
 
-            executed = await _execute_responses_once(
-                payload=pending_payload,
-                request_headers=_effective_gateway_headers(request),
-                request_path=_request_target_path(request),
-                boundary=boundary,
-                skip_confirmation=True,
-                forced_upstream_base=str(pending.get("upstream_base", "")),
-            )
+            try:
+                executed = await _execute_responses_once(
+                    payload=pending_payload,
+                    request_headers=gateway_headers,
+                    request_path=_request_target_path(request),
+                    boundary=boundary,
+                    tenant_id=str(pending.get("tenant_id") or tenant_id),
+                    skip_confirmation=True,
+                    forced_upstream_base=str(pending.get("upstream_base", "")),
+                )
+            except Exception:
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=int(time.time()),
+                )
+                raise
             if isinstance(executed, JSONResponse):
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=int(time.time()),
+                )
                 return executed
-            await _store_call("update_pending_confirmation_status", confirm_id=confirm_id, status="executed", now_ts=int(time.time()))
+            await _try_transition_pending_status(
+                confirm_id=confirm_id,
+                expected_status="executing",
+                new_status="executed",
+                now_ts=int(time.time()),
+            )
             aegis = executed.setdefault("aegisgate", {})
             aegis["confirmation"] = {
                 "required": False,
@@ -2273,6 +2821,33 @@ async def responses(payload: dict, request: Request):
         return to_responses_output(pending_resp)
 
     if confirm_id_hint:
+        hint_record = await _maybe_offload(
+            _load_single_pending_for_session,
+            payload,
+            now_ts,
+            expected_route=req_preview.route,
+            tenant_id=tenant_id,
+        )
+        hinted_id = str((hint_record or {}).get("confirm_id", "")).strip()
+        if hinted_id and hinted_id != confirm_id_hint:
+            mismatch_hint = InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=_confirmation_id_mismatch_hint_text(confirm_id_hint, hinted_id),
+            )
+            ctx_preview.response_disposition = "block"
+            ctx_preview.disposition_reasons.append("confirmation_id_mismatch")
+            _attach_security_metadata(mismatch_hint, ctx_preview, boundary=boundary)
+            _attach_confirmation_metadata(
+                mismatch_hint,
+                confirm_id=confirm_id_hint,
+                status="id_mismatch",
+                reason="确认编号不匹配",
+                summary=f"当前会话唯一可用确认编号：{hinted_id}",
+            )
+            _write_audit_event(ctx_preview, boundary=boundary)
+            return to_responses_output(mismatch_hint)
         expired_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
@@ -2292,34 +2867,22 @@ async def responses(payload: dict, request: Request):
         _write_audit_event(ctx_preview, boundary=boundary)
         return to_responses_output(expired_resp)
 
-    # 用户回复了 yes 但未匹配到任何 pending：不再对当前 body 跑请求管道
-    if decision.value == "yes" and not pending:
-        no_pending_resp = InternalResponse(
-            request_id=req_preview.request_id,
-            session_id=req_preview.session_id,
-            model=req_preview.model,
-            output_text="未找到待确认记录。请使用与触发确认时相同的 session_id，或在消息中包含确认编号（如 yes cfm-xxx）。\nNo pending confirmation found. Use the same session_id as the blocked request or include the confirm_id in your message (e.g. yes cfm-xxx).",
-        )
-        ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("no_pending_for_yes")
-        _attach_security_metadata(no_pending_resp, ctx_preview, boundary=boundary)
-        _write_audit_event(ctx_preview, boundary=boundary)
-        return to_responses_output(no_pending_resp)
-
     if _should_stream(payload):
         return await _execute_responses_stream_once(
             payload=payload,
-            request_headers=_effective_gateway_headers(request),
+            request_headers=gateway_headers,
             request_path=_request_target_path(request),
             boundary=boundary,
+            tenant_id=tenant_id,
             forced_upstream_base=None,
         )
 
     return await _execute_responses_once(
         payload=payload,
-        request_headers=_effective_gateway_headers(request),
+        request_headers=gateway_headers,
         request_path=_request_target_path(request),
         boundary=boundary,
+        tenant_id=tenant_id,
         skip_confirmation=False,
         forced_upstream_base=None,
     )
@@ -2336,12 +2899,15 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
         return JSONResponse(status_code=404, content={"error": "not_found"})
 
     boundary = getattr(request.state, "security_boundary", {})
-    ok, reason, detail = _validate_gateway_headers(_effective_gateway_headers(request))
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=payload, headers=gateway_headers, boundary=boundary)
+    ok, reason, detail = _validate_gateway_headers(gateway_headers)
     if not ok:
         preview_ctx = RequestContext(
             request_id=str(payload.get("request_id") or "preview-generic"),
             session_id=str(payload.get("session_id") or payload.get("request_id") or "preview-generic"),
             route=route_path,
+            tenant_id=tenant_id,
         )
         return _error_response(
             status_code=_to_status_code(reason),
@@ -2354,14 +2920,16 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
     if _should_stream(payload):
         return await _execute_generic_stream_once(
             payload=payload,
-            request_headers=_effective_gateway_headers(request),
+            request_headers=gateway_headers,
             request_path=route_path,
             boundary=boundary,
+            tenant_id=tenant_id,
         )
 
     return await _execute_generic_once(
         payload=payload,
-        request_headers=_effective_gateway_headers(request),
+        request_headers=gateway_headers,
         request_path=route_path,
         boundary=boundary,
+        tenant_id=tenant_id,
     )

@@ -64,14 +64,24 @@ class SqliteKVStore(KVStore):
                   created_at INTEGER NOT NULL,
                   expires_at INTEGER NOT NULL,
                   retained_until INTEGER NOT NULL,
-                  updated_at INTEGER NOT NULL
+                  updated_at INTEGER NOT NULL,
+                  tenant_id TEXT NOT NULL DEFAULT 'default'
                 )
                 """
             )
+            columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_info(pending_confirmation)").fetchall()}
+            if "tenant_id" not in columns:
+                conn.execute("ALTER TABLE pending_confirmation ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pending_session_status
                 ON pending_confirmation (session_id, status, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
+                ON pending_confirmation (tenant_id, session_id, route, status, created_at DESC)
                 """
             )
             conn.commit()
@@ -200,6 +210,7 @@ class SqliteKVStore(KVStore):
         created_at: int,
         expires_at: int,
         retained_until: int,
+        tenant_id: str = "default",
     ) -> None:
         payload = json_dumps(pending_request_payload)
 
@@ -210,9 +221,9 @@ class SqliteKVStore(KVStore):
                     INSERT INTO pending_confirmation (
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         confirm_id,
@@ -230,13 +241,20 @@ class SqliteKVStore(KVStore):
                         expires_at,
                         retained_until,
                         created_at,
+                        tenant_id,
                     ),
                 )
                 conn.commit()
 
         self._with_retry(_write)
 
-    def get_latest_pending_confirmation(self, session_id: str, now_ts: int) -> dict[str, Any] | None:
+    def get_latest_pending_confirmation(
+        self,
+        session_id: str,
+        now_ts: int,
+        *,
+        tenant_id: str = "default",
+    ) -> dict[str, Any] | None:
         def _read() -> tuple | None:
             with self._connect() as conn:
                 row = conn.execute(
@@ -244,13 +262,13 @@ class SqliteKVStore(KVStore):
                     SELECT
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     FROM pending_confirmation
-                    WHERE session_id = ? AND status = 'pending'
+                    WHERE session_id = ? AND tenant_id = ? AND status = 'pending'
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
-                    (session_id,),
+                    (session_id, tenant_id),
                 ).fetchone()
             return row
 
@@ -263,6 +281,83 @@ class SqliteKVStore(KVStore):
             return None
         return record
 
+    def get_single_pending_confirmation(
+        self,
+        *,
+        session_id: str,
+        route: str,
+        now_ts: int,
+        tenant_id: str = "default",
+        recover_executing_before: int | None = None,
+    ) -> dict[str, Any] | None:
+        def _read() -> list[tuple]:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                      confirm_id, session_id, route, request_id, model, upstream_base,
+                      pending_request_payload, pending_request_hash, reason, summary,
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
+                    FROM pending_confirmation
+                    WHERE session_id = ? AND route = ? AND tenant_id = ? AND expires_at > ?
+                      AND status IN ('pending', 'executing')
+                    ORDER BY created_at DESC
+                    LIMIT 6
+                    """,
+                    (session_id, route, tenant_id, now_ts),
+                ).fetchall()
+            return rows
+
+        rows = self._with_retry(_read)
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            record = _pending_row_to_dict(row)
+            if str(record.get("status")) == "pending":
+                matches.append(record)
+            elif (
+                str(record.get("status")) == "executing"
+                and recover_executing_before is not None
+                and int(record.get("updated_at", 0)) <= int(recover_executing_before)
+            ):
+                changed = self.compare_and_update_pending_confirmation_status(
+                    confirm_id=str(record.get("confirm_id", "")),
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=now_ts,
+                )
+                if changed:
+                    record["status"] = "pending"
+                    record["updated_at"] = int(now_ts)
+                    matches.append(record)
+            if len(matches) > 1:
+                return None
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def compare_and_update_pending_confirmation_status(
+        self,
+        *,
+        confirm_id: str,
+        expected_status: str,
+        new_status: str,
+        now_ts: int,
+    ) -> bool:
+        def _update() -> bool:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE pending_confirmation
+                    SET status = ?, updated_at = ?
+                    WHERE confirm_id = ? AND status = ?
+                    """,
+                    (new_status, now_ts, confirm_id, expected_status),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) == 1
+
+        return bool(self._with_retry(_update))
+
     def get_pending_confirmation(self, confirm_id: str) -> dict[str, Any] | None:
         def _read() -> tuple | None:
             with self._connect() as conn:
@@ -271,7 +366,7 @@ class SqliteKVStore(KVStore):
                     SELECT
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     FROM pending_confirmation
                     WHERE confirm_id = ?
                     LIMIT 1
@@ -357,4 +452,5 @@ def _pending_row_to_dict(row: tuple) -> dict[str, Any]:
         "expires_at": row[12],
         "retained_until": row[13],
         "updated_at": row[14],
+        "tenant_id": row[15] if len(row) > 15 else "default",
     }

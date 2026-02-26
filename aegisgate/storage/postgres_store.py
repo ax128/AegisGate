@@ -118,14 +118,27 @@ class PostgresKVStore(KVStore):
                       created_at BIGINT NOT NULL,
                       expires_at BIGINT NOT NULL,
                       retained_until BIGINT NOT NULL,
-                      updated_at BIGINT NOT NULL
+                      updated_at BIGINT NOT NULL,
+                      tenant_id TEXT NOT NULL DEFAULT 'default'
                     )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    ALTER TABLE {pending_table}
+                    ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'
                     """
                 )
                 cur.execute(
                     f"""
                     CREATE INDEX IF NOT EXISTS idx_pending_session_status
                     ON {pending_table} (session_id, status, created_at DESC)
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
+                    ON {pending_table} (tenant_id, session_id, route, status, created_at DESC)
                     """
                 )
                 cur.execute(
@@ -222,6 +235,7 @@ class PostgresKVStore(KVStore):
         created_at: int,
         expires_at: int,
         retained_until: int,
+        tenant_id: str = "default",
     ) -> None:
         pending_table = f"{self.schema}.pending_confirmation"
         payload = _json_dumps(pending_request_payload)
@@ -232,9 +246,9 @@ class PostgresKVStore(KVStore):
                     INSERT INTO {pending_table} (
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (confirm_id)
                     DO UPDATE SET
                       status = EXCLUDED.status,
@@ -249,7 +263,8 @@ class PostgresKVStore(KVStore):
                       created_at = EXCLUDED.created_at,
                       expires_at = EXCLUDED.expires_at,
                       retained_until = EXCLUDED.retained_until,
-                      updated_at = EXCLUDED.updated_at
+                      updated_at = EXCLUDED.updated_at,
+                      tenant_id = EXCLUDED.tenant_id
                     """,
                     (
                         confirm_id,
@@ -267,11 +282,18 @@ class PostgresKVStore(KVStore):
                         int(expires_at),
                         int(retained_until),
                         int(created_at),
+                        tenant_id,
                     ),
                 )
             conn.commit()
 
-    def get_latest_pending_confirmation(self, session_id: str, now_ts: int) -> dict[str, Any] | None:
+    def get_latest_pending_confirmation(
+        self,
+        session_id: str,
+        now_ts: int,
+        *,
+        tenant_id: str = "default",
+    ) -> dict[str, Any] | None:
         pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -280,13 +302,13 @@ class PostgresKVStore(KVStore):
                     SELECT
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     FROM {pending_table}
-                    WHERE session_id = %s AND status = 'pending'
+                    WHERE session_id = %s AND tenant_id = %s AND status = 'pending'
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
-                    (session_id,),
+                    (session_id, tenant_id),
                 )
                 row = cur.fetchone()
         if not row:
@@ -301,6 +323,82 @@ class PostgresKVStore(KVStore):
             return None
         return record
 
+    def get_single_pending_confirmation(
+        self,
+        *,
+        session_id: str,
+        route: str,
+        now_ts: int,
+        tenant_id: str = "default",
+        recover_executing_before: int | None = None,
+    ) -> dict[str, Any] | None:
+        pending_table = f"{self.schema}.pending_confirmation"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                      confirm_id, session_id, route, request_id, model, upstream_base,
+                      pending_request_payload, pending_request_hash, reason, summary,
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
+                    FROM {pending_table}
+                    WHERE session_id = %s AND route = %s AND tenant_id = %s AND expires_at > %s
+                      AND status IN ('pending', 'executing')
+                    ORDER BY created_at DESC
+                    LIMIT 6
+                    """,
+                    (session_id, route, tenant_id, int(now_ts)),
+                )
+                rows = cur.fetchall()
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            record = self._row_to_pending_record(row)
+            if str(record.get("status")) == "pending":
+                matches.append(record)
+            elif (
+                str(record.get("status")) == "executing"
+                and recover_executing_before is not None
+                and int(record.get("updated_at", 0)) <= int(recover_executing_before)
+            ):
+                changed = self.compare_and_update_pending_confirmation_status(
+                    confirm_id=str(record.get("confirm_id", "")),
+                    expected_status="executing",
+                    new_status="pending",
+                    now_ts=now_ts,
+                )
+                if changed:
+                    record["status"] = "pending"
+                    record["updated_at"] = int(now_ts)
+                    matches.append(record)
+            if len(matches) > 1:
+                return None
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def compare_and_update_pending_confirmation_status(
+        self,
+        *,
+        confirm_id: str,
+        expected_status: str,
+        new_status: str,
+        now_ts: int,
+    ) -> bool:
+        pending_table = f"{self.schema}.pending_confirmation"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE {pending_table}
+                    SET status = %s, updated_at = %s
+                    WHERE confirm_id = %s AND status = %s
+                    """,
+                    (new_status, int(now_ts), confirm_id, expected_status),
+                )
+                changed = int(cur.rowcount or 0)
+            conn.commit()
+        return changed == 1
+
     def get_pending_confirmation(self, confirm_id: str) -> dict[str, Any] | None:
         pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
@@ -310,7 +408,7 @@ class PostgresKVStore(KVStore):
                     SELECT
                       confirm_id, session_id, route, request_id, model, upstream_base,
                       pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at
+                      status, created_at, expires_at, retained_until, updated_at, tenant_id
                     FROM {pending_table}
                     WHERE confirm_id = %s
                     """,
@@ -338,6 +436,7 @@ class PostgresKVStore(KVStore):
             "expires_at": _to_int(row[12]),
             "retained_until": _to_int(row[13]),
             "updated_at": _to_int(row[14]),
+            "tenant_id": str(row[15]) if len(row) > 15 else "default",
         }
 
     def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
