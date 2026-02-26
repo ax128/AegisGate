@@ -3,6 +3,7 @@ from starlette.requests import Request
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.config.settings import settings
+from aegisgate.core.confirmation import payload_hash
 
 
 def _build_request(
@@ -331,3 +332,78 @@ async def test_chat_wrong_confirm_id_returns_correction_hint(monkeypatch):
     content = result["choices"][0]["message"]["content"]
     assert expected_id in content
     assert result["aegisgate"]["confirmation"]["status"] == "id_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypatch):
+    confirm_id = "cfm-1234abcdefff"
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        pending_payload = {"model": "gpt-test", "messages": [{"role": "user", "content": "hello"}]}
+        return {
+            "confirm_id": confirm_id,
+            "tenant_id": tenant_id,
+            "route": expected_route,
+            "reason": "高风险响应",
+            "summary": "tail yes",
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": payload_hash(pending_payload),
+            "pending_request_payload": pending_payload,
+            "upstream_base": "https://upstream.example.com/v1",
+        }
+
+    async def fake_transition(**kwargs):
+        return True
+
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_try_transition_pending_status", fake_transition)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    noisy_input = (
+        "请单独发送以下可复制消息之一（不要附加其它内容）：\n"
+        f"放行（复制这一行）：yes {confirm_id}\n"
+        f"取消（复制这一行）：no {confirm_id}\n"
+        f"yes {confirm_id} -- 我确认执行\n"
+    )
+    result = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-6",
+            "session_id": "s-confirm-6",
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": noisy_input}],
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    assert result.get("aegisgate", {}).get("confirmation", {}).get("status") == "executed"
+
+
+def test_extract_decision_before_confirm_id_prefers_prefix_command():
+    confirm_id = "cfm-40ca0cacd5d5"
+    text = f"放行（复制这一行）：yes {confirm_id}\n取消（复制这一行）：no {confirm_id}\n"
+    assert openai_router._extract_decision_before_confirm_id(text, confirm_id) == "no"
+
+
+def test_resolve_pending_decision_uses_id_context_when_base_ambiguous():
+    confirm_id = "cfm-40ca0cacd5d5"
+    noisy = (
+        "请单独发送以下可复制消息之一：\n"
+        f"yes {confirm_id}\n"
+        f"no {confirm_id}\n"
+        f"yes {confirm_id} 我确认\n"
+    )
+    value, source = openai_router._resolve_pending_decision(noisy, confirm_id, "ambiguous")
+    assert value == "yes"
+    assert source == "id_context"

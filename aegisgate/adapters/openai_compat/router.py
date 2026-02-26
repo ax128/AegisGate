@@ -584,8 +584,67 @@ def _to_status_code(reason: str) -> int:
 def _extract_confirm_id(text: str) -> str:
     import re
 
-    match = re.search(r"\bcfm-[a-f0-9]{12}\b", text.lower())
-    return match.group(0) if match else ""
+    matches = re.findall(r"\bcfm-[a-f0-9]{12}\b", text.lower())
+    if not matches:
+        return ""
+    return str(matches[-1])
+
+
+def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
+    """
+    优先解析“最后几行”中的确认命令，避免把整段模板里的 yes/no 一起算成 ambiguous。
+    返回 (decision, confirm_id_hint)；decision in {"yes","no","unknown"}。
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line and line.strip()]
+    if not lines:
+        return "unknown", ""
+    cmd_re = re.compile(
+        r"^\s*(?P<cmd>yes|y|confirm|no|n|cancel|是|确认|同意|继续|执行|好的|否|取消|拒绝|停止)\b(?P<tail>.*)$",
+        re.IGNORECASE,
+    )
+    for raw in reversed(lines[-4:]):
+        line = raw.strip()
+        match = cmd_re.match(line)
+        if not match:
+            continue
+        cmd = str(match.group("cmd") or "").lower()
+        tail = str(match.group("tail") or "")
+        confirm_id = _extract_confirm_id(f"{cmd} {tail}")
+        if cmd in {"yes", "y", "confirm", "是", "确认", "同意", "继续", "执行", "好的"}:
+            return "yes", confirm_id
+        if cmd in {"no", "n", "cancel", "否", "取消", "拒绝", "停止"}:
+            return "no", confirm_id
+    return "unknown", ""
+
+
+def _extract_decision_before_confirm_id(text: str, confirm_id: str) -> str:
+    source = str(text or "")
+    cid = str(confirm_id or "").strip().lower()
+    if not source or not cid:
+        return "unknown"
+    lowered = source.lower()
+    idx = lowered.rfind(cid)
+    if idx < 0:
+        return "unknown"
+    line_start = source.rfind("\n", 0, idx) + 1
+    prefix_in_line = source[line_start:idx]
+    decision = parse_confirmation_decision(prefix_in_line).value
+    if decision in {"yes", "no"}:
+        return decision
+    window_start = max(0, idx - 120)
+    decision = parse_confirmation_decision(source[window_start:idx]).value
+    if decision in {"yes", "no"}:
+        return decision
+    return "unknown"
+
+
+def _resolve_pending_decision(user_text: str, pending_confirm_id: str, base_decision: str) -> tuple[str, str]:
+    by_id_context = _extract_decision_before_confirm_id(user_text, pending_confirm_id)
+    if by_id_context not in {"yes", "no"}:
+        return base_decision, "base"
+    if base_decision in {"yes", "no"} and base_decision != by_id_context:
+        return "ambiguous", "conflict"
+    return by_id_context, "id_context"
 
 
 def _header_lookup(headers: Mapping[str, str], target: str) -> str:
@@ -670,8 +729,9 @@ def _resolve_pending_confirmation(
     confirm_id = _extract_confirm_id(user_text)
     if not confirm_id:
         # 兼容简化确认：当用户明确 yes/y/confirm 且池中仅有 1 条 pending 时，可不带 confirm_id。
-        decision = parse_confirmation_decision(user_text)
-        implicit_yes = decision.value == "yes"
+        tail_decision, _ = _extract_tail_confirmation_command(user_text)
+        decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
+        implicit_yes = decision_value == "yes"
         if not implicit_yes:
             return None
         return _load_single_pending_for_session(
@@ -756,6 +816,16 @@ def _confirmation_already_processed_text(confirm_id: str) -> str:
         f"确认编号：{confirm_id}\n\n"
         "This confirmation has already been processed (executed, canceled, or expired).\n"
         f"Confirmation ID: {confirm_id}"
+    )
+
+
+def _confirmation_execute_failed_text(confirm_id: str) -> str:
+    return (
+        "确认已收到，但执行上游请求失败，请稍后重试。\n"
+        f"确认编号：{confirm_id}\n\n"
+        "Confirmation received, but executing the upstream request failed.\n"
+        f"Confirmation ID: {confirm_id}\n"
+        "Please retry later."
     )
 
 
@@ -2199,7 +2269,8 @@ async def chat_completions(payload: dict, request: Request):
 
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
-    decision = parse_confirmation_decision(user_text)
+    tail_decision, tail_confirm_id = _extract_tail_confirmation_command(user_text)
+    decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -2208,13 +2279,35 @@ async def chat_completions(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    confirm_id_hint = _extract_confirm_id(user_text)
+    confirm_id_hint = tail_confirm_id or _extract_confirm_id(user_text)
+    logger.info(
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s",
+        req_preview.request_id,
+        req_preview.session_id,
+        tenant_id,
+        req_preview.route,
+        decision_value,
+        confirm_id_hint or "-",
+        bool(pending),
+    )
 
     if pending:
         pending_route = str(pending.get("route", ""))
         confirm_id = str(pending["confirm_id"])
+        decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
+        logger.info(
+            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            req_preview.route,
+            confirm_id,
+            pending_route,
+            decision_value,
+            decision_source,
+        )
         if pending_route != req_preview.route:
             mismatch_resp = InternalResponse(
                 request_id=req_preview.request_id,
@@ -2239,7 +2332,7 @@ async def chat_completions(payload: dict, request: Request):
             _write_audit_event(ctx_preview, boundary=boundary)
             return to_chat_response(mismatch_resp)
 
-        if decision.value == "no":
+        if decision_value == "no":
             changed = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -2283,9 +2376,23 @@ async def chat_completions(payload: dict, request: Request):
                 summary=summary_text,
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             return to_chat_response(canceled_resp)
 
-        if decision.value == "yes":
+        if decision_value == "yes":
+            logger.info(
+                "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             locked = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -2402,14 +2509,39 @@ async def chat_completions(payload: dict, request: Request):
                     skip_confirmation=True,
                     forced_upstream_base=str(pending.get("upstream_base", "")),
                 )
-            except Exception:
+            except Exception as exc:
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
                     expected_status="executing",
                     new_status="pending",
                     now_ts=int(time.time()),
                 )
-                raise
+                logger.exception(
+                    "confirmation execute failed request_id=%s session_id=%s tenant_id=%s confirm_id=%s error=%s",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    confirm_id,
+                    exc,
+                )
+                failed_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_execute_failed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_execute_failed")
+                _attach_security_metadata(failed_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    failed_resp,
+                    confirm_id=confirm_id,
+                    status="execute_failed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(failed_resp)
             if isinstance(executed, JSONResponse):
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
@@ -2433,9 +2565,16 @@ async def chat_completions(payload: dict, request: Request):
                 "summary": summary_text,
                 "payload_omitted": False,
             }
+            logger.info(
+                "confirmation executed request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             return executed
 
-        note = "输入不明确，请仅回复 yes 或 no。" if decision.value == "ambiguous" else "请仅回复 yes 或 no。"
+        note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
         pending_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
@@ -2453,6 +2592,14 @@ async def chat_completions(payload: dict, request: Request):
             summary=summary_text,
         )
         _write_audit_event(ctx_preview, boundary=boundary)
+        logger.info(
+            "confirmation pending await clear decision request_id=%s session_id=%s tenant_id=%s confirm_id=%s decision=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            confirm_id,
+            decision_value,
+        )
         return to_chat_response(pending_resp)
 
     if confirm_id_hint:
@@ -2482,6 +2629,14 @@ async def chat_completions(payload: dict, request: Request):
                 summary=f"当前会话唯一可用确认编号：{hinted_id}",
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation id mismatch request_id=%s session_id=%s tenant_id=%s provided=%s expected=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id_hint,
+                hinted_id,
+            )
             return to_chat_response(mismatch_hint)
         expired_resp = InternalResponse(
             request_id=req_preview.request_id,
@@ -2500,6 +2655,13 @@ async def chat_completions(payload: dict, request: Request):
             summary="未找到可执行的 pending 记录",
         )
         _write_audit_event(ctx_preview, boundary=boundary)
+        logger.info(
+            "confirmation expired request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            confirm_id_hint,
+        )
         return to_chat_response(expired_resp)
 
     if _should_stream(payload):
@@ -2564,7 +2726,8 @@ async def responses(payload: dict, request: Request):
 
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
-    decision = parse_confirmation_decision(user_text)
+    tail_decision, tail_confirm_id = _extract_tail_confirmation_command(user_text)
+    decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -2573,13 +2736,35 @@ async def responses(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    confirm_id_hint = _extract_confirm_id(user_text)
+    confirm_id_hint = tail_confirm_id or _extract_confirm_id(user_text)
+    logger.info(
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s",
+        req_preview.request_id,
+        req_preview.session_id,
+        tenant_id,
+        req_preview.route,
+        decision_value,
+        confirm_id_hint or "-",
+        bool(pending),
+    )
 
     if pending:
         pending_route = str(pending.get("route", ""))
         confirm_id = str(pending["confirm_id"])
+        decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
+        logger.info(
+            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            req_preview.route,
+            confirm_id,
+            pending_route,
+            decision_value,
+            decision_source,
+        )
         if pending_route != req_preview.route:
             mismatch_resp = InternalResponse(
                 request_id=req_preview.request_id,
@@ -2604,7 +2789,7 @@ async def responses(payload: dict, request: Request):
             _write_audit_event(ctx_preview, boundary=boundary)
             return to_responses_output(mismatch_resp)
 
-        if decision.value == "no":
+        if decision_value == "no":
             changed = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -2648,9 +2833,23 @@ async def responses(payload: dict, request: Request):
                 summary=summary_text,
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             return to_responses_output(canceled_resp)
 
-        if decision.value == "yes":
+        if decision_value == "yes":
+            logger.info(
+                "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             locked = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -2767,14 +2966,39 @@ async def responses(payload: dict, request: Request):
                     skip_confirmation=True,
                     forced_upstream_base=str(pending.get("upstream_base", "")),
                 )
-            except Exception:
+            except Exception as exc:
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
                     expected_status="executing",
                     new_status="pending",
                     now_ts=int(time.time()),
                 )
-                raise
+                logger.exception(
+                    "confirmation execute failed request_id=%s session_id=%s tenant_id=%s confirm_id=%s error=%s",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    confirm_id,
+                    exc,
+                )
+                failed_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_confirmation_execute_failed_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_execute_failed")
+                _attach_security_metadata(failed_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    failed_resp,
+                    confirm_id=confirm_id,
+                    status="execute_failed",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(failed_resp)
             if isinstance(executed, JSONResponse):
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
@@ -2798,9 +3022,16 @@ async def responses(payload: dict, request: Request):
                 "summary": summary_text,
                 "payload_omitted": False,
             }
+            logger.info(
+                "confirmation executed request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id,
+            )
             return executed
 
-        note = "输入不明确，请仅回复 yes 或 no。" if decision.value == "ambiguous" else "请仅回复 yes 或 no。"
+        note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
         pending_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
@@ -2818,6 +3049,14 @@ async def responses(payload: dict, request: Request):
             summary=summary_text,
         )
         _write_audit_event(ctx_preview, boundary=boundary)
+        logger.info(
+            "confirmation pending await clear decision request_id=%s session_id=%s tenant_id=%s confirm_id=%s decision=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            confirm_id,
+            decision_value,
+        )
         return to_responses_output(pending_resp)
 
     if confirm_id_hint:
@@ -2847,6 +3086,14 @@ async def responses(payload: dict, request: Request):
                 summary=f"当前会话唯一可用确认编号：{hinted_id}",
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            logger.info(
+                "confirmation id mismatch request_id=%s session_id=%s tenant_id=%s provided=%s expected=%s",
+                req_preview.request_id,
+                req_preview.session_id,
+                tenant_id,
+                confirm_id_hint,
+                hinted_id,
+            )
             return to_responses_output(mismatch_hint)
         expired_resp = InternalResponse(
             request_id=req_preview.request_id,
@@ -2865,6 +3112,13 @@ async def responses(payload: dict, request: Request):
             summary="未找到可执行的 pending 记录",
         )
         _write_audit_event(ctx_preview, boundary=boundary)
+        logger.info(
+            "confirmation expired request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            confirm_id_hint,
+        )
         return to_responses_output(expired_resp)
 
     if _should_stream(payload):

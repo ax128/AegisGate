@@ -62,7 +62,7 @@ def _tokenize_text(text: str) -> set[str]:
     normalized = text.strip().lower()
     if not normalized:
         return set()
-    tokens = re.split(r"[\s,，。.!！？;；:/\\\|\(\)\[\]{}\"'`<>]+", normalized)
+    tokens = re.split(r"[\s,，。.!！？;；:/\\\|\(\)\[\]{}\"'`<>：（）【】「」『』《》]+", normalized)
     return {token for token in tokens if token}
 
 
