@@ -104,6 +104,10 @@ _PENDING_FORMAT_CHAT_JSON = "chat_json"
 _PENDING_FORMAT_RESPONSES_JSON = "responses_json"
 _PENDING_FORMAT_CHAT_STREAM_TEXT = "chat_stream_text"
 _PENDING_FORMAT_RESPONSES_STREAM_TEXT = "responses_stream_text"
+_CONFIRMATION_RELEASE_EMPTY_TEXT = (
+    "[AegisGate] 已放行该确认，但被拦截响应未包含可回放文本（可能仅包含工具调用事件）。"
+    "请重新发送上一条业务请求以继续执行。"
+)
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
@@ -642,12 +646,13 @@ def _render_cached_chat_confirmation_output(
     if fmt == _PENDING_FORMAT_CHAT_JSON and isinstance(content, dict):
         return copy.deepcopy(content)
     if fmt == _PENDING_FORMAT_CHAT_STREAM_TEXT and isinstance(content, str):
+        replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
         return to_chat_response(
             InternalResponse(
                 request_id=request_id,
                 session_id=session_id,
                 model=model,
-                output_text=content,
+                output_text=replay_text,
             )
         )
     return None
@@ -670,12 +675,13 @@ def _render_cached_responses_confirmation_output(
     if fmt == _PENDING_FORMAT_RESPONSES_JSON and isinstance(content, dict):
         return copy.deepcopy(content)
     if fmt == _PENDING_FORMAT_RESPONSES_STREAM_TEXT and isinstance(content, str):
+        replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
         return to_responses_output(
             InternalResponse(
                 request_id=request_id,
                 session_id=session_id,
                 model=model,
-                output_text=content,
+                output_text=replay_text,
             )
         )
     return None
@@ -690,6 +696,7 @@ def _render_cached_chat_confirmation_stream_output(
     reason: str,
     summary: str,
 ) -> StreamingResponse:
+    replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
     confirmation_meta = {
         "required": False,
         "confirm_id": confirm_id,
@@ -705,7 +712,7 @@ def _render_cached_chat_confirmation_stream_output(
             "object": "chat.completion.chunk",
             "model": model,
             "choices": [
-                {"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+                {"index": 0, "delta": {"role": "assistant", "content": replay_text}, "finish_reason": "stop"}
             ],
             "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
         }
@@ -724,6 +731,7 @@ def _render_cached_responses_confirmation_stream_output(
     reason: str,
     summary: str,
 ) -> StreamingResponse:
+    replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
     confirmation_meta = {
         "required": False,
         "confirm_id": confirm_id,
@@ -737,7 +745,7 @@ def _render_cached_responses_confirmation_stream_output(
         request_id,
         confirm_id,
         "response.chunk,response.output_text.delta,response.output_text.done,response.completed,[DONE]",
-        len(content),
+        len(replay_text),
     )
 
     def _generator() -> Generator[bytes, None, None]:
@@ -750,7 +758,7 @@ def _render_cached_responses_confirmation_stream_output(
             "object": "response.chunk",
             "model": model,
             "type": "response.output_text.delta",
-            "delta": content,
+            "delta": replay_text,
             "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
         }
         yield f"data: {json.dumps(legacy_payload, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -761,7 +769,7 @@ def _render_cached_responses_confirmation_stream_output(
             "item_id": item_id,
             "output_index": 0,
             "content_index": 0,
-            "delta": content,
+            "delta": replay_text,
             "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
         }
         yield f"data: {json.dumps(typed_delta_payload, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -772,7 +780,7 @@ def _render_cached_responses_confirmation_stream_output(
             "item_id": item_id,
             "output_index": 0,
             "content_index": 0,
-            "text": content,
+            "text": replay_text,
             "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
         }
         yield f"data: {json.dumps(typed_done_payload, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -790,7 +798,7 @@ def _render_cached_responses_confirmation_stream_output(
                         "id": item_id,
                         "role": "assistant",
                         "status": "completed",
-                        "content": [{"type": "output_text", "text": content, "annotations": []}],
+                        "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
                     }
                 ],
             },
