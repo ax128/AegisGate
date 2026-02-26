@@ -187,7 +187,8 @@ def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(monkeypat
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     assert "hello" in text
-    assert '"code": "upstream_eof_no_done"' in text
+    assert "上游流提前断开" in text
+    assert '"recovered": true' in text
     assert "data: [DONE]" in text
 
 
@@ -257,7 +258,9 @@ def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(monk
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     assert "hello" in text
-    assert '"code": "upstream_eof_no_done"' in text
+    assert "上游流提前断开" in text
+    assert '"recovered": true' in text
+    assert '"type": "response.completed"' in text
     assert "data: [DONE]" in text
 
 
