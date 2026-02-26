@@ -1662,6 +1662,14 @@ async def _execute_chat_stream_once(
                         break
 
                 yield line
+            if not saw_done and stream_end_reason == "upstream_eof_no_done":
+                logger.warning(
+                    "chat stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
+                    ctx.request_id,
+                    chunk_count,
+                    len(stream_window),
+                )
+                yield _stream_done_sse_chunk()
         except RuntimeError as exc:
             detail = str(exc)
             reason = _stream_runtime_reason(detail)
@@ -1940,6 +1948,14 @@ async def _execute_responses_stream_once(
                         break
 
                 yield line
+            if not saw_done and stream_end_reason == "upstream_eof_no_done":
+                logger.warning(
+                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
+                    ctx.request_id,
+                    chunk_count,
+                    len(stream_window),
+                )
+                yield _stream_done_sse_chunk()
         except RuntimeError as exc:
             detail = str(exc)
             reason = _stream_runtime_reason(detail)
