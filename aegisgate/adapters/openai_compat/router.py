@@ -865,12 +865,65 @@ async def _execute_chat_stream_once(
                     block_reason = _stream_block_reason(ctx)
                     if block_reason:
                         debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
-                        ctx.response_disposition = "block"
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
-                        ctx.enforcement_actions.append("stream:block")
-                        logger.info("chat stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
-                        yield _stream_block_sse_chunk(ctx, req.model, block_reason, req.route)
+                        reason, summary = _confirmation_reason_and_summary(ctx)
+                        confirm_id = make_confirm_id()
+                        now_ts = int(time.time())
+                        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
+                            upstream_payload
+                        )
+                        await _store_call(
+                            "save_pending_confirmation",
+                            confirm_id=confirm_id,
+                            session_id=req.session_id,
+                            route=req.route,
+                            request_id=req.request_id,
+                            model=req.model,
+                            upstream_base=upstream_base,
+                            pending_request_payload=pending_payload,
+                            pending_request_hash=pending_payload_hash,
+                            reason=reason,
+                            summary=summary,
+                            created_at=now_ts,
+                            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+                        )
+                        if pending_payload_omitted:
+                            ctx.security_tags.add("pending_payload_omitted")
+                            ctx.enforcement_actions.append("pending:payload_omitted")
+                            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+                        ctx.response_disposition = "block"
+                        ctx.disposition_reasons.append("awaiting_user_confirmation")
+                        ctx.security_tags.add("confirmation_required")
+                        ctx.enforcement_actions.append("confirmation:pending")
+                        confirmation_meta = _flow_confirmation_metadata(
+                            confirm_id=confirm_id,
+                            status="pending",
+                            reason=reason,
+                            summary=summary,
+                            phase=PHASE_RESPONSE,
+                            payload_omitted=pending_payload_omitted,
+                        )
+                        message_text = _build_confirmation_message(
+                            confirm_id=confirm_id,
+                            reason=reason,
+                            summary=summary,
+                            phase=PHASE_RESPONSE,
+                        )
+                        logger.info(
+                            "chat stream requires confirmation request_id=%s confirm_id=%s reason=%s",
+                            ctx.request_id,
+                            confirm_id,
+                            block_reason,
+                        )
+                        yield _stream_confirmation_sse_chunk(
+                            ctx,
+                            req.model,
+                            req.route,
+                            message_text,
+                            confirmation_meta,
+                        )
                         yield _stream_done_sse_chunk()
                         break
 
@@ -1044,12 +1097,65 @@ async def _execute_responses_stream_once(
                     block_reason = _stream_block_reason(ctx)
                     if block_reason:
                         debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
-                        ctx.response_disposition = "block"
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
-                        ctx.enforcement_actions.append("stream:block")
-                        logger.info("responses stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
-                        yield _stream_block_sse_chunk(ctx, req.model, block_reason, req.route)
+                        reason, summary = _confirmation_reason_and_summary(ctx)
+                        confirm_id = make_confirm_id()
+                        now_ts = int(time.time())
+                        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
+                            upstream_payload
+                        )
+                        await _store_call(
+                            "save_pending_confirmation",
+                            confirm_id=confirm_id,
+                            session_id=req.session_id,
+                            route=req.route,
+                            request_id=req.request_id,
+                            model=req.model,
+                            upstream_base=upstream_base,
+                            pending_request_payload=pending_payload,
+                            pending_request_hash=pending_payload_hash,
+                            reason=reason,
+                            summary=summary,
+                            created_at=now_ts,
+                            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+                        )
+                        if pending_payload_omitted:
+                            ctx.security_tags.add("pending_payload_omitted")
+                            ctx.enforcement_actions.append("pending:payload_omitted")
+                            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
+                        ctx.response_disposition = "block"
+                        ctx.disposition_reasons.append("awaiting_user_confirmation")
+                        ctx.security_tags.add("confirmation_required")
+                        ctx.enforcement_actions.append("confirmation:pending")
+                        confirmation_meta = _flow_confirmation_metadata(
+                            confirm_id=confirm_id,
+                            status="pending",
+                            reason=reason,
+                            summary=summary,
+                            phase=PHASE_RESPONSE,
+                            payload_omitted=pending_payload_omitted,
+                        )
+                        message_text = _build_confirmation_message(
+                            confirm_id=confirm_id,
+                            reason=reason,
+                            summary=summary,
+                            phase=PHASE_RESPONSE,
+                        )
+                        logger.info(
+                            "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
+                            ctx.request_id,
+                            confirm_id,
+                            block_reason,
+                        )
+                        yield _stream_confirmation_sse_chunk(
+                            ctx,
+                            req.model,
+                            req.route,
+                            message_text,
+                            confirmation_meta,
+                        )
                         yield _stream_done_sse_chunk()
                         break
 

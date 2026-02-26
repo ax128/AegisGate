@@ -185,3 +185,101 @@ def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_erro
     assert '"code": "gateway_internal_error"' in text
     assert "unexpected parser failure" in text
     assert "data: [DONE]" in text
+
+
+def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"unsafe output"}}]}\n\n'
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_store_call(method, **kwargs):
+        assert method == "save_pending_confirmation"
+        assert kwargs["route"] == "/v1/chat/completions"
+        return None
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_privilege_abuse")
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
+
+    payload = {
+        "request_id": "r-stream-5",
+        "session_id": "s-stream-5",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "回复 是 / yes" in text
+    assert "确认编号：cfm-" in text
+    assert "data: [DONE]" in text
+
+
+def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"r1","output_text":"unsafe output"}\n\n'
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_store_call(method, **kwargs):
+        assert method == "save_pending_confirmation"
+        assert kwargs["route"] == "/v1/responses"
+        return None
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_system_prompt_leak")
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
+
+    payload = {
+        "request_id": "r-stream-6",
+        "session_id": "s-stream-6",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "回复 是 / yes" in text
+    assert "确认编号：cfm-" in text
+    assert "data: [DONE]" in text
