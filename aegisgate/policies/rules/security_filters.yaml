@@ -32,6 +32,78 @@ redaction:
       regex: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
     - id: IBAN
       regex: '\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b'
+    - id: IPV4
+      regex: '\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b'
+    - id: IPV6
+      regex: '\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b'
+    - id: JWT
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: URL_TOKEN_QUERY
+      regex: 'https?://[^\s]+[?&](?:access_token|token|api[_-]?key|key|sig|signature|session(?:id)?|jwt|auth)=[A-Za-z0-9._%\-~+/=]{8,}'
+    - id: COOKIE_SESSION
+      regex: '\b(?:session(?:id)?|sid|set-cookie|csrftoken|xsrf-token)\b\s*[:=]\s*[A-Za-z0-9._%\-]{8,}\b'
+    - id: PRIVATE_KEY_PEM
+      regex: '-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP|PRIVATE) KEY-----'
+    - id: AWS_SECRET_ACCESS_KEY
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: BANK_ACCOUNT
+      regex: '\b(?:bank[_\s-]?account|acct(?:ount)?(?:[_\s-]?no)?|账户(?:号)?)\b\s*[:=]\s*[A-Za-z0-9\-]{8,24}\b'
+    - id: SWIFT_BIC
+      regex: '\b(?:swift|bic)\b\s*[:=]\s*[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'
+    - id: ROUTING_NUMBER
+      regex: '\b(?:routing|aba)\b\s*[:=]\s*\d{9}\b'
+    - id: PASSPORT_NO
+      regex: '\b(?:passport|护照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9]{6,12}\b'
+    - id: DRIVER_LICENSE_NO
+      regex: '\b(?:driver(?:[_\s-]?license)?|驾照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9\-]{5,20}\b'
+    - id: TAX_ID
+      regex: '\b(?:tax[_\s-]?(?:id|no|number)|ein|ssn|tin|税号)\b\s*[:=]\s*[A-Z0-9\-]{6,20}\b'
+    - id: MAC_ADDRESS
+      regex: '\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
+    - id: IMEI
+      regex: '\b(?:imei|设备imei)\b\s*[:=]\s*\d{15}\b'
+    - id: IMSI
+      regex: '\b(?:imsi|subscriber[_\s-]?id)\b\s*[:=]\s*\d{14,16}\b'
+    - id: DEVICE_SERIAL
+      regex: '\b(?:serial(?:[_\s-]?number)?|sn|设备序列号)\b\s*[:=]\s*[A-Za-z0-9\-]{6,40}\b'
+    - id: CRYPTO_BTC_ADDR
+      regex: '\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b'
+    - id: CRYPTO_ETH_ADDR
+      regex: '\b0x[a-fA-F0-9]{40}\b'
+    - id: CRYPTO_SOL_ADDR
+      regex: '\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
+    - id: CRYPTO_TRON_ADDR
+      regex: '\bT[1-9A-HJ-NP-Za-km-z]{33}\b'
+    - id: CRYPTO_WIF_KEY
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: CRYPTO_XPRV
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: CRYPTO_XPUB
+      regex: '\bxpub[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: CRYPTO_SEED_PHRASE
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: EXCHANGE_API_SECRET
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
+    - id: NAME_FIELD
+      regex: '(?i)\b(?:name|full[_\-\s]?name|real[_\-\s]?name|patient[_\-\s]?name|姓名|真实姓名)\b\s*[:=]\s*[^\n,;]{2,60}'
+    - id: GEO_FIELD
+      regex: '(?i)\b(?:address|street|city|district|county|province|state|zip|zipcode|postal[_\-\s]?code|gps|lat(?:itude)?|lon(?:gitude)?|地址|省|市|区|县|街道|门牌|邮编)\b\s*[:=]\s*[^\n,;]{3,120}'
+    - id: DATE_EXACT_FIELD
+      regex: '(?i)\b(?:dob|birth(?:date)?|admission(?:[_\-\s]?date)?|discharge(?:[_\-\s]?date)?|death(?:[_\-\s]?date)?|生日|出生日期|入院日期|出院日期|死亡日期)\b\s*[:=]\s*(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})'
+    - id: FAX_FIELD
+      regex: '(?i)\b(?:fax|传真)\b\s*[:=]\s*(?:\+?\d[\d\-\s]{6,20})'
+    - id: MEDICAL_RECORD_NO
+      regex: '(?i)\b(?:mrn|medical[_\-\s]?record(?:[_\-\s]?(?:id|no|number))?|病历(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: HEALTH_PLAN_BENEFICIARY_NO
+      regex: '(?i)\b(?:member[_\-\s]?id|beneficiary[_\-\s]?(?:id|no|number)|health[_\-\s]?plan[_\-\s]?(?:id|no|number)|医保(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: CERT_LICENSE_NO
+      regex: '(?i)\b(?:cert(?:ificate)?[_\-\s]?(?:id|no|number)|license[_\-\s]?(?:id|no|number)|执照(?:号|编号)|证书(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: VEHICLE_VIN
+      regex: '(?i)\b(?:vin|vehicle[_\-\s]?id|车辆识别码)\b\s*[:=]\s*[A-HJ-NPR-Z0-9]{17}\b'
+    - id: VEHICLE_PLATE
+      regex: '(?i)\b(?:plate|license[_\-\s]?plate|车牌)\b\s*[:=]\s*[A-Za-z0-9\u4e00-\u9fff\-]{5,12}'
+    - id: BIOMETRIC_TEMPLATE
+      regex: '(?i)\b(?:fingerprint|faceprint|voiceprint|iris|retina|biometric|指纹|面纹|声纹|虹膜|生物特征)\b\s*[:=]\s*[A-Za-z0-9+/=._\-]{8,}'
 
 restoration:
   placeholder_regex: '\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}'
@@ -405,10 +477,10 @@ request_sanitizer:
   strong_intent_patterns:
     - id: secret_exfiltration_en
       category: secret_exfiltration
-      regex: '(reveal|show|dump|print|leak|output).*(system\s+prompt|developer\s+message|api\s*key|token|cookie|password|private\s*key|ssh\s*key)'
+      regex: '(reveal|show|dump|print|leak|output|export).*(system\s+prompt|developer\s+message|api\s*key|token|cookie|password|private\s*key|ssh\s*key|seed\s*phrase|mnemonic|wallet\s*key|xprv|exchange\s*secret)'
     - id: secret_exfiltration_zh
       category: secret_exfiltration
-      regex: '(泄露|显示|输出|打印|给我|提供).*(系统提示词|开发者消息|密钥|口令|密码|令牌|token|cookie|私钥|ssh\s*key)'
+      regex: '(泄露|显示|输出|打印|给我|提供|导出).*(系统提示词|开发者消息|密钥|口令|密码|令牌|token|cookie|私钥|ssh\s*key|助记词|种子短语|钱包密钥|交易所密钥)'
     - id: privilege_escalation_en
       category: privilege_escalation
       regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|config|log|database)|((execute|run).*(shell|powershell|cmd|bash))|(access|scan).*(intranet|internal\s+network|server|database)'
@@ -434,6 +506,20 @@ request_sanitizer:
       regex: '-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----'
     - id: cookie_header
       regex: '\bcookie\s*:\s*[^;\n]{8,}'
+    - id: jwt_token
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: aws_secret_access_key
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: crypto_private_key_wif
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: crypto_xprv
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: crypto_seed_phrase
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: exchange_secret
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
+    - id: url_token_query
+      regex: 'https?://[^\s]+[?&](?:access_token|token|api[_-]?key|key|sig|signature|session(?:id)?|jwt|auth)=[A-Za-z0-9._%\-~+/=]{8,}'
   shape_anomaly_patterns:
     - id: dense_base64
       regex: '[A-Za-z0-9+/]{200,}={0,2}'
@@ -559,6 +645,18 @@ post_restore_guard:
       regex: '\bghp_[A-Za-z0-9]{20,}\b'
     - id: private_key_block
       regex: '-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----'
+    - id: jwt_token
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: aws_secret_access_key
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: crypto_private_key_wif
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: crypto_xprv
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: crypto_seed_phrase
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: exchange_secret
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
   replacement: '[REDACTED:restored-secret]'
   block_message: '[AegisGate] response blocked by security policy.'
 
