@@ -106,6 +106,10 @@ _PENDING_FORMAT_CHAT_STREAM_TEXT = "chat_stream_text"
 _PENDING_FORMAT_RESPONSES_STREAM_TEXT = "responses_stream_text"
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
+_SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
+    r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
+    re.IGNORECASE,
+)
 _pipeline_local = threading.local()
 
 
@@ -302,7 +306,7 @@ def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_mes
         if _is_structured_content(original_input):
             upstream_payload["input"] = _sanitize_responses_input_for_upstream(original_input)
         else:
-            upstream_payload["input"] = sanitized_req_messages[0].content
+            upstream_payload["input"] = _strip_system_exec_runtime_lines(str(sanitized_req_messages[0].content))
     return upstream_payload
 
 
@@ -316,6 +320,55 @@ def _looks_like_gateway_confirmation_text(text: str) -> bool:
         or ("safety confirmation (high-risk action)" in lowered and "confirmation id:" in lowered)
         or ("放行（复制这一行）：yes cfm-" in body and "取消（复制这一行）：no cfm-" in body)
     )
+
+
+def _strip_system_exec_runtime_lines(text: str) -> str:
+    body = str(text or "")
+    if not body:
+        return ""
+    lines = body.splitlines()
+    kept = [line for line in lines if not _SYSTEM_EXEC_RUNTIME_LINE_RE.match(line)]
+    return "\n".join(kept).strip()
+
+
+def _sanitize_responses_user_content_for_upstream(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_system_exec_runtime_lines(value)
+    if isinstance(value, list):
+        out: list[Any] = []
+        for part in value:
+            if isinstance(part, str):
+                cleaned = _strip_system_exec_runtime_lines(part)
+                if cleaned:
+                    out.append(cleaned)
+                continue
+            if isinstance(part, dict):
+                copied = dict(part)
+                text = copied.get("text")
+                if isinstance(text, str):
+                    cleaned_text = _strip_system_exec_runtime_lines(text)
+                    if cleaned_text:
+                        copied["text"] = cleaned_text
+                    else:
+                        copied.pop("text", None)
+                out.append(copied)
+                continue
+            out.append(part)
+        return out
+    if isinstance(value, dict):
+        copied = dict(value)
+        text = copied.get("text")
+        if isinstance(text, str):
+            cleaned_text = _strip_system_exec_runtime_lines(text)
+            if cleaned_text:
+                copied["text"] = cleaned_text
+            else:
+                copied.pop("text", None)
+        content = copied.get("content")
+        if isinstance(content, str):
+            copied["content"] = _strip_system_exec_runtime_lines(content)
+        return copied
+    return value
 
 
 def _sanitize_responses_input_for_upstream(value: Any) -> Any:
@@ -333,6 +386,12 @@ def _sanitize_responses_input_for_upstream(value: Any) -> Any:
         return out_list
 
     if isinstance(value, dict):
+        node_type = str(value.get("type", "")).strip().lower()
+        if node_type == "input_text" and isinstance(value.get("text"), str):
+            copied = dict(value)
+            copied["text"] = _strip_system_exec_runtime_lines(str(value.get("text", "")))
+            return copied
+
         role = str(value.get("role", "")).strip().lower()
         if role in {"assistant", "system", "developer"}:
             content = value.get("content")
@@ -351,6 +410,10 @@ def _sanitize_responses_input_for_upstream(value: Any) -> Any:
                 copied = dict(value)
                 copied["content"] = filtered_parts
                 return copied
+        if role == "user":
+            copied = dict(value)
+            copied["content"] = _sanitize_responses_user_content_for_upstream(copied.get("content"))
+            return copied
         return value
 
     return value
@@ -683,7 +746,7 @@ def _extract_chat_user_text(payload: dict[str, Any]) -> str:
 
 def _extract_latest_user_text_from_responses_input(raw_input: Any) -> str:
     if isinstance(raw_input, str):
-        return raw_input.strip()
+        return _strip_system_exec_runtime_lines(raw_input)
     if isinstance(raw_input, list):
         for item in reversed(raw_input):
             if not isinstance(item, dict):
@@ -691,21 +754,21 @@ def _extract_latest_user_text_from_responses_input(raw_input: Any) -> str:
             if str(item.get("role", "")).strip().lower() != "user":
                 continue
             if "content" in item:
-                return _flatten_text(item.get("content")).strip()
-            return _flatten_text(item).strip()
-        return _flatten_text(raw_input).strip()
+                return _strip_system_exec_runtime_lines(_flatten_text(item.get("content")))
+            return _strip_system_exec_runtime_lines(_flatten_text(item))
+        return _strip_system_exec_runtime_lines(_flatten_text(raw_input))
     if isinstance(raw_input, dict):
         role = str(raw_input.get("role", "")).strip().lower()
         if role == "user":
             if "content" in raw_input:
-                return _flatten_text(raw_input.get("content")).strip()
-            return _flatten_text(raw_input).strip()
+                return _strip_system_exec_runtime_lines(_flatten_text(raw_input.get("content")))
+            return _strip_system_exec_runtime_lines(_flatten_text(raw_input))
         if "input" in raw_input:
             return _extract_latest_user_text_from_responses_input(raw_input.get("input"))
         if "content" in raw_input:
-            return _flatten_text(raw_input.get("content")).strip()
-        return _flatten_text(raw_input).strip()
-    return str(raw_input or "").strip()
+            return _strip_system_exec_runtime_lines(_flatten_text(raw_input.get("content")))
+        return _strip_system_exec_runtime_lines(_flatten_text(raw_input))
+    return _strip_system_exec_runtime_lines(str(raw_input or ""))
 
 
 def _extract_responses_user_text(payload: dict[str, Any]) -> str:

@@ -53,6 +53,10 @@ REASON_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "高风险响应",
         "检测到高风险指令/投毒信号",
     ),
+    "response_high_risk_command": (
+        "高风险命令响应",
+        "检测到高风险命令输出信号",
+    ),
     "response_system_prompt_leak": (
         "疑似系统提示泄露",
         "触发信号：response_system_prompt_leak",

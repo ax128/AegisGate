@@ -14,6 +14,10 @@ _IMAGE_PLACEHOLDER = "[IMAGE_CONTENT]"
 _NON_TEXT_PLACEHOLDER = "[NON_TEXT_PART]"
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _BASE64_LIKE_RE = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
+_SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
+    r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
+    re.IGNORECASE,
+)
 
 
 def _cap_text(text: str, limit: int) -> str:
@@ -72,9 +76,18 @@ def _flatten_content(content: object) -> str:
     return str(content)
 
 
+def _strip_system_exec_runtime_lines(text: str) -> str:
+    body = str(text or "")
+    if not body:
+        return ""
+    lines = body.splitlines()
+    kept = [line for line in lines if not _SYSTEM_EXEC_RUNTIME_LINE_RE.match(line)]
+    return "\n".join(kept).strip()
+
+
 def _extract_latest_user_text_from_responses_input(raw_input: object) -> str:
     if isinstance(raw_input, str):
-        return raw_input.strip()
+        return _strip_system_exec_runtime_lines(raw_input)
 
     if isinstance(raw_input, list):
         for item in reversed(raw_input):
@@ -83,23 +96,23 @@ def _extract_latest_user_text_from_responses_input(raw_input: object) -> str:
             if str(item.get("role", "")).strip().lower() != "user":
                 continue
             if "content" in item:
-                return _flatten_content(item.get("content", "")).strip()
-            return _flatten_content(item).strip()
-        return _flatten_content(raw_input).strip()
+                return _strip_system_exec_runtime_lines(_flatten_content(item.get("content", "")))
+            return _strip_system_exec_runtime_lines(_flatten_content(item))
+        return _strip_system_exec_runtime_lines(_flatten_content(raw_input))
 
     if isinstance(raw_input, dict):
         role = str(raw_input.get("role", "")).strip().lower()
         if role == "user":
             if "content" in raw_input:
-                return _flatten_content(raw_input.get("content", "")).strip()
-            return _flatten_content(raw_input).strip()
+                return _strip_system_exec_runtime_lines(_flatten_content(raw_input.get("content", "")))
+            return _strip_system_exec_runtime_lines(_flatten_content(raw_input))
         if "input" in raw_input:
             return _extract_latest_user_text_from_responses_input(raw_input.get("input"))
         if "content" in raw_input:
-            return _flatten_content(raw_input.get("content", "")).strip()
-        return _flatten_content(raw_input).strip()
+            return _strip_system_exec_runtime_lines(_flatten_content(raw_input.get("content", "")))
+        return _strip_system_exec_runtime_lines(_flatten_content(raw_input))
 
-    return str(raw_input or "").strip()
+    return _strip_system_exec_runtime_lines(str(raw_input or ""))
 
 
 def to_internal_chat(payload: dict) -> InternalRequest:

@@ -24,6 +24,12 @@ def test_stream_block_reason_uses_response_disposition_first():
     assert _stream_block_reason(ctx) == "response_sanitized"
 
 
+def test_stream_block_reason_high_risk_command_tag_requires_confirmation():
+    ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/chat/completions")
+    ctx.security_tags.add("response_anomaly_high_risk_command")
+    assert _stream_block_reason(ctx) == "response_high_risk_command"
+
+
 def test_stream_block_sse_chunk_for_responses_route():
     ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/responses")
     chunk = _stream_block_sse_chunk(ctx, "test-model", "response_high_risk", "/v1/responses")
