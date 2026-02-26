@@ -151,6 +151,39 @@ def test_execute_chat_stream_returns_error_chunk_when_upstream_runtime_error(mon
     assert "data: [DONE]" in text
 
 
+def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"hello"}}]}\n\n'
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+
+    payload = {
+        "request_id": "r-stream-chat-eof-1",
+        "session_id": "s-stream-chat-eof-1",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "hello" in text
+    assert "data: [DONE]" in text
+
+
 def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_error(monkeypatch):
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
@@ -184,6 +217,39 @@ def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_erro
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     assert '"code": "gateway_internal_error"' in text
     assert "unexpected parser failure" in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"r1","output_text":"hello"}\n\n'
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+
+    payload = {
+        "request_id": "r-stream-resp-eof-1",
+        "session_id": "s-stream-resp-eof-1",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "hello" in text
     assert "data: [DONE]" in text
 
 
