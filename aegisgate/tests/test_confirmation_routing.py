@@ -158,6 +158,14 @@ def test_parse_explicit_confirmation_command_accepts_bound_token_with_em_dash():
     assert confirm_id == "cfm-abc123def456"
 
 
+def test_has_explicit_confirmation_keyword_ignores_gateway_template_lines():
+    text = (
+        "放行（复制这一行）：yes cfm-abc123def456 act-bada1fe8dd\n"
+        "Approve (copy this line): yes cfm-abc123def456 act-bada1fe8dd"
+    )
+    assert openai_router._has_explicit_confirmation_keyword(text) is False
+
+
 @pytest.mark.asyncio
 async def test_chat_yes_without_pending_is_forwarded(monkeypatch):
     async def fake_execute_chat_once(**kwargs):
@@ -264,7 +272,7 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
+async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypatch):
     confirm_id = "cfm-route000000"
     reason = "高风险响应"
     summary = "route mismatch"
@@ -281,11 +289,7 @@ async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
             "pending_request_payload": {},
         }
 
-    async def fake_execute_chat_once(**kwargs):
-        return {"ok": True}
-
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
-    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -303,7 +307,10 @@ async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
         request,
     )
 
-    assert result == {"ok": True}
+    assert isinstance(result, dict)
+    content = result["choices"][0]["message"]["content"]
+    assert "当前接口不匹配" in content
+    assert result["aegisgate"]["confirmation"]["status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -353,7 +360,7 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_missing_action_token_is_forwarded(monkeypatch):
+async def test_chat_confirmation_missing_action_token_returns_visible_message(monkeypatch):
     confirm_id = "cfm-a1b2c3d4e5f6"
     reason = "高风险响应"
     summary = "action binding"
@@ -370,11 +377,7 @@ async def test_chat_confirmation_missing_action_token_is_forwarded(monkeypatch):
             "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
         }
 
-    async def fake_execute_chat_once(**kwargs):
-        return {"ok": True}
-
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
-    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -392,14 +395,17 @@ async def test_chat_confirmation_missing_action_token_is_forwarded(monkeypatch):
         request,
     )
 
-    assert result == {"ok": True}
+    assert isinstance(result, dict)
+    content = result["choices"][0]["message"]["content"]
+    assert "缺少动作摘要码" in content
+    assert result["aegisgate"]["confirmation"]["status"] == "pending"
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_wrong_action_token_is_forwarded(monkeypatch):
-    confirm_id = "cfm-abcdef123456"
+async def test_chat_pending_with_copy_line_prefix_bypasses_confirmation_and_forwards(monkeypatch):
+    confirm_id = "cfm-abc123def456"
     reason = "高风险响应"
-    summary = "action mismatch"
+    summary = "copy-line bypass"
 
     def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
         return {
@@ -427,6 +433,49 @@ async def test_chat_confirmation_wrong_action_token_is_forwarded(monkeypatch):
     )
     result = await openai_router.chat_completions(
         {
+            "request_id": "chat-confirm-copyline-1",
+            "session_id": "s-confirm-copyline-1",
+            "model": "gpt-test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"放行（复制这一行）：yes {confirm_id} act-bada1fe8dd",
+                }
+            ],
+        },
+        request,
+    )
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_chat_confirmation_wrong_action_token_returns_visible_message(monkeypatch):
+    confirm_id = "cfm-abcdef123456"
+    reason = "高风险响应"
+    summary = "action mismatch"
+
+    def fake_resolve_pending_confirmation(_payload, _user_text, _now_ts, *, expected_route, tenant_id):
+        return {
+            "confirm_id": confirm_id,
+            "route": expected_route,
+            "reason": reason,
+            "summary": summary,
+            "status": "pending",
+            "expires_at": 9999999999,
+            "pending_request_hash": "hash",
+            "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
+        }
+
+    monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    result = await openai_router.chat_completions(
+        {
             "request_id": "chat-confirm-action-2",
             "session_id": "s-confirm-action-2",
             "model": "gpt-test",
@@ -435,7 +484,10 @@ async def test_chat_confirmation_wrong_action_token_is_forwarded(monkeypatch):
         request,
     )
 
-    assert result == {"ok": True}
+    assert isinstance(result, dict)
+    content = result["choices"][0]["message"]["content"]
+    assert "动作摘要码不匹配" in content
+    assert result["aegisgate"]["confirmation"]["status"] == "pending"
 
 
 def test_resolve_pending_confirmation_rejects_cross_tenant_confirm_id(monkeypatch):
@@ -595,10 +647,10 @@ async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypat
     assert result.get("aegisgate", {}).get("confirmation", {}).get("status") == "executed"
 
 
-def test_extract_decision_before_confirm_id_prefers_prefix_command():
+def test_extract_decision_before_confirm_id_ignores_gateway_template_prefix():
     confirm_id = "cfm-40ca0cacd5d5"
     text = f"放行（复制这一行）：yes {confirm_id}\n取消（复制这一行）：no {confirm_id}\n"
-    assert openai_router._extract_decision_before_confirm_id(text, confirm_id) == "no"
+    assert openai_router._extract_decision_before_confirm_id(text, confirm_id) == "unknown"
 
 
 def test_resolve_pending_decision_uses_id_context_when_base_ambiguous():

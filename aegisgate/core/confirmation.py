@@ -85,7 +85,7 @@ def parse_confirmation_decision(text: str) -> ConfirmationDecision:
 
 
 def confirmation_template(confirm_id: str, reason: str, summary: str, action_token: str = "") -> str:
-    token_suffix = f" {action_token}" if action_token else ""
+    confirm_bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
     action_line_cn = f"动作摘要码：{action_token}\n" if action_token else ""
     action_line_en = f"Action Bind Token: {action_token}\n" if action_token else ""
     return (
@@ -94,16 +94,16 @@ def confirmation_template(confirm_id: str, reason: str, summary: str, action_tok
         "⚠️ 安全确认（高风险操作）\n"
         "根据上述原因，本次请求已被网关暂停执行。请确认后再决定是否放行。\n\n"
         "请单独发送以下可复制消息之一（不要附加其它内容）：\n\n"
-        f"放行（复制这一行）：yes {confirm_id}{token_suffix}\n\n"
-        f"取消（复制这一行）：no {confirm_id}{token_suffix}\n\n"
+        f"放行（复制这一行）：yes {confirm_bind}\n\n"
+        f"取消（复制这一行）：no {confirm_bind}\n\n"
         f"确认编号：{confirm_id}\n"
         f"{action_line_cn}"
         "（请不要提供密码、密钥、token、cookie 等敏感信息。）\n\n"
         "⚠️ Safety Confirmation (High-Risk Action)\n"
         "For the reason above, this request has been paused by the gateway. Confirm to approve or cancel.\n\n"
         "Send ONLY one standalone copy-ready line below:\n\n"
-        f"Approve (copy this line): yes {confirm_id}{token_suffix}\n\n"
-        f"Cancel (copy this line): no {confirm_id}{token_suffix}\n\n"
+        f"Approve (copy this line): yes {confirm_bind}\n\n"
+        f"Cancel (copy this line): no {confirm_bind}\n\n"
         f"Confirmation ID: {confirm_id}\n"
         f"{action_line_en}"
         "(Do not provide passwords, API keys, tokens, or cookies.)"

@@ -32,3 +32,11 @@ def test_confirmation_template_contains_copy_ready_commands():
     text = confirmation_template(confirm_id, reason="test", summary="summary")
     assert f"yes {confirm_id}" in text
     assert f"no {confirm_id}" in text
+
+
+def test_confirmation_template_with_action_token_uses_bound_pair():
+    confirm_id = "cfm-abc123def456"
+    action_token = "act-bada1fe8dd"
+    text = confirmation_template(confirm_id, reason="test", summary="summary", action_token=action_token)
+    assert f"yes {confirm_id}--{action_token}" in text
+    assert f"no {confirm_id}--{action_token}" in text

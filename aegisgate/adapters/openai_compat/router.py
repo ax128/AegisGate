@@ -300,10 +300,60 @@ def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_mes
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
-            upstream_payload["input"] = original_input
+            upstream_payload["input"] = _sanitize_responses_input_for_upstream(original_input)
         else:
             upstream_payload["input"] = sanitized_req_messages[0].content
     return upstream_payload
+
+
+def _looks_like_gateway_confirmation_text(text: str) -> bool:
+    body = str(text or "")
+    if not body:
+        return False
+    lowered = body.lower()
+    return (
+        ("⚠️ 安全确认（高风险操作）" in body and "确认编号：" in body)
+        or ("safety confirmation (high-risk action)" in lowered and "confirmation id:" in lowered)
+        or ("放行（复制这一行）：yes cfm-" in body and "取消（复制这一行）：no cfm-" in body)
+    )
+
+
+def _sanitize_responses_input_for_upstream(value: Any) -> Any:
+    """
+    Remove gateway-generated confirmation templates from structured responses history
+    before forwarding to upstream, to avoid model echo loops.
+    """
+    if isinstance(value, list):
+        out_list: list[Any] = []
+        for item in value:
+            sanitized = _sanitize_responses_input_for_upstream(item)
+            if sanitized is None:
+                continue
+            out_list.append(sanitized)
+        return out_list
+
+    if isinstance(value, dict):
+        role = str(value.get("role", "")).strip().lower()
+        if role in {"assistant", "system", "developer"}:
+            content = value.get("content")
+            if isinstance(content, str) and _looks_like_gateway_confirmation_text(content):
+                return None
+            if isinstance(content, list):
+                filtered_parts: list[Any] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if isinstance(text, str) and _looks_like_gateway_confirmation_text(text):
+                            continue
+                    filtered_parts.append(part)
+                if not filtered_parts:
+                    return None
+                copied = dict(value)
+                copied["content"] = filtered_parts
+                return copied
+        return value
+
+    return value
 
 
 def _extract_generic_analysis_text(value: Any) -> str:
@@ -889,6 +939,10 @@ def _extract_decision_before_confirm_id(text: str, confirm_id: str) -> str:
         return "unknown"
     line_start = source.rfind("\n", 0, idx) + 1
     prefix_in_line = source[line_start:idx]
+    marker_scope = prefix_in_line.lower()
+    template_markers = ("copy this line", "复制这一行")
+    if any(marker in marker_scope for marker in template_markers):
+        return "unknown"
     decision = parse_confirmation_decision(prefix_in_line).value
     if decision in {"yes", "no"}:
         return decision
@@ -897,6 +951,20 @@ def _extract_decision_before_confirm_id(text: str, confirm_id: str) -> str:
     if decision in {"yes", "no"}:
         return decision
     return "unknown"
+
+
+def _has_explicit_confirmation_keyword(text: str) -> bool:
+    lines = [line.strip() for line in str(text or "").splitlines() if line and line.strip()]
+    if not lines:
+        return False
+    template_markers = ("copy this line", "复制这一行")
+    for line in lines[-6:]:
+        lowered = line.lower()
+        if any(marker in lowered for marker in template_markers):
+            continue
+        if re.search(r"\b(?:yes|y|no|n)\b", line, flags=re.IGNORECASE):
+            return True
+    return False
 
 
 def _resolve_pending_decision(user_text: str, pending_confirm_id: str, base_decision: str) -> tuple[str, str]:
@@ -1109,19 +1177,20 @@ def _confirmation_execute_failed_text(confirm_id: str) -> str:
 
 
 def _confirmation_action_token_required_text(confirm_id: str, action_token: str) -> str:
+    bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
     return (
         "确认消息缺少动作摘要码，无法校验放行目标。\n"
         f"确认编号：{confirm_id}\n"
         f"动作摘要码：{action_token}\n\n"
         "请单独发送以下任一可复制消息：\n"
-        f"yes {confirm_id} {action_token}\n"
-        f"no {confirm_id} {action_token}\n\n"
+        f"yes {bind}\n"
+        f"no {bind}\n\n"
         "Missing action bind token in confirmation message.\n"
         f"Confirmation ID: {confirm_id}\n"
         f"Action Bind Token: {action_token}\n"
         "Send one standalone line:\n"
-        f"yes {confirm_id} {action_token}\n"
-        f"no {confirm_id} {action_token}"
+        f"yes {bind}\n"
+        f"no {bind}"
     )
 
 
@@ -1162,9 +1231,9 @@ def _confirmation_command_requirements_text(
     action_token: str = "",
 ) -> str:
     if confirm_id:
-        token_suffix = f" {action_token}" if action_token else ""
-        yes_line = f"yes {confirm_id}{token_suffix}"
-        no_line = f"no {confirm_id}{token_suffix}"
+        bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
+        yes_line = f"yes {bind}"
+        no_line = f"no {bind}"
         id_line_cn = f"确认编号：{confirm_id}\n"
         id_line_en = f"Confirmation ID: {confirm_id}\n"
         token_line_cn = f"动作摘要码：{action_token}\n" if action_token else ""
@@ -2785,9 +2854,57 @@ async def chat_completions(payload: dict, request: Request):
         elif decision_value not in {"yes", "no"}:
             invalid_reason = f"unsupported_decision_{decision_value}"
         if invalid_reason:
+            explicit_keyword = _has_explicit_confirmation_keyword(user_text)
+            if explicit_keyword:
+                logger.info(
+                    "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=false pending_retained=true",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    req_preview.route,
+                    confirm_id,
+                    decision_value,
+                    decision_source,
+                    invalid_reason,
+                    bool(provided_action_token),
+                    bool(provided_action_token and provided_action_token == expected_action_token),
+                )
+                if invalid_reason == "missing_action_token":
+                    invalid_text = _confirmation_action_token_required_text(confirm_id, expected_action_token)
+                elif invalid_reason == "action_token_mismatch":
+                    invalid_text = _confirmation_action_token_mismatch_text(
+                        confirm_id, provided_action_token, expected_action_token
+                    )
+                elif invalid_reason == "route_mismatch":
+                    invalid_text = _confirmation_route_mismatch_text(confirm_id, pending_route, req_preview.route)
+                else:
+                    invalid_text = _confirmation_command_requirements_text(
+                        detail=invalid_reason,
+                        confirm_id=confirm_id,
+                        action_token=expected_action_token,
+                    )
+                invalid_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=invalid_text,
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    invalid_resp,
+                    confirm_id=confirm_id,
+                    status="pending",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(invalid_resp)
+
             confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
-                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true",
+                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
@@ -2798,6 +2915,7 @@ async def chat_completions(payload: dict, request: Request):
                 invalid_reason,
                 bool(provided_action_token),
                 bool(provided_action_token and provided_action_token == expected_action_token),
+                explicit_keyword,
             )
         elif decision_value == "no":
             changed = await _try_transition_pending_status(
@@ -3233,9 +3351,57 @@ async def responses(payload: dict, request: Request):
         elif decision_value not in {"yes", "no"}:
             invalid_reason = f"unsupported_decision_{decision_value}"
         if invalid_reason:
+            explicit_keyword = _has_explicit_confirmation_keyword(user_text)
+            if explicit_keyword:
+                logger.info(
+                    "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=false pending_retained=true",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    req_preview.route,
+                    confirm_id,
+                    decision_value,
+                    decision_source,
+                    invalid_reason,
+                    bool(provided_action_token),
+                    bool(provided_action_token and provided_action_token == expected_action_token),
+                )
+                if invalid_reason == "missing_action_token":
+                    invalid_text = _confirmation_action_token_required_text(confirm_id, expected_action_token)
+                elif invalid_reason == "action_token_mismatch":
+                    invalid_text = _confirmation_action_token_mismatch_text(
+                        confirm_id, provided_action_token, expected_action_token
+                    )
+                elif invalid_reason == "route_mismatch":
+                    invalid_text = _confirmation_route_mismatch_text(confirm_id, pending_route, req_preview.route)
+                else:
+                    invalid_text = _confirmation_command_requirements_text(
+                        detail=invalid_reason,
+                        confirm_id=confirm_id,
+                        action_token=expected_action_token,
+                    )
+                invalid_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=invalid_text,
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    invalid_resp,
+                    confirm_id=confirm_id,
+                    status="pending",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(invalid_resp)
+
             confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
-                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true",
+                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
@@ -3246,6 +3412,7 @@ async def responses(payload: dict, request: Request):
                 invalid_reason,
                 bool(provided_action_token),
                 bool(provided_action_token and provided_action_token == expected_action_token),
+                explicit_keyword,
             )
         elif decision_value == "no":
             changed = await _try_transition_pending_status(
