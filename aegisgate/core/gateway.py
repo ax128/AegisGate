@@ -251,6 +251,31 @@ _FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
 )
 
 
+def _sanitize_public_host(raw_host: str) -> str:
+    host = (raw_host or "").strip()
+    if not host:
+        return f"127.0.0.1:{settings.port}"
+    if re.search(r"[^A-Za-z0-9.\-:\[\]]", host):
+        return f"127.0.0.1:{settings.port}"
+    lowered = host.lower()
+    if lowered in {"0.0.0.0", "::", "[::]"}:
+        return f"127.0.0.1:{settings.port}"
+    if lowered.startswith("0.0.0.0:"):
+        return f"127.0.0.1:{host.split(':', 1)[1]}"
+    if lowered.startswith("[::]:"):
+        return f"127.0.0.1:{host.split(':', 1)[1]}"
+    return host
+
+
+def _public_base_url(request: Request) -> str:
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme or "http"
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host_header = (request.headers.get("host") or "").strip()
+    host = _sanitize_public_host(forwarded_host or host_header or f"{settings.host}:{settings.port}")
+    return f"{scheme}://{host}"
+
+
 @app.post("/__gw__/register")
 async def gw_register(request: Request) -> JSONResponse:
     """一次性注册：返回短 token 与 baseUrl，映射写入 config/gw_tokens.json。"""
@@ -276,7 +301,7 @@ async def gw_register(request: Request) -> JSONResponse:
         )
     upstream_base_normalized = upstream_base.rstrip("/")
     token, already_registered = gw_tokens_register(upstream_base_normalized, gateway_key)
-    base_url = f"http://{settings.host}:{settings.port}/v1/__gw__/t/{token}"
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     if already_registered:
         return JSONResponse(
             content={
@@ -321,7 +346,7 @@ async def gw_lookup(request: Request) -> JSONResponse:
                 "detail": "该 upstream_base + gateway_key 未注册，请先调用 /__gw__/register 注册。",
             },
         )
-    base_url = f"http://{settings.host}:{settings.port}/v1/__gw__/t/{token}"
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     return JSONResponse(content={"token": token, "baseUrl": base_url})
 
 
