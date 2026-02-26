@@ -732,9 +732,20 @@ def _render_cached_responses_confirmation_stream_output(
         "summary": summary,
         "payload_omitted": False,
     }
+    logger.info(
+        "confirmation stream replay responses request_id=%s confirm_id=%s events=%s content_chars=%s",
+        request_id,
+        confirm_id,
+        "response.chunk,response.output_text.delta,response.output_text.done,response.completed,[DONE]",
+        len(content),
+    )
 
     def _generator() -> Generator[bytes, None, None]:
-        payload = {
+        # 兼容两类客户端：
+        # 1) 仅识别 legacy response.chunk
+        # 2) 严格识别 OpenAI Responses typed events（output_text.delta/done/completed）
+        item_id = f"msg_{(request_id or 'resp')[:12]}"
+        legacy_payload = {
             "id": request_id,
             "object": "response.chunk",
             "model": model,
@@ -742,7 +753,50 @@ def _render_cached_responses_confirmation_stream_output(
             "delta": content,
             "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
         }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield f"data: {json.dumps(legacy_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        typed_delta_payload = {
+            "type": "response.output_text.delta",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": content,
+            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
+        }
+        yield f"data: {json.dumps(typed_delta_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        typed_done_payload = {
+            "type": "response.output_text.done",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": content,
+            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
+        }
+        yield f"data: {json.dumps(typed_done_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        completed_payload = {
+            "type": "response.completed",
+            "response": {
+                "id": request_id,
+                "object": "response",
+                "model": model,
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": item_id,
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": content, "annotations": []}],
+                    }
+                ],
+            },
+            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
+        }
+        yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n".encode("utf-8")
         yield _stream_done_sse_chunk()
 
     return _build_streaming_response(_generator())
