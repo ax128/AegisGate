@@ -761,7 +761,7 @@ def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
     if not lines:
         return "unknown", ""
     cmd_re = re.compile(
-        r"^\s*(?P<cmd>yes|y|confirm|no|n|cancel|是|确认|同意|继续|执行|好的|否|取消|拒绝|停止)\b(?P<tail>.*)$",
+        r"^\s*(?P<cmd>yes|y|no|n)\b(?P<tail>.*)$",
         re.IGNORECASE,
     )
     for raw in reversed(lines[-4:]):
@@ -772,10 +772,17 @@ def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
         cmd = str(match.group("cmd") or "").lower()
         tail = str(match.group("tail") or "")
         confirm_id = _extract_confirm_id(f"{cmd} {tail}")
-        if cmd in {"yes", "y", "confirm", "是", "确认", "同意", "继续", "执行", "好的"}:
+        if cmd in {"yes", "y"}:
             return "yes", confirm_id
-        if cmd in {"no", "n", "cancel", "否", "取消", "拒绝", "停止"}:
+        if cmd in {"no", "n"}:
             return "no", confirm_id
+    return "unknown", ""
+
+
+def _parse_explicit_confirmation_command(text: str) -> tuple[str, str]:
+    decision, confirm_id = _extract_tail_confirmation_command(text)
+    if decision in {"yes", "no"}:
+        return decision, confirm_id
     return "unknown", ""
 
 
@@ -888,14 +895,12 @@ def _resolve_pending_confirmation(
     expected_route: str,
     tenant_id: str,
 ) -> dict[str, Any] | None:
-    confirm_id = _extract_confirm_id(user_text)
+    explicit_decision, explicit_confirm_id = _parse_explicit_confirmation_command(user_text)
+    if explicit_decision not in {"yes", "no"}:
+        return None
+    confirm_id = explicit_confirm_id
     if not confirm_id:
-        # 兼容简化确认：当用户明确 yes/y/confirm 且池中仅有 1 条 pending 时，可不带 confirm_id。
-        tail_decision, _ = _extract_tail_confirmation_command(user_text)
-        decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
-        implicit_yes = decision_value == "yes"
-        if not implicit_yes:
-            return None
+        # 兼容简化确认：当用户明确 yes/no 且池中仅有 1 条 pending 时，可不带 confirm_id。
         return _load_single_pending_for_session(
             payload,
             now_ts,
@@ -1055,6 +1060,43 @@ def _confirmation_id_mismatch_hint_text(provided_id: str, expected_id: str) -> s
         "Send one standalone copy-ready line:\n"
         f"yes {expected_id}\n"
         f"no {expected_id}"
+    )
+
+
+def _confirmation_command_requirements_text(
+    *,
+    detail: str,
+    confirm_id: str = "",
+    action_token: str = "",
+) -> str:
+    if confirm_id:
+        token_suffix = f" {action_token}" if action_token else ""
+        yes_line = f"yes {confirm_id}{token_suffix}"
+        no_line = f"no {confirm_id}{token_suffix}"
+        id_line_cn = f"确认编号：{confirm_id}\n"
+        id_line_en = f"Confirmation ID: {confirm_id}\n"
+        token_line_cn = f"动作摘要码：{action_token}\n" if action_token else ""
+        token_line_en = f"Action Bind Token: {action_token}\n" if action_token else ""
+    else:
+        yes_line = "yes cfm-<12hex> [act-<token>]"
+        no_line = "no cfm-<12hex> [act-<token>]"
+        id_line_cn = ""
+        id_line_en = ""
+        token_line_cn = ""
+        token_line_en = ""
+    return (
+        "确认指令不符合放行要求，未执行。\n"
+        f"原因：{detail}\n"
+        f"{id_line_cn}{token_line_cn}"
+        "请单独发送以下任一可复制消息：\n"
+        f"{yes_line}\n"
+        f"{no_line}\n\n"
+        "Confirmation command does not meet release requirements; execution was not performed.\n"
+        f"Reason: {detail}\n"
+        f"{id_line_en}{token_line_en}"
+        "Send one standalone copy-ready line:\n"
+        f"{yes_line}\n"
+        f"{no_line}"
     )
 
 
@@ -2541,8 +2583,7 @@ async def chat_completions(payload: dict, request: Request):
 
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
-    tail_decision, tail_confirm_id = _extract_tail_confirmation_command(user_text)
-    decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
+    decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -2551,9 +2592,8 @@ async def chat_completions(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    confirm_id_hint = tail_confirm_id or _extract_confirm_id(user_text)
     logger.info(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s",
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
@@ -2983,6 +3023,38 @@ async def chat_completions(payload: dict, request: Request):
         )
         return to_chat_response(pending_resp)
 
+    if decision_value in {"yes", "no"} and not confirm_id_hint:
+        requirement_detail = "当前会话没有唯一可执行的待确认记录（可能没有 pending，或存在多条 pending）。"
+        invalid_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=_confirmation_command_requirements_text(
+                detail=requirement_detail,
+            ),
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            invalid_resp,
+            confirm_id="",
+            status="command_invalid",
+            reason="确认指令不符合放行要求",
+            summary=requirement_detail,
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        logger.warning(
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            req_preview.route,
+            decision_value,
+            requirement_detail,
+        )
+        return to_chat_response(invalid_resp)
+
     if confirm_id_hint:
         hint_record = await _maybe_offload(
             _load_single_pending_for_session,
@@ -3019,31 +3091,46 @@ async def chat_completions(payload: dict, request: Request):
                 hinted_id,
             )
             return to_chat_response(mismatch_hint)
-        expired_resp = InternalResponse(
+        requirement_detail = "确认编号无可执行 pending（可能已过期、已处理或不属于当前会话）。"
+        invalid_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
             model=req_preview.model,
-            output_text=f"确认已过期，请重新发起请求。确认编号：{confirm_id_hint}\nConfirmation expired. Please send the request again.",
+            output_text=_confirmation_command_requirements_text(
+                detail=requirement_detail,
+                confirm_id=confirm_id_hint,
+            ),
         )
         ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_expired")
-        _attach_security_metadata(expired_resp, ctx_preview, boundary=boundary)
+        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
         _attach_confirmation_metadata(
-            expired_resp,
+            invalid_resp,
             confirm_id=confirm_id_hint,
-            status="expired",
-            reason="确认已过期",
-            summary="未找到可执行的 pending 记录",
+            status="command_invalid",
+            reason="确认指令不符合放行要求",
+            summary=requirement_detail,
         )
         _write_audit_event(ctx_preview, boundary=boundary)
-        logger.info(
-            "confirmation expired request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+        logger.warning(
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
+            req_preview.route,
+            decision_value,
             confirm_id_hint,
+            requirement_detail,
         )
-        return to_chat_response(expired_resp)
+        return to_chat_response(invalid_resp)
+
+    logger.info(
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true",
+        req_preview.request_id,
+        req_preview.session_id,
+        tenant_id,
+        req_preview.route,
+    )
 
     if _should_stream(payload):
         return await _execute_chat_stream_once(
@@ -3107,8 +3194,7 @@ async def responses(payload: dict, request: Request):
 
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
-    tail_decision, tail_confirm_id = _extract_tail_confirmation_command(user_text)
-    decision_value = tail_decision if tail_decision in {"yes", "no"} else parse_confirmation_decision(user_text).value
+    decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -3117,9 +3203,8 @@ async def responses(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    confirm_id_hint = tail_confirm_id or _extract_confirm_id(user_text)
     logger.info(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s",
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
@@ -3549,6 +3634,38 @@ async def responses(payload: dict, request: Request):
         )
         return to_responses_output(pending_resp)
 
+    if decision_value in {"yes", "no"} and not confirm_id_hint:
+        requirement_detail = "当前会话没有唯一可执行的待确认记录（可能没有 pending，或存在多条 pending）。"
+        invalid_resp = InternalResponse(
+            request_id=req_preview.request_id,
+            session_id=req_preview.session_id,
+            model=req_preview.model,
+            output_text=_confirmation_command_requirements_text(
+                detail=requirement_detail,
+            ),
+        )
+        ctx_preview.response_disposition = "block"
+        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+        _attach_confirmation_metadata(
+            invalid_resp,
+            confirm_id="",
+            status="command_invalid",
+            reason="确认指令不符合放行要求",
+            summary=requirement_detail,
+        )
+        _write_audit_event(ctx_preview, boundary=boundary)
+        logger.warning(
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s",
+            req_preview.request_id,
+            req_preview.session_id,
+            tenant_id,
+            req_preview.route,
+            decision_value,
+            requirement_detail,
+        )
+        return to_responses_output(invalid_resp)
+
     if confirm_id_hint:
         hint_record = await _maybe_offload(
             _load_single_pending_for_session,
@@ -3585,31 +3702,46 @@ async def responses(payload: dict, request: Request):
                 hinted_id,
             )
             return to_responses_output(mismatch_hint)
-        expired_resp = InternalResponse(
+        requirement_detail = "确认编号无可执行 pending（可能已过期、已处理或不属于当前会话）。"
+        invalid_resp = InternalResponse(
             request_id=req_preview.request_id,
             session_id=req_preview.session_id,
             model=req_preview.model,
-            output_text=f"确认已过期，请重新发起请求。确认编号：{confirm_id_hint}\nConfirmation expired. Please send the request again.",
+            output_text=_confirmation_command_requirements_text(
+                detail=requirement_detail,
+                confirm_id=confirm_id_hint,
+            ),
         )
         ctx_preview.response_disposition = "block"
-        ctx_preview.disposition_reasons.append("confirmation_expired")
-        _attach_security_metadata(expired_resp, ctx_preview, boundary=boundary)
+        ctx_preview.disposition_reasons.append("confirmation_command_invalid")
+        _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
         _attach_confirmation_metadata(
-            expired_resp,
+            invalid_resp,
             confirm_id=confirm_id_hint,
-            status="expired",
-            reason="确认已过期",
-            summary="未找到可执行的 pending 记录",
+            status="command_invalid",
+            reason="确认指令不符合放行要求",
+            summary=requirement_detail,
         )
         _write_audit_event(ctx_preview, boundary=boundary)
-        logger.info(
-            "confirmation expired request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+        logger.warning(
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
+            req_preview.route,
+            decision_value,
             confirm_id_hint,
+            requirement_detail,
         )
-        return to_responses_output(expired_resp)
+        return to_responses_output(invalid_resp)
+
+    logger.info(
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true",
+        req_preview.request_id,
+        req_preview.session_id,
+        tenant_id,
+        req_preview.route,
+    )
 
     if _should_stream(payload):
         return await _execute_responses_stream_once(
