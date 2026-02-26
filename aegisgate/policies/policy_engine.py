@@ -20,6 +20,7 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "redaction",
         "request_sanitizer",
+        "rag_poison_guard",
         "anomaly_detector",
         "injection_detector",
         "privilege_guard",
@@ -82,6 +83,7 @@ class PolicyEngine:
             "system_prompt_guard": feature_flags.system_prompt_guard,
             "untrusted_content_guard": feature_flags.untrusted_content_guard,
             "tool_call_guard": feature_flags.tool_call_guard,
+            "rag_poison_guard": feature_flags.rag_poison_guard,
         }
         enabled = {item for item in configured if global_flags.get(item, False)}
         # Redaction is mandatory baseline protection and is not downgraded by security level.

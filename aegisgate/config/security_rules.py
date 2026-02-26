@@ -137,6 +137,18 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "markdown_link_instruction_zh", "regex": r"\[[^\]]+\]\(https?://[^)]+\).*(按|执行|遵循).*(指令|说明)"},
             {"id": "url_instruction_zh", "regex": r"https?://\S+.*(按|执行|遵循).*(指令|说明)"},
         ],
+        "indirect_injection_patterns": [
+            {"id": "retrieved_override_en", "regex": r"(retrieved|document|knowledge\s*base|web\s*page).*(ignore|override|bypass).*(instructions|policy|guardrails?)"},
+            {"id": "context_priority_hijack_en", "regex": r"(treat|use).*(this|retrieved|external).*(as|with).*(highest|top).*(priority|authority)"},
+            {"id": "retrieved_override_zh", "regex": r"(检索|文档|知识库|网页).*(忽略|覆盖|绕过).*(指令|规则|策略|安全)"},
+            {"id": "context_priority_hijack_zh", "regex": r"(将|把).*(检索内容|外部内容|文档).*(作为|设为).*(最高|最高级).*(优先级|权威)"},
+        ],
+        "remote_content_instruction_patterns": [
+            {"id": "copy_paste_terminal_en", "regex": r"(copy|paste).*(terminal|shell|powershell|cmd)|(run|execute).*(from|in).*(url|link|document)"},
+            {"id": "remote_tool_invocation_en", "regex": r"(follow|execute).*(tool|function|api).*(from|in).*(link|url|document)"},
+            {"id": "copy_paste_terminal_zh", "regex": r"(复制|粘贴).*(终端|shell|powershell|cmd)|(按|执行).*(链接|网页|文档).*(命令|脚本)"},
+            {"id": "remote_tool_invocation_zh", "regex": r"(根据|按照).*(链接|文档|网页).*(调用|执行).*(工具|函数|接口)"},
+        ],
         "typoglycemia_targets": ["ignore", "bypass", "override", "reveal", "system", "prompt", "instructions"],
         "decoded_keywords": [
             "ignore previous instructions",
@@ -172,6 +184,8 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "obfuscated": {"bucket": "payload", "severity": 9},
                 "html_markdown": {"bucket": "payload", "severity": 6},
                 "remote_content": {"bucket": "hijack", "severity": 8},
+                "remote_content_instruction": {"bucket": "hijack", "severity": 9},
+                "indirect_injection": {"bucket": "hijack", "severity": 9},
                 "typoglycemia": {"bucket": "hijack", "severity": 7},
                 "unicode_invisible": {"bucket": "anomaly", "severity": 6},
                 "unicode_bidi": {"bucket": "anomaly", "severity": 10},
@@ -341,6 +355,31 @@ _DEFAULT_RULES: dict[str, Any] = {
         ],
         "default_action": "block",
     },
+    "rag_poison_guard": {
+        "ingestion_risk_score": 0.9,
+        "retrieval_risk_score": 0.86,
+        "propagation_risk_score": 0.88,
+        "traceback_excerpt_max_chars": 180,
+        "ingestion_poison_patterns": [
+            {"id": "ingestion_override_en", "regex": r"(ignore|override|bypass).*(instructions|policy|guardrails?)"},
+            {"id": "ingestion_exfil_en", "regex": r"(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)"},
+            {"id": "ingestion_override_zh", "regex": r"(忽略|覆盖|绕过).*(指令|规则|策略|安全)"},
+            {"id": "ingestion_exfil_zh", "regex": r"(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)"},
+            {"id": "hidden_markup_payload", "regex": r"(<!--[\s\S]{0,300}(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)"},
+        ],
+        "retrieval_poison_patterns": [
+            {"id": "retrieval_instruction_en", "regex": r"(retrieved|document|web|link).*(follow|execute|run|copy|paste).*(instruction|command|script|shell)"},
+            {"id": "retrieval_tool_en", "regex": r"(call|invoke|use).*(tool|function|api).*(from|according to).*(retrieved|document|web|link)"},
+            {"id": "retrieval_instruction_zh", "regex": r"(检索|文档|网页|链接).*(按|执行|运行|复制|粘贴).*(指令|命令|脚本|shell)"},
+            {"id": "retrieval_tool_zh", "regex": r"(调用|使用|执行).*(工具|函数|接口).*(根据|按照).*(检索|文档|网页|链接)"},
+        ],
+        "propagation_patterns": [
+            {"id": "propagation_cmd_en", "regex": r"(run|execute|copy|paste).*(shell|powershell|cmd|bash)|curl\s+[^|]+\|\s*(sh|bash)"},
+            {"id": "propagation_exfil_en", "regex": r"(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)"},
+            {"id": "propagation_cmd_zh", "regex": r"(执行|运行|复制|粘贴).*(命令|脚本|终端|shell)"},
+            {"id": "propagation_exfil_zh", "regex": r"(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)"},
+        ],
+    },
         "action_map": {
             "injection_detector": {
                 "system_exfil": "block",
@@ -348,6 +387,8 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "unicode_bidi": "block",
                 "unicode_invisible": "review",
                 "remote_content": "review",
+                "remote_content_instruction": "review",
+                "indirect_injection": "review",
                 "direct": "downgrade",
                 "typoglycemia": "review",
                 "html_markdown": "sanitize",
@@ -376,6 +417,11 @@ _DEFAULT_RULES: dict[str, Any] = {
             "rule_bypass": "block",
             "leak_check": "block",
             "shape_anomaly": "sanitize",
+        },
+        "rag_poison_guard": {
+            "ingestion_poison": "block",
+            "retrieval_poison": "review",
+            "poison_propagation": "block",
         },
     },
 }

@@ -1,6 +1,7 @@
 enabled_filters:
   - redaction
   - request_sanitizer
+  - rag_poison_guard
   - anomaly_detector
   - restoration
   - post_restore_guard

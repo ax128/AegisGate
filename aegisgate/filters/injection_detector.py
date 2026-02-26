@@ -91,6 +91,10 @@ class PromptInjectionDetector(BaseFilter):
         self._system_exfil_patterns = self._compile_rule_patterns(detector_rules.get("system_exfil_patterns", []))
         self._html_md_patterns = self._compile_rule_patterns(detector_rules.get("html_markdown_patterns", []))
         self._remote_content_patterns = self._compile_rule_patterns(detector_rules.get("remote_content_patterns", []))
+        self._indirect_injection_patterns = self._compile_rule_patterns(detector_rules.get("indirect_injection_patterns", []))
+        self._remote_instruction_patterns = self._compile_rule_patterns(
+            detector_rules.get("remote_content_instruction_patterns", [])
+        )
 
         self._typoglycemia_targets = [str(item).lower() for item in detector_rules.get("typoglycemia_targets", [])]
         self._decoded_keywords = [str(item).lower() for item in detector_rules.get("decoded_keywords", [])]
@@ -206,6 +210,8 @@ class PromptInjectionDetector(BaseFilter):
             "html_markdown": set(),
             "typoglycemia": set(),
             "remote_content": set(),
+            "remote_content_instruction": set(),
+            "indirect_injection": set(),
         }
 
         invisible_hits = sorted({f"U+{ord(char):04X}" for char in text_nfkc if char in self._invisible_chars})
@@ -230,6 +236,14 @@ class PromptInjectionDetector(BaseFilter):
         for label, pattern in self._remote_content_patterns.items():
             if pattern.search(text_norm):
                 signals["remote_content"].add(label)
+
+        for label, pattern in self._indirect_injection_patterns.items():
+            if pattern.search(text_norm):
+                signals["indirect_injection"].add(label)
+
+        for label, pattern in self._remote_instruction_patterns.items():
+            if pattern.search(text_norm):
+                signals["remote_content_instruction"].add(label)
 
         if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
             signals["obfuscated"].add("rule_obfuscation_marker")
