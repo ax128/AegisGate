@@ -72,6 +72,36 @@ def _flatten_content(content: object) -> str:
     return str(content)
 
 
+def _extract_latest_user_text_from_responses_input(raw_input: object) -> str:
+    if isinstance(raw_input, str):
+        return raw_input.strip()
+
+    if isinstance(raw_input, list):
+        for item in reversed(raw_input):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role", "")).strip().lower() != "user":
+                continue
+            if "content" in item:
+                return _flatten_content(item.get("content", "")).strip()
+            return _flatten_content(item).strip()
+        return _flatten_content(raw_input).strip()
+
+    if isinstance(raw_input, dict):
+        role = str(raw_input.get("role", "")).strip().lower()
+        if role == "user":
+            if "content" in raw_input:
+                return _flatten_content(raw_input.get("content", "")).strip()
+            return _flatten_content(raw_input).strip()
+        if "input" in raw_input:
+            return _extract_latest_user_text_from_responses_input(raw_input.get("input"))
+        if "content" in raw_input:
+            return _flatten_content(raw_input.get("content", "")).strip()
+        return _flatten_content(raw_input).strip()
+
+    return str(raw_input or "").strip()
+
+
 def to_internal_chat(payload: dict) -> InternalRequest:
     request_id = payload.get("request_id") or str(uuid.uuid4())
     session_id = payload.get("session_id") or request_id
@@ -121,7 +151,7 @@ def to_internal_responses(payload: dict) -> InternalRequest:
     route = "/v1/responses"
     model = payload.get("model", "unknown-model")
 
-    content = _flatten_content(payload.get("input", ""))
+    content = _extract_latest_user_text_from_responses_input(payload.get("input", ""))
     content = _cap_text(content, settings.max_content_length_per_message)
     messages = [InternalMessage(role="user", content=content, source="user")]
 

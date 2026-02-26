@@ -113,6 +113,25 @@ def test_mapper_caps_responses_input_length():
         settings.max_content_length_per_message = original
 
 
+def test_mapper_responses_uses_latest_user_content_from_conversation_input():
+    req = to_internal_responses(
+        {
+            "input": [
+                {
+                    "role": "assistant",
+                    "content": "Action Bind Token: act-0b8ba9524e",
+                },
+                {
+                    "role": "user",
+                    "content": "为什么不出力",
+                },
+            ]
+        }
+    )
+    assert req.messages[0].content == "为什么不出力"
+    assert "act-0b8ba9524e" not in req.messages[0].content
+
+
 def test_chat_upstream_payload_preserves_multimodal_structure():
     payload = {
         "messages": [
