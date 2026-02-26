@@ -90,6 +90,18 @@ _STREAM_WINDOW_MAX_CHARS = 8000
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
+_PENDING_PAYLOAD_KIND_KEY = "_aegisgate_pending_kind"
+_PENDING_PAYLOAD_KIND_RESPONSE = "response_payload"
+_PENDING_PAYLOAD_FORMAT_KEY = "_aegisgate_pending_format"
+_PENDING_PAYLOAD_ROUTE_KEY = "_aegisgate_pending_route"
+_PENDING_PAYLOAD_MODEL_KEY = "_aegisgate_pending_model"
+_PENDING_PAYLOAD_REQUEST_ID_KEY = "_aegisgate_pending_request_id"
+_PENDING_PAYLOAD_SESSION_ID_KEY = "_aegisgate_pending_session_id"
+_PENDING_PAYLOAD_CONTENT_KEY = "content"
+_PENDING_FORMAT_CHAT_JSON = "chat_json"
+_PENDING_FORMAT_RESPONSES_JSON = "responses_json"
+_PENDING_FORMAT_CHAT_STREAM_TEXT = "chat_stream_text"
+_PENDING_FORMAT_RESPONSES_STREAM_TEXT = "responses_stream_text"
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _pipeline_local = threading.local()
@@ -427,6 +439,110 @@ def _prepare_pending_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], s
         }
         return omitted_payload, payload_hash(omitted_payload), True, payload_size
     return payload, payload_hash(payload), False, payload_size
+
+
+def _build_response_pending_payload(
+    *,
+    route: str,
+    request_id: str,
+    session_id: str,
+    model: str,
+    fmt: str,
+    content: Any,
+) -> dict[str, Any]:
+    return {
+        _PENDING_PAYLOAD_KIND_KEY: _PENDING_PAYLOAD_KIND_RESPONSE,
+        _PENDING_PAYLOAD_FORMAT_KEY: fmt,
+        _PENDING_PAYLOAD_ROUTE_KEY: route,
+        _PENDING_PAYLOAD_REQUEST_ID_KEY: request_id,
+        _PENDING_PAYLOAD_SESSION_ID_KEY: session_id,
+        _PENDING_PAYLOAD_MODEL_KEY: model,
+        _PENDING_PAYLOAD_CONTENT_KEY: content,
+    }
+
+
+def _prepare_response_pending_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str, int]:
+    payload_size = _serialized_payload_size(payload)
+    return payload, payload_hash(payload), payload_size
+
+
+def _is_response_pending_payload(payload: Any) -> bool:
+    return isinstance(payload, dict) and str(payload.get(_PENDING_PAYLOAD_KIND_KEY, "")).strip() == _PENDING_PAYLOAD_KIND_RESPONSE
+
+
+def _confirmation_expires_at(now_ts: int, phase: str) -> int:
+    if phase == PHASE_RESPONSE:
+        return now_ts + max(60, int(settings.pending_data_ttl_seconds))
+    return now_ts + max(30, int(settings.confirmation_ttl_seconds))
+
+
+def _attach_executed_confirmation(output: dict[str, Any], *, confirm_id: str, reason: str, summary: str) -> dict[str, Any]:
+    aegis = output.setdefault("aegisgate", {})
+    aegis["confirmation"] = {
+        "required": False,
+        "confirm_id": confirm_id,
+        "status": "executed",
+        "reason": reason,
+        "summary": summary,
+        "payload_omitted": False,
+    }
+    return output
+
+
+def _render_cached_chat_confirmation_output(
+    pending_payload: dict[str, Any],
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | None:
+    if not _is_response_pending_payload(pending_payload):
+        return None
+    fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
+    content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
+    request_id = str(pending_payload.get(_PENDING_PAYLOAD_REQUEST_ID_KEY) or fallback_request_id)
+    session_id = str(pending_payload.get(_PENDING_PAYLOAD_SESSION_ID_KEY) or fallback_session_id)
+    model = str(pending_payload.get(_PENDING_PAYLOAD_MODEL_KEY) or fallback_model)
+    if fmt == _PENDING_FORMAT_CHAT_JSON and isinstance(content, dict):
+        return copy.deepcopy(content)
+    if fmt == _PENDING_FORMAT_CHAT_STREAM_TEXT and isinstance(content, str):
+        return to_chat_response(
+            InternalResponse(
+                request_id=request_id,
+                session_id=session_id,
+                model=model,
+                output_text=content,
+            )
+        )
+    return None
+
+
+def _render_cached_responses_confirmation_output(
+    pending_payload: dict[str, Any],
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | None:
+    if not _is_response_pending_payload(pending_payload):
+        return None
+    fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
+    content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
+    request_id = str(pending_payload.get(_PENDING_PAYLOAD_REQUEST_ID_KEY) or fallback_request_id)
+    session_id = str(pending_payload.get(_PENDING_PAYLOAD_SESSION_ID_KEY) or fallback_session_id)
+    model = str(pending_payload.get(_PENDING_PAYLOAD_MODEL_KEY) or fallback_model)
+    if fmt == _PENDING_FORMAT_RESPONSES_JSON and isinstance(content, dict):
+        return copy.deepcopy(content)
+    if fmt == _PENDING_FORMAT_RESPONSES_STREAM_TEXT and isinstance(content, str):
+        return to_responses_output(
+            InternalResponse(
+                request_id=request_id,
+                session_id=session_id,
+                model=model,
+                output_text=content,
+            )
+        )
+    return None
 
 
 def _is_pending_payload_omitted(payload: Any) -> bool:
@@ -1087,7 +1203,7 @@ async def _execute_chat_stream_once(
             summary=summary,
             tenant_id=ctx.tenant_id,
             created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
         )
         if pending_payload_omitted:
@@ -1114,6 +1230,7 @@ async def _execute_chat_stream_once(
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
+        stream_cached_parts: list[str] = []
         chunk_count = 0
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
@@ -1129,6 +1246,7 @@ async def _execute_chat_stream_once(
                 chunk_text = _extract_stream_text_from_event(payload_text)
                 if chunk_text:
                     stream_window = _trim_stream_window(stream_window, chunk_text)
+                    stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
                     # Keep stream memory bounded by carrying request reports + latest stream check only.
@@ -1153,9 +1271,16 @@ async def _execute_chat_stream_once(
                         reason, summary = _confirmation_reason_and_summary(ctx)
                         confirm_id = make_confirm_id()
                         now_ts = int(time.time())
-                        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
-                            upstream_payload
+                        cached_text = "".join(stream_cached_parts)
+                        pending_payload = _build_response_pending_payload(
+                            route=req.route,
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            fmt=_PENDING_FORMAT_CHAT_STREAM_TEXT,
+                            content=cached_text,
                         )
+                        pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
                         await _store_call(
                             "save_pending_confirmation",
                             confirm_id=confirm_id,
@@ -1170,13 +1295,9 @@ async def _execute_chat_stream_once(
                             summary=summary,
                             tenant_id=ctx.tenant_id,
                             created_at=now_ts,
-                            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                            expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
                             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
                         )
-                        if pending_payload_omitted:
-                            ctx.security_tags.add("pending_payload_omitted")
-                            ctx.enforcement_actions.append("pending:payload_omitted")
-                            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
                         ctx.response_disposition = "block"
                         ctx.disposition_reasons.append("awaiting_user_confirmation")
                         ctx.security_tags.add("confirmation_required")
@@ -1187,7 +1308,7 @@ async def _execute_chat_stream_once(
                             reason=reason,
                             summary=summary,
                             phase=PHASE_RESPONSE,
-                            payload_omitted=pending_payload_omitted,
+                            payload_omitted=False,
                         )
                         message_text = _build_confirmation_message(
                             confirm_id=confirm_id,
@@ -1200,6 +1321,14 @@ async def _execute_chat_stream_once(
                             ctx.request_id,
                             confirm_id,
                             block_reason,
+                        )
+                        logger.info(
+                            "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                            ctx.request_id,
+                            confirm_id,
+                            req.route,
+                            _PENDING_FORMAT_CHAT_STREAM_TEXT,
+                            pending_payload_size,
                         )
                         yield _stream_confirmation_sse_chunk(
                             ctx,
@@ -1323,7 +1452,7 @@ async def _execute_responses_stream_once(
             summary=summary,
             tenant_id=ctx.tenant_id,
             created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
         )
         if pending_payload_omitted:
@@ -1350,6 +1479,7 @@ async def _execute_responses_stream_once(
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
+        stream_cached_parts: list[str] = []
         chunk_count = 0
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
@@ -1365,6 +1495,7 @@ async def _execute_responses_stream_once(
                 chunk_text = _extract_stream_text_from_event(payload_text)
                 if chunk_text:
                     stream_window = _trim_stream_window(stream_window, chunk_text)
+                    stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
                     ctx.report_items = list(base_reports)
@@ -1388,9 +1519,16 @@ async def _execute_responses_stream_once(
                         reason, summary = _confirmation_reason_and_summary(ctx)
                         confirm_id = make_confirm_id()
                         now_ts = int(time.time())
-                        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
-                            upstream_payload
+                        cached_text = "".join(stream_cached_parts)
+                        pending_payload = _build_response_pending_payload(
+                            route=req.route,
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                            content=cached_text,
                         )
+                        pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
                         await _store_call(
                             "save_pending_confirmation",
                             confirm_id=confirm_id,
@@ -1405,13 +1543,9 @@ async def _execute_responses_stream_once(
                             summary=summary,
                             tenant_id=ctx.tenant_id,
                             created_at=now_ts,
-                            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                            expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
                             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
                         )
-                        if pending_payload_omitted:
-                            ctx.security_tags.add("pending_payload_omitted")
-                            ctx.enforcement_actions.append("pending:payload_omitted")
-                            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
                         ctx.response_disposition = "block"
                         ctx.disposition_reasons.append("awaiting_user_confirmation")
                         ctx.security_tags.add("confirmation_required")
@@ -1422,7 +1556,7 @@ async def _execute_responses_stream_once(
                             reason=reason,
                             summary=summary,
                             phase=PHASE_RESPONSE,
-                            payload_omitted=pending_payload_omitted,
+                            payload_omitted=False,
                         )
                         message_text = _build_confirmation_message(
                             confirm_id=confirm_id,
@@ -1435,6 +1569,14 @@ async def _execute_responses_stream_once(
                             ctx.request_id,
                             confirm_id,
                             block_reason,
+                        )
+                        logger.info(
+                            "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                            ctx.request_id,
+                            confirm_id,
+                            req.route,
+                            _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                            pending_payload_size,
                         )
                         yield _stream_confirmation_sse_chunk(
                             ctx,
@@ -1529,6 +1671,8 @@ async def _execute_chat_once(
         logger.info("chat completion bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_chat_response(upstream_body, req)
 
+    pipeline = _get_pipeline()
+
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
     if forced_upstream_base and skip_confirmation:
         upstream_payload = _build_chat_upstream_payload(payload, req.messages)
@@ -1537,7 +1681,6 @@ async def _execute_chat_once(
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
         debug_log_original("request_before_filters", request_user_text, max_len=180)
 
-        pipeline = _get_pipeline()
         sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
         if ctx.request_disposition == "block":
             block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
@@ -1562,7 +1705,7 @@ async def _execute_chat_once(
                 summary=summary,
                 tenant_id=ctx.tenant_id,
                 created_at=now_ts,
-                expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
                 retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
             )
             if pending_payload_omitted:
@@ -1640,7 +1783,16 @@ async def _execute_chat_once(
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
         reason, summary = _confirmation_reason_and_summary(ctx)
-        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(upstream_payload)
+        cached_output = _passthrough_chat_response(upstream_body, req)
+        pending_payload = _build_response_pending_payload(
+            route=req.route,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            fmt=_PENDING_FORMAT_CHAT_JSON,
+            content=cached_output,
+        )
+        pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         await _store_call(
@@ -1657,17 +1809,21 @@ async def _execute_chat_once(
             summary=summary,
             tenant_id=ctx.tenant_id,
             created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
         )
-        if pending_payload_omitted:
-            ctx.security_tags.add("pending_payload_omitted")
-            ctx.enforcement_actions.append("pending:payload_omitted")
-            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
         ctx.response_disposition = "block"
         ctx.disposition_reasons.append("awaiting_user_confirmation")
         ctx.security_tags.add("confirmation_required")
         ctx.enforcement_actions.append("confirmation:pending")
+        logger.info(
+            "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+            ctx.request_id,
+            confirm_id,
+            req.route,
+            _PENDING_FORMAT_CHAT_JSON,
+            pending_payload_size,
+        )
 
         confirmation_resp = InternalResponse(
             request_id=req.request_id,
@@ -1683,7 +1839,7 @@ async def _execute_chat_once(
             reason=reason,
             summary=summary,
             phase=PHASE_RESPONSE,
-            payload_omitted=pending_payload_omitted,
+            payload_omitted=False,
         )
         _write_audit_event(ctx, boundary=boundary)
         logger.info("chat completion requires confirmation request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
@@ -1754,6 +1910,8 @@ async def _execute_responses_once(
         logger.info("responses endpoint bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_responses_output(upstream_body, req)
 
+    pipeline = _get_pipeline()
+
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
     if forced_upstream_base and skip_confirmation:
         upstream_payload = _build_responses_upstream_payload(payload, req.messages)
@@ -1762,7 +1920,6 @@ async def _execute_responses_once(
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
         debug_log_original("request_before_filters", request_user_text, max_len=180)
 
-        pipeline = _get_pipeline()
         sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
         if ctx.request_disposition == "block":
             block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
@@ -1787,7 +1944,7 @@ async def _execute_responses_once(
                 summary=summary,
                 tenant_id=ctx.tenant_id,
                 created_at=now_ts,
-                expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+                expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
                 retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
             )
             if pending_payload_omitted:
@@ -1864,7 +2021,16 @@ async def _execute_responses_once(
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
         reason, summary = _confirmation_reason_and_summary(ctx)
-        pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(upstream_payload)
+        cached_output = _passthrough_responses_output(upstream_body, req)
+        pending_payload = _build_response_pending_payload(
+            route=req.route,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+            fmt=_PENDING_FORMAT_RESPONSES_JSON,
+            content=cached_output,
+        )
+        pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         await _store_call(
@@ -1881,17 +2047,21 @@ async def _execute_responses_once(
             summary=summary,
             tenant_id=ctx.tenant_id,
             created_at=now_ts,
-            expires_at=now_ts + max(30, int(settings.confirmation_ttl_seconds)),
+            expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
             retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
         )
-        if pending_payload_omitted:
-            ctx.security_tags.add("pending_payload_omitted")
-            ctx.enforcement_actions.append("pending:payload_omitted")
-            summary = f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
         ctx.response_disposition = "block"
         ctx.disposition_reasons.append("awaiting_user_confirmation")
         ctx.security_tags.add("confirmation_required")
         ctx.enforcement_actions.append("confirmation:pending")
+        logger.info(
+            "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+            ctx.request_id,
+            confirm_id,
+            req.route,
+            _PENDING_FORMAT_RESPONSES_JSON,
+            pending_payload_size,
+        )
 
         confirmation_resp = InternalResponse(
             request_id=req.request_id,
@@ -1907,7 +2077,7 @@ async def _execute_responses_once(
             reason=reason,
             summary=summary,
             phase=PHASE_RESPONSE,
-            payload_omitted=pending_payload_omitted,
+            payload_omitted=False,
         )
         _write_audit_event(ctx, boundary=boundary)
         logger.info("responses endpoint requires confirmation request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
@@ -2445,6 +2615,84 @@ async def chat_completions(payload: dict, request: Request):
                 )
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_chat_response(invalid_resp)
+            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
+                )
+                mismatch_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_hash_mismatch_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
+                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    mismatch_resp,
+                    confirm_id=confirm_id,
+                    status="hash_mismatch",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_chat_response(mismatch_resp)
+
+            if _is_response_pending_payload(pending_payload):
+                released = _render_cached_chat_confirmation_output(
+                    pending_payload,
+                    fallback_request_id=req_preview.request_id,
+                    fallback_session_id=req_preview.session_id,
+                    fallback_model=req_preview.model,
+                )
+                if not isinstance(released, dict):
+                    await _try_transition_pending_status(
+                        confirm_id=confirm_id,
+                        expected_status="executing",
+                        new_status="expired",
+                        now_ts=now_ts,
+                    )
+                    invalid_resp = InternalResponse(
+                        request_id=req_preview.request_id,
+                        session_id=req_preview.session_id,
+                        model=req_preview.model,
+                        output_text=_pending_payload_invalid_text(confirm_id),
+                    )
+                    ctx_preview.response_disposition = "block"
+                    ctx_preview.disposition_reasons.append("pending_payload_invalid")
+                    _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                    _attach_confirmation_metadata(
+                        invalid_resp,
+                        confirm_id=confirm_id,
+                        status="payload_invalid",
+                        reason=reason_text,
+                        summary=summary_text,
+                    )
+                    _write_audit_event(ctx_preview, boundary=boundary)
+                    return to_chat_response(invalid_resp)
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="executed",
+                    now_ts=int(time.time()),
+                )
+                logger.info(
+                    "confirmation released cached response request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    confirm_id,
+                )
+                return _attach_executed_confirmation(
+                    released,
+                    confirm_id=confirm_id,
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+
             if _is_pending_payload_omitted(pending_payload):
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
@@ -2473,31 +2721,6 @@ async def chat_completions(payload: dict, request: Request):
                 )
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_chat_response(omitted_resp)
-            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
-                await _try_transition_pending_status(
-                    confirm_id=confirm_id,
-                    expected_status="executing",
-                    new_status="expired",
-                    now_ts=now_ts,
-                )
-                mismatch_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=_pending_hash_mismatch_text(confirm_id),
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
-                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    mismatch_resp,
-                    confirm_id=confirm_id,
-                    status="hash_mismatch",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_chat_response(mismatch_resp)
 
             try:
                 executed = await _execute_chat_once(
@@ -2556,15 +2779,6 @@ async def chat_completions(payload: dict, request: Request):
                 new_status="executed",
                 now_ts=int(time.time()),
             )
-            aegis = executed.setdefault("aegisgate", {})
-            aegis["confirmation"] = {
-                "required": False,
-                "confirm_id": confirm_id,
-                "status": "executed",
-                "reason": reason_text,
-                "summary": summary_text,
-                "payload_omitted": False,
-            }
             logger.info(
                 "confirmation executed request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
@@ -2572,7 +2786,12 @@ async def chat_completions(payload: dict, request: Request):
                 tenant_id,
                 confirm_id,
             )
-            return executed
+            return _attach_executed_confirmation(
+                executed,
+                confirm_id=confirm_id,
+                reason=reason_text,
+                summary=summary_text,
+            )
 
         note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
         pending_resp = InternalResponse(
@@ -2902,6 +3121,84 @@ async def responses(payload: dict, request: Request):
                 )
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_responses_output(invalid_resp)
+            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="expired",
+                    now_ts=now_ts,
+                )
+                mismatch_resp = InternalResponse(
+                    request_id=req_preview.request_id,
+                    session_id=req_preview.session_id,
+                    model=req_preview.model,
+                    output_text=_pending_hash_mismatch_text(confirm_id),
+                )
+                ctx_preview.response_disposition = "block"
+                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
+                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
+                _attach_confirmation_metadata(
+                    mismatch_resp,
+                    confirm_id=confirm_id,
+                    status="hash_mismatch",
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+                _write_audit_event(ctx_preview, boundary=boundary)
+                return to_responses_output(mismatch_resp)
+
+            if _is_response_pending_payload(pending_payload):
+                released = _render_cached_responses_confirmation_output(
+                    pending_payload,
+                    fallback_request_id=req_preview.request_id,
+                    fallback_session_id=req_preview.session_id,
+                    fallback_model=req_preview.model,
+                )
+                if not isinstance(released, dict):
+                    await _try_transition_pending_status(
+                        confirm_id=confirm_id,
+                        expected_status="executing",
+                        new_status="expired",
+                        now_ts=now_ts,
+                    )
+                    invalid_resp = InternalResponse(
+                        request_id=req_preview.request_id,
+                        session_id=req_preview.session_id,
+                        model=req_preview.model,
+                        output_text=_pending_payload_invalid_text(confirm_id),
+                    )
+                    ctx_preview.response_disposition = "block"
+                    ctx_preview.disposition_reasons.append("pending_payload_invalid")
+                    _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
+                    _attach_confirmation_metadata(
+                        invalid_resp,
+                        confirm_id=confirm_id,
+                        status="payload_invalid",
+                        reason=reason_text,
+                        summary=summary_text,
+                    )
+                    _write_audit_event(ctx_preview, boundary=boundary)
+                    return to_responses_output(invalid_resp)
+                await _try_transition_pending_status(
+                    confirm_id=confirm_id,
+                    expected_status="executing",
+                    new_status="executed",
+                    now_ts=int(time.time()),
+                )
+                logger.info(
+                    "confirmation released cached response request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                    req_preview.request_id,
+                    req_preview.session_id,
+                    tenant_id,
+                    confirm_id,
+                )
+                return _attach_executed_confirmation(
+                    released,
+                    confirm_id=confirm_id,
+                    reason=reason_text,
+                    summary=summary_text,
+                )
+
             if _is_pending_payload_omitted(pending_payload):
                 await _try_transition_pending_status(
                     confirm_id=confirm_id,
@@ -2930,31 +3227,6 @@ async def responses(payload: dict, request: Request):
                 )
                 _write_audit_event(ctx_preview, boundary=boundary)
                 return to_responses_output(omitted_resp)
-            if payload_hash(pending_payload) != str(pending.get("pending_request_hash", "")):
-                await _try_transition_pending_status(
-                    confirm_id=confirm_id,
-                    expected_status="executing",
-                    new_status="expired",
-                    now_ts=now_ts,
-                )
-                mismatch_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=_pending_hash_mismatch_text(confirm_id),
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("pending_hash_mismatch")
-                _attach_security_metadata(mismatch_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    mismatch_resp,
-                    confirm_id=confirm_id,
-                    status="hash_mismatch",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_responses_output(mismatch_resp)
 
             try:
                 executed = await _execute_responses_once(
@@ -3013,15 +3285,6 @@ async def responses(payload: dict, request: Request):
                 new_status="executed",
                 now_ts=int(time.time()),
             )
-            aegis = executed.setdefault("aegisgate", {})
-            aegis["confirmation"] = {
-                "required": False,
-                "confirm_id": confirm_id,
-                "status": "executed",
-                "reason": reason_text,
-                "summary": summary_text,
-                "payload_omitted": False,
-            }
             logger.info(
                 "confirmation executed request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
@@ -3029,7 +3292,12 @@ async def responses(payload: dict, request: Request):
                 tenant_id,
                 confirm_id,
             )
-            return executed
+            return _attach_executed_confirmation(
+                executed,
+                confirm_id=confirm_id,
+                reason=reason_text,
+                summary=summary_text,
+            )
 
         note = "输入不明确，请仅回复 yes 或 no。" if decision_value == "ambiguous" else "请仅回复 yes 或 no。"
         pending_resp = InternalResponse(

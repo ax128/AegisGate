@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 
 from fastapi import FastAPI, Request
@@ -18,6 +17,7 @@ from aegisgate.adapters.openai_compat.upstream import close_upstream_async_clien
 from aegisgate.adapters.relay_compat.router import router as relay_router
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
+from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
 from aegisgate.core.gw_tokens import find_token as gw_tokens_find_token, get as gw_tokens_get, load as gw_tokens_load, register as gw_tokens_register, unregister as gw_tokens_unregister
 from aegisgate.init_config import ensure_config_dir
 from aegisgate.core.security_boundary import (
@@ -37,7 +37,7 @@ if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
 _nonce_cache = build_nonce_cache()
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_pending_prune_task: asyncio.Task | None = None
+_confirmation_cache_task: ConfirmationCacheTask | None = None
 
 
 class GWTokenRewriteMiddleware:
@@ -348,31 +348,13 @@ def health() -> dict:
 
 @app.on_event("shutdown")
 async def shutdown_cleanup() -> None:
-    global _pending_prune_task
-    if _pending_prune_task is not None:
-        _pending_prune_task.cancel()
-        try:
-            await _pending_prune_task
-        except asyncio.CancelledError:
-            pass
-        _pending_prune_task = None
+    global _confirmation_cache_task
+    if _confirmation_cache_task is not None:
+        await _confirmation_cache_task.stop()
+        _confirmation_cache_task = None
     await close_upstream_async_client()
     await close_semantic_async_client()
     shutdown_audit_worker()
-
-
-async def _pending_prune_loop() -> None:
-    interval = max(5, int(settings.pending_prune_interval_seconds))
-    while True:
-        try:
-            if settings.enable_thread_offload:
-                await asyncio.to_thread(prune_pending_confirmations, int(now_ts()))
-            else:
-                prune_pending_confirmations(int(now_ts()))
-        except Exception as exc:  # pragma: no cover - operational guard
-            logger.warning("pending prune task failed: %s", exc)
-        await asyncio.sleep(interval)
-
 
 @app.on_event("startup")
 async def startup_background_tasks() -> None:
@@ -384,16 +366,17 @@ async def startup_background_tasks() -> None:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_tokens load on startup failed: %s", exc)
-    # 重启后清空待确认记录，仅本次运行期间的新请求可被确认放行
-    try:
-        n = clear_pending_confirmations_on_startup()
-        if n:
-            logger.info("cleared %d pending confirmation(s) on startup", n)
-    except Exception as exc:  # pragma: no cover
-        logger.warning("clear pending confirmations on startup failed: %s", exc)
-    global _pending_prune_task
-    if settings.enable_pending_prune_task and _pending_prune_task is None:
-        _pending_prune_task = asyncio.create_task(_pending_prune_loop(), name="aegisgate-pending-prune")
+    if settings.clear_pending_on_startup:
+        try:
+            n = clear_pending_confirmations_on_startup()
+            if n:
+                logger.info("cleared %d pending confirmation(s) on startup", n)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("clear pending confirmations on startup failed: %s", exc)
+    global _confirmation_cache_task
+    if settings.enable_pending_prune_task and _confirmation_cache_task is None:
+        _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
+        await _confirmation_cache_task.start()
 
 
 # Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。

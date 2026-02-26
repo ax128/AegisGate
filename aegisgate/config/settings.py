@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_key_prefix: str = "aegisgate"
     redis_pending_scan_batch_size: int = 200
-    redis_pending_scan_max_entries: int = 5000
+    redis_pending_scan_max_entries: int = 0  # <=0 表示不限制扫描数量，避免高并发会话漏检较早 pending
     postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"
     postgres_schema: str = "public"
     max_request_body_bytes: int = 2_000_000
@@ -70,6 +70,7 @@ class Settings(BaseSettings):
 
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60
+    clear_pending_on_startup: bool = False
     audit_log_path: str = "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl
 
     enable_redaction: bool = True

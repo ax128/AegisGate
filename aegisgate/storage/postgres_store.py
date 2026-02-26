@@ -345,7 +345,6 @@ class PostgresKVStore(KVStore):
                     WHERE session_id = %s AND route = %s AND tenant_id = %s AND expires_at > %s
                       AND status IN ('pending', 'executing')
                     ORDER BY created_at DESC
-                    LIMIT 6
                     """,
                     (session_id, route, tenant_id, int(now_ts)),
                 )

@@ -302,7 +302,6 @@ class SqliteKVStore(KVStore):
                     WHERE session_id = ? AND route = ? AND tenant_id = ? AND expires_at > ?
                       AND status IN ('pending', 'executing')
                     ORDER BY created_at DESC
-                    LIMIT 6
                     """,
                     (session_id, route, tenant_id, now_ts),
                 ).fetchall()

@@ -202,6 +202,10 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
     async def fake_store_call(method, **kwargs):
         assert method == "save_pending_confirmation"
         assert kwargs["route"] == "/v1/chat/completions"
+        pending_payload = kwargs["pending_request_payload"]
+        assert pending_payload["_aegisgate_pending_kind"] == "response_payload"
+        assert pending_payload["_aegisgate_pending_format"] == "chat_stream_text"
+        assert pending_payload["content"] == "unsafe output"
         return None
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
@@ -251,6 +255,10 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
     async def fake_store_call(method, **kwargs):
         assert method == "save_pending_confirmation"
         assert kwargs["route"] == "/v1/responses"
+        pending_payload = kwargs["pending_request_payload"]
+        assert pending_payload["_aegisgate_pending_kind"] == "response_payload"
+        assert pending_payload["_aegisgate_pending_format"] == "responses_stream_text"
+        assert pending_payload["content"] == "unsafe output"
         return None
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
