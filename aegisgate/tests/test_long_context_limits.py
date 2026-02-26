@@ -132,6 +132,21 @@ def test_mapper_responses_uses_latest_user_content_from_conversation_input():
     assert "act-0b8ba9524e" not in req.messages[0].content
 
 
+def test_mapper_responses_strips_system_exec_runtime_lines():
+    req = to_internal_responses(
+        {
+            "input": (
+                "System: [2026-02-26 22:46:45 GMT+1] Exec completed (x, code 0)\n"
+                "System: [2026-02-26 22:46:53 GMT+1] Exec failed (y, signal SIGKILL)\n"
+                "3"
+            )
+        }
+    )
+    assert "Exec completed" not in req.messages[0].content
+    assert "Exec failed" not in req.messages[0].content
+    assert req.messages[0].content == "3"
+
+
 def test_chat_upstream_payload_preserves_multimodal_structure():
     payload = {
         "messages": [
@@ -197,3 +212,25 @@ def test_responses_upstream_payload_keeps_normal_assistant_history():
     items = upstream_payload["input"]
     assert isinstance(items, list)
     assert len(items) == 2
+
+
+def test_responses_upstream_payload_strips_system_exec_runtime_lines_in_user_input():
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": (
+                    "System: [2026-02-26 22:46:45 GMT+1] Exec completed (x, code 0)\n"
+                    "[Telegram] 什么意思"
+                ),
+            }
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    assert items[0]["role"] == "user"
+    assert "Exec completed" not in str(items[0]["content"])
+    assert "什么意思" in str(items[0]["content"])

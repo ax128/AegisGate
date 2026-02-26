@@ -59,6 +59,10 @@ def _extract_stream_text_from_event(data_payload: str) -> str:
 
 
 def _stream_block_reason(ctx: RequestContext) -> str | None:
+    # Command-like high risk output should always require confirmation in stream mode.
+    if "response_anomaly_high_risk_command" in ctx.security_tags:
+        return "response_high_risk_command"
+
     if ctx.response_disposition == "block":
         if ctx.disposition_reasons:
             return ctx.disposition_reasons[-1]
