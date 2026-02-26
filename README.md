@@ -1,10 +1,10 @@
 # AegisGate
 
-AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关负责做请求/响应安全检查，再转发到真实上游模型。
+AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。
 
 核心目标：
 - 统一入口：把安全策略集中在网关层，而不是散落在各个 Agent/应用里。
-- 降低泄露面：请求侧脱敏、越权/注入检测、响应侧清洗与阻断。
+- 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、确认放行流程（yes/no）。
 
 ## 1. 主要能力
@@ -18,14 +18,25 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - `POST /v1/messages/count_tokens`
   - `stream=true` 流式透传
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
-- 请求侧：redaction、request_sanitizer、注入/异常/越权检测
+- 请求侧：redaction、request_sanitizer、rag_poison_guard
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
-- 高风险确认：命中高风险可返回确认模板，用户 `yes/no` 后一次性执行或取消
+- 高风险确认：命中高风险可返回确认模板，确认指令在 request 入口按三态处理
 - 可选能力：
   - 语义灰区复核（超时、熔断、缓存）
   - HMAC + nonce 防重放
   - loopback-only 边界限制
 - 存储后端：`sqlite` / `redis` / `postgres`
+
+### 1.1 确认放行三态（当前行为）
+
+当会话中存在 pending 确认时，新消息在请求入口按以下规则处理：
+
+1. `yes` 放行：命中有效确认指令后，放行并回放/释放 pending 缓存内容给 agent。
+2. `no` 取消：取消执行，并销毁该 pending 缓存数据。
+3. 其他输入：视为普通新消息，不拦截挂死；继续走请求脱敏与策略链后转发上游。
+
+推荐使用模板中的完整指令（`yes/no + cfm-id + act-token`）。  
+在“当前会话且仅有 1 条 pending”时，也支持仅发送 `yes` 或 `no`。
 
 ## 2. 接入模型
 
