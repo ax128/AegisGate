@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from aegisgate.config.settings import settings
 from aegisgate.config.security_level import apply_threshold, normalize_security_level
 from aegisgate.config.feature_flags import feature_flags
 from aegisgate.core.context import RequestContext
@@ -35,9 +36,22 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
 _builtin_policy_warned: set[str] = set()
 
 
+def _resolve_rules_dir(rules_dir: str | None) -> Path:
+    raw = rules_dir or str(Path(settings.security_rules_path).parent)
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    app_root = Path(__file__).resolve().parents[2]
+    candidates = [Path.cwd() / candidate, app_root / candidate]
+    for item in candidates:
+        if item.exists():
+            return item.resolve()
+    return candidates[-1].resolve()
+
+
 class PolicyEngine:
-    def __init__(self, rules_dir: str = "aegisgate/policies/rules") -> None:
-        self.rules_dir = Path(rules_dir)
+    def __init__(self, rules_dir: str | None = None) -> None:
+        self.rules_dir = _resolve_rules_dir(rules_dir)
         self._cache_lock = Lock()
         self._cache: dict[str, tuple[int, dict[str, Any]]] = {}
 

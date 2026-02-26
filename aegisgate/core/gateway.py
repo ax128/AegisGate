@@ -19,7 +19,7 @@ from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
 from aegisgate.core.gw_tokens import find_token as gw_tokens_find_token, get as gw_tokens_get, load as gw_tokens_load, register as gw_tokens_register, unregister as gw_tokens_unregister
-from aegisgate.init_config import ensure_config_dir
+from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.core.security_boundary import (
     build_nonce_cache,
     build_signature_payload,
@@ -360,8 +360,11 @@ async def shutdown_cleanup() -> None:
 async def startup_background_tasks() -> None:
     try:
         ensure_config_dir()
+        assert_security_bootstrap_ready()
+        logger.info("security policy bootstrap ready")
     except Exception as exc:  # pragma: no cover
-        logger.warning("init_config on startup failed: %s", exc)
+        logger.error("init_config on startup failed: %s", exc)
+        raise
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
