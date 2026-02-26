@@ -108,6 +108,9 @@ _CONFIRMATION_RELEASE_EMPTY_TEXT = (
     "[AegisGate] 已放行该确认，但被拦截响应未包含可回放文本（可能仅包含工具调用事件）。"
     "请重新发送上一条业务请求以继续执行。"
 )
+_UPSTREAM_EOF_RECOVERY_NOTICE = (
+    "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
+)
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
@@ -157,6 +160,13 @@ def _trim_stream_window(current: str, chunk: str) -> str:
     if len(merged) <= _STREAM_WINDOW_MAX_CHARS:
         return merged
     return merged[-_STREAM_WINDOW_MAX_CHARS:]
+
+
+def _build_upstream_eof_replay_text(cached_text: str) -> str:
+    text = (cached_text or "").strip()
+    if not text:
+        return _UPSTREAM_EOF_RECOVERY_NOTICE
+    return f"{text}\n\n{_UPSTREAM_EOF_RECOVERY_NOTICE}"
 
 
 # 调试时完整请求内容最大输出长度，避免日志过长
@@ -1855,16 +1865,31 @@ async def _execute_chat_stream_once(
 
                 yield line
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
-                detail = "upstream stream closed without [DONE] terminator"
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
+                replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
-                    "chat stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
+                    "chat stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true recovery_chars=%s",
                     ctx.request_id,
                     chunk_count,
                     len(stream_window),
+                    len(replay_text),
                 )
-                yield _stream_error_sse_chunk(detail, code="upstream_eof_no_done")
+                payload = {
+                    "id": req.request_id,
+                    "object": "chat.completion.chunk",
+                    "model": req.model,
+                    "choices": [
+                        {"index": 0, "delta": {"role": "assistant", "content": replay_text}, "finish_reason": "stop"}
+                    ],
+                    "aegisgate": {
+                        "action": "allow",
+                        "warning": "upstream_eof_no_done",
+                        "recovered": True,
+                    },
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
                 yield _stream_done_sse_chunk()
+                stream_end_reason = "upstream_eof_no_done_recovered"
         except RuntimeError as exc:
             detail = str(exc)
             reason = _stream_runtime_reason(detail)
@@ -2144,16 +2169,86 @@ async def _execute_responses_stream_once(
 
                 yield line
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
-                detail = "upstream stream closed without [DONE] terminator"
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
+                replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
-                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true",
+                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true recovery_chars=%s",
                     ctx.request_id,
                     chunk_count,
                     len(stream_window),
+                    len(replay_text),
                 )
-                yield _stream_error_sse_chunk(detail, code="upstream_eof_no_done")
+                item_id = f"msg_{(req.request_id or 'resp')[:12]}"
+                legacy_payload = {
+                    "id": req.request_id,
+                    "object": "response.chunk",
+                    "model": req.model,
+                    "type": "response.output_text.delta",
+                    "delta": replay_text,
+                    "aegisgate": {
+                        "action": "allow",
+                        "warning": "upstream_eof_no_done",
+                        "recovered": True,
+                    },
+                }
+                yield f"data: {json.dumps(legacy_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                typed_delta_payload = {
+                    "type": "response.output_text.delta",
+                    "response_id": req.request_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": replay_text,
+                    "aegisgate": {
+                        "action": "allow",
+                        "warning": "upstream_eof_no_done",
+                        "recovered": True,
+                    },
+                }
+                yield f"data: {json.dumps(typed_delta_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                typed_done_payload = {
+                    "type": "response.output_text.done",
+                    "response_id": req.request_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": replay_text,
+                    "aegisgate": {
+                        "action": "allow",
+                        "warning": "upstream_eof_no_done",
+                        "recovered": True,
+                    },
+                }
+                yield f"data: {json.dumps(typed_done_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                completed_payload = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": req.request_id,
+                        "object": "response",
+                        "model": req.model,
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "message",
+                                "id": item_id,
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
+                            }
+                        ],
+                    },
+                    "aegisgate": {
+                        "action": "allow",
+                        "warning": "upstream_eof_no_done",
+                        "recovered": True,
+                    },
+                }
+                yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n".encode("utf-8")
                 yield _stream_done_sse_chunk()
+                stream_end_reason = "upstream_eof_no_done_recovered"
         except RuntimeError as exc:
             detail = str(exc)
             reason = _stream_runtime_reason(detail)
