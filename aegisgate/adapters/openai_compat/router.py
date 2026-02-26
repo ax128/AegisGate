@@ -165,6 +165,10 @@ def _sanitize_payload_for_log(value: Any) -> Any:
         for key, item in value.items():
             if key == "parameters":
                 continue
+            if key == "tools":
+                # Keep field for troubleshooting but omit tool list details from debug logs.
+                sanitized[key] = []
+                continue
             sanitized[key] = _sanitize_payload_for_log(item)
         return sanitized
     if isinstance(value, list):
@@ -1461,6 +1465,8 @@ async def _execute_chat_stream_once(
         stream_window = ""
         stream_cached_parts: list[str] = []
         chunk_count = 0
+        saw_done = False
+        stream_end_reason = "upstream_eof_no_done"
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
                 payload_text = _extract_sse_data_payload(line)
@@ -1469,6 +1475,8 @@ async def _execute_chat_stream_once(
                     continue
 
                 if payload_text == "[DONE]":
+                    saw_done = True
+                    stream_end_reason = "upstream_done"
                     yield line
                     break
 
@@ -1581,6 +1589,7 @@ async def _execute_chat_stream_once(
                             confirmation_meta,
                         )
                         yield _stream_done_sse_chunk()
+                        stream_end_reason = "policy_confirmation"
                         break
 
                 yield line
@@ -1590,6 +1599,7 @@ async def _execute_chat_stream_once(
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append(reason)
             ctx.enforcement_actions.append(f"upstream:{reason}")
+            stream_end_reason = f"error:{reason}"
             logger.error("chat stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
             yield _stream_error_sse_chunk(detail, code=reason)
             yield _stream_done_sse_chunk()
@@ -1598,10 +1608,19 @@ async def _execute_chat_stream_once(
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("gateway_internal_error")
             ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            stream_end_reason = "error:gateway_internal_error"
             logger.exception("chat stream unexpected failure request_id=%s", ctx.request_id)
             yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
             yield _stream_done_sse_chunk()
         finally:
+            logger.info(
+                "chat stream finished request_id=%s reason=%s saw_done=%s chunk_count=%s cached_chars=%s",
+                ctx.request_id,
+                stream_end_reason,
+                saw_done,
+                chunk_count,
+                len(stream_window),
+            )
             _write_audit_event(ctx, boundary=boundary)
 
     return _build_streaming_response(guarded_generator())
@@ -1725,6 +1744,8 @@ async def _execute_responses_stream_once(
         stream_window = ""
         stream_cached_parts: list[str] = []
         chunk_count = 0
+        saw_done = False
+        stream_end_reason = "upstream_eof_no_done"
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
                 payload_text = _extract_sse_data_payload(line)
@@ -1733,6 +1754,8 @@ async def _execute_responses_stream_once(
                     continue
 
                 if payload_text == "[DONE]":
+                    saw_done = True
+                    stream_end_reason = "upstream_done"
                     yield line
                     break
 
@@ -1844,6 +1867,7 @@ async def _execute_responses_stream_once(
                             confirmation_meta,
                         )
                         yield _stream_done_sse_chunk()
+                        stream_end_reason = "policy_confirmation"
                         break
 
                 yield line
@@ -1853,6 +1877,7 @@ async def _execute_responses_stream_once(
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append(reason)
             ctx.enforcement_actions.append(f"upstream:{reason}")
+            stream_end_reason = f"error:{reason}"
             logger.error("responses stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
             yield _stream_error_sse_chunk(detail, code=reason)
             yield _stream_done_sse_chunk()
@@ -1861,10 +1886,19 @@ async def _execute_responses_stream_once(
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("gateway_internal_error")
             ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            stream_end_reason = "error:gateway_internal_error"
             logger.exception("responses stream unexpected failure request_id=%s", ctx.request_id)
             yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
             yield _stream_done_sse_chunk()
         finally:
+            logger.info(
+                "responses stream finished request_id=%s reason=%s saw_done=%s chunk_count=%s cached_chars=%s",
+                ctx.request_id,
+                stream_end_reason,
+                saw_done,
+                chunk_count,
+                len(stream_window),
+            )
             _write_audit_event(ctx, boundary=boundary)
 
     return _build_streaming_response(guarded_generator())
