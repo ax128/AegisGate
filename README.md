@@ -20,7 +20,9 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
 - 请求侧：redaction、request_sanitizer、rag_poison_guard
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
+- 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
 - 高风险确认：命中高风险可返回确认模板，确认指令在 request 入口按三态处理
+- 流式韧性：上游未发送 `[DONE]` 提前断流时，网关会合成恢复完成事件并补齐 `[DONE]`
 - 可选能力：
   - 语义灰区复核（超时、熔断、缓存）
   - HMAC + nonce 防重放
@@ -37,6 +39,18 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 推荐使用模板中的完整指令（`yes/no + cfm-id + act-token`）。  
 在“当前会话且仅有 1 条 pending”时，也支持仅发送 `yes` 或 `no`。
+
+### 1.2 脱敏覆盖范围（当前）
+
+请求侧 `redaction` + `request_sanitizer` + 响应侧 `post_restore_guard` 已覆盖以下类别：
+
+- 凭据/密钥：`API Key`、`Bearer`、`JWT`、`Cookie/Session`、`Private Key PEM`、`AWS Access/Secret`、`GitHub/Slack token`
+- 金融标识：`银行卡`、`IBAN`、`SWIFT/BIC`、`Routing/ABA`、银行账号字段
+- 网络与设备：`IPv4/IPv6`、`MAC`、`IMEI/IMSI`、设备序列号
+- 证件与合规：`SSN`、`税号`、`护照/驾照`、证书/执照编号、医疗记录号、医保受益人编号
+- 人员与地理：姓名字段、地址/经纬度/邮编字段、精确日期（生日/入院/出院/死亡）、传真字段
+- 车辆与生物：`VIN`、车牌字段、生物特征模板字段（文本形态）
+- Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
 
 ## 2. 接入模型
 
@@ -241,6 +255,14 @@ pytest -q
 ### 8.3 上游返回 4xx/5xx
 
 网关会透传上游错误摘要。请先独立验证上游接口可用，再检查网关策略拦截。
+
+### 8.4 流式日志出现 `upstream_eof_no_done`
+
+含义：上游流式连接提前关闭，未按协议发送 `data: [DONE]`。
+
+- 网关会自动执行恢复：合成可见完成事件（含已缓存文本和提示）并补发 `[DONE]`，避免客户端“无反馈/卡住”。
+- 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关确认匹配失败。
+- 建议同时排查上游超时、代理 `read timeout`、连接重置日志。
 
 ## 9. 许可证
 
