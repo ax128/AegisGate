@@ -108,6 +108,40 @@ def test_resolve_pending_confirmation_no_without_id_uses_single_pending(monkeypa
     assert result == record
 
 
+def test_resolve_pending_confirmation_accepts_wrapped_yes_with_confirm_id(monkeypatch):
+    confirm_id = "cfm-abc123def458"
+    record = {
+        "confirm_id": confirm_id,
+        "tenant_id": "default",
+        "status": "pending",
+        "expires_at": 9999999999,
+        "updated_at": 1,
+        "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "hello"}]},
+        "pending_request_hash": "hash",
+    }
+    monkeypatch.setattr(
+        openai_router.store,
+        "get_pending_confirmation",
+        lambda cid: record if cid == confirm_id else None,
+    )
+    result = openai_router._resolve_pending_confirmation(
+        {"session_id": "s1"},
+        f"---yes {confirm_id} act-bada1fe8dd---",
+        1,
+        expected_route="/v1/chat/completions",
+        tenant_id="default",
+    )
+    assert result == record
+
+
+def test_parse_explicit_confirmation_command_ignores_template_prefixed_line():
+    decision, confirm_id = openai_router._parse_explicit_confirmation_command(
+        "Approve (copy this line): yes cfm-abc123def456 act-bada1fe8dd"
+    )
+    assert decision == "unknown"
+    assert confirm_id == ""
+
+
 @pytest.mark.asyncio
 async def test_chat_yes_without_pending_returns_confirmation_requirements(monkeypatch):
     async def fake_execute_chat_once(**kwargs):

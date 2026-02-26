@@ -761,22 +761,45 @@ def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
     if not lines:
         return "unknown", ""
     cmd_re = re.compile(
-        r"^\s*(?P<cmd>yes|y|no|n)\b(?P<tail>.*)$",
+        r"^[\s`\"'*_=\-~>#\[\]\(\)\{\}\|:：,，]*?(?P<cmd>yes|y|no|n)\b(?P<tail>.*)$",
         re.IGNORECASE,
     )
-    for raw in reversed(lines[-4:]):
+    for raw in reversed(lines[-6:]):
         line = raw.strip()
         match = cmd_re.match(line)
         if not match:
             continue
         cmd = str(match.group("cmd") or "").lower()
         tail = str(match.group("tail") or "")
+        tail = re.sub(r"[\s`\"'*_=\-~>#\]\)\}\|:：,，.;。!！?？]+$", "", tail)
         confirm_id = _extract_confirm_id(f"{cmd} {tail}")
         if cmd in {"yes", "y"}:
             return "yes", confirm_id
         if cmd in {"no", "n"}:
             return "no", confirm_id
     return "unknown", ""
+
+
+def _confirmation_tail_preview(text: str, max_lines: int = 4, max_chars: int = 120) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line and line.strip()]
+    if not lines:
+        return "-"
+    previews: list[str] = []
+    for line in lines[-max_lines:]:
+        compact = re.sub(r"\s+", " ", line).strip()
+        lowered = compact.lower()
+        looks_like_command = (
+            bool(re.search(r"\b(?:yes|y|no|n)\b", lowered))
+            or "cfm-" in lowered
+            or "act-" in lowered
+        )
+        if looks_like_command:
+            if len(compact) > max_chars:
+                compact = f"{compact[:max_chars]}..."
+            previews.append(compact)
+        else:
+            previews.append(f"<non-command-line len={len(compact)}>")
+    return " || ".join(previews) if previews else "-"
 
 
 def _parse_explicit_confirmation_command(text: str) -> tuple[str, str]:
@@ -1406,6 +1429,19 @@ async def _execute_chat_stream_once(
 
                     block_reason = _stream_block_reason(ctx)
                     if block_reason:
+                        logger.info(
+                            "chat stream block decision request_id=%s reason=%s risk_score=%.4f threshold=%.4f response_disposition=%s requires_human_review=%s security_tags=%s disposition_reasons=%s chunk_count=%s cached_chars=%s",
+                            ctx.request_id,
+                            block_reason,
+                            float(ctx.risk_score),
+                            float(ctx.risk_threshold),
+                            ctx.response_disposition,
+                            bool(ctx.requires_human_review),
+                            sorted(ctx.security_tags),
+                            list(ctx.disposition_reasons),
+                            chunk_count,
+                            len(stream_window),
+                        )
                         debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
@@ -1656,6 +1692,19 @@ async def _execute_responses_stream_once(
 
                     block_reason = _stream_block_reason(ctx)
                     if block_reason:
+                        logger.info(
+                            "responses stream block decision request_id=%s reason=%s risk_score=%.4f threshold=%.4f response_disposition=%s requires_human_review=%s security_tags=%s disposition_reasons=%s chunk_count=%s cached_chars=%s",
+                            ctx.request_id,
+                            block_reason,
+                            float(ctx.risk_score),
+                            float(ctx.risk_threshold),
+                            ctx.response_disposition,
+                            bool(ctx.requires_human_review),
+                            sorted(ctx.security_tags),
+                            list(ctx.disposition_reasons),
+                            chunk_count,
+                            len(stream_window),
+                        )
                         debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
@@ -2584,6 +2633,7 @@ async def chat_completions(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
+    tail_preview = _confirmation_tail_preview(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -2593,7 +2643,7 @@ async def chat_completions(payload: dict, request: Request):
         tenant_id=tenant_id,
     )
     logger.info(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit",
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
@@ -2601,6 +2651,7 @@ async def chat_completions(payload: dict, request: Request):
         decision_value,
         confirm_id_hint or "-",
         bool(pending),
+        tail_preview,
     )
 
     if pending:
@@ -3045,13 +3096,14 @@ async def chat_completions(payload: dict, request: Request):
         )
         _write_audit_event(ctx_preview, boundary=boundary)
         logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s",
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s tail_preview=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
             req_preview.route,
             decision_value,
             requirement_detail,
+            tail_preview,
         )
         return to_chat_response(invalid_resp)
 
@@ -3113,7 +3165,7 @@ async def chat_completions(payload: dict, request: Request):
         )
         _write_audit_event(ctx_preview, boundary=boundary)
         logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s",
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s tail_preview=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
@@ -3121,15 +3173,17 @@ async def chat_completions(payload: dict, request: Request):
             decision_value,
             confirm_id_hint,
             requirement_detail,
+            tail_preview,
         )
         return to_chat_response(invalid_resp)
 
     logger.info(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true",
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
         req_preview.route,
+        tail_preview,
     )
 
     if _should_stream(payload):
@@ -3195,6 +3249,7 @@ async def responses(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
+    tail_preview = _confirmation_tail_preview(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -3204,7 +3259,7 @@ async def responses(payload: dict, request: Request):
         tenant_id=tenant_id,
     )
     logger.info(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit",
+        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
@@ -3212,6 +3267,7 @@ async def responses(payload: dict, request: Request):
         decision_value,
         confirm_id_hint or "-",
         bool(pending),
+        tail_preview,
     )
 
     if pending:
@@ -3656,13 +3712,14 @@ async def responses(payload: dict, request: Request):
         )
         _write_audit_event(ctx_preview, boundary=boundary)
         logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s",
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s reason=%s tail_preview=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
             req_preview.route,
             decision_value,
             requirement_detail,
+            tail_preview,
         )
         return to_responses_output(invalid_resp)
 
@@ -3724,7 +3781,7 @@ async def responses(payload: dict, request: Request):
         )
         _write_audit_event(ctx_preview, boundary=boundary)
         logger.warning(
-            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s",
+            "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id=%s reason=%s tail_preview=%s",
             req_preview.request_id,
             req_preview.session_id,
             tenant_id,
@@ -3732,15 +3789,17 @@ async def responses(payload: dict, request: Request):
             decision_value,
             confirm_id_hint,
             requirement_detail,
+            tail_preview,
         )
         return to_responses_output(invalid_resp)
 
     logger.info(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true",
+        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=no_explicit_confirmation_command forward_as_new_request=true tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
         tenant_id,
         req_preview.route,
+        tail_preview,
     )
 
     if _should_stream(payload):
