@@ -82,7 +82,7 @@ def test_resolve_pending_confirmation_yes_without_id_uses_single_pending(monkeyp
     assert result == record
 
 
-def test_resolve_pending_confirmation_confirm_without_id_uses_single_pending(monkeypatch):
+def test_resolve_pending_confirmation_no_without_id_uses_single_pending(monkeypatch):
     record = {
         "confirm_id": "cfm-abc123def457",
         "status": "pending",
@@ -100,7 +100,7 @@ def test_resolve_pending_confirmation_confirm_without_id_uses_single_pending(mon
     )
     result = openai_router._resolve_pending_confirmation(
         {"session_id": "s1"},
-        "confirm",
+        "no",
         1,
         expected_route="/v1/chat/completions",
         tenant_id="default",
@@ -109,7 +109,7 @@ def test_resolve_pending_confirmation_confirm_without_id_uses_single_pending(mon
 
 
 @pytest.mark.asyncio
-async def test_chat_yes_without_confirm_id_is_not_forced_into_pending(monkeypatch):
+async def test_chat_yes_without_pending_returns_confirmation_requirements(monkeypatch):
     async def fake_execute_chat_once(**kwargs):
         return {"ok": True}
 
@@ -126,6 +126,32 @@ async def test_chat_yes_without_confirm_id_is_not_forced_into_pending(monkeypatc
             "session_id": "s-confirm-1",
             "model": "gpt-test",
             "messages": [{"role": "user", "content": "yes"}],
+        },
+        request,
+    )
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "command_invalid"
+    assert "确认指令不符合放行要求" in result["choices"][0]["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_chat_message_with_stale_confirm_id_but_without_explicit_command_is_forwarded(monkeypatch):
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        }
+    )
+    result = await openai_router.chat_completions(
+        {
+            "request_id": "chat-confirm-1b",
+            "session_id": "s-confirm-1b",
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "这个 cfm-6a5aac9b09ac 是什么含义？"}],
         },
         request,
     )
@@ -690,3 +716,31 @@ async def test_responses_ignores_stale_confirm_id_from_non_user_history(monkeypa
     )
 
     assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_responses_yes_without_pending_returns_confirmation_requirements(monkeypatch):
+    async def fake_execute_responses_once(**kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(openai_router, "_execute_responses_once", fake_execute_responses_once)
+    request = _build_request(
+        headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "gateway-key": settings.gateway_key,
+        },
+        path="/v1/responses",
+    )
+    result = await openai_router.responses(
+        {
+            "request_id": "resp-confirm-req-1",
+            "session_id": "s-confirm-req-1",
+            "model": "gpt-test",
+            "input": "yes",
+        },
+        request,
+    )
+
+    assert isinstance(result, dict)
+    assert result["aegisgate"]["confirmation"]["status"] == "command_invalid"
+    assert "确认指令不符合放行要求" in result["output_text"]
