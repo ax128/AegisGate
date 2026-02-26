@@ -24,6 +24,12 @@ def test_sanitize_payload_for_log_drops_parameters_recursively():
                 },
             }
         ],
+        "config": {
+            "parameters": {
+                "should": "remove",
+            },
+            "keep": "ok",
+        },
         "input": [{"role": "user", "content": "hello"}],
     }
 
@@ -32,8 +38,8 @@ def test_sanitize_payload_for_log_drops_parameters_recursively():
     # input payload should not be mutated
     assert "parameters" in payload["tools"][0]
 
-    tool0 = sanitized["tools"][0]
-    assert "parameters" not in tool0
-    assert "parameters" not in tool0["metadata"]["nested"]
-    assert tool0["name"] == "write"
+    # tools field is preserved but values are omitted
+    assert sanitized["tools"] == []
+    assert "parameters" not in sanitized["config"]
+    assert sanitized["config"]["keep"] == "ok"
     assert sanitized["model"] == "gpt-test"
