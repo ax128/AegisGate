@@ -771,13 +771,6 @@ def _iter_responses_text_stream_replay(
             "part": {"type": "output_text", "text": ""},
         },
         {
-            "id": request_id,
-            "object": "response.chunk",
-            "model": model,
-            "type": "response.output_text.delta",
-            "delta": replay_text,
-        },
-        {
             "type": "response.output_text.delta",
             "response_id": request_id,
             "item_id": item_id,
@@ -845,7 +838,7 @@ def _render_cached_responses_confirmation_stream_output(
         "confirmation stream replay responses request_id=%s confirm_id=%s events=%s content_chars=%s",
         request_id,
         confirm_id,
-        "response.created,response.output_item.added,response.content_part.added,response.chunk,response.output_text.delta,response.output_text.done,response.content_part.done,response.output_item.done,response.completed,[DONE]",
+        "response.created,response.output_item.added,response.content_part.added,response.output_text.delta,response.output_text.done,response.content_part.done,response.output_item.done,response.completed,[DONE]",
         len(replay_text),
     )
 
