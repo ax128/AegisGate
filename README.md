@@ -26,6 +26,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 请求侧：redaction、request_sanitizer、rag_poison_guard
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
+- `responses` 结构化 `input` 预转发脱敏：覆盖 `user/developer/system/assistant` 与 `function_call_output/tool_output` 等节点
 - 高风险确认：命中高风险可返回确认模板，确认指令在 request 入口按三态处理
 - 流式韧性：上游未发送 `[DONE]` 提前断流时，网关会合成恢复完成事件并补齐 `[DONE]`
 - 可选能力：
@@ -51,7 +52,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ### 1.2 脱敏覆盖范围（当前）
 
-请求侧 `redaction` + `request_sanitizer` + 响应侧 `post_restore_guard` 已覆盖以下类别：
+请求侧 `redaction` + `request_sanitizer` + `responses` 结构化 `input` 预转发脱敏 + 响应侧 `post_restore_guard` 已覆盖以下类别：
 
 - 凭据/密钥：`API Key`、`Bearer`、`JWT`、`Cookie/Session`、`Private Key PEM`、`AWS Access/Secret`、`GitHub/Slack token`
 - 金融标识：`银行卡`、`IBAN`、`SWIFT/BIC`、`Routing/ABA`、银行账号字段
@@ -60,6 +61,12 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 人员与地理：姓名字段、地址/经纬度/邮编字段、精确日期（生日/入院/出院/死亡）、传真字段
 - 车辆与生物：`VIN`、车牌字段、生物特征模板字段（文本形态）
 - Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
+
+`responses` 结构化输入补充说明（当前）：
+- 全节点文本扫描：`role=user/developer/system/assistant` + `type=function_call_output/tool_result/tool_output/computer_call_output`
+- 角色分级：`system/developer` 使用放宽规则（优先脱敏 token/key/secret/private key/IP 等高风险项）；`user` 保持严格
+- 命中位置记录：日志记录 `path/field/role/pattern/count` 摘要（不含命中原文）
+- 幂等：已包含 `[REDACTED:*]` 的文本不会重复脱敏
 
 ## 2. 接入模型
 
@@ -191,6 +198,8 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `AEGIS_GATEWAY_KEY` | 网关校验 key | `agent` |
+| `AEGIS_LOG_LEVEL` | 日志等级 | `info` |
+| `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | 仅允许本机访问 | `true` |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | 默认上游地址 | `https://your-upstream.example.com/v1` |
@@ -214,6 +223,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 - 网关是安全中间层，不负责上游模型参数（如 model/api-key/超时）语义正确性。
 - 默认会写日志和审计文件到本地；是否包含正文取决于日志级别与策略配置。
+- 当 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true` 时，请求体会完整打印（含 function/tool 输出原文），仅建议在受控环境短时开启。
 - 若对外网开放，建议至少做到：
   - 使用高强度 `AEGIS_GATEWAY_KEY`（不要用默认值）
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
@@ -251,7 +261,9 @@ pytest -q
 
 含义：上游流式连接提前关闭，未按协议发送 `data: [DONE]`。
 
-- 网关会自动执行恢复：合成可见完成事件（含已缓存文本和提示）并补发 `[DONE]`，避免客户端“无反馈/卡住”。
+- 网关会自动执行恢复并补发 `[DONE]`：
+  - `chat/completions`：合成包含恢复提示的可见文本 chunk。
+  - `responses`：合成 `response.completed` 终止事件（不保证回放已输出文本）。
 - 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关确认匹配失败。
 - 建议同时排查上游超时、代理 `read timeout`、连接重置日志。
 
