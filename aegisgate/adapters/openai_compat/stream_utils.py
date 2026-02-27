@@ -37,6 +37,24 @@ def _extract_stream_text_from_event(data_payload: str) -> str:
     if not isinstance(event, dict):
         return ""
 
+    # Responses typed events may include both delta and full-text done/completed payloads.
+    # Only count incremental delta text to avoid duplicate cache/replay content.
+    event_type = str(event.get("type") or "").strip().lower()
+    if event_type:
+        if event_type in {
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+        }:
+            return ""
+        if event_type == "response.output_text.delta":
+            text = _flatten_stream_content(event.get("delta"))
+            return text if text else ""
+
     choices = event.get("choices")
     if isinstance(choices, list) and choices:
         first = choices[0]
