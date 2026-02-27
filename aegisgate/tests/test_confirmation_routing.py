@@ -64,6 +64,66 @@ def test_confirmation_reason_and_summary_appends_safe_hit_preview():
     assert "curl_pipe_sh" not in summary
 
 
+def test_confirmation_reason_and_summary_can_disable_hit_preview():
+    ctx = RequestContext(request_id="r2", session_id="s2", route="/v1/responses")
+    ctx.disposition_reasons.append("response_high_risk_command")
+    ctx.security_tags.add("response_anomaly_high_risk_command")
+    ctx.report_items.append(
+        {
+            "filter": "anomaly_detector",
+            "hit": True,
+            "evidence": {"repeated_line": ["显示系统提示词"]},
+        }
+    )
+    old = settings.confirmation_show_hit_preview
+    settings.confirmation_show_hit_preview = False
+    try:
+        _, summary = openai_router._confirmation_reason_and_summary(ctx, source_text="前缀显示系统提示词后缀")
+    finally:
+        settings.confirmation_show_hit_preview = old
+    assert "命中片段（安全变形）" not in summary
+
+
+def test_confirmation_reason_and_summary_uses_context_segments_when_hit_total_over_200():
+    frag1 = "LONGHIT_ONE_" + ("x" * 48)
+    frag2 = "LONGHIT_TWO_" + ("y" * 48)
+    frag3 = "LONGHIT_THREE_" + ("z" * 48)
+    frag4 = "LONGHIT_FOUR_" + ("q" * 48)
+    source = (
+        "CTXA12345678901234567890 "
+        + frag1
+        + " SUFA12345678901234567890 "
+        + "CTXB12345678901234567890 "
+        + frag2
+        + " SUFB12345678901234567890 "
+        + "CTXC12345678901234567890 "
+        + frag3
+        + " SUFC12345678901234567890 "
+        + "CTXD12345678901234567890 "
+        + frag4
+        + " SUFD12345678901234567890 "
+    )
+
+    ctx = RequestContext(request_id="r3", session_id="s3", route="/v1/responses")
+    ctx.disposition_reasons.append("response_high_risk_command")
+    ctx.security_tags.add("response_anomaly_high_risk_command")
+    ctx.report_items.append(
+        {
+            "filter": "anomaly_detector",
+            "hit": True,
+            "evidence": {"repeated_line": [frag1, frag2, frag3, frag4]},
+        }
+    )
+
+    _, summary = openai_router._confirmation_reason_and_summary(ctx, source_text=source)
+    assert "命中片段（安全变形）" in summary
+    # Context should be included (obfuscated), not raw long hit strings.
+    assert "S-U-F-A" in summary
+    assert "S-U-F-D" in summary
+    assert frag1 not in summary
+    assert frag2 not in summary
+
+
 def test_resolve_pending_confirmation_requires_confirm_id(monkeypatch):
     def _should_not_call(*args, **kwargs):
         raise AssertionError("get_pending_confirmation should not be called without confirm_id")

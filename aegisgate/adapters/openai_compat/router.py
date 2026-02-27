@@ -110,8 +110,7 @@ _UPSTREAM_EOF_RECOVERY_NOTICE = (
     "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
 )
 _GENERIC_EXTRACT_MAX_CHARS = 16000
-_CONFIRMATION_HIT_PREVIEW_MAX_ITEMS = 3
-_CONFIRMATION_HIT_PREVIEW_MAX_CHARS = 48
+_CONFIRMATION_HIT_CONTEXT_CHARS = 20
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
@@ -994,16 +993,21 @@ def _needs_confirmation(ctx: RequestContext) -> bool:
     return any(tag.startswith("response_") for tag in ctx.security_tags)
 
 
-def _confirmation_reason_and_summary(ctx: RequestContext, phase: str = PHASE_RESPONSE) -> tuple[str, str]:
+def _confirmation_reason_and_summary(
+    ctx: RequestContext,
+    phase: str = PHASE_RESPONSE,
+    *,
+    source_text: str = "",
+) -> tuple[str, str]:
     reason, summary = _flow_reason_and_summary(phase, ctx.disposition_reasons, ctx.security_tags)
-    return reason, _append_safe_hit_preview(summary, ctx)
+    return reason, _append_safe_hit_preview(summary, ctx, source_text=source_text)
 
 
-def _obfuscate_hit_fragment(text: str, *, max_chars: int = _CONFIRMATION_HIT_PREVIEW_MAX_CHARS) -> str:
+def _obfuscate_hit_fragment(text: str, *, max_chars: int | None = None) -> str:
     compact = re.sub(r"\s+", " ", str(text or "").strip())
     if not compact:
         return ""
-    if len(compact) > max_chars:
+    if max_chars is not None and max_chars > 0 and len(compact) > max_chars:
         compact = f"{compact[:max_chars]}..."
 
     words = compact.split(" ")
@@ -1041,25 +1045,63 @@ def _collect_confirmation_hit_fragments(ctx: RequestContext) -> list[str]:
                     if re.fullmatch(r"[a-z0-9_]{2,40}", lowered):
                         continue
                     fragments.append(value)
-                    if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
-                        break
-                if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
-                    break
-        if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
-            break
 
     deduped: list[str] = []
     for value in fragments:
         if value not in deduped:
             deduped.append(value)
-    return deduped[:_CONFIRMATION_HIT_PREVIEW_MAX_ITEMS]
+    return deduped
 
 
-def _append_safe_hit_preview(summary: str, ctx: RequestContext) -> str:
+def _extract_hit_context_segments(source_text: str, hit_text: str, *, context_chars: int = _CONFIRMATION_HIT_CONTEXT_CHARS) -> list[str]:
+    source = str(source_text or "")
+    hit = str(hit_text or "")
+    if not source or not hit:
+        return []
+    escaped = re.escape(hit)
+    matches = list(re.finditer(escaped, source, flags=re.IGNORECASE))
+    if not matches:
+        return []
+    segments: list[str] = []
+    for match in matches:
+        start = match.start()
+        end = match.end()
+        left_start = max(0, start - context_chars)
+        right_end = min(len(source), end + context_chars)
+        left = source[left_start:start]
+        mid = source[start:end]
+        right = source[end:right_end]
+        segment = f"{left}{mid}{right}"
+        if left_start > 0:
+            segment = f"…{segment}"
+        if right_end < len(source):
+            segment = f"{segment}…"
+        segments.append(segment.strip())
+    return segments
+
+
+def _append_safe_hit_preview(summary: str, ctx: RequestContext, *, source_text: str = "") -> str:
+    if not settings.confirmation_show_hit_preview:
+        return summary
+
     fragments = _collect_confirmation_hit_fragments(ctx)
     if not fragments:
         return summary
-    obfuscated = [_obfuscate_hit_fragment(item) for item in fragments]
+
+    total_hit_chars = sum(len(item) for item in fragments)
+    if total_hit_chars <= 200:
+        preview_items = fragments
+    else:
+        preview_items: list[str] = []
+        for item in fragments:
+            segments = _extract_hit_context_segments(source_text, item, context_chars=_CONFIRMATION_HIT_CONTEXT_CHARS)
+            if segments:
+                preview_items.extend(segments)
+            else:
+                # Fallback when source text is unavailable or cannot be matched.
+                preview_items.append(item)
+
+    obfuscated = [_obfuscate_hit_fragment(item) for item in preview_items]
     obfuscated = [item for item in obfuscated if item]
     if not obfuscated:
         return summary
@@ -1984,7 +2026,7 @@ async def _execute_chat_stream_once(
                         debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
-                        reason, summary = _confirmation_reason_and_summary(ctx)
+                        reason, summary = _confirmation_reason_and_summary(ctx, source_text=stream_window)
                         confirm_id = make_confirm_id()
                         now_ts = int(time.time())
                         cached_text = "".join(stream_cached_parts)
@@ -2300,7 +2342,10 @@ async def _execute_responses_stream_once(
                             debug_log_original("response_stream_blocked", stream_window, reason=blocked_reason)
                             if blocked_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(blocked_reason)
-                            blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(ctx)
+                            blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(
+                                ctx,
+                                source_text=stream_window,
+                            )
                             blocked_confirm_id = make_confirm_id()
                             blocked_confirmation_meta = _flow_confirmation_metadata(
                                 confirm_id=blocked_confirm_id,
@@ -2633,7 +2678,7 @@ async def _execute_chat_once(
     if not skip_confirmation and _needs_confirmation(ctx):
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
-        reason, summary = _confirmation_reason_and_summary(ctx)
+        reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
         cached_output = _passthrough_chat_response(upstream_body, req)
         pending_payload = _build_response_pending_payload(
             route=req.route,
@@ -2871,7 +2916,7 @@ async def _execute_responses_once(
     if not skip_confirmation and _needs_confirmation(ctx):
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
-        reason, summary = _confirmation_reason_and_summary(ctx)
+        reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
         cached_output = _passthrough_responses_output(upstream_body, req)
         pending_payload = _build_response_pending_payload(
             route=req.route,
