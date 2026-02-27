@@ -63,8 +63,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ## 2. 接入模型
 
-当前仅支持 token 路由模式：`/v1/__gw__/t/<token>/...`。  
-Header 直连模式（`X-Upstream-Base` + `gateway-key`）已禁用。
+当前仅支持 token 路由模式：`/v1/__gw__/t/<token>/...`。
 
 ### 2.1 Token 注册（必选）
 
