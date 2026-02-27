@@ -784,7 +784,7 @@ def _iter_responses_text_stream_replay(
             "item_id": item_id,
             "output_index": 0,
             "content_index": 0,
-            "text": replay_text,
+            "text": "",
         },
         {
             "type": "response.content_part.done",
@@ -792,7 +792,7 @@ def _iter_responses_text_stream_replay(
             "item_id": item_id,
             "output_index": 0,
             "content_index": 0,
-            "part": {"type": "output_text", "text": replay_text},
+            "part": {"type": "output_text", "text": ""},
         },
         {
             "type": "response.output_item.done",
