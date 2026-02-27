@@ -1263,18 +1263,14 @@ def _append_safe_hit_preview(summary: str, ctx: RequestContext, *, source_text: 
     if not fragments:
         return summary
 
-    total_hit_chars = sum(len(item) for item in fragments)
-    if total_hit_chars <= 200:
-        preview_items = fragments
-    else:
-        preview_items: list[str] = []
-        for item in fragments:
-            segments = _extract_hit_context_segments(source_text, item, context_chars=_CONFIRMATION_HIT_CONTEXT_CHARS)
-            if segments:
-                preview_items.extend(segments)
-            else:
-                # Fallback when source text is unavailable or cannot be matched.
-                preview_items.append(item)
+    preview_items: list[str] = []
+    for item in fragments:
+        segments = _extract_hit_context_segments(source_text, item, context_chars=_CONFIRMATION_HIT_CONTEXT_CHARS)
+        if segments:
+            preview_items.extend(segments)
+        else:
+            # Fallback when source text is unavailable or cannot be matched.
+            preview_items.append(item)
 
     obfuscated = [_obfuscate_hit_fragment(item) for item in preview_items]
     obfuscated = [item for item in obfuscated if item]
