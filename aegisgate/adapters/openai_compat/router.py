@@ -9,6 +9,7 @@ import asyncio
 import re
 import threading
 import time
+from functools import lru_cache
 from typing import Any, AsyncGenerator, AsyncIterable, Generator, Iterable, Mapping
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -41,6 +42,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     close_upstream_async_client,
 )
 from aegisgate.config.settings import settings
+from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.audit import write_audit
 from aegisgate.core.confirmation import (
     make_confirm_id,
@@ -1086,6 +1088,8 @@ def _append_safe_hit_preview(summary: str, ctx: RequestContext, *, source_text: 
 
     fragments = _collect_confirmation_hit_fragments(ctx)
     if not fragments:
+        fragments = _collect_source_hit_fragments(source_text)
+    if not fragments:
         return summary
 
     total_hit_chars = sum(len(item) for item in fragments)
@@ -1107,6 +1111,64 @@ def _append_safe_hit_preview(summary: str, ctx: RequestContext, *, source_text: 
         return summary
     suffix = f"；命中片段（安全变形）：{'；'.join(obfuscated)}"
     return f"{summary}{suffix}"
+
+
+@lru_cache(maxsize=1)
+def _confirmation_hit_regex_patterns() -> tuple[re.Pattern[str], ...]:
+    rules = load_security_rules()
+    pattern_strings: list[str] = []
+
+    def _append_rule_patterns(rule_key: str, field: str) -> None:
+        for item in rules.get(rule_key, {}).get(field, []):
+            regex = item.get("regex") if isinstance(item, dict) else None
+            if regex:
+                pattern_strings.append(str(regex))
+
+    _append_rule_patterns("anomaly_detector", "command_patterns")
+    _append_rule_patterns("privilege_guard", "blocked_patterns")
+    _append_rule_patterns("request_sanitizer", "strong_intent_patterns")
+    _append_rule_patterns("request_sanitizer", "command_patterns")
+    _append_rule_patterns("sanitizer", "system_leak_patterns")
+
+    # Fixed fallback for text-like risky phrases that may not be present in evidence.
+    pattern_strings.extend(
+        [
+            r"(系统提示词|开发者消息|developer\s+message|system\s+prompt)",
+            r"(执行|运行).{0,12}(命令|shell|bash|powershell|cmd|脚本|终端)",
+            r"(rm\s+-rf|curl\s+[^|]+\|\s*(?:sh|bash)|cat\s+~/.ssh|powershell(?:\.exe)?\s+-enc)",
+        ]
+    )
+
+    deduped: list[str] = []
+    for pattern in pattern_strings:
+        if pattern not in deduped:
+            deduped.append(pattern)
+
+    compiled: list[re.Pattern[str]] = []
+    for pattern in deduped:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            continue
+    return tuple(compiled)
+
+
+def _collect_source_hit_fragments(source_text: str) -> list[str]:
+    source = str(source_text or "")
+    if not source:
+        return []
+    patterns = _confirmation_hit_regex_patterns()
+    fragments: list[str] = []
+    for pattern in patterns:
+        for match in pattern.finditer(source):
+            value = str(match.group(0) or "").strip()
+            if len(value) < 2:
+                continue
+            if value not in fragments:
+                fragments.append(value)
+            if len(fragments) >= 12:
+                return fragments
+    return fragments
 
 
 def _semantic_gray_zone_enabled(ctx: RequestContext) -> bool:
@@ -1923,7 +1985,11 @@ async def _execute_chat_stream_once(
     if ctx.request_disposition == "block":
         block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
         debug_log_original("request_blocked", request_user_text, reason=block_reason)
-        reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+        reason, summary = _confirmation_reason_and_summary(
+            ctx,
+            phase=PHASE_REQUEST,
+            source_text=request_user_text,
+        )
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -2228,7 +2294,11 @@ async def _execute_responses_stream_once(
     if ctx.request_disposition == "block":
         block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
         debug_log_original("request_blocked", request_user_text, reason=block_reason)
-        reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+        reason, summary = _confirmation_reason_and_summary(
+            ctx,
+            phase=PHASE_REQUEST,
+            source_text=request_user_text,
+        )
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -2581,7 +2651,11 @@ async def _execute_chat_once(
         if ctx.request_disposition == "block":
             block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
             debug_log_original("request_blocked", request_user_text, reason=block_reason)
-            reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+            reason, summary = _confirmation_reason_and_summary(
+                ctx,
+                phase=PHASE_REQUEST,
+                source_text=request_user_text,
+            )
             confirm_id = make_confirm_id()
             now_ts = int(time.time())
             pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -2820,7 +2894,11 @@ async def _execute_responses_once(
         if ctx.request_disposition == "block":
             block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
             debug_log_original("request_blocked", request_user_text, reason=block_reason)
-            reason, summary = _flow_reason_and_summary(PHASE_REQUEST, ctx.disposition_reasons, ctx.security_tags)
+            reason, summary = _confirmation_reason_and_summary(
+                ctx,
+                phase=PHASE_REQUEST,
+                source_text=request_user_text,
+            )
             confirm_id = make_confirm_id()
             now_ts = int(time.time())
             pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
