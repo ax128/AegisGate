@@ -816,6 +816,27 @@ def _iter_responses_text_stream_replay(
     yield _stream_done_sse_chunk()
 
 
+def _iter_responses_stream_finalize(
+    *,
+    request_id: str,
+    model: str,
+    aegisgate_meta: dict[str, Any],
+) -> Generator[bytes, None, None]:
+    payload = {
+        "type": "response.completed",
+        "response": {
+            "id": request_id,
+            "object": "response",
+            "model": model,
+            "status": "completed",
+            "output": [],
+        },
+        "aegisgate": aegisgate_meta,
+    }
+    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    yield _stream_done_sse_chunk()
+
+
 def _render_cached_responses_confirmation_stream_output(
     *,
     request_id: str,
@@ -2325,18 +2346,15 @@ async def _execute_responses_stream_once(
                 stream_end_reason = "policy_confirmation"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
-                replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
-                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true recovery_chars=%s",
+                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true finalize_only=true",
                     ctx.request_id,
                     chunk_count,
                     len(stream_window),
-                    len(replay_text),
                 )
-                for chunk in _iter_responses_text_stream_replay(
+                for chunk in _iter_responses_stream_finalize(
                     request_id=req.request_id,
                     model=req.model,
-                    replay_text=replay_text,
                     aegisgate_meta={"action": "allow", "warning": "upstream_eof_no_done", "recovered": True},
                 ):
                     yield chunk
