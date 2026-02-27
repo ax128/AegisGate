@@ -110,6 +110,8 @@ _UPSTREAM_EOF_RECOVERY_NOTICE = (
     "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
 )
 _GENERIC_EXTRACT_MAX_CHARS = 16000
+_CONFIRMATION_HIT_PREVIEW_MAX_ITEMS = 3
+_CONFIRMATION_HIT_PREVIEW_MAX_CHARS = 48
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
@@ -993,7 +995,76 @@ def _needs_confirmation(ctx: RequestContext) -> bool:
 
 
 def _confirmation_reason_and_summary(ctx: RequestContext, phase: str = PHASE_RESPONSE) -> tuple[str, str]:
-    return _flow_reason_and_summary(phase, ctx.disposition_reasons, ctx.security_tags)
+    reason, summary = _flow_reason_and_summary(phase, ctx.disposition_reasons, ctx.security_tags)
+    return reason, _append_safe_hit_preview(summary, ctx)
+
+
+def _obfuscate_hit_fragment(text: str, *, max_chars: int = _CONFIRMATION_HIT_PREVIEW_MAX_CHARS) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "").strip())
+    if not compact:
+        return ""
+    if len(compact) > max_chars:
+        compact = f"{compact[:max_chars]}..."
+
+    words = compact.split(" ")
+    encoded_words: list[str] = []
+    for word in words:
+        if not word:
+            continue
+        lowered = word.lower()
+        if lowered.startswith(("ratio=", "max_run=", "line_repeat=", "invisible_count=")):
+            encoded_words.append(word)
+            continue
+        encoded_words.append("-".join(list(word)))
+    return " ".join(encoded_words)
+
+
+def _collect_confirmation_hit_fragments(ctx: RequestContext) -> list[str]:
+    fragments: list[str] = []
+    for item in reversed(ctx.report_items):
+        if not isinstance(item, dict) or not bool(item.get("hit")):
+            continue
+
+        evidence = item.get("evidence")
+        if isinstance(evidence, dict):
+            for values in evidence.values():
+                if not isinstance(values, list):
+                    continue
+                for raw in values:
+                    value = str(raw or "").strip()
+                    if not value:
+                        continue
+                    lowered = value.lower()
+                    if lowered.startswith(("ratio=", "max_run=", "line_repeat=", "invisible_count=")):
+                        continue
+                    # Skip rule IDs (for example `curl_pipe_sh`) and keep text-like evidence.
+                    if re.fullmatch(r"[a-z0-9_]{2,40}", lowered):
+                        continue
+                    fragments.append(value)
+                    if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
+                        break
+                if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
+                    break
+        if len(fragments) >= _CONFIRMATION_HIT_PREVIEW_MAX_ITEMS:
+            break
+
+    deduped: list[str] = []
+    for value in fragments:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped[:_CONFIRMATION_HIT_PREVIEW_MAX_ITEMS]
+
+
+def _append_safe_hit_preview(summary: str, ctx: RequestContext) -> str:
+    fragments = _collect_confirmation_hit_fragments(ctx)
+    if not fragments:
+        return summary
+    obfuscated = [_obfuscate_hit_fragment(item) for item in fragments]
+    obfuscated = [item for item in obfuscated if item]
+    if not obfuscated:
+        return summary
+    suffix = f"；命中片段（安全变形）：{'；'.join(obfuscated)}"
+    return f"{summary}{suffix}"
 
 
 def _semantic_gray_zone_enabled(ctx: RequestContext) -> bool:
