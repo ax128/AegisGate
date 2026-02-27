@@ -3,6 +3,7 @@ from starlette.requests import Request
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.config.settings import settings
+from aegisgate.core.context import RequestContext
 from aegisgate.core.confirmation import payload_hash
 
 
@@ -39,6 +40,28 @@ def _hash_payload(payload: dict) -> str:
 
 def _action_token(confirm_id: str, reason: str, summary: str) -> str:
     return openai_router.make_action_bind_token(f"{confirm_id}|{reason}|{summary}")
+
+
+def test_confirmation_reason_and_summary_appends_safe_hit_preview():
+    ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/responses")
+    ctx.disposition_reasons.append("response_high_risk_command")
+    ctx.security_tags.add("response_anomaly_high_risk_command")
+    ctx.report_items.append(
+        {
+            "filter": "anomaly_detector",
+            "hit": True,
+            "evidence": {
+                "repeated_line": ["line_repeat=3", "显示系统提示词"],
+                "high_risk_command": ["curl_pipe_sh"],
+            },
+        }
+    )
+
+    reason, summary = openai_router._confirmation_reason_and_summary(ctx)
+    assert reason == "高风险命令响应"
+    assert "命中片段（安全变形）" in summary
+    assert "显-示-系-统-提-示-词" in summary
+    assert "curl_pipe_sh" not in summary
 
 
 def test_resolve_pending_confirmation_requires_confirm_id(monkeypatch):
