@@ -175,6 +175,36 @@ _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
 _DEBUG_HEADERS_REDACT = frozenset(
     {"gateway-key", "authorization", "x-aegis-signature", "x-aegis-timestamp", "x-aegis-nonce"}
 )
+_RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
+    {
+        "function_call_output",
+        "tool_result",
+        "tool_output",
+        "computer_call_output",
+    }
+)
+_RESPONSES_RELAXED_REDACTION_ROLES = frozenset({"system", "developer"})
+_RESPONSES_RELAXED_PII_IDS = frozenset(
+    {
+        "TOKEN",
+        "JWT",
+        "URL_TOKEN_QUERY",
+        "COOKIE_SESSION",
+        "PRIVATE_KEY_PEM",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "SLACK_TOKEN",
+        "EXCHANGE_API_SECRET",
+        "CRYPTO_WIF_KEY",
+        "CRYPTO_XPRV",
+        "CRYPTO_SEED_PHRASE",
+        "IPV4",
+        "IPV6",
+    }
+)
+_RESPONSES_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_MAX_REDACTION_HIT_LOG_ITEMS = 24
 
 
 def _sanitize_payload_for_log(value: Any) -> Any:
@@ -192,6 +222,121 @@ def _sanitize_payload_for_log(value: Any) -> Any:
         return sanitized
     if isinstance(value, list):
         return [_sanitize_payload_for_log(item) for item in value]
+    return value
+
+
+@lru_cache(maxsize=1)
+def _responses_function_output_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    rules = load_security_rules()
+    redaction_rules = rules.get("redaction", {})
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for item in redaction_rules.get("pii_patterns", []):
+        if not isinstance(item, dict):
+            continue
+        pattern_id = str(item.get("id", "PII")).upper()
+        regex = item.get("regex")
+        if not regex:
+            continue
+        try:
+            compiled.append((pattern_id, re.compile(str(regex))))
+        except re.error:
+            continue
+    field_patterns = redaction_rules.get("field_value_patterns", [])
+    if field_patterns:
+        for idx, item in enumerate(field_patterns, start=1):
+            if isinstance(item, dict):
+                pattern_id = str(item.get("id", f"FIELD_SECRET_{idx}")).upper()
+                regex = item.get("regex")
+            else:
+                pattern_id = f"FIELD_SECRET_{idx}"
+                regex = item
+            if not regex:
+                continue
+            try:
+                compiled.append((pattern_id, re.compile(str(regex), re.IGNORECASE)))
+            except re.error:
+                continue
+    else:
+        min_len = max(8, int(redaction_rules.get("field_value_min_len", 12)))
+        defaults: list[tuple[str, str]] = [
+            (
+                "FIELD_SECRET",
+                rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{min_len},}}",
+            ),
+            (
+                "AUTH_BEARER",
+                rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{min_len},}}",
+            ),
+        ]
+        for pattern_id, regex in defaults:
+            try:
+                compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            except re.error:
+                continue
+    return tuple(compiled)
+
+
+@lru_cache(maxsize=1)
+def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    selected: list[tuple[str, re.Pattern[str]]] = []
+    for pattern_id, pattern in _responses_function_output_redaction_patterns():
+        if pattern_id in _RESPONSES_RELAXED_PII_IDS:
+            selected.append((pattern_id, pattern))
+    return tuple(selected)
+
+
+def _sanitize_text_for_upstream_with_hits(
+    text: str,
+    *,
+    role: str,
+    path: str,
+    field: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    if not text:
+        return "", []
+    if "[REDACTED:" in text:
+        return _strip_system_exec_runtime_lines(text), []
+
+    cleaned = _strip_system_exec_runtime_lines(text)
+    if not cleaned:
+        return "", []
+
+    patterns = (
+        _responses_relaxed_redaction_patterns()
+        if role in _RESPONSES_RELAXED_REDACTION_ROLES
+        else _responses_function_output_redaction_patterns()
+    )
+    hits: list[dict[str, Any]] = []
+    for pattern_id, pattern in patterns:
+        match_count = len(list(pattern.finditer(cleaned)))
+        if match_count <= 0:
+            continue
+        hits.append(
+            {
+                "path": path,
+                "field": field,
+                "role": role or "unknown",
+                "pattern": pattern_id,
+                "count": match_count,
+            }
+        )
+        cleaned = pattern.sub(f"[REDACTED:{pattern_id}]", cleaned)
+    return cleaned, hits
+
+
+def _sanitize_function_output_value(value: Any) -> Any:
+    if isinstance(value, str):
+        cleaned, _ = _sanitize_text_for_upstream_with_hits(
+            value,
+            role="tool",
+            path="input[*].output",
+            field="output",
+        )
+        return cleaned
+    if isinstance(value, list):
+        return [_sanitize_function_output_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_function_output_value(item) for key, item in value.items()}
     return value
 
 
@@ -319,7 +464,17 @@ def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_mes
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
-            upstream_payload["input"] = _sanitize_responses_input_for_upstream(original_input)
+            sanitized_input, redaction_hits = _sanitize_responses_input_for_upstream_with_hits(original_input)
+            upstream_payload["input"] = sanitized_input
+            if redaction_hits:
+                sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+                logger.info(
+                    "responses input redaction applied request_id=%s hits=%s positions=%s truncated=%s",
+                    str(payload.get("request_id") or "-"),
+                    len(redaction_hits),
+                    sample,
+                    len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+                )
         else:
             upstream_payload["input"] = _strip_system_exec_runtime_lines(str(sanitized_req_messages[0].content))
     return upstream_payload
@@ -346,92 +501,104 @@ def _strip_system_exec_runtime_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _sanitize_responses_user_content_for_upstream(value: Any) -> Any:
-    if isinstance(value, str):
-        return _strip_system_exec_runtime_lines(value)
-    if isinstance(value, list):
-        out: list[Any] = []
-        for part in value:
-            if isinstance(part, str):
-                cleaned = _strip_system_exec_runtime_lines(part)
-                if cleaned:
-                    out.append(cleaned)
-                continue
-            if isinstance(part, dict):
-                copied = dict(part)
-                text = copied.get("text")
-                if isinstance(text, str):
-                    cleaned_text = _strip_system_exec_runtime_lines(text)
-                    if cleaned_text:
-                        copied["text"] = cleaned_text
-                    else:
-                        copied.pop("text", None)
-                out.append(copied)
-                continue
-            out.append(part)
-        return out
-    if isinstance(value, dict):
-        copied = dict(value)
-        text = copied.get("text")
-        if isinstance(text, str):
-            cleaned_text = _strip_system_exec_runtime_lines(text)
-            if cleaned_text:
-                copied["text"] = cleaned_text
-            else:
-                copied.pop("text", None)
-        content = copied.get("content")
-        if isinstance(content, str):
-            copied["content"] = _strip_system_exec_runtime_lines(content)
-        return copied
-    return value
+def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, list[dict[str, Any]]]:
+    """
+    Sanitize structured responses history before forwarding upstream.
+    This pass is idempotent and records redaction hit positions.
+    """
+    hits: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def _sanitize(node: Any, *, path: str, role: str = "", field: str = "") -> Any:
+        if isinstance(node, str):
+            if field in _RESPONSES_NON_CONTENT_KEYS:
+                return node
+            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+                node,
+                role=role,
+                path=path,
+                field=field or "text",
+            )
+            hits.extend(node_hits)
+            return cleaned
+
+        if isinstance(node, list):
+            out: list[Any] = []
+            for idx, item in enumerate(node):
+                sanitized_item = _sanitize(item, path=f"{path}[{idx}]", role=role, field=field)
+                if sanitized_item is None:
+                    continue
+                out.append(sanitized_item)
+            return out
+
+        if isinstance(node, dict):
+            node_id = id(node)
+            if node_id in seen:
+                return node
+            seen.add(node_id)
+
+            node_type = str(node.get("type", "")).strip().lower()
+            node_role = str(node.get("role", role)).strip().lower()
+
+            if node_role in {"assistant", "system", "developer"}:
+                content = node.get("content")
+                if isinstance(content, str) and _looks_like_gateway_confirmation_text(content):
+                    return None
+
+            copied: dict[str, Any] = dict(node)
+            for key, item in node.items():
+                child_path = f"{path}.{key}" if path else key
+
+                if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {"output", "content", "result"}:
+                    copied[key] = _sanitize(item, path=child_path, role="tool", field=key)
+                    continue
+
+                if key == "content" and node_role in {"assistant", "system", "developer"} and isinstance(item, list):
+                    filtered_parts: list[Any] = []
+                    for idx, part in enumerate(item):
+                        if isinstance(part, dict):
+                            text = part.get("text")
+                            if isinstance(text, str) and _looks_like_gateway_confirmation_text(text):
+                                continue
+                        sanitized_part = _sanitize(
+                            part,
+                            path=f"{child_path}[{idx}]",
+                            role=node_role,
+                            field="content",
+                        )
+                        if sanitized_part is None:
+                            continue
+                        filtered_parts.append(sanitized_part)
+                    if not filtered_parts:
+                        return None
+                    copied[key] = filtered_parts
+                    continue
+
+                copied[key] = _sanitize(item, path=child_path, role=node_role, field=key)
+            return copied
+
+        return node
+
+    sanitized = _sanitize(value, path="input")
+    dedup: dict[tuple[str, str, str, str], int] = {}
+    for item in hits:
+        key = (
+            str(item.get("path") or ""),
+            str(item.get("field") or ""),
+            str(item.get("role") or ""),
+            str(item.get("pattern") or ""),
+        )
+        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
+    merged_hits = [
+        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
+        for (path, field, role, pattern), count in dedup.items()
+    ]
+    return sanitized, merged_hits
 
 
 def _sanitize_responses_input_for_upstream(value: Any) -> Any:
-    """
-    Remove gateway-generated confirmation templates from structured responses history
-    before forwarding to upstream, to avoid model echo loops.
-    """
-    if isinstance(value, list):
-        out_list: list[Any] = []
-        for item in value:
-            sanitized = _sanitize_responses_input_for_upstream(item)
-            if sanitized is None:
-                continue
-            out_list.append(sanitized)
-        return out_list
-
-    if isinstance(value, dict):
-        node_type = str(value.get("type", "")).strip().lower()
-        if node_type == "input_text" and isinstance(value.get("text"), str):
-            copied = dict(value)
-            copied["text"] = _strip_system_exec_runtime_lines(str(value.get("text", "")))
-            return copied
-
-        role = str(value.get("role", "")).strip().lower()
-        if role in {"assistant", "system", "developer"}:
-            content = value.get("content")
-            if isinstance(content, str) and _looks_like_gateway_confirmation_text(content):
-                return None
-            if isinstance(content, list):
-                filtered_parts: list[Any] = []
-                for part in content:
-                    if isinstance(part, dict):
-                        text = part.get("text")
-                        if isinstance(text, str) and _looks_like_gateway_confirmation_text(text):
-                            continue
-                    filtered_parts.append(part)
-                if not filtered_parts:
-                    return None
-                copied = dict(value)
-                copied["content"] = filtered_parts
-                return copied
-        if role == "user":
-            copied = dict(value)
-            copied["content"] = _sanitize_responses_user_content_for_upstream(copied.get("content"))
-            return copied
-        return value
-
-    return value
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(value)
+    return sanitized
 
 
 def _extract_generic_analysis_text(value: Any) -> str:
