@@ -1293,6 +1293,11 @@ def _confirmation_hit_regex_patterns() -> tuple[re.Pattern[str], ...]:
 
     _append_rule_patterns("anomaly_detector", "command_patterns")
     _append_rule_patterns("privilege_guard", "blocked_patterns")
+    # Cover injection-only detections so confirmation can still show source hit preview.
+    _append_rule_patterns("injection_detector", "direct_patterns")
+    _append_rule_patterns("injection_detector", "system_exfil_patterns")
+    _append_rule_patterns("injection_detector", "indirect_injection_patterns")
+    _append_rule_patterns("injection_detector", "remote_content_instruction_patterns")
     _append_rule_patterns("request_sanitizer", "strong_intent_patterns")
     _append_rule_patterns("request_sanitizer", "command_patterns")
     _append_rule_patterns("sanitizer", "system_leak_patterns")
