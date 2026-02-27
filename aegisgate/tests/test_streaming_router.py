@@ -8,7 +8,7 @@ from aegisgate.adapters.openai_compat.router import (
     _stream_block_reason,
     _stream_block_sse_chunk,
 )
-from aegisgate.adapters.openai_compat.stream_utils import _stream_error_sse_chunk
+from aegisgate.adapters.openai_compat.stream_utils import _extract_stream_text_from_event, _stream_error_sse_chunk
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 
@@ -43,6 +43,21 @@ def test_stream_error_sse_chunk_uses_structured_error_payload():
     assert '"type": "error"' in payload
     assert '"code": "upstream_unreachable"' in payload
     assert "dns" in payload
+
+
+def test_extract_stream_text_from_responses_delta_only():
+    delta = _extract_stream_text_from_event(
+        '{"type":"response.output_text.delta","delta":"hello"}'
+    )
+    done = _extract_stream_text_from_event(
+        '{"type":"response.output_text.done","text":"hello"}'
+    )
+    completed = _extract_stream_text_from_event(
+        '{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}'
+    )
+    assert delta == "hello"
+    assert done == ""
+    assert completed == ""
 
 
 def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
