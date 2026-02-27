@@ -39,6 +39,7 @@ cp aegisgate/policies/rules/*.yaml config/
 | 变量 | 说明 | 示例 |
 |------|------|------|
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` / `debug` |
+| `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` / `true` |
 | `AEGIS_SECURITY_LEVEL` | 安全档位 | `low` / `medium` / `high` |
 | `AEGIS_GATEWAY_KEY` | 网关校验 key | `agent` |
 | `AEGIS_DEFAULT_POLICY` | 默认策略名 | `default` |
@@ -46,6 +47,9 @@ cp aegisgate/policies/rules/*.yaml config/
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `2000000` |
 
 完整列表见项目 README 的「环境变量」章节。
+
+注意：
+- 当 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true` 时，请求体会完整打印（包括 `responses` 历史里的 function/tool 输出原文）。生产环境建议保持 `false`。
 
 ### 3. Token 映射表（gw_tokens.json）
 
