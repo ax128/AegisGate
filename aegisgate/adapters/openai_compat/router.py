@@ -1021,7 +1021,11 @@ def _obfuscate_hit_fragment(text: str, *, max_chars: int | None = None) -> str:
         if lowered.startswith(("ratio=", "max_run=", "line_repeat=", "invisible_count=")):
             encoded_words.append(word)
             continue
-        encoded_words.append("-".join(list(word)))
+        if len(word) <= 3:
+            encoded_words.append(word)
+            continue
+        grouped = [word[i : i + 3] for i in range(0, len(word), 3)]
+        encoded_words.append("-".join(grouped))
     return " ".join(encoded_words)
 
 
