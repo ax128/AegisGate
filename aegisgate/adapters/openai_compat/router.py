@@ -1061,6 +1061,8 @@ _CONFIRMATION_TEMPLATE_PREFIX_MARKERS: tuple[str, ...] = (
     "取消（复制这一行）",
     "approve (copy this line):",
     "cancel (copy this line):",
+    "send only one standalone copy-ready line",
+    "请单独发送以下可复制消息之一",
 )
 
 
@@ -1072,20 +1074,30 @@ def _extract_action_token(text: str) -> str:
 
 
 def _extract_bound_confirm_and_action(text: str) -> tuple[str, str]:
-    source = str(text or "").lower()
+    source = str(text or "")
+    lowered = source.lower()
     matches = list(
         re.finditer(
             r"(cfm-[a-f0-9]{12})\s*(?:--|——|—|–|[-_:/|：])+\s*(act-[a-f0-9]{8,16})\b",
-            source,
+            lowered,
             flags=re.IGNORECASE,
         )
     )
     if not matches:
         return "", ""
-    last = matches[-1]
-    confirm_id = str(last.group(1) or "").lower()
-    action_token = str(last.group(2) or "").lower()
-    return confirm_id, action_token
+    for match in reversed(matches):
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        line_end = source.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(source)
+        prefix = source[line_start:match.start()].lower()
+        line_lower = source[line_start:line_end].lower()
+        if any(marker in prefix or marker in line_lower for marker in _CONFIRMATION_TEMPLATE_PREFIX_MARKERS):
+            continue
+        confirm_id = str(match.group(1) or "").lower()
+        action_token = str(match.group(2) or "").lower()
+        return confirm_id, action_token
+    return "", ""
 
 
 def _extract_decision_by_bound_token(user_text: str, confirm_id: str, action_token: str) -> tuple[str, str]:
