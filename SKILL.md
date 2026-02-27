@@ -7,7 +7,6 @@
 - AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/阻断/确认放行。
 - 当前只支持 **Token 路由**：
   - `http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
-- Header 直连模式（`X-Upstream-Base` + `gateway-key`）已禁用。
 - 管理接口（`/__gw__/register|lookup|unregister`）应只允许内网/管理机访问。
 
 ## 1) 环境检查
@@ -124,7 +123,7 @@ model: gpt-4.1-mini
 ```
 
 说明：
-- `base_url` 使用 token 路由，不要再配 `X-Upstream-Base`/`gateway-key`。
+- `base_url` 使用 token 路由。
 - 若客户端默认流式输出，网关会处理 `[DONE]` 断流恢复。
 
 ## 9) 常用管理命令

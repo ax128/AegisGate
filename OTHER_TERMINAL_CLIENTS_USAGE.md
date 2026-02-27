@@ -56,10 +56,8 @@ Supported via generic proxy:
 Example:
 
 ```bash
-curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
+curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-version=2023-06-01' \
   -H 'Content-Type: application/json' \
-  -H 'X-Upstream-Base: https://your-upstream.example.com/v1' \
-  -H 'gateway-key: agent' \
   -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
@@ -75,14 +73,14 @@ curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
 
 ## Client Matrix
 
-| Client | Base URL + API Key | Header Injection | Claude `messages` | OAuth Hosted Login |
-|---|---|---|---|---|
-| Codex CLI | Yes | Version-dependent | Yes | No |
-| OpenCodeX | Yes | Version-dependent | Yes | No |
-| OpenClaw | Yes | Usually yes | Yes | No |
-| Cherry Studio | Yes | Yes | Yes | No |
-| VS Code extensions | Extension-dependent | Extension-dependent | Yes (if base URL configurable) | No |
-| Cursor | Yes | Usually not needed (Token mode) | Yes | No |
+| Client | Base URL + API Key | Claude `messages` | OAuth Hosted Login |
+|---|---|---|---|
+| Codex CLI | Yes | Yes | No |
+| OpenCodeX | Yes | Yes | No |
+| OpenClaw | Yes | Yes | No |
+| Cherry Studio | Yes | Yes | No |
+| VS Code extensions | Extension-dependent | Yes (if base URL configurable) | No |
+| Cursor | Yes | Yes | No |
 
 ---
 
@@ -98,7 +96,7 @@ curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
 
 ### OpenClaw
 - Use OpenAI-compatible endpoint.
-- Token mode first; Header mode if needed.
+- Use Token mode.
 
 ### Cherry Studio
 - Provider: OpenAI-compatible.
@@ -125,25 +123,11 @@ api_key: <UPSTREAM_API_KEY>
 model: claude-3-5-sonnet-latest
 ```
 
-### Header Mode
-
-```yaml
-provider: openai_compatible
-base_url: http://127.0.0.1:18080/v1
-api_key: <UPSTREAM_API_KEY>
-model: claude-3-5-sonnet-latest
-headers:
-  X-Upstream-Base: https://your-upstream.example.com/v1
-  gateway-key: agent
-```
-
----
-
 ## Troubleshooting
 
 ### `invalid_parameters`
-- Header mode request did not actually include required headers.
-- Switch to Token mode.
+- Request path is not token route or required fields are invalid.
+- Use token `base_url` and verify request JSON fields.
 
 ### `token_not_found`
 - Token not registered, removed, or token file not persisted.
