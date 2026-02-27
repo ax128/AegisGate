@@ -1054,11 +1054,72 @@ def _extract_confirm_id(text: str) -> str:
     return str(matches[-1])
 
 
+_CONFIRMATION_TEMPLATE_PREFIX_MARKERS: tuple[str, ...] = (
+    "copy this line",
+    "复制这一行",
+    "放行（复制这一行）",
+    "取消（复制这一行）",
+    "approve (copy this line):",
+    "cancel (copy this line):",
+)
+
+
 def _extract_action_token(text: str) -> str:
     matches = re.findall(r"\bact-[a-f0-9]{8,16}\b", str(text or "").lower())
     if not matches:
         return ""
     return str(matches[-1])
+
+
+def _extract_bound_confirm_and_action(text: str) -> tuple[str, str]:
+    source = str(text or "").lower()
+    matches = list(
+        re.finditer(
+            r"(cfm-[a-f0-9]{12})\s*(?:--|——|—|–|[-_:/|：])+\s*(act-[a-f0-9]{8,16})\b",
+            source,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not matches:
+        return "", ""
+    last = matches[-1]
+    confirm_id = str(last.group(1) or "").lower()
+    action_token = str(last.group(2) or "").lower()
+    return confirm_id, action_token
+
+
+def _extract_decision_by_bound_token(user_text: str, confirm_id: str, action_token: str) -> tuple[str, str]:
+    source = str(user_text or "")
+    cid = str(confirm_id or "").strip().lower()
+    act = str(action_token or "").strip().lower()
+    if not source or not cid or not act:
+        return "unknown", "missing_bind_components"
+    bind_re = re.compile(
+        rf"{re.escape(cid)}\s*(?:--|——|—|–|[-_:/|：])+\s*{re.escape(act)}\b",
+        flags=re.IGNORECASE,
+    )
+    matches = list(bind_re.finditer(source))
+    if not matches:
+        return "unknown", "bind_not_found"
+    match = matches[-1]
+    line_start = source.rfind("\n", 0, match.start()) + 1
+    prefix = source[line_start:match.start()]
+    marker_scope = prefix.lower()
+    if any(marker in marker_scope for marker in _CONFIRMATION_TEMPLATE_PREFIX_MARKERS):
+        return "unknown", "system_template_prefix"
+
+    cmd_tokens = re.findall(r"\b(?:yes|y|no|n)\b", prefix, flags=re.IGNORECASE)
+    if cmd_tokens:
+        cmd = str(cmd_tokens[-1]).lower()
+        if cmd in {"yes", "y"}:
+            return "yes", "bind_prefix_cmd"
+        if cmd in {"no", "n"}:
+            return "no", "bind_prefix_cmd"
+
+    decision = parse_confirmation_decision(prefix).value
+    if decision in {"yes", "no"}:
+        return decision, "bind_prefix_parse"
+    return "unknown", "missing_decision_before_bind"
 
 
 def _pending_action_bind_token(record: Mapping[str, Any]) -> str:
@@ -1089,7 +1150,7 @@ def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
         r"(?:^|[\]\)\}>:：\|])\s*(?P<cmd>yes|y|no|n)\s+(?P<confirm_id>cfm-[a-f0-9]{12})\b(?:\s+act-[a-f0-9]{8,16})?\s*$",
         re.IGNORECASE,
     )
-    template_markers = ("copy this line", "复制这一行")
+    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
     for raw in reversed(lines[-6:]):
         line = raw.strip()
         lowered = line.lower()
@@ -1175,7 +1236,7 @@ def _extract_decision_before_confirm_id(text: str, confirm_id: str) -> str:
     line_start = source.rfind("\n", 0, idx) + 1
     prefix_in_line = source[line_start:idx]
     marker_scope = prefix_in_line.lower()
-    template_markers = ("copy this line", "复制这一行")
+    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
     if any(marker in marker_scope for marker in template_markers):
         return "unknown"
     decision = parse_confirmation_decision(prefix_in_line).value
@@ -1192,7 +1253,7 @@ def _has_explicit_confirmation_keyword(text: str) -> bool:
     lines = [line.strip() for line in str(text or "").splitlines() if line and line.strip()]
     if not lines:
         return False
-    template_markers = ("copy this line", "复制这一行")
+    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
     for line in lines[-6:]:
         lowered = line.lower()
         if any(marker in lowered for marker in template_markers):
@@ -1291,17 +1352,11 @@ def _resolve_pending_confirmation(
     tenant_id: str,
 ) -> dict[str, Any] | None:
     explicit_decision, explicit_confirm_id = _parse_explicit_confirmation_command(user_text)
-    if explicit_decision not in {"yes", "no"}:
-        return None
-    confirm_id = explicit_confirm_id
+    bind_confirm_id, bind_action_token = _extract_bound_confirm_and_action(user_text)
+    confirm_id = bind_confirm_id or explicit_confirm_id
     if not confirm_id:
-        # 兼容简化确认：当用户明确 yes/no 且池中仅有 1 条 pending 时，可不带 confirm_id。
-        return _load_single_pending_for_session(
-            payload,
-            now_ts,
-            expected_route=expected_route,
-            tenant_id=tenant_id,
-        )
+        return None
+
     record = store.get_pending_confirmation(confirm_id)
     if not record:
         return None
@@ -1329,7 +1384,10 @@ def _resolve_pending_confirmation(
     if int(record.get("expires_at", 0)) <= int(now_ts):
         store.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
         return None
-    return record
+    merged = dict(record)
+    merged["_aegisgate_bind_action_token"] = bind_action_token
+    merged["_aegisgate_explicit_decision"] = explicit_decision
+    return merged
 
 
 def _attach_confirmation_metadata(
@@ -3147,12 +3205,15 @@ async def chat_completions(payload: dict, request: Request):
     if pending:
         pending_route = str(pending.get("route", ""))
         confirm_id = str(pending["confirm_id"])
-        decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
+        expected_action_token = _pending_action_bind_token(pending)
+        decision_value, decision_source = _extract_decision_by_bound_token(
+            user_text,
+            confirm_id,
+            expected_action_token,
+        )
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
-        expected_action_token = _pending_action_bind_token(pending)
-        provided_action_token = _extract_action_token(user_text)
-        explicit_confirm_id = bool(confirm_id_hint)
+        provided_action_token = str(pending.get("_aegisgate_bind_action_token") or _extract_action_token(user_text))
         logger.info(
             "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
             req_preview.request_id,
@@ -3166,63 +3227,11 @@ async def chat_completions(payload: dict, request: Request):
             bool(provided_action_token),
         )
         invalid_reason = ""
-        if explicit_confirm_id and not provided_action_token:
-            invalid_reason = "missing_action_token"
-        elif explicit_confirm_id and provided_action_token != expected_action_token:
-            invalid_reason = "action_token_mismatch"
-        elif pending_route != req_preview.route:
+        if pending_route != req_preview.route:
             invalid_reason = "route_mismatch"
         elif decision_value not in {"yes", "no"}:
             invalid_reason = f"unsupported_decision_{decision_value}"
         if invalid_reason:
-            explicit_keyword = _has_explicit_confirmation_keyword(user_text)
-            if explicit_keyword:
-                logger.info(
-                    "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=false pending_retained=true",
-                    req_preview.request_id,
-                    req_preview.session_id,
-                    tenant_id,
-                    req_preview.route,
-                    confirm_id,
-                    decision_value,
-                    decision_source,
-                    invalid_reason,
-                    bool(provided_action_token),
-                    bool(provided_action_token and provided_action_token == expected_action_token),
-                )
-                if invalid_reason == "missing_action_token":
-                    invalid_text = _confirmation_action_token_required_text(confirm_id, expected_action_token)
-                elif invalid_reason == "action_token_mismatch":
-                    invalid_text = _confirmation_action_token_mismatch_text(
-                        confirm_id, provided_action_token, expected_action_token
-                    )
-                elif invalid_reason == "route_mismatch":
-                    invalid_text = _confirmation_route_mismatch_text(confirm_id, pending_route, req_preview.route)
-                else:
-                    invalid_text = _confirmation_command_requirements_text(
-                        detail=invalid_reason,
-                        confirm_id=confirm_id,
-                        action_token=expected_action_token,
-                    )
-                invalid_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=invalid_text,
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    invalid_resp,
-                    confirm_id=confirm_id,
-                    status="pending",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_chat_response(invalid_resp)
-
             confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
                 "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
@@ -3236,7 +3245,7 @@ async def chat_completions(payload: dict, request: Request):
                 invalid_reason,
                 bool(provided_action_token),
                 bool(provided_action_token and provided_action_token == expected_action_token),
-                explicit_keyword,
+                _has_explicit_confirmation_keyword(user_text),
             )
         elif decision_value == "no":
             changed = await _try_transition_pending_status(
@@ -3659,12 +3668,15 @@ async def responses(payload: dict, request: Request):
     if pending:
         pending_route = str(pending.get("route", ""))
         confirm_id = str(pending["confirm_id"])
-        decision_value, decision_source = _resolve_pending_decision(user_text, confirm_id, decision_value)
+        expected_action_token = _pending_action_bind_token(pending)
+        decision_value, decision_source = _extract_decision_by_bound_token(
+            user_text,
+            confirm_id,
+            expected_action_token,
+        )
         reason_text = str(pending.get("reason", "高风险响应"))
         summary_text = str(pending.get("summary", "检测到高风险信号"))
-        expected_action_token = _pending_action_bind_token(pending)
-        provided_action_token = _extract_action_token(user_text)
-        explicit_confirm_id = bool(confirm_id_hint)
+        provided_action_token = str(pending.get("_aegisgate_bind_action_token") or _extract_action_token(user_text))
         logger.info(
             "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
             req_preview.request_id,
@@ -3678,63 +3690,11 @@ async def responses(payload: dict, request: Request):
             bool(provided_action_token),
         )
         invalid_reason = ""
-        if explicit_confirm_id and not provided_action_token:
-            invalid_reason = "missing_action_token"
-        elif explicit_confirm_id and provided_action_token != expected_action_token:
-            invalid_reason = "action_token_mismatch"
-        elif pending_route != req_preview.route:
+        if pending_route != req_preview.route:
             invalid_reason = "route_mismatch"
         elif decision_value not in {"yes", "no"}:
             invalid_reason = f"unsupported_decision_{decision_value}"
         if invalid_reason:
-            explicit_keyword = _has_explicit_confirmation_keyword(user_text)
-            if explicit_keyword:
-                logger.info(
-                    "confirmation command invalid request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=false pending_retained=true",
-                    req_preview.request_id,
-                    req_preview.session_id,
-                    tenant_id,
-                    req_preview.route,
-                    confirm_id,
-                    decision_value,
-                    decision_source,
-                    invalid_reason,
-                    bool(provided_action_token),
-                    bool(provided_action_token and provided_action_token == expected_action_token),
-                )
-                if invalid_reason == "missing_action_token":
-                    invalid_text = _confirmation_action_token_required_text(confirm_id, expected_action_token)
-                elif invalid_reason == "action_token_mismatch":
-                    invalid_text = _confirmation_action_token_mismatch_text(
-                        confirm_id, provided_action_token, expected_action_token
-                    )
-                elif invalid_reason == "route_mismatch":
-                    invalid_text = _confirmation_route_mismatch_text(confirm_id, pending_route, req_preview.route)
-                else:
-                    invalid_text = _confirmation_command_requirements_text(
-                        detail=invalid_reason,
-                        confirm_id=confirm_id,
-                        action_token=expected_action_token,
-                    )
-                invalid_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=invalid_text,
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("confirmation_command_invalid")
-                _attach_security_metadata(invalid_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    invalid_resp,
-                    confirm_id=confirm_id,
-                    status="pending",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_responses_output(invalid_resp)
-
             confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
             logger.info(
                 "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
@@ -3748,7 +3708,7 @@ async def responses(payload: dict, request: Request):
                 invalid_reason,
                 bool(provided_action_token),
                 bool(provided_action_token and provided_action_token == expected_action_token),
-                explicit_keyword,
+                _has_explicit_confirmation_keyword(user_text),
             )
         elif decision_value == "no":
             changed = await _try_transition_pending_status(

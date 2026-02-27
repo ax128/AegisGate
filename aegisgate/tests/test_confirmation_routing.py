@@ -56,7 +56,7 @@ def test_resolve_pending_confirmation_requires_confirm_id(monkeypatch):
     assert result is None
 
 
-def test_resolve_pending_confirmation_yes_without_id_uses_single_pending(monkeypatch):
+def test_resolve_pending_confirmation_yes_without_id_returns_none(monkeypatch):
     record = {
         "confirm_id": "cfm-abc123def456",
         "status": "pending",
@@ -79,10 +79,10 @@ def test_resolve_pending_confirmation_yes_without_id_uses_single_pending(monkeyp
         expected_route="/v1/chat/completions",
         tenant_id="default",
     )
-    assert result == record
+    assert result is None
 
 
-def test_resolve_pending_confirmation_no_without_id_uses_single_pending(monkeypatch):
+def test_resolve_pending_confirmation_no_without_id_returns_none(monkeypatch):
     record = {
         "confirm_id": "cfm-abc123def457",
         "status": "pending",
@@ -105,7 +105,7 @@ def test_resolve_pending_confirmation_no_without_id_uses_single_pending(monkeypa
         expected_route="/v1/chat/completions",
         tenant_id="default",
     )
-    assert result == record
+    assert result is None
 
 
 def test_resolve_pending_confirmation_accepts_wrapped_yes_with_confirm_id(monkeypatch):
@@ -131,7 +131,8 @@ def test_resolve_pending_confirmation_accepts_wrapped_yes_with_confirm_id(monkey
         expected_route="/v1/chat/completions",
         tenant_id="default",
     )
-    assert result == record
+    assert result is not None
+    assert result["confirm_id"] == confirm_id
 
 
 def test_parse_explicit_confirmation_command_ignores_template_prefixed_line():
@@ -258,7 +259,7 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
             "request_id": "chat-confirm-2",
             "session_id": "s-confirm-2",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -272,7 +273,7 @@ async def test_chat_pending_payload_omitted_returns_visible_confirmation_message
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypatch):
+async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
     confirm_id = "cfm-route000000"
     reason = "高风险响应"
     summary = "route mismatch"
@@ -289,7 +290,11 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
             "pending_request_payload": {},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -302,15 +307,12 @@ async def test_chat_confirmation_route_mismatch_returns_visible_message(monkeypa
             "request_id": "chat-confirm-3",
             "session_id": "s-confirm-3",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
 
-    assert isinstance(result, dict)
-    content = result["choices"][0]["message"]["content"]
-    assert "当前接口不匹配" in content
-    assert result["aegisgate"]["confirmation"]["status"] == "pending"
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -348,7 +350,7 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
             "request_id": "chat-confirm-4",
             "session_id": "s-confirm-4",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -360,7 +362,7 @@ async def test_chat_confirmation_already_processed_returns_visible_message(monke
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_missing_action_token_returns_visible_message(monkeypatch):
+async def test_chat_confirmation_missing_action_token_is_forwarded(monkeypatch):
     confirm_id = "cfm-a1b2c3d4e5f6"
     reason = "高风险响应"
     summary = "action binding"
@@ -377,7 +379,11 @@ async def test_chat_confirmation_missing_action_token_returns_visible_message(mo
             "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -395,10 +401,7 @@ async def test_chat_confirmation_missing_action_token_returns_visible_message(mo
         request,
     )
 
-    assert isinstance(result, dict)
-    content = result["choices"][0]["message"]["content"]
-    assert "缺少动作摘要码" in content
-    assert result["aegisgate"]["confirmation"]["status"] == "pending"
+    assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -449,7 +452,7 @@ async def test_chat_pending_with_copy_line_prefix_bypasses_confirmation_and_forw
 
 
 @pytest.mark.asyncio
-async def test_chat_confirmation_wrong_action_token_returns_visible_message(monkeypatch):
+async def test_chat_confirmation_wrong_action_token_is_forwarded(monkeypatch):
     confirm_id = "cfm-abcdef123456"
     reason = "高风险响应"
     summary = "action mismatch"
@@ -466,7 +469,11 @@ async def test_chat_confirmation_wrong_action_token_returns_visible_message(monk
             "pending_request_payload": {"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]},
         }
 
+    async def fake_execute_chat_once(**kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(openai_router, "_resolve_pending_confirmation", fake_resolve_pending_confirmation)
+    monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
 
     request = _build_request(
         headers={
@@ -484,10 +491,7 @@ async def test_chat_confirmation_wrong_action_token_returns_visible_message(monk
         request,
     )
 
-    assert isinstance(result, dict)
-    content = result["choices"][0]["message"]["content"]
-    assert "动作摘要码不匹配" in content
-    assert result["aegisgate"]["confirmation"]["status"] == "pending"
+    assert result == {"ok": True}
 
 
 def test_resolve_pending_confirmation_rejects_cross_tenant_confirm_id(monkeypatch):
@@ -628,9 +632,9 @@ async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypat
     )
     noisy_input = (
         "请单独发送以下可复制消息之一（不要附加其它内容）：\n"
-        f"放行（复制这一行）：yes {confirm_id} {_action_token(confirm_id, reason, summary)}\n"
-        f"取消（复制这一行）：no {confirm_id} {_action_token(confirm_id, reason, summary)}\n"
-        f"yes {confirm_id} {_action_token(confirm_id, reason, summary)} -- 我确认执行\n"
+        f"放行（复制这一行）：yes {confirm_id}--{_action_token(confirm_id, reason, summary)}\n"
+        f"取消（复制这一行）：no {confirm_id}--{_action_token(confirm_id, reason, summary)}\n"
+        f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)} -- 我确认执行\n"
     )
     result = await openai_router.chat_completions(
         {
@@ -720,7 +724,7 @@ async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatc
             "request_id": "chat-confirm-cache-1",
             "session_id": "s-cache-chat",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -773,7 +777,7 @@ async def test_chat_confirmation_no_deletes_pending_cache(monkeypatch):
             "request_id": "chat-confirm-cancel-1",
             "session_id": "s-cancel-chat",
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": f"no {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"no {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -830,7 +834,7 @@ async def test_chat_confirmation_yes_replays_cached_stream_text_as_sse_when_stre
             "session_id": "s-cache-chat-2",
             "model": "gpt-test",
             "stream": True,
-            "messages": [{"role": "user", "content": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}"}],
+            "messages": [{"role": "user", "content": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}"}],
         },
         request,
     )
@@ -891,7 +895,7 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
             "request_id": "resp-confirm-cache-1",
             "session_id": "s-cache-resp",
             "model": "gpt-test",
-            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
+            "input": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}",
         },
         request,
     )
@@ -948,7 +952,7 @@ async def test_responses_confirmation_yes_replays_cached_stream_text_as_sse_when
             "session_id": "s-cache-resp-2",
             "model": "gpt-test",
             "stream": True,
-            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
+            "input": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}",
         },
         request,
     )
@@ -1007,7 +1011,7 @@ async def test_responses_confirmation_yes_replays_fallback_message_when_cached_s
             "session_id": "s-cache-resp-empty",
             "model": "gpt-test",
             "stream": True,
-            "input": f"yes {confirm_id} {_action_token(confirm_id, reason, summary)}",
+            "input": f"yes {confirm_id}--{_action_token(confirm_id, reason, summary)}",
         },
         request,
     )
@@ -1063,7 +1067,7 @@ async def test_responses_confirmation_no_deletes_pending_cache(monkeypatch):
             "request_id": "resp-confirm-cancel-1",
             "session_id": "s-cancel-resp",
             "model": "gpt-test",
-            "input": f"no {confirm_id} {_action_token(confirm_id, reason, summary)}",
+            "input": f"no {confirm_id}--{_action_token(confirm_id, reason, summary)}",
         },
         request,
     )
