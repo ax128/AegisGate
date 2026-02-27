@@ -49,6 +49,9 @@ def test_extract_stream_text_from_responses_delta_only():
     delta = _extract_stream_text_from_event(
         '{"type":"response.output_text.delta","delta":"hello"}'
     )
+    summary = _extract_stream_text_from_event(
+        '{"type":"response.reasoning_summary_text.delta","delta":"hello"}'
+    )
     done = _extract_stream_text_from_event(
         '{"type":"response.output_text.done","text":"hello"}'
     )
@@ -56,6 +59,7 @@ def test_extract_stream_text_from_responses_delta_only():
         '{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}'
     )
     assert delta == "hello"
+    assert summary == ""
     assert done == ""
     assert completed == ""
 
@@ -273,10 +277,10 @@ def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(monk
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     assert "hello" in text
-    assert "上游流提前断开" in text
     assert '"recovered": true' in text
     assert '"type": "response.completed"' in text
     assert "data: [DONE]" in text
+    assert text.count("hello") == 1
 
 
 def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatch):
