@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     confirmation_ttl_seconds: int = 300
     confirmation_executing_timeout_seconds: int = 120
     pending_data_ttl_seconds: int = 86400
+    # 是否在确认文案中展示「命中片段（安全变形）」预览，默认开启
+    confirmation_show_hit_preview: bool = True
     # high|medium|low 三档均已整体放宽，medium 为默认
     security_level: str = "medium"
     enable_semantic_module: bool = False  # 默认关闭；仅在具备 1G 1vCPU 可用的语义模型或接受内置正则占位时设为 True

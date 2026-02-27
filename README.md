@@ -40,6 +40,10 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 推荐发送完整单行指令：`yes cfm-<id>--act-<token>` 或 `no cfm-<id>--act-<token>`。  
 当前实现不再支持仅 `yes` / `no` 的简化确认。
 
+确认文案中的“命中片段（安全变形）”可通过开关控制：
+- `AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW=true|false`（默认 `true`）
+- 展示规则：命中总长度 `<=200` 时全量变形展示；`>200` 时按“命中片段前后 20 字”分段变形展示。
+
 ### 1.2 脱敏覆盖范围（当前）
 
 请求侧 `redaction` + `request_sanitizer` + 响应侧 `post_restore_guard` 已覆盖以下类别：
