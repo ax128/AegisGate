@@ -36,10 +36,8 @@ from aegisgate.adapters.openai_compat.upstream import (
     _forward_json,
     _forward_stream_lines,
     _is_upstream_whitelisted,
-    _resolve_gateway_key,
     _resolve_upstream_base,
     _safe_error_detail,
-    _validate_gateway_headers,
     close_upstream_async_client,
 )
 from aegisgate.config.settings import settings
@@ -732,6 +730,99 @@ def _render_cached_chat_confirmation_stream_output(
     return _build_streaming_response(_generator())
 
 
+def _iter_responses_text_stream_replay(
+    *,
+    request_id: str,
+    model: str,
+    replay_text: str,
+    aegisgate_meta: dict[str, Any],
+) -> Generator[bytes, None, None]:
+    item_id = f"msg_{(request_id or 'resp')[:12]}"
+
+    def _with_meta(payload: dict[str, Any]) -> dict[str, Any]:
+        payload["aegisgate"] = aegisgate_meta
+        return payload
+
+    output_item_completed = {
+        "type": "message",
+        "id": item_id,
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
+    }
+
+    events = [
+        {
+            "type": "response.created",
+            "response": {"id": request_id, "object": "response", "model": model, "status": "in_progress", "output": []},
+        },
+        {
+            "type": "response.output_item.added",
+            "response_id": request_id,
+            "output_index": 0,
+            "item": {"type": "message", "id": item_id, "role": "assistant", "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.content_part.added",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {
+            "id": request_id,
+            "object": "response.chunk",
+            "model": model,
+            "type": "response.output_text.delta",
+            "delta": replay_text,
+        },
+        {
+            "type": "response.output_text.delta",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": replay_text,
+        },
+        {
+            "type": "response.output_text.done",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": replay_text,
+        },
+        {
+            "type": "response.content_part.done",
+            "response_id": request_id,
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": replay_text},
+        },
+        {
+            "type": "response.output_item.done",
+            "response_id": request_id,
+            "output_index": 0,
+            "item": output_item_completed,
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": request_id,
+                "object": "response",
+                "model": model,
+                "status": "completed",
+                "output": [output_item_completed],
+            },
+        },
+    ]
+    for payload in events:
+        yield f"data: {json.dumps(_with_meta(payload), ensure_ascii=False)}\n\n".encode("utf-8")
+    yield _stream_done_sse_chunk()
+
+
 def _render_cached_responses_confirmation_stream_output(
     *,
     request_id: str,
@@ -754,68 +845,17 @@ def _render_cached_responses_confirmation_stream_output(
         "confirmation stream replay responses request_id=%s confirm_id=%s events=%s content_chars=%s",
         request_id,
         confirm_id,
-        "response.chunk,response.output_text.delta,response.output_text.done,response.completed,[DONE]",
+        "response.created,response.output_item.added,response.content_part.added,response.chunk,response.output_text.delta,response.output_text.done,response.content_part.done,response.output_item.done,response.completed,[DONE]",
         len(replay_text),
     )
 
     def _generator() -> Generator[bytes, None, None]:
-        # 兼容两类客户端：
-        # 1) 仅识别 legacy response.chunk
-        # 2) 严格识别 OpenAI Responses typed events（output_text.delta/done/completed）
-        item_id = f"msg_{(request_id or 'resp')[:12]}"
-        legacy_payload = {
-            "id": request_id,
-            "object": "response.chunk",
-            "model": model,
-            "type": "response.output_text.delta",
-            "delta": replay_text,
-            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
-        }
-        yield f"data: {json.dumps(legacy_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-        typed_delta_payload = {
-            "type": "response.output_text.delta",
-            "response_id": request_id,
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "delta": replay_text,
-            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
-        }
-        yield f"data: {json.dumps(typed_delta_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-        typed_done_payload = {
-            "type": "response.output_text.done",
-            "response_id": request_id,
-            "item_id": item_id,
-            "output_index": 0,
-            "content_index": 0,
-            "text": replay_text,
-            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
-        }
-        yield f"data: {json.dumps(typed_done_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-        completed_payload = {
-            "type": "response.completed",
-            "response": {
-                "id": request_id,
-                "object": "response",
-                "model": model,
-                "status": "completed",
-                "output": [
-                    {
-                        "type": "message",
-                        "id": item_id,
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
-                    }
-                ],
-            },
-            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
-        }
-        yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-        yield _stream_done_sse_chunk()
+        yield from _iter_responses_text_stream_replay(
+            request_id=request_id,
+            model=model,
+            replay_text=replay_text,
+            aegisgate_meta={"action": "allow", "confirmation": confirmation_meta},
+        )
 
     return _build_streaming_response(_generator())
 
@@ -2043,16 +2083,26 @@ async def _execute_responses_stream_once(
         chunk_count = 0
         saw_done = False
         stream_end_reason = "upstream_eof_no_done"
+        blocked_reason: str | None = None
+        blocked_confirm_id = ""
+        blocked_confirmation_reason = ""
+        blocked_confirmation_summary = ""
+        blocked_confirmation_meta: dict[str, Any] | None = None
+        blocked_message_text = ""
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
                 payload_text = _extract_sse_data_payload(line)
                 if payload_text is None:
+                    if blocked_reason:
+                        continue
                     yield line
                     continue
 
                 if payload_text == "[DONE]":
                     saw_done = True
                     stream_end_reason = "upstream_done"
+                    if blocked_reason:
+                        break
                     yield line
                     break
 
@@ -2062,113 +2112,155 @@ async def _execute_responses_stream_once(
                     stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
-                    ctx.report_items = list(base_reports)
-                    probe_resp = InternalResponse(
-                        request_id=req.request_id,
-                        session_id=req.session_id,
-                        model=req.model,
-                        output_text=stream_window,
-                        raw={"stream": True},
-                    )
-                    await _run_response_pipeline(pipeline, probe_resp, ctx)
-
-                    if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
-                        await _apply_semantic_review(ctx, stream_window, phase="response")
-
-                    block_reason = _stream_block_reason(ctx)
-                    if block_reason:
-                        logger.info(
-                            "responses stream block decision request_id=%s reason=%s risk_score=%.4f threshold=%.4f response_disposition=%s requires_human_review=%s security_tags=%s disposition_reasons=%s chunk_count=%s cached_chars=%s",
-                            ctx.request_id,
-                            block_reason,
-                            float(ctx.risk_score),
-                            float(ctx.risk_threshold),
-                            ctx.response_disposition,
-                            bool(ctx.requires_human_review),
-                            sorted(ctx.security_tags),
-                            list(ctx.disposition_reasons),
-                            chunk_count,
-                            len(stream_window),
-                        )
-                        debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
-                        if block_reason not in ctx.disposition_reasons:
-                            ctx.disposition_reasons.append(block_reason)
-                        reason, summary = _confirmation_reason_and_summary(ctx)
-                        confirm_id = make_confirm_id()
-                        now_ts = int(time.time())
-                        cached_text = "".join(stream_cached_parts)
-                        pending_payload = _build_response_pending_payload(
-                            route=req.route,
+                    if not blocked_reason:
+                        ctx.report_items = list(base_reports)
+                        probe_resp = InternalResponse(
                             request_id=req.request_id,
                             session_id=req.session_id,
                             model=req.model,
-                            fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                            content=cached_text,
+                            output_text=stream_window,
+                            raw={"stream": True},
                         )
-                        pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
-                        await _store_call(
-                            "save_pending_confirmation",
-                            confirm_id=confirm_id,
-                            session_id=req.session_id,
-                            route=req.route,
-                            request_id=req.request_id,
-                            model=req.model,
-                            upstream_base=upstream_base,
-                            pending_request_payload=pending_payload,
-                            pending_request_hash=pending_payload_hash,
-                            reason=reason,
-                            summary=summary,
-                            tenant_id=ctx.tenant_id,
-                            created_at=now_ts,
-                            expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-                        )
-                        ctx.response_disposition = "block"
-                        ctx.disposition_reasons.append("awaiting_user_confirmation")
-                        ctx.security_tags.add("confirmation_required")
-                        ctx.enforcement_actions.append("confirmation:pending")
-                        confirmation_meta = _flow_confirmation_metadata(
-                            confirm_id=confirm_id,
-                            status="pending",
-                            reason=reason,
-                            summary=summary,
-                            phase=PHASE_RESPONSE,
-                            payload_omitted=False,
-                            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
-                        )
-                        message_text = _build_confirmation_message(
-                            confirm_id=confirm_id,
-                            reason=reason,
-                            summary=summary,
-                            phase=PHASE_RESPONSE,
-                        )
-                        logger.info(
-                            "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
-                            ctx.request_id,
-                            confirm_id,
-                            block_reason,
-                        )
-                        logger.info(
-                            "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
-                            ctx.request_id,
-                            confirm_id,
-                            req.route,
-                            _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                            pending_payload_size,
-                        )
-                        yield _stream_confirmation_sse_chunk(
-                            ctx,
-                            req.model,
-                            req.route,
-                            message_text,
-                            confirmation_meta,
-                        )
-                        yield _stream_done_sse_chunk()
-                        stream_end_reason = "policy_confirmation"
-                        break
+                        await _run_response_pipeline(pipeline, probe_resp, ctx)
+
+                        if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                            await _apply_semantic_review(ctx, stream_window, phase="response")
+
+                        decision = _stream_block_reason(ctx)
+                        if decision:
+                            blocked_reason = decision
+                            logger.info(
+                                "responses stream block decision request_id=%s reason=%s risk_score=%.4f threshold=%.4f response_disposition=%s requires_human_review=%s security_tags=%s disposition_reasons=%s chunk_count=%s cached_chars=%s",
+                                ctx.request_id,
+                                blocked_reason,
+                                float(ctx.risk_score),
+                                float(ctx.risk_threshold),
+                                ctx.response_disposition,
+                                bool(ctx.requires_human_review),
+                                sorted(ctx.security_tags),
+                                list(ctx.disposition_reasons),
+                                chunk_count,
+                                len(stream_window),
+                            )
+                            debug_log_original("response_stream_blocked", stream_window, reason=blocked_reason)
+                            if blocked_reason not in ctx.disposition_reasons:
+                                ctx.disposition_reasons.append(blocked_reason)
+                            blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(ctx)
+                            blocked_confirm_id = make_confirm_id()
+                            blocked_confirmation_meta = _flow_confirmation_metadata(
+                                confirm_id=blocked_confirm_id,
+                                status="pending",
+                                reason=blocked_confirmation_reason,
+                                summary=blocked_confirmation_summary,
+                                phase=PHASE_RESPONSE,
+                                payload_omitted=False,
+                                action_token=make_action_bind_token(
+                                    f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
+                                ),
+                            )
+                            blocked_message_text = _build_confirmation_message(
+                                confirm_id=blocked_confirm_id,
+                                reason=blocked_confirmation_reason,
+                                summary=blocked_confirmation_summary,
+                                phase=PHASE_RESPONSE,
+                            )
+                            stream_end_reason = "policy_confirmation_draining_upstream"
+                            logger.info(
+                                "responses stream block drain started request_id=%s confirm_id=%s reason=%s chunk_count=%s cached_chars=%s",
+                                ctx.request_id,
+                                blocked_confirm_id,
+                                blocked_reason,
+                                chunk_count,
+                                len(stream_window),
+                            )
+
+                if blocked_reason:
+                    continue
 
                 yield line
-            if not saw_done and stream_end_reason == "upstream_eof_no_done":
+            if blocked_reason:
+                now_ts = int(time.time())
+                cached_text = "".join(stream_cached_parts)
+                pending_payload = _build_response_pending_payload(
+                    route=req.route,
+                    request_id=req.request_id,
+                    session_id=req.session_id,
+                    model=req.model,
+                    fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                    content=cached_text,
+                )
+                pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
+                await _store_call(
+                    "save_pending_confirmation",
+                    confirm_id=blocked_confirm_id,
+                    session_id=req.session_id,
+                    route=req.route,
+                    request_id=req.request_id,
+                    model=req.model,
+                    upstream_base=upstream_base,
+                    pending_request_payload=pending_payload,
+                    pending_request_hash=pending_payload_hash,
+                    reason=blocked_confirmation_reason,
+                    summary=blocked_confirmation_summary,
+                    tenant_id=ctx.tenant_id,
+                    created_at=now_ts,
+                    expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
+                    retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+                )
+                ctx.response_disposition = "block"
+                if "awaiting_user_confirmation" not in ctx.disposition_reasons:
+                    ctx.disposition_reasons.append("awaiting_user_confirmation")
+                ctx.security_tags.add("confirmation_required")
+                ctx.enforcement_actions.append("confirmation:pending")
+                logger.info(
+                    "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
+                    ctx.request_id,
+                    blocked_confirm_id,
+                    blocked_reason,
+                )
+                logger.info(
+                    "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                    ctx.request_id,
+                    blocked_confirm_id,
+                    req.route,
+                    _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                    pending_payload_size,
+                )
+                logger.info(
+                    "responses stream block drain completed request_id=%s confirm_id=%s saw_done=%s chunk_count=%s cached_chars=%s",
+                    ctx.request_id,
+                    blocked_confirm_id,
+                    saw_done,
+                    chunk_count,
+                    len(cached_text),
+                )
+                confirmation_meta = blocked_confirmation_meta or _flow_confirmation_metadata(
+                    confirm_id=blocked_confirm_id,
+                    status="pending",
+                    reason=blocked_confirmation_reason,
+                    summary=blocked_confirmation_summary,
+                    phase=PHASE_RESPONSE,
+                    payload_omitted=False,
+                    action_token=make_action_bind_token(
+                        f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
+                    ),
+                )
+                message_text = blocked_message_text or _build_confirmation_message(
+                    confirm_id=blocked_confirm_id,
+                    reason=blocked_confirmation_reason,
+                    summary=blocked_confirmation_summary,
+                    phase=PHASE_RESPONSE,
+                )
+                yield _stream_confirmation_sse_chunk(
+                    ctx,
+                    req.model,
+                    req.route,
+                    message_text,
+                    confirmation_meta,
+                )
+                yield _stream_done_sse_chunk()
+                stream_end_reason = "policy_confirmation"
+            elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
@@ -2178,76 +2270,13 @@ async def _execute_responses_stream_once(
                     len(stream_window),
                     len(replay_text),
                 )
-                item_id = f"msg_{(req.request_id or 'resp')[:12]}"
-                legacy_payload = {
-                    "id": req.request_id,
-                    "object": "response.chunk",
-                    "model": req.model,
-                    "type": "response.output_text.delta",
-                    "delta": replay_text,
-                    "aegisgate": {
-                        "action": "allow",
-                        "warning": "upstream_eof_no_done",
-                        "recovered": True,
-                    },
-                }
-                yield f"data: {json.dumps(legacy_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                typed_delta_payload = {
-                    "type": "response.output_text.delta",
-                    "response_id": req.request_id,
-                    "item_id": item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": replay_text,
-                    "aegisgate": {
-                        "action": "allow",
-                        "warning": "upstream_eof_no_done",
-                        "recovered": True,
-                    },
-                }
-                yield f"data: {json.dumps(typed_delta_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                typed_done_payload = {
-                    "type": "response.output_text.done",
-                    "response_id": req.request_id,
-                    "item_id": item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "text": replay_text,
-                    "aegisgate": {
-                        "action": "allow",
-                        "warning": "upstream_eof_no_done",
-                        "recovered": True,
-                    },
-                }
-                yield f"data: {json.dumps(typed_done_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                completed_payload = {
-                    "type": "response.completed",
-                    "response": {
-                        "id": req.request_id,
-                        "object": "response",
-                        "model": req.model,
-                        "status": "completed",
-                        "output": [
-                            {
-                                "type": "message",
-                                "id": item_id,
-                                "role": "assistant",
-                                "status": "completed",
-                                "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
-                            }
-                        ],
-                    },
-                    "aegisgate": {
-                        "action": "allow",
-                        "warning": "upstream_eof_no_done",
-                        "recovered": True,
-                    },
-                }
-                yield f"data: {json.dumps(completed_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-                yield _stream_done_sse_chunk()
+                for chunk in _iter_responses_text_stream_replay(
+                    request_id=req.request_id,
+                    model=req.model,
+                    replay_text=replay_text,
+                    aegisgate_meta={"action": "allow", "warning": "upstream_eof_no_done", "recovered": True},
+                ):
+                    yield chunk
                 stream_end_reason = "upstream_eof_no_done_recovered"
         except RuntimeError as exc:
             detail = str(exc)
@@ -3097,16 +3126,6 @@ async def chat_completions(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(gateway_headers)
-    if not ok:
-        return _error_response(
-            status_code=_to_status_code(reason),
-            reason=reason,
-            detail=detail,
-            ctx=ctx_preview,
-            boundary=boundary,
-        )
-
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
@@ -3619,16 +3638,6 @@ async def responses(payload: dict, request: Request):
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
-    ok, reason, detail = _validate_gateway_headers(gateway_headers)
-    if not ok:
-        return _error_response(
-            status_code=_to_status_code(reason),
-            reason=reason,
-            detail=detail,
-            ctx=ctx_preview,
-            boundary=boundary,
-        )
-
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
@@ -4125,21 +4134,6 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
     boundary = getattr(request.state, "security_boundary", {})
     gateway_headers = _effective_gateway_headers(request)
     tenant_id = _resolve_tenant_id(payload=payload, headers=gateway_headers, boundary=boundary)
-    ok, reason, detail = _validate_gateway_headers(gateway_headers)
-    if not ok:
-        preview_ctx = RequestContext(
-            request_id=str(payload.get("request_id") or "preview-generic"),
-            session_id=str(payload.get("session_id") or payload.get("request_id") or "preview-generic"),
-            route=route_path,
-            tenant_id=tenant_id,
-        )
-        return _error_response(
-            status_code=_to_status_code(reason),
-            reason=reason,
-            detail=detail,
-            ctx=preview_ctx,
-            boundary=boundary,
-        )
 
     if _should_stream(payload):
         return await _execute_generic_stream_once(

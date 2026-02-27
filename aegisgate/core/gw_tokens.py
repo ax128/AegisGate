@@ -18,7 +18,7 @@ from aegisgate.util.logger import logger
 # 内存映射：token -> {"upstream_base": str, "gateway_key": str}
 _tokens: dict[str, dict[str, str]] = {}
 _lock = threading.Lock()
-_TOKEN_LEN = 8
+_TOKEN_LEN = 10
 _GW_TOKENS_KEY = "tokens"
 
 

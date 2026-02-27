@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 from fastapi import FastAPI, Request
@@ -37,6 +38,7 @@ if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
 _nonce_cache = build_nonce_cache()
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister"})
 _confirmation_cache_task: ConfirmationCacheTask | None = None
 
 
@@ -79,17 +81,19 @@ class GWTokenRewriteMiddleware:
         new_scope["path"] = new_path
         new_scope["root_path"] = ""
         new_scope["raw_path"] = new_path.encode("utf-8")
+        new_scope["aegis_token_authenticated"] = True
+        new_scope["aegis_gateway_token"] = token
+        new_scope["aegis_upstream_base"] = ub
+        new_scope["aegis_gateway_key"] = gk
 
         headers = list(new_scope.get("headers") or [])
-        # token 访问时以映射为准：移除客户端携带的同名/下划线头，避免冲突。
+        # token 访问时移除客户端携带的网关内部头，避免冲突。
         ub_name = settings.upstream_base_header.encode("latin-1")
         gk_name = settings.gateway_key_header.encode("latin-1")
         ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
         gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
         skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
         headers = [(k, v) for k, v in headers if k.lower() not in skip]
-        headers.append((ub_name, ub.encode("utf-8")))
-        headers.append((gk_name, gk.encode("utf-8")))
         new_scope["headers"] = headers
 
         await self.app(new_scope, receive, send)
@@ -116,6 +120,22 @@ def _blocked_response(status_code: int, reason: str, detail: str | None = None) 
     )
 
 
+def _is_internal_client(request: Request) -> bool:
+    host = (request.client.host if request.client else "").strip()
+    if not host:
+        return False
+    if host in _LOOPBACK_HOSTS:
+        return True
+    normalized = host
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary = {
@@ -136,6 +156,32 @@ async def security_boundary_middleware(request: Request, call_next):
 
     if request.url.path == "/health":
         return await call_next(request)
+
+    if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
+        if not _is_internal_client(request):
+            await request.body()
+            boundary["rejected_reason"] = "admin_endpoint_network_restricted"
+            client_host = request.client.host if request.client else ""
+            logger.warning(
+                "boundary reject admin endpoint from non-internal host=%s path=%s",
+                client_host,
+                request.url.path,
+            )
+            return _blocked_response(
+                status_code=403,
+                reason="admin_endpoint_network_restricted",
+                detail="admin endpoint only allowed from internal network",
+            )
+
+    if request.url.path.startswith("/v1/") and not bool(request.scope.get("aegis_token_authenticated")):
+        await request.body()
+        boundary["rejected_reason"] = "token_route_required"
+        logger.warning("boundary reject non-token v1 request path=%s", request.url.path)
+        return _blocked_response(
+            status_code=403,
+            reason="token_route_required",
+            detail="use /v1/__gw__/t/<token>/... routes; header mode is disabled",
+        )
 
     cached_body: bytes | None = None
     content_length_header = request.headers.get("content-length", "").strip()
