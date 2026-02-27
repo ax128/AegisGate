@@ -90,7 +90,14 @@ def _header_value(headers: Mapping[str, str], target: str) -> str:
 
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
     """从请求中取 headers 供网关校验与转发使用（仅 Header，不含 Query）。"""
-    return dict(request.headers)
+    headers = dict(request.headers)
+    injected_upstream_base = request.scope.get("aegis_upstream_base")
+    if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
+        headers[settings.upstream_base_header] = injected_upstream_base.strip()
+    injected_gateway_key = request.scope.get("aegis_gateway_key")
+    if isinstance(injected_gateway_key, str) and injected_gateway_key.strip():
+        headers[settings.gateway_key_header] = injected_gateway_key.strip()
+    return headers
 
 
 def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
@@ -106,26 +113,6 @@ def _resolve_gateway_key(headers: Mapping[str, str]) -> str:
         return primary.strip()
     fallback = _header_value(headers, settings.gateway_key_header.replace("-", "_"))
     return fallback.strip()
-
-
-def _validate_gateway_headers(headers: Mapping[str, str]) -> tuple[bool, str, str]:
-    upstream_raw = _header_value(headers, settings.upstream_base_header).strip()
-    gateway_key_raw = _resolve_gateway_key(headers).strip()
-    if not upstream_raw or not gateway_key_raw:
-        logger.warning(
-            "gateway header validation failed missing upstream_or_key upstream_present=%s key_present=%s",
-            bool(upstream_raw),
-            bool(gateway_key_raw),
-        )
-        return False, "invalid_parameters", "X-Upstream-Base or gateway-key is missing"
-    if not settings.gateway_key:
-        logger.error("gateway header validation failed gateway-key misconfigured on server")
-        return False, "gateway_misconfigured", "gateway-key is not configured on server"
-    if gateway_key_raw != settings.gateway_key:
-        logger.warning("gateway header validation failed key mismatch")
-        return False, "gateway_auth_failed", "gateway-key is invalid"
-    logger.debug("gateway header validation passed")
-    return True, "", ""
 
 
 def _build_upstream_url(request_path: str, upstream_base: str) -> str:

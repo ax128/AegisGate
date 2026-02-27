@@ -54,25 +54,10 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ## 2. 接入模型
 
-你有两种接入方式。
+当前仅支持 token 路由模式：`/v1/__gw__/t/<token>/...`。  
+Header 直连模式（`X-Upstream-Base` + `gateway-key`）已禁用。
 
-### 2.1 方式 A：Header 传上游
-
-请求发给网关，同时带：
-- `X-Upstream-Base: https://your-upstream/v1`
-- `gateway-key: <your-gateway-key>`
-
-示例：
-
-```bash
-curl -X POST http://127.0.0.1:18080/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "X-Upstream-Base: https://your-upstream.example.com/v1" \
-  -H "gateway-key: agent" \
-  -d '{"model":"gpt-4.1-mini","input":"hello"}'
-```
-
-### 2.2 方式 B：Token 注册（推荐）
+### 2.1 Token 注册（必选）
 
 先注册一次，之后客户端只配置 token baseUrl，不再每次传网关头。
 
@@ -88,15 +73,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ```json
 {
-  "token": "Ab3k9Qx7",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7"
+  "token": "Ab3k9Qx7Yp",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp"
 }
 ```
+
+说明：token 长度为 10 位（沿用原有生成方式，长度调整为 10）。
 
 然后请求：
 
 ```bash
-curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7/responses \
+curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp/responses \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
@@ -105,21 +92,17 @@ curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7/responses \
 - 查询：`POST /__gw__/lookup`
 - 删除：`POST /__gw__/unregister`
 
-### 2.3 Claude 接入快速示例
+### 2.2 Claude 接入快速示例
 
 ```bash
 # 非流式
-curl -X POST 'http://127.0.0.1:18080/v1/messages' \
+curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
   -H 'Content-Type: application/json' \
-  -H 'X-Upstream-Base: https://your-upstream.example.com/v1' \
-  -H 'gateway-key: agent' \
   -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
 
 # 流式
-curl -N -X POST 'http://127.0.0.1:18080/v1/messages' \
+curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
   -H 'Content-Type: application/json' \
-  -H 'X-Upstream-Base: https://your-upstream.example.com/v1' \
-  -H 'gateway-key: agent' \
   -d '{"model":"claude-3-5-sonnet-latest","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
@@ -227,7 +210,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
   - 使用高强度 `AEGIS_GATEWAY_KEY`（不要用默认值）
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
   - 在入口网关（Nginx/Caddy/WAF）上加 IP 白名单、限流与访问控制
-  - 限制管理端点 `POST /__gw__/register|lookup|unregister` 的访问来源
+  - 管理端点 `POST /__gw__/register|lookup|unregister` 仅允许内网来源访问（网关入口已强制）
 - OAuth 托管登录模式通常无法配置 Base URL/Header，不适合接入 AegisGate；建议统一使用 API Key + Base URL 模式。
 
 ## 7. 测试

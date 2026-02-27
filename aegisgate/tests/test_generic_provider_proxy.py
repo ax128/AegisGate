@@ -83,7 +83,7 @@ async def test_generic_provider_proxy_requires_gateway_headers():
         response = await openai_router.generic_provider_proxy("messages", {"model": "generic-model"}, request)
         assert response.status_code == 400
         body = json.loads(response.body.decode("utf-8"))
-        assert body["error"]["code"] == "invalid_parameters"
+        assert body["error"]["code"] == "invalid_upstream_base"
         assert "missing" in body["error"]["message"].lower()
     finally:
         settings.enforce_loopback_only = original_loopback

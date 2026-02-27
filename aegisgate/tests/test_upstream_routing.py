@@ -1,13 +1,14 @@
 from aegisgate.adapters.openai_compat.upstream import (
     _build_forward_headers,
     _build_upstream_url,
+    _effective_gateway_headers,
     _is_upstream_whitelisted,
     _normalize_upstream_base,
     _resolve_gateway_key,
     _resolve_upstream_base,
-    _validate_gateway_headers,
 )
 from aegisgate.config.settings import settings
+from starlette.requests import Request
 
 
 def test_build_upstream_url_replaces_gateway_base_segment():
@@ -61,36 +62,29 @@ def test_resolve_gateway_key_accepts_underscore_header():
     assert _resolve_gateway_key(headers) == "abc123"
 
 
-def test_validate_gateway_headers_missing_parameters():
-    ok, reason, detail = _validate_gateway_headers({})
-    assert ok is False
-    assert reason == "invalid_parameters"
-    assert "missing" in detail.lower()
+def test_effective_gateway_headers_uses_scope_injected_upstream_and_key():
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer demo"), (b"x-upstream-base", b"https://evil.example.com/v1")],
+        "aegis_upstream_base": "https://upstream.example.com/v1",
+        "aegis_gateway_key": "agent",
+    }
 
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
 
-def test_validate_gateway_headers_auth_checks():
-    original = settings.gateway_key
-    settings.gateway_key = "gw-secret"
-    try:
-        ok, reason, _ = _validate_gateway_headers(
-            {
-                "X-Upstream-Base": "https://upstream.example.com/v1",
-                "gateway-key": "gw-secret",
-            }
-        )
-        assert ok is True
-        assert reason == ""
-
-        ok2, reason2, _ = _validate_gateway_headers(
-            {
-                "X-Upstream-Base": "https://upstream.example.com/v1",
-                "gateway-key": "wrong",
-            }
-        )
-        assert ok2 is False
-        assert reason2 == "gateway_auth_failed"
-    finally:
-        settings.gateway_key = original
+    request = Request(scope, receive)
+    headers = _effective_gateway_headers(request)
+    assert headers["x-upstream-base"] == "https://upstream.example.com/v1"
+    assert headers["gateway-key"] == "agent"
+    assert headers["authorization"] == "Bearer demo"
 
 
 def test_upstream_whitelist_matching():

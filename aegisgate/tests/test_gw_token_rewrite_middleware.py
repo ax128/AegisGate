@@ -59,6 +59,9 @@ async def test_gw_token_rewrite_routes_to_responses_and_injects_headers(monkeypa
     async def downstream(scope, receive, send):
         captured["path"] = scope.get("path")
         captured["headers"] = list(scope.get("headers") or [])
+        captured["aegis_token_authenticated"] = scope.get("aegis_token_authenticated")
+        captured["aegis_upstream_base"] = scope.get("aegis_upstream_base")
+        captured["aegis_gateway_key"] = scope.get("aegis_gateway_key")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"{\"ok\": true}", "more_body": False})
 
@@ -80,8 +83,11 @@ async def test_gw_token_rewrite_routes_to_responses_and_injects_headers(monkeypa
     }
     assert status == 200
     assert captured["path"] == "/v1/responses"
-    assert headers["x-upstream-base"] == "https://upstream.example.com/v1"
-    assert headers["gateway-key"] == "agent"
+    assert captured["aegis_token_authenticated"] is True
+    assert captured["aegis_upstream_base"] == "https://upstream.example.com/v1"
+    assert captured["aegis_gateway_key"] == "agent"
+    assert "x-upstream-base" not in headers
+    assert "gateway-key" not in headers
     assert "gateway_key" not in headers
     assert headers["authorization"] == "Bearer demo"
 
