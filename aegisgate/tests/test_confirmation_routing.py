@@ -159,12 +159,40 @@ def test_parse_explicit_confirmation_command_accepts_bound_token_with_em_dash():
     assert confirm_id == "cfm-abc123def456"
 
 
+def test_extract_bound_confirm_and_action_ignores_gateway_template_line():
+    confirm_id, action_token = openai_router._extract_bound_confirm_and_action(
+        "放行（复制这一行）：yes cfm-abc123def456--act-bada1fe8dd"
+    )
+    assert confirm_id == ""
+    assert action_token == ""
+
+
 def test_has_explicit_confirmation_keyword_ignores_gateway_template_lines():
     text = (
         "放行（复制这一行）：yes cfm-abc123def456 act-bada1fe8dd\n"
         "Approve (copy this line): yes cfm-abc123def456 act-bada1fe8dd"
     )
     assert openai_router._has_explicit_confirmation_keyword(text) is False
+
+
+def test_resolve_pending_confirmation_ignores_gateway_template_bound_token(monkeypatch):
+    confirm_id = "cfm-abc123def456"
+    record = {
+        "confirm_id": confirm_id,
+        "tenant_id": "default",
+        "status": "pending",
+        "expires_at": 9999999999,
+        "updated_at": 1,
+    }
+    monkeypatch.setattr(openai_router.store, "get_pending_confirmation", lambda cid: record if cid == confirm_id else None)
+    result = openai_router._resolve_pending_confirmation(
+        {"session_id": "s1"},
+        "放行（复制这一行）：yes cfm-abc123def456--act-bada1fe8dd",
+        1,
+        expected_route="/v1/chat/completions",
+        tenant_id="default",
+    )
+    assert result is None
 
 
 @pytest.mark.asyncio
