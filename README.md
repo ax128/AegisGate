@@ -7,6 +7,11 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、确认放行流程（yes/no）。
 
+## Agent Skill
+
+给 Agent 直接执行的安装与接入手册：  
+- [SKILL.md](SKILL.md)
+
 ## 1. 主要能力
 
 - OpenAI 兼容接口：
