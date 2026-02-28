@@ -4,11 +4,12 @@
 - 创建 src/infra/proxy-fetch.ts
 - 在 src/entry.ts 最早处加入 import "./infra/proxy-fetch.js"
 - 注入后：proxy-fetch.ts 写入 .gitignore，不参与提交；git 正常更新（pull）即可，更新完需手动再执行一次本脚本注入
+- 注入成功后：自动执行一次前端构建（build）
 
 用法：
   python openclaw-inject-proxy-fetch.py                  # 自动定位：同级/子目录/全局搜索名为 openclaw 的目录
   python openclaw-inject-proxy-fetch.py /path/to/openclaw   # 命令行指定根目录
-  set OPENCLAW_ROOT=<OpenClaw 根目录路径>   # 或用环境变量指定（未找到或找到多个时提示）
+  export OPENCLAW_ROOT=<OpenClaw 根目录路径>   # 或用环境变量指定（未找到或找到多个时提示）
   python openclaw-inject-proxy-fetch.py --remove
   python openclaw-inject-proxy-fetch.py -v / -vv
 """
@@ -16,6 +17,8 @@
 import argparse
 import logging
 import os
+import shutil
+import subprocess
 import sys
 
 # 日志级别：默认 INFO；-v DEBUG；-vv 显示更多上下文
@@ -246,8 +249,8 @@ ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
 ENTRY_NEXT_IMPORT_CONTAINS = 'from "./cli/profile.js"'
 ENTRY_CONTEXT_LOOKAHEAD = 6  # 锚点后最多看几行内要出现 profile.js import
 
-# 全局搜索：目录名必须为以下之一，且包含 src/entry.ts
-OPENCLAW_DIR_NAMES = ("openclaw", "openclaw-main")
+# 全局搜索：目录名必须为 openclaw，且包含 src/entry.ts
+OPENCLAW_DIR_NAMES = ("openclaw",)
 # 搜索时跳过的目录名（避免进入 node_modules、.git 等）
 SEARCH_SKIP_DIRS = frozenset({"node_modules", ".git", ".svn", ".hg", "dist", "build", "__pycache__"})
 
@@ -262,7 +265,7 @@ def _is_valid_openclaw_root(path: str) -> bool:
 
 def _search_openclaw_dirs(start: str, max_depth: int = 5) -> list[str]:
     """
-    从 start 目录起有限深度搜索：名为 openclaw 或 openclaw-main 且含 src/entry.ts 的目录。
+    从 start 目录起有限深度搜索：名为 openclaw 且含 src/entry.ts 的目录。
     返回绝对路径列表（可能为空或多个）。
     """
     start = os.path.abspath(start)
@@ -320,7 +323,7 @@ def find_openclaw_root(given: str | None) -> tuple[str | None, list[str] | None]
 
     cwd = os.getcwd()
 
-    # 3) 同级/子目录：当前目录即仓库根，或当前目录下 openclaw / openclaw-main 子目录
+    # 3) 同级/子目录：当前目录即仓库根，或当前目录下 openclaw 子目录
     if _is_valid_openclaw_root(cwd):
         LOG.debug("使用当前目录为根目录: %s", cwd)
         return cwd, None
@@ -330,9 +333,31 @@ def find_openclaw_root(given: str | None) -> tuple[str | None, list[str] | None]
             LOG.debug("使用当前目录下子目录: %s", cand)
             return os.path.normpath(cand), None
 
-    # 4) 全局搜索：从 cwd 起搜索名为 openclaw 的目录
-    LOG.debug("同级/子目录未找到，开始从当前目录搜索名为 openclaw 的目录: %s", cwd)
-    found = _search_openclaw_dirs(cwd)
+    # 4) 全局搜索：从 cwd、父目录、上级目录递归搜索名为 openclaw 的目录
+    search_roots: list[str] = []
+    seen: set[str] = set()
+    for cand in (cwd, os.path.dirname(cwd), os.path.dirname(os.path.dirname(cwd))):
+        c = os.path.abspath(cand)
+        if c and c not in seen and os.path.isdir(c):
+            seen.add(c)
+            search_roots.append(c)
+
+    LOG.debug("同级/子目录未找到，开始递归搜索名为 openclaw 的目录，roots=%s", search_roots)
+    all_found: list[str] = []
+    for base in search_roots:
+        sub = _search_openclaw_dirs(base)
+        if sub:
+            LOG.debug("在 %s 下找到: %s", base, sub)
+            all_found.extend(sub)
+
+    # 去重并保持顺序
+    found: list[str] = []
+    seen_found: set[str] = set()
+    for p in all_found:
+        if p not in seen_found:
+            seen_found.add(p)
+            found.append(p)
+
     if len(found) == 0:
         LOG.debug("未找到任何符合条件的 openclaw 目录")
         return None, None
@@ -542,6 +567,54 @@ def remove(root: str) -> bool:
     return changed
 
 
+def _detect_build_command(root: str) -> list[str] | None:
+    """根据锁文件和可执行程序检测 build 命令。"""
+    package_json = os.path.join(root, "package.json")
+    if not os.path.isfile(package_json):
+        return None
+
+    pnpm_lock = os.path.join(root, "pnpm-lock.yaml")
+    yarn_lock = os.path.join(root, "yarn.lock")
+    npm_lock = os.path.join(root, "package-lock.json")
+
+    if os.path.isfile(pnpm_lock) and shutil.which("pnpm"):
+        return ["pnpm", "build"]
+    if os.path.isfile(yarn_lock) and shutil.which("yarn"):
+        return ["yarn", "build"]
+    if os.path.isfile(npm_lock) and shutil.which("npm"):
+        return ["npm", "run", "build"]
+
+    if shutil.which("pnpm"):
+        return ["pnpm", "build"]
+    if shutil.which("yarn"):
+        return ["yarn", "build"]
+    if shutil.which("npm"):
+        return ["npm", "run", "build"]
+    return None
+
+
+def run_build(root: str) -> bool:
+    """注入成功后自动执行构建。"""
+    cmd = _detect_build_command(root)
+    if not cmd:
+        LOG.error("未检测到可用的构建命令（pnpm/yarn/npm），无法自动 build。")
+        return False
+
+    LOG.info("开始自动执行 build: %s (cwd=%s)", " ".join(cmd), root)
+    try:
+        proc = subprocess.run(cmd, cwd=root, check=False)
+    except OSError as exc:
+        LOG.error("执行 build 失败: %s", exc)
+        return False
+
+    if proc.returncode != 0:
+        LOG.error("build 失败，退出码: %s", proc.returncode)
+        return False
+
+    LOG.info("build 完成。")
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inject or remove OpenClaw proxy-fetch (gateway proxy).")
     parser.add_argument(
@@ -572,7 +645,7 @@ def main() -> None:
         for p in multiple:
             LOG.error("  - %s", p)
         LOG.error("请通过环境变量指定目标路径，例如：")
-        LOG.error("  set %s=<上述其中一个路径>", ENV_OPENCLAW_ROOT)
+        LOG.error("  export %s=<上述其中一个路径>", ENV_OPENCLAW_ROOT)
         LOG.error("  python openclaw-inject-proxy-fetch.py")
         sys.exit(1)
     if root is None:
@@ -580,7 +653,7 @@ def main() -> None:
         LOG.error("请任选其一：")
         LOG.error("  1) 在 OpenClaw 仓库根目录下执行本脚本；")
         LOG.error("  2) 或传入路径：python openclaw-inject-proxy-fetch.py <路径>；")
-        LOG.error("  3) 或设置环境变量：set %s=<OpenClaw 根目录路径>", ENV_OPENCLAW_ROOT)
+        LOG.error("  3) 或设置环境变量：export %s=<OpenClaw 根目录路径>", ENV_OPENCLAW_ROOT)
         sys.exit(1)
     LOG.info("OpenClaw 根目录: %s", root)
 
@@ -589,7 +662,10 @@ def main() -> None:
         sys.exit(0)
     ok = inject(root)
     if ok:
-        LOG.info("注入完成。运行 openclaw 时设置 OPENCLAW_PROXY_GATEWAY_URL 即可走网关。")
+        if not run_build(root):
+            LOG.error("注入成功，但自动 build 失败。请在 OpenClaw 根目录手动执行构建命令。")
+            sys.exit(1)
+        LOG.info("注入并 build 完成。运行 openclaw 时设置 OPENCLAW_PROXY_GATEWAY_URL 即可走网关。")
     else:
         LOG.error("注入未成功，请根据上述错误检查 entry.ts 或更新脚本适配当前项目结构。")
         sys.exit(1)
@@ -599,5 +675,5 @@ if __name__ == "__main__":
     main()
 
 # 用法（仅支持通过环境变量指定网关 URL；原 URL 固定用 X-Target-URL 传给网关）：
-#   set OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2
+#   export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2
 #   openclaw status
