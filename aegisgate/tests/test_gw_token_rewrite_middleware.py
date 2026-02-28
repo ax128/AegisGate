@@ -105,3 +105,27 @@ async def test_gw_token_rewrite_returns_404_when_token_not_found(monkeypatch):
 
     assert status == 404
     assert payload["error"] == "token_not_found"
+
+
+@pytest.mark.asyncio
+async def test_gw_token_rewrite_supports_v2_routes(monkeypatch):
+    mapping = {
+        "upstream_base": "https://upstream.example.com/v1",
+        "gateway_key": "agent",
+    }
+    monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: mapping if token == "tok12345" else None)
+
+    captured: dict[str, object] = {}
+
+    async def downstream(scope, receive, send):
+        captured["path"] = scope.get("path")
+        captured["aegis_token_authenticated"] = scope.get("aegis_token_authenticated")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{\"ok\": true}", "more_body": False})
+
+    app = GWTokenRewriteMiddleware(downstream)
+    status, _ = await _run_asgi_request(app, path="/v2/__gw__/t/tok12345/proxy")
+
+    assert status == 200
+    assert captured["path"] == "/v2/proxy"
+    assert captured["aegis_token_authenticated"] is True

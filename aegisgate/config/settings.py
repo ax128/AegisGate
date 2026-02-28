@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     request_nonce_cache_size: int = 50000
     nonce_cache_backend: str = "memory"  # memory | redis
 
+    # v2 generic HTTP proxy (independent from v1 OpenAI-compatible filter chain)
+    enable_v2_proxy: bool = True
+    v2_original_url_header: str = "x-original-url"
+    v2_enable_request_redaction: bool = True
+    v2_enable_response_command_filter: bool = True
+    v2_response_filter_max_chars: int = 200_000
+
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60
     clear_pending_on_startup: bool = False

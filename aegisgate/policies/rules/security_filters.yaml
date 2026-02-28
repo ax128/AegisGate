@@ -424,20 +424,26 @@ anomaly_detector:
       - "\u2069"
     invisible_char_threshold: 6
   command_patterns:
-    - id: rm_rf
-      regex: 'rm\s+-rf'
-    - id: curl_pipe_sh
-      regex: 'curl\s+[^|]+\|\s*(sh|bash)'
-    - id: powershell_enc
-      regex: 'powershell(\.exe)?\s+-enc'
-    - id: certutil_decode
-      regex: 'certutil\s+-decode'
-    - id: reg_add
-      regex: 'reg\s+add'
-    - id: cat_ssh
-      regex: 'cat\s+~/.ssh'
-    - id: zh_priv_escalation
-      regex: '(提权|越权|读取本地|导出敏感|删除日志)'
+    - id: sqli_union_select
+      regex: '\bunion\s+select\b'
+    - id: sqli_tautology
+      regex: '\b(?:or|and)\s+1\s*=\s*1\b'
+    - id: sqli_time_blind
+      regex: '\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)'
+    - id: xss_script_event
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: command_injection_chain
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: xxe_external_entity
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)'
+    - id: ssti_or_log4shell
+      regex: '(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: ssrf_metadata
+      regex: '(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)'
+    - id: crlf_header_injection
+      regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
   points:
     repetition_ratio: 0.25
     max_run_length: 0.20
@@ -530,10 +536,18 @@ request_sanitizer:
     - id: prompt_flood
       regex: '(?i)(ignore previous instructions){3,}'
   command_patterns:
-    - id: shell_en
-      regex: '(rm\s+-rf|curl\s+[^|]+\|\s*(sh|bash)|powershell(\.exe)?\s+-enc|cmd\.exe)'
-    - id: shell_zh
-      regex: '(执行命令|运行脚本|终端执行|读取本地文件)'
+    - id: web_sqli
+      regex: '(\bunion\s+select\b|\b(?:or|and)\s+1\s*=\s*1\b|\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\))'
+    - id: web_xss
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: web_path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: web_command_injection
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: web_xxe_ssti
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: web_ssrf_crlf
+      regex: '((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))'
   encoded_payload_patterns:
     - id: base64_long
       regex: '[A-Za-z0-9+/]{200,}={0,2}'
@@ -574,17 +588,22 @@ sanitizer:
     - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)'
     - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)'
   command_patterns:
-    - id: shell_en
-      regex: '(rm\s+-rf|curl\s+[^|]+\|\s*(sh|bash)|powershell(\.exe)?\s+-enc|cmd\.exe)'
-    - id: shell_zh
-      regex: '(执行命令|运行脚本|终端执行|读取本地文件)'
+    - id: web_sqli
+      regex: '(\bunion\s+select\b|\b(?:or|and)\s+1\s*=\s*1\b|\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\))'
+    - id: web_xss
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: web_path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: web_command_injection
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: web_xxe_ssti
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: web_ssrf_crlf
+      regex: '((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))'
   # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
   force_block_command_patterns:
-    # Docker 高危
     - id: docker_compose_down
       regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b'
-    - id: docker_system_prune
-      regex: '(?:^|\s)(?:/)?docker\s+system\s+prune(?:\s+-[a-z]+)*\b'
     - id: docker_compose_logs
       regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+logs\b'
     - id: docker_images
@@ -597,48 +616,26 @@ sanitizer:
       regex: '(?:^|\s)(?:/)?docker\s+restart\b'
     - id: docker_exec_interactive
       regex: '(?:^|\s)(?:/)?docker\s+exec\b[^\n]*(?:\s-(?:it|ti)\b|\s--interactive\b|\s--tty\b)'
-    - id: docker_run_privileged
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*\s--privileged\b'
-    - id: docker_mount_root_fs
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*(?:-v|--volume)\s*/:\s*/[A-Za-z0-9._/-]+\b'
-    - id: docker_mount_docker_sock
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*(?:-v|--volume)\s*/var/run/docker\.sock\s*:\s*/var/run/docker\.sock\b'
-    - id: docker_net_host
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--net(?:work)?=host\b'
-    - id: docker_cap_add_all
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--cap-add=ALL\b'
-    - id: docker_unconfined_security_opt
-      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--security-opt\s+(?:seccomp|apparmor)=unconfined\b'
-    # SSH / 密钥 / sshd
-    - id: ssh_authorized_keys_write
-      regex: '(?:>>|>|(?:\|\s*tee\b)|\bAdd-Content\b|\bSet-Content\b|\bOut-File\b).*(?:~?/\.ssh/authorized_keys|/root/\.ssh/authorized_keys|C:\\ProgramData\\ssh\\administrators_authorized_keys)'
-    - id: ssh_private_key_write
-      regex: '(?:>>|>|(?:\|\s*tee\b)|\bAdd-Content\b|\bSet-Content\b|\bOut-File\b).*(?:~?/\.ssh/(?:id_rsa|id_ed25519)|/root/\.ssh/(?:id_rsa|id_ed25519)|\S+\.pem\b)'
-    - id: sshd_config_write
-      regex: '(?:>>|>|(?:\|\s*tee\b)|\bsed\s+-i\b|\bperl\s+-pi\b).*(?:/etc/ssh/sshd_config(?:\.d/\S+)?)'
-    - id: sshd_weak_setting
-      regex: '\b(?:PermitRootLogin\s+yes|PasswordAuthentication\s+yes|PubkeyAuthentication\s+no|PermitEmptyPasswords\s+yes)\b'
-    - id: ssh_sensitive_file_exfil
-      regex: '\b(?:cat|type|more|less|Get-Content|scp|rsync|curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b.*(?:/etc/ssh/\S*key\S*|~?/\.ssh/(?:authorized_keys|known_hosts|id_rsa|id_ed25519))'
-    - id: ssh_archive_exfil
-      regex: '\b(?:tar|zip|7z)\b.*(?:~?/\.ssh\b|/etc/ssh\b).*(?:\||&&|;).*(?:curl|wget|nc|scp|rsync|Invoke-WebRequest|Invoke-RestMethod)\b'
-    # 防火墙/网络高危
-    - id: iptables_flush
-      regex: '\biptables\s+(?:-F|--flush)\b'
-    - id: nft_flush_ruleset
-      regex: '\bnft\s+flush\s+ruleset\b'
-    - id: iptables_policy_accept
-      regex: '\biptables\s+-P\s+(?:INPUT|FORWARD|OUTPUT)\s+ACCEPT\b'
-    - id: ufw_disable
-      regex: '\bufw\s+disable\b'
-    - id: pfctl_disable
-      regex: '\bpfctl\s+-d\b'
-    - id: netsh_firewall_off
-      regex: '\bnetsh\s+advfirewall\s+set\s+allprofiles\s+state\s+off\b'
-    - id: powershell_firewall_off
-      regex: '\bSet-NetFirewallProfile\b[^\n]*\s-Enabled\s+False\b'
-    - id: windows_inbound_remote_open
-      regex: '\b(?:New-NetFirewallRule|netsh\s+advfirewall\s+firewall\s+add\s+rule)\b[^\n]*(?:\bdir(?:ection)?\s*=?\s*in\b|\b-Inbound\b)[^\n]*(?:\b22\b|\b3389\b|\b2375\b|\b5985\b|\b5986\b)'
+    - id: web_sqli_union_select
+      regex: '\bunion\s+select\b'
+    - id: web_sqli_tautology
+      regex: '\b(?:or|and)\s+1\s*=\s*1\b'
+    - id: web_sqli_time_blind
+      regex: '\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)'
+    - id: web_xss_script_event
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: web_command_injection_chain
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: web_path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: web_xxe_external_entity
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)'
+    - id: web_ssti_or_log4shell
+      regex: '(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: web_ssrf_metadata
+      regex: '(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)'
+    - id: web_crlf_header_injection
+      regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
   encoded_payload_patterns:
     - id: base64_long
       regex: '[A-Za-z0-9+/]{200,}={0,2}'

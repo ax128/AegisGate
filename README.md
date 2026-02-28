@@ -18,6 +18,13 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/{subpath}` 通用代理
+- v2 通用 HTTP 代理（独立安全链路）：
+  - `ANY /v2` / `ANY /v2/{subpath}`
+  - 必须携带原始目标头（兼容 `x-target-url` / `x-original-url`，优先读取 `AEGIS_V2_ORIGINAL_URL_HEADER`）
+  - 请求侧仅做脱敏（可开关，默认开）
+  - 响应侧仅做 HTTP 注入攻击识别拦截（可开关，默认开）
+    - 例如：SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入
+    - 命中后直接返回非 200（默认 `403`）格式化错误，不走确认放行链路
 - Claude 系列 API（通用代理）：
   - `POST /v1/messages`
   - `POST /v1/messages/count_tokens`
@@ -69,9 +76,54 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 命中位置记录：日志记录 `path/field/role/pattern/count` 摘要（不含命中原文）
 - 幂等：已包含 `[REDACTED:*]` 的文本不会重复脱敏
 
+### 1.3 v1 / v2 实现链路与逻辑
+
+统一入口（v1/v2 共用）：
+1. 客户端必须走 token 路径：`/v1/__gw__/t/<token>/...` 或 `/v2/__gw__/t/<token>/...`
+2. 中间件重写 token 路径到真实路由，并把 token 绑定信息注入请求上下文
+3. 安全边界中间件执行基础限制：token 路径强制、请求体大小限制、可选 loopback-only、可选 HMAC/nonce 防重放
+
+`v1` 链路（OpenAI 兼容）：
+1. 请求侧过滤：`redaction -> request_sanitizer -> rag_poison_guard`
+2. 转发到上游 LLM（chat/responses/generic 子路径）
+3. 响应侧过滤：`anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
+4. 按风险处置：`allow / sanitize / block / confirmation(yes/no)`
+5. 记录审计事件（含风险标签、处置原因、确认状态）
+
+`v2` 链路（通用 HTTP 代理）：
+1. 读取原始目标 URL 头（支持 `x-target-url`、`x-original-url`，优先 `AEGIS_V2_ORIGINAL_URL_HEADER`）
+2. 请求侧按配置进行脱敏（默认开启）
+3. 转发到目标 HTTP(S) 地址
+4. 响应侧按配置进行 HTTP 注入检测（默认开启，文本类响应）
+5. 命中即返回 `403` 格式化错误（不走确认放行）
+
+### 1.4 过滤范围、安全检查、审计能力
+
+| 维度 | v1 | v2 |
+|---|---|---|
+| 请求体过滤 | 脱敏 + 请求清洗 + RAG 投毒检测 | 脱敏（文本/JSON） |
+| 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | HTTP 注入攻击检测 |
+| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入 |
+| 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
+| 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 按普通 HTTP 响应处理 |
+| 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |
+
+### 1.5 命中后的处理方式（怎么处理）
+
+1. `allow`：直接透传结果。
+2. `sanitize`：替换敏感片段或可疑片段后返回。
+3. `block`：立即拒绝并返回统一错误结构（v2 默认为 `403`）。
+4. `confirmation`（仅 v1）：返回确认模板，用户需发送绑定确认指令 `yes/no cfm-...--act-...` 再继续。
+
+建议：
+1. LLM 主链路用 `v1`（具备确认放行与完整审计）。
+2. 通用 HTTP 安检用 `v2`（命中即阻断，响应更直接）。
+
 ## 2. 接入模型
 
-当前仅支持 token 路由模式：`/v1/__gw__/t/<token>/...`。
+当前支持 token 路由模式：
+- `v1`：`/v1/__gw__/t/<token>/...`
+- `v2`：`/v2/__gw__/t/<token>/...`（复用同一 token，无需单独注册）
 
 ### 2.1 Token 注册（必选）
 
@@ -104,6 +156,17 @@ curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp/responses \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
 
+v2 请求示例（原始目标放请求头）：
+
+```bash
+curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
+  -H "Content-Type: application/json" \
+  -H "x-target-url: https://httpbin.org/post" \
+  -d '{"api_key":"sk-test-1234567890","message":"hello"}'
+```
+
+说明：`v2` 同时兼容 `x-target-url` 和 `x-original-url`；如果你有自定义头名，可通过 `AEGIS_V2_ORIGINAL_URL_HEADER` 配置。
+
 辅助接口：
 - 查询：`POST /__gw__/lookup`
 - 删除：`POST /__gw__/unregister`
@@ -124,6 +187,13 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 
 更多终端/客户端（Codex CLI、OpenClaw、Cherry、VS Code、Cursor、WSL2）接入见：  
 - [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)
+- OpenClaw 自动注入代理脚本说明见：
+  - [OPENCLAW_INJECT_PROXY_FETCH.md](OPENCLAW_INJECT_PROXY_FETCH.md)
+
+OpenClaw 自动注入脚本位置：
+- `scripts/openclaw-inject-proxy-fetch.py`
+- 示例：
+  - `python scripts/openclaw-inject-proxy-fetch.py D:\agent_work\openclaw-main`
 
 ## 3. 本地开发
 
@@ -216,6 +286,11 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high` | `medium` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
+| `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
+| `AEGIS_V2_ORIGINAL_URL_HEADER` | v2 原始目标 URL 请求头名（默认；仍兼容 `x-target-url`） | `x-original-url` |
+| `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
+| `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | v2 响应 HTTP 注入攻击过滤开关 | `true` |
+| `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | v2 响应注入检测最大字符数 | `200000` |
 
 完整可调项见：
 - [config/.env.example](config/.env.example)

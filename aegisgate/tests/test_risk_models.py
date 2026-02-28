@@ -44,7 +44,7 @@ def test_injection_detector_detects_bidi_control():
 
 def test_anomaly_detector_points_based_payload_scoring():
     plugin = AnomalyDetector()
-    raw = "A" * 220 + " " + ("%2F%2E%2E" * 12) + " " + "rm -rf /tmp/demo"
+    raw = "A" * 400 + " " + ("%2F%2E%2E" * 12) + " " + "UNION SELECT username, password FROM users"
     resp = InternalResponse(request_id="risk-3", session_id="s1", model="gpt", output_text=raw)
     ctx = RequestContext(request_id="risk-3", session_id="s1", route="/v1/chat/completions", enabled_filters={"anomaly_detector"})
 

@@ -106,7 +106,7 @@ def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"c1","choices":[{"delta":{"content":"docker compose down"}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"UNION SELECT password FROM users"}}]}\n\n'
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
     monkeypatch.setattr(

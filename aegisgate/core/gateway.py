@@ -16,6 +16,7 @@ from aegisgate.adapters.openai_compat.router import (
 )
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
 from aegisgate.adapters.relay_compat.router import router as relay_router
+from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as v2_proxy_router
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
@@ -29,11 +30,14 @@ from aegisgate.core.security_boundary import (
 )
 from aegisgate.util.logger import logger
 
-# /v1/__gw__/t/{token}/chat/completions -> token + rest
-_GW_TOKEN_PATH_RE = re.compile(r"^/v1/__gw__/t/([^/]+)/(.*)$")
+# /v1/__gw__/t/{token}/chat/completions -> /v1/chat/completions
+# /v2/__gw__/t/{token}/proxy -> /v2/proxy
+_GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
 
 app = FastAPI(title=settings.app_name)
 app.include_router(openai_router, prefix="/v1")
+if settings.enable_v2_proxy:
+    app.include_router(v2_proxy_router)
 if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
 _nonce_cache = build_nonce_cache()
@@ -61,7 +65,7 @@ class GWTokenRewriteMiddleware:
             await self.app(scope, receive, send)
             return
 
-        token, rest = matched.group(1), matched.group(2)
+        version, token, rest = matched.group(1), matched.group(2), matched.group(3)
         mapping = gw_tokens_get(token)
         if not mapping:
             logger.warning("gw_token not found token=%s path=%s", token, path)
@@ -72,7 +76,7 @@ class GWTokenRewriteMiddleware:
             await response(scope, receive, send)
             return
 
-        new_path = f"/v1/{rest}" if rest else "/v1"
+        new_path = f"/{version}/{rest}" if rest else f"/{version}"
         logger.info("gw_token_rewrite path=%s -> %s token=%s", path, new_path, token)
 
         ub = mapping["upstream_base"]
@@ -173,14 +177,16 @@ async def security_boundary_middleware(request: Request, call_next):
                 detail="admin endpoint only allowed from internal network",
             )
 
-    if request.url.path.startswith("/v1/") and not bool(request.scope.get("aegis_token_authenticated")):
+    protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
+    protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
+    if (protected_v1 or protected_v2) and not bool(request.scope.get("aegis_token_authenticated")):
         await request.body()
         boundary["rejected_reason"] = "token_route_required"
-        logger.warning("boundary reject non-token v1 request path=%s", request.url.path)
+        logger.warning("boundary reject non-token request path=%s", request.url.path)
         return _blocked_response(
             status_code=403,
             reason="token_route_required",
-            detail="use /v1/__gw__/t/<token>/... routes; header mode is disabled",
+            detail="use /v1/__gw__/t/<token>/... or /v2/__gw__/t/<token>/... routes; header mode is disabled",
         )
 
     cached_body: bytes | None = None
@@ -424,6 +430,7 @@ async def shutdown_cleanup() -> None:
         await _confirmation_cache_task.stop()
         _confirmation_cache_task = None
     await close_upstream_async_client()
+    await close_v2_async_client()
     await close_semantic_async_client()
     shutdown_audit_worker()
 

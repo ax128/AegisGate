@@ -68,6 +68,32 @@ async def test_boundary_allows_token_authenticated_v1_requests():
 
 
 @pytest.mark.asyncio
+async def test_boundary_blocks_non_token_v2_requests():
+    request = _build_request(
+        "/v2/proxy",
+        token_authenticated=False,
+        headers={"x-original-url": "https://example.com/api"},
+        body={"hello": "world"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "token_route_required"
+
+
+@pytest.mark.asyncio
+async def test_boundary_allows_token_authenticated_v2_requests():
+    request = _build_request(
+        "/v2/proxy",
+        token_authenticated=True,
+        headers={"x-original-url": "https://example.com/api"},
+        body={"hello": "world"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_boundary_blocks_admin_endpoints_from_public_ip():
     request = _build_request(
         "/__gw__/register",
