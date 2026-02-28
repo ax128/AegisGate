@@ -193,7 +193,12 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 OpenClaw 自动注入脚本位置：
 - `scripts/openclaw-inject-proxy-fetch.py`
 - 示例：
-  - `python scripts/openclaw-inject-proxy-fetch.py D:\agent_work\openclaw-main`
+  - `python scripts/openclaw-inject-proxy-fetch.py D:\agent_work\openclaw`
+- 行为：
+  - 自动检索目录名 `openclaw`（不再检索 `openclaw-main`）
+  - 注入成功后自动执行 `build`（`pnpm/yarn/npm` 自动检测）
+  - 设置环境变量示例：`export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
+  - 修改环境变量后需重启 OpenClaw 进程才生效
 
 ## 3. 本地开发
 
