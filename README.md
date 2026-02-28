@@ -195,7 +195,7 @@ OpenClaw 自动注入脚本位置：
 - 示例：
   - `python scripts/openclaw-inject-proxy-fetch.py D:\agent_work\openclaw`
 - 行为：
-  - 自动检索目录名 `openclaw`（不再检索 `openclaw-main`）
+  - 不自动检索目录；必须通过参数或 `OPENCLAW_ROOT` 显式指定 OpenClaw 根目录
   - 注入成功后自动执行 `build`（`pnpm/yarn/npm` 自动检测）
   - 设置环境变量示例：`export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
   - 修改环境变量后需重启 OpenClaw 进程才生效
