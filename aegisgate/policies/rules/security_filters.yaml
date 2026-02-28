@@ -582,21 +582,33 @@ sanitizer:
   force_block_command_patterns:
     # Docker 高危
     - id: docker_compose_down
-      regex: '\b(?:docker\s+compose|docker-compose)\s+down\b'
+      regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b'
     - id: docker_system_prune
-      regex: '\bdocker\s+system\s+prune(?:\s+-[a-z]+)*\b'
+      regex: '(?:^|\s)(?:/)?docker\s+system\s+prune(?:\s+-[a-z]+)*\b'
+    - id: docker_compose_logs
+      regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+logs\b'
+    - id: docker_images
+      regex: '(?:^|\s)(?:/)?docker\s+images\b'
+    - id: docker_ps
+      regex: '(?:^|\s)(?:/)?docker\s+ps\b'
+    - id: docker_stop
+      regex: '(?:^|\s)(?:/)?docker\s+stop\b'
+    - id: docker_restart
+      regex: '(?:^|\s)(?:/)?docker\s+restart\b'
+    - id: docker_exec_interactive
+      regex: '(?:^|\s)(?:/)?docker\s+exec\b[^\n]*(?:\s-(?:it|ti)\b|\s--interactive\b|\s--tty\b)'
     - id: docker_run_privileged
-      regex: '\bdocker\s+run\b[^\n]*\s--privileged\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*\s--privileged\b'
     - id: docker_mount_root_fs
-      regex: '\bdocker\s+run\b[^\n]*(?:-v|--volume)\s*/:\s*/[A-Za-z0-9._/-]+\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*(?:-v|--volume)\s*/:\s*/[A-Za-z0-9._/-]+\b'
     - id: docker_mount_docker_sock
-      regex: '\bdocker\s+run\b[^\n]*(?:-v|--volume)\s*/var/run/docker\.sock\s*:\s*/var/run/docker\.sock\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*(?:-v|--volume)\s*/var/run/docker\.sock\s*:\s*/var/run/docker\.sock\b'
     - id: docker_net_host
-      regex: '\bdocker\s+run\b[^\n]*--net(?:work)?=host\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--net(?:work)?=host\b'
     - id: docker_cap_add_all
-      regex: '\bdocker\s+run\b[^\n]*--cap-add=ALL\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--cap-add=ALL\b'
     - id: docker_unconfined_security_opt
-      regex: '\bdocker\s+run\b[^\n]*--security-opt\s+(?:seccomp|apparmor)=unconfined\b'
+      regex: '(?:^|\s)(?:/)?docker\s+run\b[^\n]*--security-opt\s+(?:seccomp|apparmor)=unconfined\b'
     # SSH / 密钥 / sshd
     - id: ssh_authorized_keys_write
       regex: '(?:>>|>|(?:\|\s*tee\b)|\bAdd-Content\b|\bSet-Content\b|\bOut-File\b).*(?:~?/\.ssh/authorized_keys|/root/\.ssh/authorized_keys|C:\\ProgramData\\ssh\\administrators_authorized_keys)'

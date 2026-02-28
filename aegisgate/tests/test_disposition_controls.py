@@ -136,6 +136,16 @@ def test_output_sanitizer_force_blocks_docker_compose_down_when_switch_on():
 @pytest.mark.parametrize(
     "payload_text",
     [
+        "docker compose logs -f --tail=200 web",
+        "/docker compose logs -f --tail=200 web",
+        "/docker-compose logs -f --tail=200 web",
+        "docker images",
+        "/docker images",
+        "docker ps -a",
+        "/docker ps -a",
+        "docker stop my-app-container",
+        "docker restart my-app-container",
+        "docker exec -it my-app-container sh",
         "echo 'ssh-ed25519 AAAA...' >> ~/.ssh/authorized_keys",
         "sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config",
         "iptables -F",
