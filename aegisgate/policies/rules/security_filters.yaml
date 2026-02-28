@@ -578,6 +578,55 @@ sanitizer:
       regex: '(rm\s+-rf|curl\s+[^|]+\|\s*(sh|bash)|powershell(\.exe)?\s+-enc|cmd\.exe)'
     - id: shell_zh
       regex: '(执行命令|运行脚本|终端执行|读取本地文件)'
+  # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
+  force_block_command_patterns:
+    # Docker 高危
+    - id: docker_compose_down
+      regex: '\b(?:docker\s+compose|docker-compose)\s+down\b'
+    - id: docker_system_prune
+      regex: '\bdocker\s+system\s+prune(?:\s+-[a-z]+)*\b'
+    - id: docker_run_privileged
+      regex: '\bdocker\s+run\b[^\n]*\s--privileged\b'
+    - id: docker_mount_root_fs
+      regex: '\bdocker\s+run\b[^\n]*(?:-v|--volume)\s*/:\s*/[A-Za-z0-9._/-]+\b'
+    - id: docker_mount_docker_sock
+      regex: '\bdocker\s+run\b[^\n]*(?:-v|--volume)\s*/var/run/docker\.sock\s*:\s*/var/run/docker\.sock\b'
+    - id: docker_net_host
+      regex: '\bdocker\s+run\b[^\n]*--net(?:work)?=host\b'
+    - id: docker_cap_add_all
+      regex: '\bdocker\s+run\b[^\n]*--cap-add=ALL\b'
+    - id: docker_unconfined_security_opt
+      regex: '\bdocker\s+run\b[^\n]*--security-opt\s+(?:seccomp|apparmor)=unconfined\b'
+    # SSH / 密钥 / sshd
+    - id: ssh_authorized_keys_write
+      regex: '(?:>>|>|(?:\|\s*tee\b)|\bAdd-Content\b|\bSet-Content\b|\bOut-File\b).*(?:~?/\.ssh/authorized_keys|/root/\.ssh/authorized_keys|C:\\ProgramData\\ssh\\administrators_authorized_keys)'
+    - id: ssh_private_key_write
+      regex: '(?:>>|>|(?:\|\s*tee\b)|\bAdd-Content\b|\bSet-Content\b|\bOut-File\b).*(?:~?/\.ssh/(?:id_rsa|id_ed25519)|/root/\.ssh/(?:id_rsa|id_ed25519)|\S+\.pem\b)'
+    - id: sshd_config_write
+      regex: '(?:>>|>|(?:\|\s*tee\b)|\bsed\s+-i\b|\bperl\s+-pi\b).*(?:/etc/ssh/sshd_config(?:\.d/\S+)?)'
+    - id: sshd_weak_setting
+      regex: '\b(?:PermitRootLogin\s+yes|PasswordAuthentication\s+yes|PubkeyAuthentication\s+no|PermitEmptyPasswords\s+yes)\b'
+    - id: ssh_sensitive_file_exfil
+      regex: '\b(?:cat|type|more|less|Get-Content|scp|rsync|curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b.*(?:/etc/ssh/\S*key\S*|~?/\.ssh/(?:authorized_keys|known_hosts|id_rsa|id_ed25519))'
+    - id: ssh_archive_exfil
+      regex: '\b(?:tar|zip|7z)\b.*(?:~?/\.ssh\b|/etc/ssh\b).*(?:\||&&|;).*(?:curl|wget|nc|scp|rsync|Invoke-WebRequest|Invoke-RestMethod)\b'
+    # 防火墙/网络高危
+    - id: iptables_flush
+      regex: '\biptables\s+(?:-F|--flush)\b'
+    - id: nft_flush_ruleset
+      regex: '\bnft\s+flush\s+ruleset\b'
+    - id: iptables_policy_accept
+      regex: '\biptables\s+-P\s+(?:INPUT|FORWARD|OUTPUT)\s+ACCEPT\b'
+    - id: ufw_disable
+      regex: '\bufw\s+disable\b'
+    - id: pfctl_disable
+      regex: '\bpfctl\s+-d\b'
+    - id: netsh_firewall_off
+      regex: '\bnetsh\s+advfirewall\s+set\s+allprofiles\s+state\s+off\b'
+    - id: powershell_firewall_off
+      regex: '\bSet-NetFirewallProfile\b[^\n]*\s-Enabled\s+False\b'
+    - id: windows_inbound_remote_open
+      regex: '\b(?:New-NetFirewallRule|netsh\s+advfirewall\s+firewall\s+add\s+rule)\b[^\n]*(?:\bdir(?:ection)?\s*=?\s*in\b|\b-Inbound\b)[^\n]*(?:\b22\b|\b3389\b|\b2375\b|\b5985\b|\b5986\b)'
   encoded_payload_patterns:
     - id: base64_long
       regex: '[A-Za-z0-9+/]{200,}={0,2}'

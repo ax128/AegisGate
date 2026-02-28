@@ -102,6 +102,46 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
     assert "please run shell bash command now" not in text
 
 
+def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"docker compose down"}}]}\n\n'
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._stream_block_reason",
+        lambda ctx: "response_forbidden_command",
+    )
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router.settings.strict_command_block_enabled", True)
+
+    payload = {
+        "request_id": "r-stream-1b",
+        "session_id": "s-stream-1b",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    body = asyncio.run(run_case())
+    text = body.decode("utf-8", errors="replace")
+    assert "response_forbidden_command" in text
+    assert "安全确认" in text
+    assert "data: [DONE]" in text
+
+
 def test_execute_chat_stream_whitelist_bypass(monkeypatch):
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 

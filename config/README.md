@@ -41,6 +41,7 @@ cp aegisgate/policies/rules/*.yaml config/
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` / `debug` |
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` / `true` |
 | `AEGIS_SECURITY_LEVEL` | 安全档位 | `low` / `medium` / `high` |
+| `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截；默认覆盖 SSH/防火墙/Docker 高危） | `false` / `true` |
 | `AEGIS_GATEWAY_KEY` | 网关校验 key | `agent` |
 | `AEGIS_DEFAULT_POLICY` | 默认策略名 | `default` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | 上游超时秒数 | `60` |

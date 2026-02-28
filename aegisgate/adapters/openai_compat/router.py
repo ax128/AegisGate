@@ -112,7 +112,7 @@ _UPSTREAM_EOF_RECOVERY_NOTICE = (
     "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
 )
 _GENERIC_EXTRACT_MAX_CHARS = 16000
-_CONFIRMATION_HIT_CONTEXT_CHARS = 20
+_CONFIRMATION_HIT_CONTEXT_CHARS = 40
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
@@ -1301,6 +1301,7 @@ def _confirmation_hit_regex_patterns() -> tuple[re.Pattern[str], ...]:
     _append_rule_patterns("request_sanitizer", "strong_intent_patterns")
     _append_rule_patterns("request_sanitizer", "command_patterns")
     _append_rule_patterns("sanitizer", "system_leak_patterns")
+    _append_rule_patterns("sanitizer", "force_block_command_patterns")
 
     # Fixed fallback for text-like risky phrases that may not be present in evidence.
     pattern_strings.extend(

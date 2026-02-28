@@ -48,7 +48,8 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 确认文案中的“命中片段（安全变形）”可通过开关控制：
 - `AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW=true|false`（默认 `true`）
-- 展示规则：默认按“命中片段前后 20 字”分段变形展示；无可匹配上下文时回退到命中片段本身。
+- 展示规则：默认按“命中片段前后 40 字”分段变形展示；无可匹配上下文时回退到命中片段本身。
+- `AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true|false`（默认 `false`）：开启后命中强制命令会进入高风险确认拦截（返回 `yes/no cfm...`），不依赖 `security_level` 阈值。默认覆盖高危 `SSH/sshd` 改写与密钥外传、`iptables/nft/ufw/pfctl/netsh` 关键放开动作、`docker --privileged/挂载宿主根目录/docker.sock` 等。
 
 ### 1.2 脱敏覆盖范围（当前）
 
@@ -214,6 +215,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `100000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high` | `medium` |
+| `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
 
 完整可调项见：
 - [config/.env.example](config/.env.example)
