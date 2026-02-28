@@ -161,6 +161,18 @@ def test_confirmation_reason_and_summary_falls_back_to_injection_rule_source_hit
     assert "ins-tru-cti-ons" in summary
 
 
+def test_needs_confirmation_keeps_forbidden_command_confirmation_when_strict_switch_on():
+    ctx = RequestContext(request_id="r6", session_id="s6", route="/v1/responses")
+    ctx.response_disposition = "block"
+    ctx.disposition_reasons.append("response_forbidden_command")
+    old = settings.strict_command_block_enabled
+    settings.strict_command_block_enabled = True
+    try:
+        assert openai_router._needs_confirmation(ctx) is True
+    finally:
+        settings.strict_command_block_enabled = old
+
+
 def test_resolve_pending_confirmation_requires_confirm_id(monkeypatch):
     def _should_not_call(*args, **kwargs):
         raise AssertionError("get_pending_confirmation should not be called without confirm_id")

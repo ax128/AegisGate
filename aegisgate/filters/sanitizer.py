@@ -6,6 +6,7 @@ import re
 
 from aegisgate.config.security_level import apply_threshold, normalize_security_level
 from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
@@ -29,6 +30,9 @@ class OutputSanitizer(BaseFilter):
 
         self._discussion_patterns = self._compile_patterns(sanitizer_rules.get("discussion_context_patterns", []))
         self._command_patterns = self._compile_patterns(sanitizer_rules.get("command_patterns", []))
+        self._force_block_command_patterns = self._compile_id_patterns(
+            sanitizer_rules.get("force_block_command_patterns", [])
+        )
         self._encoded_payload_patterns = self._compile_patterns(sanitizer_rules.get("encoded_payload_patterns", []))
         self._system_leak_patterns = self._compile_patterns(sanitizer_rules.get("system_leak_patterns", []))
         self._unsafe_markup_patterns = self._compile_patterns(sanitizer_rules.get("unsafe_markup_patterns", []))
@@ -68,12 +72,61 @@ class OutputSanitizer(BaseFilter):
         return compiled
 
     @staticmethod
+    def _compile_id_patterns(items: list[dict]) -> list[tuple[str, re.Pattern[str]]]:
+        compiled: list[tuple[str, re.Pattern[str]]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            regex = item.get("regex")
+            if not regex:
+                continue
+            pattern_id = str(item.get("id", "force_block_command"))
+            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+        return compiled
+
+    @staticmethod
     def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
         return any(pattern.search(text) for pattern in patterns)
+
+    @staticmethod
+    def _matched_pattern_ids(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
+        hits: list[str] = []
+        for pattern_id, pattern in patterns:
+            if pattern.search(text):
+                hits.append(pattern_id)
+        return sorted(set(hits))
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "action": "none"}
         text = resp.output_text
+        force_block_hits = (
+            self._matched_pattern_ids(text, self._force_block_command_patterns)
+            if settings.strict_command_block_enabled
+            else []
+        )
+        if force_block_hits:
+            debug_log_original("output_sanitizer_blocked", text, reason="response_forbidden_command")
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("response_forbidden_command")
+            ctx.security_tags.add("response_forbidden_command")
+            ctx.risk_score = max(ctx.risk_score, 1.0)
+            resp.output_text = self._block_message
+            self._report = {
+                "filter": self.name,
+                "hit": True,
+                "risk_score": ctx.risk_score,
+                "risk_threshold": ctx.risk_threshold,
+                "signals": force_block_hits,
+                "evidence": {"forbidden_command": force_block_hits},
+                "action": "block",
+            }
+            logger.info(
+                "response blocked request_id=%s reason=forbidden_command hits=%s",
+                ctx.request_id,
+                force_block_hits,
+            )
+            return resp
+
         if "response_injection_unicode_bidi" in ctx.security_tags:
             debug_log_original("output_sanitizer_blocked", text, reason="response_unicode_bidi")
             ctx.response_disposition = "block"

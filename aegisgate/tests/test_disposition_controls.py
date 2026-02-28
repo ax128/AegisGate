@@ -1,5 +1,8 @@
+import pytest
+
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
+from aegisgate.config.settings import settings
 from aegisgate.filters.injection_detector import PromptInjectionDetector
 from aegisgate.filters.output_sanitizer import OutputSanitizer
 from aegisgate.filters.request_sanitizer import RequestSanitizer
@@ -101,3 +104,68 @@ def test_output_sanitizer_prefers_sanitize_for_discussion_context():
     assert ctx.response_disposition == "sanitize"
     assert out.output_text.startswith("[AegisGate] content sanitized:")
     assert "[REDACTED:command]" in out.output_text
+
+
+def test_output_sanitizer_force_blocks_docker_compose_down_when_switch_on():
+    plugin = OutputSanitizer()
+    resp = InternalResponse(
+        request_id="disp-5",
+        session_id="s1",
+        model="gpt",
+        output_text="先执行 docker compose down，再继续后续操作。",
+    )
+    ctx = RequestContext(
+        request_id="disp-5",
+        session_id="s1",
+        route="/v1/chat/completions",
+        enabled_filters={"output_sanitizer"},
+        risk_score=0.01,
+    )
+    old = settings.strict_command_block_enabled
+    settings.strict_command_block_enabled = True
+    try:
+        out = plugin.process_response(resp, ctx)
+    finally:
+        settings.strict_command_block_enabled = old
+
+    assert ctx.response_disposition == "block"
+    assert "response_forbidden_command" in ctx.disposition_reasons
+    assert out.output_text.startswith("[AegisGate] response blocked by security policy.")
+
+
+@pytest.mark.parametrize(
+    "payload_text",
+    [
+        "echo 'ssh-ed25519 AAAA...' >> ~/.ssh/authorized_keys",
+        "sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+        "iptables -F",
+        "Set-NetFirewallProfile -Enabled False",
+        "docker run --privileged ubuntu:22.04 bash",
+        "docker run -v /var/run/docker.sock:/var/run/docker.sock alpine sh",
+    ],
+)
+def test_output_sanitizer_force_block_patterns_cover_ssh_firewall_docker(payload_text: str):
+    plugin = OutputSanitizer()
+    resp = InternalResponse(
+        request_id="disp-6",
+        session_id="s1",
+        model="gpt",
+        output_text=payload_text,
+    )
+    ctx = RequestContext(
+        request_id="disp-6",
+        session_id="s1",
+        route="/v1/chat/completions",
+        enabled_filters={"output_sanitizer"},
+        risk_score=0.0,
+    )
+    old = settings.strict_command_block_enabled
+    settings.strict_command_block_enabled = True
+    try:
+        out = plugin.process_response(resp, ctx)
+    finally:
+        settings.strict_command_block_enabled = old
+
+    assert ctx.response_disposition == "block"
+    assert "response_forbidden_command" in ctx.disposition_reasons
+    assert out.output_text.startswith("[AegisGate] response blocked by security policy.")
