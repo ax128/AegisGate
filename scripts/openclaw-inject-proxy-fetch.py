@@ -7,9 +7,8 @@
 - 注入成功后：自动执行一次前端构建（build）
 
 用法：
-  python openclaw-inject-proxy-fetch.py                  # 自动定位：同级/子目录/全局搜索名为 openclaw 的目录
   python openclaw-inject-proxy-fetch.py /path/to/openclaw   # 命令行指定根目录
-  export OPENCLAW_ROOT=<OpenClaw 根目录路径>   # 或用环境变量指定（未找到或找到多个时提示）
+  export OPENCLAW_ROOT=<OpenClaw 根目录路径>   # 或用环境变量指定（二选一，必须显式提供）
   python openclaw-inject-proxy-fetch.py --remove
   python openclaw-inject-proxy-fetch.py -v / -vv
 """
@@ -241,18 +240,13 @@ PROXY_IMPORT_LINES = '''import "./infra/proxy-fetch.js";
 MARKER_IMPORT = 'import "./infra/proxy-fetch.js";'
 MARKER_AFTER = 'import { fileURLToPath } from "node:url";'
 
-# 环境变量：未找到或找到多个 openclaw 目录时，由用户指定目标路径
+# 环境变量：未提供命令行参数时，用于指定 OpenClaw 目标路径
 ENV_OPENCLAW_ROOT = "OPENCLAW_ROOT"
 
 # 注入前上下文校验：锚点行及其后必须出现的特征（避免项目迭代后误注入）
 ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
 ENTRY_NEXT_IMPORT_CONTAINS = 'from "./cli/profile.js"'
 ENTRY_CONTEXT_LOOKAHEAD = 6  # 锚点后最多看几行内要出现 profile.js import
-
-# 全局搜索：目录名必须为 openclaw，且包含 src/entry.ts
-OPENCLAW_DIR_NAMES = ("openclaw",)
-# 搜索时跳过的目录名（避免进入 node_modules、.git 等）
-SEARCH_SKIP_DIRS = frozenset({"node_modules", ".git", ".svn", ".hg", "dist", "build", "__pycache__"})
 
 # 注入生成的文件，加入 .gitignore 以便 git 忽略
 GITIGNORE_ENTRY = "src/infra/proxy-fetch.ts"
@@ -263,109 +257,35 @@ def _is_valid_openclaw_root(path: str) -> bool:
     return os.path.isdir(path) and os.path.isfile(os.path.join(path, "src", "entry.ts"))
 
 
-def _search_openclaw_dirs(start: str, max_depth: int = 5) -> list[str]:
+def find_openclaw_root(given: str | None) -> str | None:
     """
-    从 start 目录起有限深度搜索：名为 openclaw 且含 src/entry.ts 的目录。
-    返回绝对路径列表（可能为空或多个）。
+    确定 OpenClaw 源码根目录（必须显式指定）：
+    1) 命令行参数
+    2) 环境变量 OPENCLAW_ROOT
     """
-    start = os.path.abspath(start)
-    if not os.path.isdir(start):
-        return []
-    results: list[str] = []
-
-    def scan(dir_path: str, depth: int) -> None:
-        if depth > max_depth:
-            return
-        try:
-            entries = os.listdir(dir_path)
-        except OSError:
-            return
-        for name in entries:
-            if name in SEARCH_SKIP_DIRS:
-                continue
-            full = os.path.join(dir_path, name)
-            if not os.path.isdir(full):
-                continue
-            if name in OPENCLAW_DIR_NAMES and _is_valid_openclaw_root(full):
-                results.append(os.path.normpath(full))
-            scan(full, depth + 1)
-
-    scan(start, 0)
-    return results
-
-
-def find_openclaw_root(given: str | None) -> tuple[str | None, list[str] | None]:
-    """
-    确定 OpenClaw 源码根目录。
-    返回 (root, multiple_found):
-      - (path, None): 找到唯一目标，使用 path
-      - (None, None): 未找到
-      - (None, [path1, path2, ...]): 找到多个同名目录，需用户通过环境变量指定
-    """
-    # 1) 命令行参数
-    if given:
-        root = os.path.abspath(given)
+    if given and given.strip():
+        root = os.path.abspath(given.strip())
         if _is_valid_openclaw_root(root):
             LOG.debug("使用命令行指定根目录: %s", root)
-            return root, None
-        LOG.debug("命令行指定路径不符合条件（需存在 src/entry.ts）: %s", root)
-        return None, None
+            return root
+        LOG.error("命令行指定路径不符合条件（需存在 src/entry.ts）: %s", root)
+        return None
 
-    # 2) 环境变量
-    env_root = os.environ.get(ENV_OPENCLAW_ROOT)
+    env_root = os.environ.get(ENV_OPENCLAW_ROOT, "").strip()
     if env_root:
-        root = os.path.abspath(env_root.strip())
+        root = os.path.abspath(env_root)
         if _is_valid_openclaw_root(root):
             LOG.debug("使用环境变量 %s 指定根目录: %s", ENV_OPENCLAW_ROOT, root)
-            return root, None
-        LOG.debug("环境变量 %s 指向路径不符合条件: %s", ENV_OPENCLAW_ROOT, root)
-        return None, None
+            return root
+        LOG.error("环境变量 %s 指向路径不符合条件（需存在 src/entry.ts）: %s", ENV_OPENCLAW_ROOT, root)
+        return None
 
-    cwd = os.getcwd()
-
-    # 3) 同级/子目录：当前目录即仓库根，或当前目录下 openclaw 子目录
-    if _is_valid_openclaw_root(cwd):
-        LOG.debug("使用当前目录为根目录: %s", cwd)
-        return cwd, None
-    for name in OPENCLAW_DIR_NAMES:
-        cand = os.path.join(cwd, name)
-        if _is_valid_openclaw_root(cand):
-            LOG.debug("使用当前目录下子目录: %s", cand)
-            return os.path.normpath(cand), None
-
-    # 4) 全局搜索：从 cwd、父目录、上级目录递归搜索名为 openclaw 的目录
-    search_roots: list[str] = []
-    seen: set[str] = set()
-    for cand in (cwd, os.path.dirname(cwd), os.path.dirname(os.path.dirname(cwd))):
-        c = os.path.abspath(cand)
-        if c and c not in seen and os.path.isdir(c):
-            seen.add(c)
-            search_roots.append(c)
-
-    LOG.debug("同级/子目录未找到，开始递归搜索名为 openclaw 的目录，roots=%s", search_roots)
-    all_found: list[str] = []
-    for base in search_roots:
-        sub = _search_openclaw_dirs(base)
-        if sub:
-            LOG.debug("在 %s 下找到: %s", base, sub)
-            all_found.extend(sub)
-
-    # 去重并保持顺序
-    found: list[str] = []
-    seen_found: set[str] = set()
-    for p in all_found:
-        if p not in seen_found:
-            seen_found.add(p)
-            found.append(p)
-
-    if len(found) == 0:
-        LOG.debug("未找到任何符合条件的 openclaw 目录")
-        return None, None
-    if len(found) == 1:
-        LOG.debug("全局搜索到唯一目录: %s", found[0])
-        return found[0], None
-    LOG.debug("全局搜索到多个同名目录: %s", found)
-    return None, found
+    LOG.error("未提供 OpenClaw 根目录。必须通过参数或环境变量显式指定。")
+    LOG.error("示例：")
+    LOG.error("  python openclaw-inject-proxy-fetch.py /path/to/openclaw")
+    LOG.error("  export %s=/path/to/openclaw", ENV_OPENCLAW_ROOT)
+    LOG.error("  python openclaw-inject-proxy-fetch.py")
+    return None
 
 
 def _check_entry_context(lines: list[str], entry_path: str) -> tuple[bool, str]:
@@ -621,7 +541,7 @@ def main() -> None:
         "openclaw_root",
         nargs="?",
         default=None,
-        help="OpenClaw 根目录（可选；未指定时自动定位或使用环境变量 OPENCLAW_ROOT）",
+        help="OpenClaw 根目录（必填；或使用环境变量 OPENCLAW_ROOT）",
     )
     parser.add_argument(
         "--remove",
@@ -639,21 +559,8 @@ def main() -> None:
 
     setup_log(args.verbose)
 
-    root, multiple = find_openclaw_root(args.openclaw_root)
-    if root is None and multiple is not None:
-        LOG.error("找到多个名为 openclaw 的目录，无法自动选择：")
-        for p in multiple:
-            LOG.error("  - %s", p)
-        LOG.error("请通过环境变量指定目标路径，例如：")
-        LOG.error("  export %s=<上述其中一个路径>", ENV_OPENCLAW_ROOT)
-        LOG.error("  python openclaw-inject-proxy-fetch.py")
-        sys.exit(1)
+    root = find_openclaw_root(args.openclaw_root)
     if root is None:
-        LOG.error("未找到符合注入条件的 OpenClaw 目录（需包含 src/entry.ts）。")
-        LOG.error("请任选其一：")
-        LOG.error("  1) 在 OpenClaw 仓库根目录下执行本脚本；")
-        LOG.error("  2) 或传入路径：python openclaw-inject-proxy-fetch.py <路径>；")
-        LOG.error("  3) 或设置环境变量：export %s=<OpenClaw 根目录路径>", ENV_OPENCLAW_ROOT)
         sys.exit(1)
     LOG.info("OpenClaw 根目录: %s", root)
 
@@ -665,7 +572,11 @@ def main() -> None:
         if not run_build(root):
             LOG.error("注入成功，但自动 build 失败。请在 OpenClaw 根目录手动执行构建命令。")
             sys.exit(1)
-        LOG.info("注入并 build 完成。运行 openclaw 时设置 OPENCLAW_PROXY_GATEWAY_URL 即可走网关。")
+        LOG.info("build完成，接下来需要进行：")
+        LOG.info("1) 导入环境变量，例如：")
+        LOG.info("   export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x")
+        LOG.info("2) 重启 OpenClaw：")
+        LOG.info("   openclaw gateway restart")
     else:
         LOG.error("注入未成功，请根据上述错误检查 entry.ts 或更新脚本适配当前项目结构。")
         sys.exit(1)

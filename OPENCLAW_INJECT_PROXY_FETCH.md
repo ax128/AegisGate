@@ -25,16 +25,11 @@
 - 同源防重入：请求目标与网关同源时不再代理，避免循环转发
 - 直连名单：默认放行部分常见站点；可用 `OPENCLAW_PROXY_DIRECT_HOSTS` 覆盖（逗号分隔）
 
-## 3. 目录定位规则（只检索 `openclaw`）
+## 3. 目录指定规则（必须显式提供）
 
-脚本按以下顺序定位 OpenClaw 根目录（需包含 `src/entry.ts`）：
-1. 命令行参数路径
-2. 环境变量 `OPENCLAW_ROOT`
-3. 当前目录本身
-4. 当前目录下的 `openclaw` 子目录
-5. 从当前目录、父目录、上级目录递归搜索名为 `openclaw` 的目录（有限深度）
-
-说明：不再按 `openclaw-main` 名称检索。
+脚本不再自动搜索目录。必须按以下二选一显式提供 OpenClaw 根目录（且目录内需存在 `src/entry.ts`）：
+1. 命令行参数：`python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw`
+2. 环境变量：`OPENCLAW_ROOT=/path/to/openclaw`
 
 ## 4. 使用方法
 
