@@ -59,10 +59,21 @@ _DEFAULT_DANGEROUS_COMMAND_PATTERNS: tuple[tuple[str, str], ...] = (
     ("web_ssrf_metadata", r"(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)"),
     ("web_crlf_header_injection", r"(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)"),
 )
+_XSS_RULE_ID_HINTS = ("xss", "script_event")
+_XSS_HIGH_CONFIDENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:%3c|\\x3c)\s*/?\s*script\b", re.IGNORECASE),
+    re.compile(r"</\s*script\s*>\s*<\s*script\b", re.IGNORECASE),
+    re.compile(r"javascript\s*:\s*(?:alert|prompt|confirm)\s*\(", re.IGNORECASE),
+    re.compile(
+        r"on(?:error|load|mouseover)\s*=\s*['\"]?\s*(?:alert|prompt|confirm|document\.cookie|fetch\s*\(|xmlhttprequest)",
+        re.IGNORECASE,
+    ),
+)
 _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_sqli_union_select": "检测到 SQL 注入特征（UNION SELECT）",
     "web_sqli_tautology": "检测到 SQL 注入特征（恒真条件）",
     "web_sqli_time_blind": "检测到 SQL 注入特征（时间盲注）",
+    "web_xss": "检测到 XSS/脚本注入特征",
     "web_xss_script_event": "检测到 XSS/脚本注入特征",
     "web_command_injection_chain": "检测到命令注入链特征",
     "web_path_traversal": "检测到路径穿越特征",
@@ -269,16 +280,26 @@ def _sanitize_request_body(body: bytes, content_type: str) -> tuple[bytes, int, 
 
 
 def _detect_dangerous_commands(text: str) -> list[str]:
-    matches: list[str] = []
+    raw_matches: list[str] = []
     seen: set[str] = set()
     for pattern_id, pattern in _v2_dangerous_command_patterns():
         if pattern.search(text):
             if pattern_id not in seen:
                 seen.add(pattern_id)
-                matches.append(pattern_id)
-            if len(matches) >= _V2_MAX_MATCH_IDS:
+                raw_matches.append(pattern_id)
+            if len(raw_matches) >= _V2_MAX_MATCH_IDS:
                 break
-    return matches
+    if not raw_matches:
+        return []
+
+    xss_matches = [match_id for match_id in raw_matches if any(hint in match_id.lower() for hint in _XSS_RULE_ID_HINTS)]
+    if xss_matches:
+        high_conf_xss = any(pattern.search(text) for pattern in _XSS_HIGH_CONFIDENCE_PATTERNS)
+        if not high_conf_xss:
+            # 普通网页经常包含 <script> 等标记；只有高置信载荷形态才作为注入拦截。
+            raw_matches = [match_id for match_id in raw_matches if match_id not in xss_matches]
+
+    return raw_matches[:_V2_MAX_MATCH_IDS]
 
 
 def _target_url_header_candidates() -> list[str]:
