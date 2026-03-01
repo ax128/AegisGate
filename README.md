@@ -21,9 +21,10 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
   - 必须携带原始目标头（兼容 `x-target-url` / `x-original-url`，优先读取 `AEGIS_V2_ORIGINAL_URL_HEADER`）
-  - 请求侧仅做脱敏（可开关，默认开）
+  - 请求侧：脱敏 + 报文边界歧义检测（CL/TE 冲突、重复头、非法 framing）
   - 响应侧仅做 HTTP 注入攻击识别拦截（可开关，默认开）
     - 例如：SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入
+    - 以及：HTTP request smuggling / response splitting 特征（CL.TE / TE.CL / TE.TE / 多状态行注入）
     - 命中后直接返回非 200（默认 `403`）格式化错误，不走确认放行链路
 - Claude 系列 API（通用代理）：
   - `POST /v1/messages`
@@ -92,9 +93,9 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 `v2` 链路（通用 HTTP 代理）：
 1. 读取原始目标 URL 头（支持 `x-target-url`、`x-original-url`，优先 `AEGIS_V2_ORIGINAL_URL_HEADER`）
-2. 请求侧按配置进行脱敏（默认开启）
+2. 请求侧按配置进行脱敏 + 报文边界歧义检测（默认开启）
 3. 转发到目标 HTTP(S) 地址
-4. 响应侧按配置进行 HTTP 注入检测（默认开启，文本类响应）
+4. 响应侧按配置进行 HTTP 注入检测（默认开启，文本类响应）+ 上游响应 framing 异常检测（CL/TE）
 5. 命中即返回 `403` 格式化错误（不走确认放行）
 
 ### 1.4 过滤范围、安全检查、审计能力
@@ -103,7 +104,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 |---|---|---|
 | 请求体过滤 | 脱敏 + 请求清洗 + RAG 投毒检测 | 脱敏（文本/JSON） |
 | 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | HTTP 注入攻击检测 |
-| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入 |
+| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入 + HTTP smuggling/splitting（CL.TE/TE.CL/TE.TE） |
 | 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
 | 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 按普通 HTTP 响应处理 |
 | 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |

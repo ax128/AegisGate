@@ -2705,18 +2705,35 @@ async def _execute_responses_stream_once(
                 stream_end_reason = "policy_confirmation"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
-                logger.warning(
-                    "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true finalize_only=true",
-                    ctx.request_id,
-                    chunk_count,
-                    len(stream_window),
-                )
-                for chunk in _iter_responses_stream_finalize(
-                    request_id=req.request_id,
-                    model=req.model,
-                    aegisgate_meta={"action": "allow", "warning": "upstream_eof_no_done", "recovered": True},
-                ):
-                    yield chunk
+                recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
+                if chunk_count <= 0:
+                    replay_text = _build_upstream_eof_replay_text("")
+                    logger.warning(
+                        "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true replay_notice=true",
+                        ctx.request_id,
+                        chunk_count,
+                        len(stream_window),
+                    )
+                    for chunk in _iter_responses_text_stream_replay(
+                        request_id=req.request_id,
+                        model=req.model,
+                        replay_text=replay_text,
+                        aegisgate_meta=recovery_meta,
+                    ):
+                        yield chunk
+                else:
+                    logger.warning(
+                        "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true finalize_only=true",
+                        ctx.request_id,
+                        chunk_count,
+                        len(stream_window),
+                    )
+                    for chunk in _iter_responses_stream_finalize(
+                        request_id=req.request_id,
+                        model=req.model,
+                        aegisgate_meta=recovery_meta,
+                    ):
+                        yield chunk
                 stream_end_reason = "upstream_eof_no_done_recovered"
         except RuntimeError as exc:
             detail = str(exc)

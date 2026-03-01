@@ -14,9 +14,14 @@ def _build_request(
     path: str = "/v2/proxy",
     method: str = "POST",
     headers: dict[str, str] | None = None,
+    raw_headers: list[tuple[str, str]] | None = None,
     body: bytes = b"",
 ) -> Request:
-    raw_headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in (headers or {}).items()]
+    encoded_headers: list[tuple[bytes, bytes]] = []
+    if headers:
+        encoded_headers.extend((k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers.items())
+    if raw_headers:
+        encoded_headers.extend((k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in raw_headers)
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -26,7 +31,7 @@ def _build_request(
         "path": path,
         "raw_path": path.encode("latin-1"),
         "query_string": b"",
-        "headers": raw_headers,
+        "headers": encoded_headers,
         "client": ("127.0.0.1", 54321),
         "server": ("testserver", 80),
         "aegis_token_authenticated": True,
@@ -319,3 +324,98 @@ async def test_v2_proxy_logs_request_body_when_debug_and_flag_enabled(monkeypatc
     assert response.status_code == 200
     assert any("incoming v2 request body" in message for message in debug_messages)
     assert any("hello-v2-debug" in message for message in debug_messages)
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_blocks_ambiguous_request_framing(monkeypatch):
+    async def fake_get_client():
+        raise AssertionError("upstream client should not be called for ambiguous request framing")
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    request = _build_request(
+        raw_headers=[
+            ("x-original-url", "https://upstream.example.com/path"),
+            ("content-length", "8"),
+            ("transfer-encoding", "chunked"),
+        ],
+        body=b'{"k":1}',
+    )
+    response = await v2_router.proxy_v2(request)
+    assert response.status_code == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == "v2_request_http_framing_blocked"
+    assert any("cl_te" in str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_blocks_ambiguous_upstream_response_framing(monkeypatch):
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content=b"safe-body",
+                headers=[
+                    ("content-type", "text/plain; charset=utf-8"),
+                    ("content-length", "9"),
+                    ("transfer-encoding", "chunked"),
+                ],
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    settings.v2_enable_response_command_filter = True
+    try:
+        request = _build_request(
+            headers={"x-original-url": "https://upstream.example.com/path"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+
+    assert response.status_code == 502
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == "v2_upstream_response_framing_blocked"
+    assert any("response_framing_cl_te_conflict" == str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_blocks_response_smuggling_signature(monkeypatch):
+    body = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: 4\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n"
+        "0\r\n\r\n"
+    ).encode("utf-8")
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content=body,
+                headers={"content-type": "text/plain; charset=utf-8"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    settings.v2_enable_response_command_filter = True
+    try:
+        request = _build_request(
+            headers={"x-target-url": "https://upstream.example.com/path"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+
+    assert response.status_code == 403
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == "v2_response_http_attack_blocked"
+    assert any("http_smuggling" in str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
