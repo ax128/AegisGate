@@ -8,7 +8,7 @@
 
 注入时会自动执行：
 1. 创建或更新 `src/infra/proxy-fetch.ts`
-2. 在 `src/entry.ts` 早期插入 `import "./infra/proxy-fetch.js";`
+2. 在入口文件（`src/index.ts` / `src/entry.ts`）插入 `import "./infra/proxy-fetch.js";`
 3. 首次注入前备份改动目标到 `.aegisgate-backups/openclaw-inject-proxy-fetch/`
 4. 若检测到“已注入”，先恢复备份再重注入，避免重复注入错位
 5. 自动维护 OpenClaw 仓库 `.gitignore`（忽略 `.aegisgate-backups/` 与 `src/infra/proxy-fetch.ts`）
@@ -39,7 +39,7 @@ python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_G
 
 ## 3. 参数规则
 
-脚本不自动搜索目录。必须通过以下方式之一指定 OpenClaw 根目录（目录中必须存在 `src/entry.ts`）：
+脚本不自动搜索目录。必须通过以下方式之一指定 OpenClaw 根目录（目录中必须存在 `src/index.ts` 或 `src/entry.ts`）：
 1. 位置参数：`python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw`
 2. 环境变量：`OPENCLAW_ROOT=/path/to/openclaw`
 
@@ -101,6 +101,6 @@ tr '\0' '\n' < /proc/<PID>/environ | egrep 'OPENCLAW_PROXY_GATEWAY_URL|OPENCLAW_
 
 ## 7. 注意事项
 
-1. 脚本会校验 `entry.ts` 锚点上下文，校验失败时会终止，避免误注入。
+1. 脚本会校验 `entry.ts` 锚点上下文（`index.ts` 采用通用注入策略），异常时会终止，避免误注入。
 2. OpenClaw 升级后如入口结构变化，可能需要更新脚本锚点逻辑。
 3. 建议每次 OpenClaw 升级后重新执行脚本，确保注入文件与最新源码一致。
