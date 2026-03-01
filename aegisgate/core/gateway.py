@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -34,7 +35,48 @@ from aegisgate.util.logger import logger
 # /v2/__gw__/t/{token}/proxy -> /v2/proxy
 _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
 
-app = FastAPI(title=settings.app_name)
+_confirmation_cache_task: ConfirmationCacheTask | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    # --- startup ---
+    try:
+        ensure_config_dir()
+        assert_security_bootstrap_ready()
+        logger.info("security policy bootstrap ready")
+    except Exception as exc:  # pragma: no cover
+        logger.error("init_config on startup failed: %s", exc)
+        raise
+    try:
+        gw_tokens_load()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("gw_tokens load on startup failed: %s", exc)
+    if settings.clear_pending_on_startup:
+        try:
+            n = clear_pending_confirmations_on_startup()
+            if n:
+                logger.info("cleared %d pending confirmation(s) on startup", n)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("clear pending confirmations on startup failed: %s", exc)
+    global _confirmation_cache_task
+    if settings.enable_pending_prune_task and _confirmation_cache_task is None:
+        _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
+        await _confirmation_cache_task.start()
+
+    yield
+
+    # --- shutdown ---
+    if _confirmation_cache_task is not None:
+        await _confirmation_cache_task.stop()
+        _confirmation_cache_task = None
+    await close_upstream_async_client()
+    await close_v2_async_client()
+    await close_semantic_async_client()
+    shutdown_audit_worker()
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(openai_router, prefix="/v1")
 if settings.enable_v2_proxy:
     app.include_router(v2_proxy_router)
@@ -43,7 +85,6 @@ if settings.enable_relay_endpoint:
 _nonce_cache = build_nonce_cache()
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister"})
-_confirmation_cache_task: ConfirmationCacheTask | None = None
 
 
 class GWTokenRewriteMiddleware:
@@ -421,43 +462,6 @@ async def gw_unregister(request: Request) -> JSONResponse:
 def health() -> dict:
     logger.info("health check")
     return {"status": "ok"}
-
-
-@app.on_event("shutdown")
-async def shutdown_cleanup() -> None:
-    global _confirmation_cache_task
-    if _confirmation_cache_task is not None:
-        await _confirmation_cache_task.stop()
-        _confirmation_cache_task = None
-    await close_upstream_async_client()
-    await close_v2_async_client()
-    await close_semantic_async_client()
-    shutdown_audit_worker()
-
-@app.on_event("startup")
-async def startup_background_tasks() -> None:
-    try:
-        ensure_config_dir()
-        assert_security_bootstrap_ready()
-        logger.info("security policy bootstrap ready")
-    except Exception as exc:  # pragma: no cover
-        logger.error("init_config on startup failed: %s", exc)
-        raise
-    try:
-        gw_tokens_load()
-    except Exception as exc:  # pragma: no cover
-        logger.warning("gw_tokens load on startup failed: %s", exc)
-    if settings.clear_pending_on_startup:
-        try:
-            n = clear_pending_confirmations_on_startup()
-            if n:
-                logger.info("cleared %d pending confirmation(s) on startup", n)
-        except Exception as exc:  # pragma: no cover
-            logger.warning("clear pending confirmations on startup failed: %s", exc)
-    global _confirmation_cache_task
-    if settings.enable_pending_prune_task and _confirmation_cache_task is None:
-        _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
-        await _confirmation_cache_task.start()
 
 
 # Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。
