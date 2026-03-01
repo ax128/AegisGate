@@ -24,6 +24,7 @@ class RequestContext:
     disposition_reasons: list[str] = field(default_factory=list)
     untrusted_input_detected: bool = False
     requires_human_review: bool = False
+    redaction_whitelist_keys: set[str] = field(default_factory=set)
     report_items: list[dict] = field(default_factory=list)
     poison_traceback: list[dict] = field(default_factory=list)
 

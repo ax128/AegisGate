@@ -51,6 +51,7 @@ async def test_gw_token_rewrite_routes_to_responses_and_injects_headers(monkeypa
     mapping = {
         "upstream_base": "https://upstream.example.com/v1",
         "gateway_key": "agent",
+        "whitelist_key": ["bn_key", "okx_key"],
     }
     monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: mapping if token == "tok12345" else None)
 
@@ -62,6 +63,7 @@ async def test_gw_token_rewrite_routes_to_responses_and_injects_headers(monkeypa
         captured["aegis_token_authenticated"] = scope.get("aegis_token_authenticated")
         captured["aegis_upstream_base"] = scope.get("aegis_upstream_base")
         captured["aegis_gateway_key"] = scope.get("aegis_gateway_key")
+        captured["aegis_redaction_whitelist_keys"] = scope.get("aegis_redaction_whitelist_keys")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"{\"ok\": true}", "more_body": False})
 
@@ -86,6 +88,7 @@ async def test_gw_token_rewrite_routes_to_responses_and_injects_headers(monkeypa
     assert captured["aegis_token_authenticated"] is True
     assert captured["aegis_upstream_base"] == "https://upstream.example.com/v1"
     assert captured["aegis_gateway_key"] == "agent"
+    assert captured["aegis_redaction_whitelist_keys"] == ["bn_key", "okx_key"]
     assert "x-upstream-base" not in headers
     assert "gateway-key" not in headers
     assert "gateway_key" not in headers
@@ -112,6 +115,7 @@ async def test_gw_token_rewrite_supports_v2_routes(monkeypatch):
     mapping = {
         "upstream_base": "https://upstream.example.com/v1",
         "gateway_key": "agent",
+        "whitelist_key": ["bn_key"],
     }
     monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: mapping if token == "tok12345" else None)
 

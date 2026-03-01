@@ -73,7 +73,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 `responses` 结构化输入补充说明（当前）：
 - 全节点文本扫描：`role=user/developer/system/assistant` + `type=function_call_output/tool_result/tool_output/computer_call_output`
-- 角色分级：`system/developer` 使用放宽规则（优先脱敏 token/key/secret/private key/IP 等高风险项）；`user` 保持严格
+- 角色分级：`user/developer/system/assistant/tool` 统一使用放宽规则（优先脱敏 token/key/secret/private key 等高风险项）
 - 命中位置记录：日志记录 `path/field/role/pattern/count` 摘要（不含命中原文）
 - 幂等：已包含 `[REDACTED:*]` 的文本不会重复脱敏
 
@@ -121,6 +121,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 建议：
 1. LLM 主链路用 `v1`（具备确认放行与完整审计）。
 2. 通用 HTTP 安检用 `v2`（命中即阻断，响应更直接）。
+3. 外部 MCP / Skill（涉及外部网站访问）同样支持走 `v1` 或 `v2` 网关路径；默认建议优先走 `v1`，安全检查更全面、使用方式与普通模型请求一致。
 
 ## 2. 接入模型
 
@@ -137,7 +138,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"agent"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"agent","whitelist_key":["bn_key","okx_key"]}'
 ```
 
 返回：
@@ -145,11 +146,14 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 ```json
 {
   "token": "Ab3k9Qx7Yp",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp"
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp",
+  "whitelist_key": ["bn_key", "okx_key"]
 }
 ```
 
-说明：token 长度为 10 位（沿用原有生成方式，长度调整为 10）。
+说明：
+1. token 长度为 10 位（沿用原有生成方式，长度调整为 10）。
+2. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
 
 然后请求：
 
@@ -192,6 +196,10 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 - [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)
 - OpenClaw 自动注入代理脚本说明见：
   - [OPENCLAW_INJECT_PROXY_FETCH.md](OPENCLAW_INJECT_PROXY_FETCH.md)
+
+外部 MCP / Skill 对外网站访问接入建议：
+1. 可走 `v1`：`/v1/__gw__/t/<TOKEN>/...`（推荐，检查链路更完整）。
+2. 可走 `v2`：`/v2/__gw__/t/<TOKEN>/...`（通用 HTTP 代理模式，需 `x-target-url`）。
 
 OpenClaw 自动注入脚本位置：
 - `scripts/openclaw-inject-proxy-fetch.py`

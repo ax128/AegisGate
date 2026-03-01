@@ -18,6 +18,7 @@ from aegisgate.storage.kv import KVStore
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys, protected_spans_for_text, range_overlaps_protected
 
 
 _MAX_LOG_MARKERS = 10
@@ -151,10 +152,17 @@ class RedactionFilter(BaseFilter):
 
         def replace_in_text(text: str) -> str:
             nonlocal serial
+            protected_spans = protected_spans_for_text(text, ctx.redaction_whitelist_keys)
 
             def _replace_match(match: re.Match[str], kind: str) -> str:
                 nonlocal serial
                 raw_value = match.group(0)
+                if protected_spans and range_overlaps_protected(
+                    protected_spans,
+                    start=match.start(),
+                    end=match.end(),
+                ):
+                    return raw_value
                 existing = value_to_placeholder.get(raw_value)
                 if existing:
                     return existing
@@ -181,6 +189,7 @@ class RedactionFilter(BaseFilter):
                 text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
             return text
 
+        ctx.redaction_whitelist_keys = set(normalize_whitelist_keys(ctx.redaction_whitelist_keys))
         for msg in req.messages:
             _current_role[0] = str(msg.role or "unknown")
             normalized = self._normalize_input(msg.content)

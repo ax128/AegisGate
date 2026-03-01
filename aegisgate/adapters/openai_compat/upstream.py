@@ -14,6 +14,7 @@ from fastapi import Request
 
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
 # 与 router 内路由前缀一致，用于从 request_path 剥掉网关前缀得到上游 path
 GATEWAY_PREFIX = "/v1"
@@ -28,6 +29,7 @@ _HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+_REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 
 _upstream_async_client: httpx.AsyncClient | None = None
 _upstream_client_lock: Any = None
@@ -97,6 +99,9 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_gateway_key = request.scope.get("aegis_gateway_key")
     if isinstance(injected_gateway_key, str) and injected_gateway_key.strip():
         headers[settings.gateway_key_header] = injected_gateway_key.strip()
+    injected_whitelist_keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
+    if injected_whitelist_keys:
+        headers[_REDACTION_WHITELIST_HEADER] = ",".join(injected_whitelist_keys)
     return headers
 
 

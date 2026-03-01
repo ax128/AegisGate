@@ -19,6 +19,11 @@ from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
+from aegisgate.util.redaction_whitelist import (
+    normalize_whitelist_keys,
+    protected_spans_for_text,
+    range_overlaps_protected,
+)
 
 router = APIRouter()
 
@@ -38,6 +43,7 @@ _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
 _STREAM_FLAG_DETECT_MAX_BYTES = 16_384
 _SSE_DONE_RECOVERY_CHUNK = b"data: [DONE]\n\n"
 _SSE_DONE_DETECT_TAIL_CHARS = 64
+_REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DEBUG_HEADERS_REDACT = frozenset(
     {"authorization", "gateway-key", "x-aegis-signature", "x-aegis-timestamp", "x-aegis-nonce"}
 )
@@ -353,7 +359,12 @@ def _should_skip_v2_field_redaction(field: str) -> bool:
     )
 
 
-def _redact_text(text: str, *, field: str = "") -> tuple[str, int, list[str], list[dict[str, str]]]:
+def _redact_text(
+    text: str,
+    *,
+    field: str = "",
+    whitelist_keys: set[str] | None = None,
+) -> tuple[str, int, list[str], list[dict[str, str]]]:
     """Returns (redacted_text, replacement_count, hit_ids, markers).
 
     markers contains {kind, masked_value} for unique pattern hits (capped at _V2_MAX_MATCH_IDS).
@@ -361,15 +372,26 @@ def _redact_text(text: str, *, field: str = "") -> tuple[str, int, list[str], li
     if _should_skip_v2_field_redaction(field):
         return text, 0, [], []
     value = text
+    whitelist = set(normalize_whitelist_keys(whitelist_keys))
+    normalized_field = str(field or "").strip().lower()
+    if normalized_field and normalized_field in whitelist:
+        return value, 0, [], []
     replacement_count = 0
     hit_ids: list[str] = []
     hit_set: set[str] = set()
     markers: list[dict[str, str]] = []
     for pattern_id, pattern in _v2_relaxed_redaction_patterns():
         replacement = f"[REDACTED:{pattern_id}]"
+        protected_spans = protected_spans_for_text(value, whitelist)
 
         def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
             nonlocal replacement_count
+            if protected_spans and range_overlaps_protected(
+                protected_spans,
+                start=m.start(),
+                end=m.end(),
+            ):
+                return m.group(0)
             replacement_count += 1
             if _pid not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
                 hit_set.add(_pid)
@@ -381,10 +403,15 @@ def _redact_text(text: str, *, field: str = "") -> tuple[str, int, list[str], li
     return value, replacement_count, hit_ids, markers
 
 
-def _sanitize_json_value(value: Any, *, field: str = "") -> tuple[Any, int, list[str], list[dict[str, str]]]:
+def _sanitize_json_value(
+    value: Any,
+    *,
+    field: str = "",
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, int, list[str], list[dict[str, str]]]:
     """Recursively sanitize a JSON-decoded value; returns (result, count, hit_ids, markers)."""
     if isinstance(value, str):
-        return _redact_text(value, field=field)
+        return _redact_text(value, field=field, whitelist_keys=whitelist_keys)
     if isinstance(value, list):
         total = 0
         hit_ids: list[str] = []
@@ -392,7 +419,11 @@ def _sanitize_json_value(value: Any, *, field: str = "") -> tuple[Any, int, list
         markers: list[dict[str, str]] = []
         out: list[Any] = []
         for item in value:
-            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item, field=field)
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(
+                item,
+                field=field,
+                whitelist_keys=whitelist_keys,
+            )
             total += next_count
             out.append(next_item)
             for hit in next_hits:
@@ -408,7 +439,11 @@ def _sanitize_json_value(value: Any, *, field: str = "") -> tuple[Any, int, list
         markers: list[dict[str, str]] = []
         out: dict[str, Any] = {}
         for key, item in value.items():
-            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item, field=str(key))
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(
+                item,
+                field=str(key),
+                whitelist_keys=whitelist_keys,
+            )
             total += next_count
             out[key] = next_item
             for hit in next_hits:
@@ -433,7 +468,10 @@ def _looks_textual_content_type(content_type: str) -> bool:
 
 
 def _sanitize_request_body(
-    body: bytes, content_type: str
+    body: bytes,
+    content_type: str,
+    *,
+    whitelist_keys: set[str] | None = None,
 ) -> tuple[bytes, int, list[str], list[dict[str, str]]]:
     """Returns (sanitized_body, replacement_count, hit_ids, markers)."""
     if not body or not _looks_textual_content_type(content_type):
@@ -443,7 +481,7 @@ def _sanitize_request_body(
         try:
             raw = body.decode("utf-8")
             parsed = json.loads(raw)
-            sanitized, count, hits, markers = _sanitize_json_value(parsed)
+            sanitized, count, hits, markers = _sanitize_json_value(parsed, whitelist_keys=whitelist_keys)
             if count <= 0:
                 return body, 0, [], []
             return json.dumps(sanitized, ensure_ascii=False).encode("utf-8"), count, hits, markers
@@ -451,7 +489,7 @@ def _sanitize_request_body(
             pass
 
     text = body.decode("utf-8", errors="replace")
-    sanitized, count, hits, markers = _redact_text(text)
+    sanitized, count, hits, markers = _redact_text(text, whitelist_keys=whitelist_keys)
     if count <= 0:
         return body, 0, [], []
     return sanitized.encode("utf-8"), count, hits, markers
@@ -533,6 +571,13 @@ def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]
             continue
         out[key] = value
     return out
+
+
+def _extract_redaction_whitelist_keys(request: Request) -> set[str]:
+    keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
+    if keys:
+        return set(keys)
+    return set(normalize_whitelist_keys(request.headers.get(_REDACTION_WHITELIST_HEADER, "")))
 
 
 def _request_prefers_streaming(request: Request, body: bytes, content_type: str) -> bool:
@@ -787,9 +832,12 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     redaction_hits: list[str] = []
     redaction_count = 0
     outbound_body = request_body
+    whitelist_keys = _extract_redaction_whitelist_keys(request)
     if settings.v2_enable_request_redaction:
         outbound_body, redaction_count, redaction_hits, redaction_markers = _sanitize_request_body(
-            request_body, original_content_type
+            request_body,
+            original_content_type,
+            whitelist_keys=whitelist_keys,
         )
         if redaction_count > 0:
             client_ip = (request.client.host if request.client else None) or "-"
