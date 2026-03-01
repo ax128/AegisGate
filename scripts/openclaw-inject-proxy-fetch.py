@@ -2,7 +2,7 @@
 """
 在 OpenClaw 源码中注入「安全网关代理」逻辑：
 - 创建 src/infra/proxy-fetch.ts
-- 在 src/entry.ts 最早处加入 import "./infra/proxy-fetch.js"
+- 在 src/index.ts / src/entry.ts 入口处加入 import "./infra/proxy-fetch.js"
 - 首次注入前会备份被改动文件到 .aegisgate-backups/openclaw-inject-proxy-fetch/
 - 再次运行若检测到已注入：先恢复备份，再重新注入，避免重复注入导致的错位
 - 注入后：proxy-fetch.ts 与备份目录写入 .gitignore，不参与提交；git 正常更新（pull）即可，更新完需手动再执行一次本脚本注入
@@ -326,12 +326,13 @@ export function installProxyFetchIfConfigured(): void {
 installProxyFetchIfConfigured();
 '''
 
-# entry.ts 中要在 node:url 之后插入的几行
+# 入口文件中要插入的几行
 PROXY_IMPORT_LINES = '''import "./infra/proxy-fetch.js";
 '''
 
 MARKER_IMPORT = 'import "./infra/proxy-fetch.js";'
 MARKER_AFTER = 'import { fileURLToPath } from "node:url";'
+ENTRY_RELATIVE_PATHS = ("src/index.ts", "src/entry.ts")
 
 # 环境变量：未提供命令行参数时，用于指定 OpenClaw 目标路径
 ENV_OPENCLAW_ROOT = "OPENCLAW_ROOT"
@@ -345,7 +346,7 @@ DEFAULT_PROXY_DIRECT_HOSTS = (
 )
 LOCAL_EXECSTART_OVERRIDE_FILENAME = "91-openclaw-local-build.conf"
 
-# 注入前上下文校验：锚点行及其后必须出现的特征（避免项目迭代后误注入）
+# entry.ts 注入前上下文校验：避免项目迭代后误注入
 ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
 ENTRY_NEXT_IMPORT_CONTAINS = 'from "./cli/profile.js"'
 ENTRY_CONTEXT_LOOKAHEAD = 6  # 锚点后最多看几行内要出现 profile.js import
@@ -357,14 +358,29 @@ GITIGNORE_BACKUP_DIR_ENTRY = ".aegisgate-backups/"
 
 # 备份目录（位于 OpenClaw 目标项目根目录）
 BACKUP_DIR_REL = os.path.join(".aegisgate-backups", "openclaw-inject-proxy-fetch")
-ENTRY_BACKUP_FILENAME = "src__entry.ts.bak"
+ENTRY_BACKUP_FILENAMES = {
+    "src/index.ts": "src__index.ts.bak",
+    "src/entry.ts": "src__entry.ts.bak",
+}
 PROXY_FETCH_BACKUP_FILENAME = "src__infra__proxy-fetch.ts.bak"
 PROXY_FETCH_MISSING_MARKER_FILENAME = "src__infra__proxy-fetch.ts.missing"
 
 
 def _is_valid_openclaw_root(path: str) -> bool:
-    """目录是否符合注入条件：存在 src/entry.ts。"""
-    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "src", "entry.ts"))
+    """目录是否符合注入条件：至少存在一个可注入入口文件。"""
+    if not os.path.isdir(path):
+        return False
+    return any(os.path.isfile(os.path.join(path, rel)) for rel in ENTRY_RELATIVE_PATHS)
+
+
+def _resolve_entry_paths(root: str) -> list[str]:
+    """返回可注入入口文件的绝对路径列表。"""
+    paths: list[str] = []
+    for rel in ENTRY_RELATIVE_PATHS:
+        abs_path = os.path.join(root, rel)
+        if os.path.isfile(abs_path):
+            paths.append(abs_path)
+    return paths
 
 
 def find_openclaw_root(given: str | None) -> str | None:
@@ -378,7 +394,7 @@ def find_openclaw_root(given: str | None) -> str | None:
         if _is_valid_openclaw_root(root):
             LOG.debug("使用命令行指定根目录: %s", root)
             return root
-        LOG.error("命令行指定路径不符合条件（需存在 src/entry.ts）: %s", root)
+        LOG.error("命令行指定路径不符合条件（需存在 src/index.ts 或 src/entry.ts）: %s", root)
         return None
 
     env_root = os.environ.get(ENV_OPENCLAW_ROOT, "").strip()
@@ -387,7 +403,11 @@ def find_openclaw_root(given: str | None) -> str | None:
         if _is_valid_openclaw_root(root):
             LOG.debug("使用环境变量 %s 指定根目录: %s", ENV_OPENCLAW_ROOT, root)
             return root
-        LOG.error("环境变量 %s 指向路径不符合条件（需存在 src/entry.ts）: %s", ENV_OPENCLAW_ROOT, root)
+        LOG.error(
+            "环境变量 %s 指向路径不符合条件（需存在 src/index.ts 或 src/entry.ts）: %s",
+            ENV_OPENCLAW_ROOT,
+            root,
+        )
         return None
 
     LOG.error("未提供 OpenClaw 根目录。必须通过参数或环境变量显式指定。")
@@ -665,35 +685,46 @@ def _entry_already_injected(content: str) -> bool:
     return MARKER_IMPORT in content
 
 
-def _backup_paths(root: str) -> tuple[str, str, str]:
-    """返回 (entry_backup_path, proxy_fetch_backup_path, proxy_fetch_missing_marker_path)。"""
+def _backup_paths(root: str) -> tuple[dict[str, str], str, str]:
+    """返回 (entry_backup_paths, proxy_fetch_backup_path, proxy_fetch_missing_marker_path)。"""
     backup_dir = os.path.join(root, BACKUP_DIR_REL)
+    entry_backups: dict[str, str] = {}
+    for rel, backup_name in ENTRY_BACKUP_FILENAMES.items():
+        entry_backups[os.path.join(root, rel)] = os.path.join(backup_dir, backup_name)
     return (
-        os.path.join(backup_dir, ENTRY_BACKUP_FILENAME),
+        entry_backups,
         os.path.join(backup_dir, PROXY_FETCH_BACKUP_FILENAME),
         os.path.join(backup_dir, PROXY_FETCH_MISSING_MARKER_FILENAME),
     )
 
 
-def _has_entry_backup(root: str) -> bool:
-    entry_backup_path, _, _ = _backup_paths(root)
-    return os.path.isfile(entry_backup_path)
+def _has_any_entry_backup(root: str, entry_paths: list[str]) -> bool:
+    entry_backups, _, _ = _backup_paths(root)
+    for entry_path in entry_paths:
+        backup_path = entry_backups.get(entry_path)
+        if backup_path and os.path.isfile(backup_path):
+            return True
+    return False
 
 
-def _ensure_backup_baseline(root: str, entry_path: str, proxy_fetch_path: str) -> bool:
+def _ensure_backup_baseline(root: str, entry_paths: list[str], proxy_fetch_path: str) -> bool:
     """
     首次注入时建立“原始基线”备份。
     已存在备份时不会覆盖，避免把“已注入状态”覆盖成基线。
     """
     backup_dir = os.path.join(root, BACKUP_DIR_REL)
-    entry_backup_path, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
+    entry_backups, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
     try:
         os.makedirs(backup_dir, exist_ok=True)
-        if not os.path.isfile(entry_backup_path):
-            shutil.copy2(entry_path, entry_backup_path)
-            LOG.info("已创建备份: %s", entry_backup_path)
-        else:
-            LOG.debug("entry.ts 备份已存在，跳过: %s", entry_backup_path)
+        for entry_path in entry_paths:
+            entry_backup_path = entry_backups.get(entry_path)
+            if not entry_backup_path:
+                continue
+            if not os.path.isfile(entry_backup_path):
+                shutil.copy2(entry_path, entry_backup_path)
+                LOG.info("已创建备份: %s", entry_backup_path)
+            else:
+                LOG.debug("入口文件备份已存在，跳过: %s", entry_backup_path)
 
         if os.path.isfile(proxy_fetch_path):
             if not os.path.isfile(proxy_backup_path):
@@ -712,15 +743,17 @@ def _ensure_backup_baseline(root: str, entry_path: str, proxy_fetch_path: str) -
         return False
 
 
-def _restore_from_backup(root: str, entry_path: str, proxy_fetch_path: str) -> bool:
+def _restore_from_backup(root: str, entry_paths: list[str], proxy_fetch_path: str) -> bool:
     """从备份恢复基线文件。成功恢复任一文件返回 True。"""
-    entry_backup_path, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
+    entry_backups, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
     restored = False
     try:
-        if os.path.isfile(entry_backup_path):
-            shutil.copy2(entry_backup_path, entry_path)
-            LOG.info("已恢复备份: %s -> %s", entry_backup_path, entry_path)
-            restored = True
+        for entry_path in entry_paths:
+            entry_backup_path = entry_backups.get(entry_path)
+            if entry_backup_path and os.path.isfile(entry_backup_path):
+                shutil.copy2(entry_backup_path, entry_path)
+                LOG.info("已恢复备份: %s -> %s", entry_backup_path, entry_path)
+                restored = True
 
         if os.path.isfile(proxy_backup_path):
             os.makedirs(os.path.dirname(proxy_fetch_path), exist_ok=True)
@@ -789,40 +822,85 @@ def _update_gitignore(root: str, add_proxy_file: bool) -> None:
         LOG.debug(".gitignore 已是最新，跳过更新")
 
 
+def _inject_import_to_entry_file(entry_path: str, strict_context: bool) -> bool:
+    with open(entry_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    content = "".join(lines)
+    if _entry_already_injected(content):
+        LOG.debug("入口文件已注入，跳过: %s", entry_path)
+        return True
+
+    if strict_context:
+        ok, msg = _check_entry_context(lines, entry_path)
+        if not ok:
+            LOG.error("entry.ts 上下文校验未通过: %s", msg)
+            LOG.debug("锚点行期望: %s", ENTRY_ANCHOR)
+            LOG.debug("锚点后应出现包含 %s 的 import", ENTRY_NEXT_IMPORT_CONTAINS)
+            return False
+
+    if MARKER_AFTER in content:
+        new_content = content.replace(
+            MARKER_AFTER + "\n",
+            MARKER_AFTER + "\n" + PROXY_IMPORT_LINES,
+            1,
+        )
+    else:
+        # 回退策略：在首个 import 前插入（保留 shebang）。
+        insert_at = 1 if lines and lines[0].startswith("#!") else 0
+        for i in range(insert_at, len(lines)):
+            if lines[i].lstrip().startswith("import "):
+                insert_at = i
+                break
+        new_lines = list(lines)
+        new_lines.insert(insert_at, PROXY_IMPORT_LINES)
+        new_content = "".join(new_lines)
+
+    if new_content == content:
+        LOG.error("入口文件注入替换未生效: %s", entry_path)
+        return False
+    with open(entry_path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    LOG.info("已在入口文件中注入 proxy-fetch import: %s", entry_path)
+    return True
+
+
 def inject(root: str) -> bool:
-    """注入 proxy-fetch：若已注入则先恢复备份，再重新注入。"""
+    """注入 proxy-fetch：覆盖 index.ts/entry.ts，若已注入则先恢复备份再重注入。"""
     infra_dir = os.path.join(root, "src", "infra")
     proxy_fetch_path = os.path.join(root, "src", "infra", "proxy-fetch.ts")
-    entry_path = os.path.join(root, "src", "entry.ts")
+    entry_paths = _resolve_entry_paths(root)
 
     LOG.info("注入目标根目录: %s", root)
-    if not os.path.isfile(entry_path):
-        LOG.error("未找到 entry.ts: %s", entry_path)
+    if not entry_paths:
+        LOG.error("未找到可注入入口文件（src/index.ts 或 src/entry.ts）")
         return False
-    LOG.info("找到 entry.ts: %s", entry_path)
+    for entry_path in entry_paths:
+        LOG.info("找到入口文件: %s", entry_path)
 
-    with open(entry_path, "r", encoding="utf-8") as f:
-        entry_lines = f.readlines()
-    entry_content = "".join(entry_lines)
+    injected_detected = False
+    for entry_path in entry_paths:
+        with open(entry_path, "r", encoding="utf-8") as f:
+            if _entry_already_injected(f.read()):
+                injected_detected = True
+                break
 
-    if _entry_already_injected(entry_content):
+    if injected_detected:
         LOG.info("检测到已注入：先恢复备份，再重新注入。")
-        if _has_entry_backup(root):
-            if not _restore_from_backup(root, entry_path, proxy_fetch_path):
+        if _has_any_entry_backup(root, entry_paths):
+            if not _restore_from_backup(root, entry_paths, proxy_fetch_path):
                 LOG.error("已注入状态下恢复备份失败，终止以避免错误覆盖。")
                 return False
         else:
             LOG.warning("检测到已注入，但未找到备份；先执行一次移除，再继续重注入。")
             remove(root)
 
-        with open(entry_path, "r", encoding="utf-8") as f:
-            entry_lines = f.readlines()
-        entry_content = "".join(entry_lines)
-        if _entry_already_injected(entry_content):
-            LOG.error("恢复后 entry.ts 仍检测到注入标记，终止以避免重复注入。")
-            return False
+        for entry_path in entry_paths:
+            with open(entry_path, "r", encoding="utf-8") as f:
+                if _entry_already_injected(f.read()):
+                    LOG.error("恢复后入口文件仍检测到注入标记，终止以避免重复注入: %s", entry_path)
+                    return False
 
-    if not _ensure_backup_baseline(root, entry_path, proxy_fetch_path):
+    if not _ensure_backup_baseline(root, entry_paths, proxy_fetch_path):
         return False
 
     # 1) 写入 proxy-fetch.ts
@@ -840,44 +918,24 @@ def inject(root: str) -> bool:
         else:
             LOG.debug("proxy-fetch.ts 已存在且内容一致，跳过写入")
 
-    # 2) 执行上下文校验
-    ok, msg = _check_entry_context(entry_lines, entry_path)
-    if not ok:
-        LOG.error("entry.ts 上下文校验未通过: %s", msg)
-        LOG.debug("锚点行期望: %s", ENTRY_ANCHOR)
-        LOG.debug("锚点后应出现包含 %s 的 import", ENTRY_NEXT_IMPORT_CONTAINS)
-        return False
+    # 2) 在入口文件执行注入：index.ts + entry.ts
+    for entry_path in entry_paths:
+        strict = entry_path.endswith(os.path.join("src", "entry.ts"))
+        if not _inject_import_to_entry_file(entry_path, strict_context=strict):
+            return False
 
-    # 3) 执行注入
-    if MARKER_AFTER not in entry_content:
-        LOG.error("entry.ts 中未找到锚点行，无法注入: %s", MARKER_AFTER)
-        return False
-    new_content = entry_content.replace(
-        MARKER_AFTER + "\n",
-        MARKER_AFTER + "\n" + PROXY_IMPORT_LINES,
-        1,
-    )
-    if new_content == entry_content:
-        LOG.error("替换未生效（锚点行格式可能不一致）")
-        return False
-    with open(entry_path, "w", encoding="utf-8") as f:
-        f.write(new_content)
-    LOG.info("已在 entry.ts 中注入 proxy-fetch import")
     _update_gitignore(root, True)
     return True
 
 
 def remove(root: str) -> bool:
-    """移除注入：删除 proxy-fetch.ts 并从 entry.ts 去掉 import。返回是否做了修改。"""
+    """移除注入：删除 proxy-fetch.ts 并从入口文件去掉 import。返回是否做了修改。"""
     proxy_fetch_path = os.path.join(root, "src", "infra", "proxy-fetch.ts")
-    entry_path = os.path.join(root, "src", "entry.ts")
+    entry_paths = _resolve_entry_paths(root)
 
     LOG.info("移除注入，根目录: %s", root)
-    if not os.path.isfile(entry_path):
-        LOG.error("未找到 entry.ts: %s", entry_path)
-        return False
 
-    restored = _restore_from_backup(root, entry_path, proxy_fetch_path)
+    restored = _restore_from_backup(root, entry_paths, proxy_fetch_path)
     if restored:
         LOG.info("已优先从备份恢复原始状态。")
         _update_gitignore(root, False)
@@ -891,33 +949,35 @@ def remove(root: str) -> bool:
     else:
         LOG.debug("proxy-fetch.ts 不存在，跳过删除")
 
-    with open(entry_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    for entry_path in entry_paths:
+        with open(entry_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
-    new_lines = []
-    removed_what = []
-    for line in lines:
-        if MARKER_IMPORT in line or ("./infra/proxy-fetch.js" in line and "import" in line):
-            changed = True
-            removed_what.append("import proxy-fetch.js")
-            continue
-        stripped = line.strip()
-        if stripped.startswith("//") and (
-            "Must run before any fetch" in line
-            or "OPENCLAW_PROXY_GATEWAY_URL" in line
-            or "X-Target-URL" in line
-        ):
-            changed = True
-            removed_what.append("proxy-fetch 注释行")
-            continue
-        new_lines.append(line)
+        new_lines: list[str] = []
+        removed_what: list[str] = []
+        for line in lines:
+            if MARKER_IMPORT in line or ("./infra/proxy-fetch.js" in line and "import" in line):
+                changed = True
+                removed_what.append("import proxy-fetch.js")
+                continue
+            stripped = line.strip()
+            if stripped.startswith("//") and (
+                "Must run before any fetch" in line
+                or "OPENCLAW_PROXY_GATEWAY_URL" in line
+                or "X-Target-URL" in line
+            ):
+                changed = True
+                removed_what.append("proxy-fetch 注释行")
+                continue
+            new_lines.append(line)
 
-    if new_lines != lines:
-        with open(entry_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
-        LOG.info("已从 entry.ts 移除: %s", ", ".join(removed_what))
-        changed = True
-    elif not changed:
+        if new_lines != lines:
+            with open(entry_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            LOG.info("已从入口文件移除(%s): %s", entry_path, ", ".join(removed_what))
+            changed = True
+
+    if not changed:
         LOG.info("未发现 proxy-fetch 注入内容，无需移除")
     if changed:
         _update_gitignore(root, False)
