@@ -253,3 +253,60 @@ def test_responses_upstream_payload_strips_system_exec_runtime_lines_in_user_inp
     assert items[0]["role"] == "user"
     assert "Exec completed" not in str(items[0]["content"])
     assert "什么意思" in str(items[0]["content"])
+
+
+def test_responses_upstream_payload_keeps_encrypted_content_raw():
+    encrypted_blob = "9xQeWvG816bUx9EPjHmaT23yvVMZbrrpQ9e3Qk6nQJ2J"
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "encrypted_content": encrypted_blob,
+            }
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    assert items[0]["encrypted_content"] == encrypted_blob
+
+
+def test_responses_upstream_payload_tool_output_uses_relaxed_redaction():
+    card_like = "4111 1111 1111 1111"
+    payload = {
+        "input": [
+            {
+                "type": "tool_output",
+                "output": f"result: {card_like}",
+            }
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    assert card_like in str(items[0]["output"])
+
+
+def test_responses_upstream_payload_developer_ip_not_redacted():
+    payload = {
+        "input": [
+            {
+                "role": "developer",
+                "content": "debug endpoint 10.10.10.10 for local tracing",
+            },
+            {
+                "role": "user",
+                "content": "继续",
+            },
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 2
+    assert "10.10.10.10" in str(items[0]["content"])

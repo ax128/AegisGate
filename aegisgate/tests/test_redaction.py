@@ -126,3 +126,23 @@ def test_redaction_normalizes_invisible_chars_before_matching(tmp_path):
 
     out = plugin.process_request(req, ctx)
     assert "{{AG_R6_EMAIL_1}}" in out.messages[0].content
+
+
+def test_redaction_relaxes_pii_for_responses_route(tmp_path):
+    store = SqliteKVStore(db_path=str(tmp_path / "store.db"))
+    plugin = RedactionFilter(store)
+
+    req = InternalRequest(
+        request_id="r7",
+        session_id="s1",
+        route="/v1/responses",
+        model="gpt",
+        messages=[InternalMessage(role="user", content="email a@b.com token=sk-abcdeABCDE1234567890xyz")],
+    )
+    ctx = RequestContext(request_id="r7", session_id="s1", route=req.route, enabled_filters={"redaction"})
+
+    out = plugin.process_request(req, ctx)
+    text = out.messages[0].content
+    assert "a@b.com" in text
+    assert "{{AG_R7_TOKEN_1}}" in text
+    assert "sk-abcdeABCDE1234567890xyz" not in text

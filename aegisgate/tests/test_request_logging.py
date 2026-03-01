@@ -76,9 +76,9 @@ def test_sanitize_responses_input_for_upstream_redacts_function_call_output_sens
     output = sanitized[0]["output"]
 
     assert sanitized[0]["call_id"] == "call_2"
-    assert "[REDACTED:IPV4]" in output
     assert "[REDACTED:TOKEN]" in output
-    assert "31.220.196.235" not in output
+    # Tool output uses relaxed redaction rules to reduce false positives.
+    assert "31.220.196.235" in output
     assert "sk-abcdefghijklmnop" not in output
 
 
@@ -98,7 +98,7 @@ def test_sanitize_responses_input_for_upstream_relaxes_redaction_for_developer_r
     assert "sk-abcdefghijklmnop" not in content
 
 
-def test_sanitize_responses_input_for_upstream_keeps_user_role_strict():
+def test_sanitize_responses_input_for_upstream_relaxes_user_role():
     payload = [
         {
             "role": "user",
@@ -109,9 +109,8 @@ def test_sanitize_responses_input_for_upstream_keeps_user_role_strict():
     sanitized = openai_router._sanitize_responses_input_for_upstream(payload)
     content = sanitized[0]["content"]
 
-    assert "[REDACTED:EMAIL]" in content
+    assert "admin@example.com" in content
     assert "[REDACTED:TOKEN]" in content
-    assert "admin@example.com" not in content
     assert "sk-abcdefghijklmnop" not in content
 
 
@@ -133,6 +132,6 @@ def test_sanitize_responses_input_for_upstream_records_hit_positions_and_is_idem
 
     assert first_hits
     assert any(item["path"] == "input[0].content" for item in first_hits)
-    assert any(item["path"] == "input[1].output" for item in first_hits)
+    assert not any(item["path"] == "input[1].output" for item in first_hits)
     assert second_sanitized == first_sanitized
     assert second_hits == []

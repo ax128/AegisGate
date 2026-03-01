@@ -23,6 +23,23 @@ from aegisgate.util.masking import mask_for_log
 _MAX_LOG_MARKERS = 10
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
+_RESPONSES_RELAXED_PII_IDS = frozenset(
+    {
+        "TOKEN",
+        "JWT",
+        "URL_TOKEN_QUERY",
+        "COOKIE_SESSION",
+        "PRIVATE_KEY_PEM",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "SLACK_TOKEN",
+        "EXCHANGE_API_SECRET",
+        "CRYPTO_WIF_KEY",
+        "CRYPTO_XPRV",
+        "CRYPTO_SEED_PHRASE",
+    }
+)
 
 
 class RedactionFilter(BaseFilter):
@@ -56,6 +73,9 @@ class RedactionFilter(BaseFilter):
                     (regex[:80] + "…") if len(regex) > 80 else regex,
                 )
         self._pii_patterns = compiled_patterns
+        self._responses_relaxed_pii_patterns = [
+            (pattern_id, pattern) for pattern_id, pattern in compiled_patterns if pattern_id in _RESPONSES_RELAXED_PII_IDS
+        ]
 
         self._field_patterns = self._build_field_patterns(redaction_rules.get("field_value_patterns", []))
 
@@ -109,6 +129,10 @@ class RedactionFilter(BaseFilter):
         token = re.sub(r"[^A-Za-z0-9]", "", request_id)
         return (token[: self._prefix_max_len] or "REQ").upper()
 
+    @staticmethod
+    def _is_responses_route(route: str) -> bool:
+        return str(route or "").strip().lower() == "/v1/responses"
+
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "replacements": 0}
         original_text = " ".join(m.content for m in req.messages).strip()
@@ -118,6 +142,9 @@ class RedactionFilter(BaseFilter):
         log_markers: list[dict[str, Any]] = []
         serial = 0
         request_prefix = self._request_prefix(ctx.request_id)
+        active_pii_patterns = (
+            self._responses_relaxed_pii_patterns if self._is_responses_route(ctx.route) else self._pii_patterns
+        )
 
         # Mutable container so the inner closure can reference the current message role.
         _current_role: list[str] = ["unknown"]
@@ -148,7 +175,7 @@ class RedactionFilter(BaseFilter):
                     )
                 return placeholder
 
-            for kind, pattern in self._pii_patterns:
+            for kind, pattern in active_pii_patterns:
                 text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
             for kind, pattern in self._field_patterns:
                 text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
