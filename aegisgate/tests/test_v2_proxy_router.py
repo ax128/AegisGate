@@ -93,7 +93,7 @@ async def test_v2_proxy_redacts_request_body_before_forward(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_blocks_multi_signal_response_attack_in_obvious_only_mode(monkeypatch):
+async def test_v2_proxy_allows_non_protocol_payload_in_strict_mode(monkeypatch):
     class FakeClient:
         async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
             return httpx.Response(
@@ -109,7 +109,7 @@ async def test_v2_proxy_blocks_multi_signal_response_attack_in_obvious_only_mode
     original_filter = settings.v2_enable_response_command_filter
     original_obvious_only = settings.v2_response_filter_obvious_only
     settings.v2_enable_response_command_filter = True
-    settings.v2_response_filter_obvious_only = True
+    settings.v2_response_filter_obvious_only = False
     try:
         request = _build_request(
             headers={"x-original-url": "https://upstream.example.com/path"},
@@ -120,12 +120,8 @@ async def test_v2_proxy_blocks_multi_signal_response_attack_in_obvious_only_mode
         settings.v2_enable_response_command_filter = original_filter
         settings.v2_response_filter_obvious_only = original_obvious_only
 
-    assert response.status_code == 403
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["code"] == "v2_response_http_attack_blocked"
-    assert "该请求已被安全网关拦截" in payload["error"]["message"]
-    assert payload["error"]["details"]
-    assert payload["aegisgate_v2"]["matched_rules"]
+    assert response.status_code == 200
+    assert b"UNION SELECT username FROM users" in response.body
 
 
 @pytest.mark.asyncio
@@ -224,7 +220,7 @@ async def test_v2_proxy_allows_normal_html_with_script_tags(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_blocks_high_confidence_xss_payload(monkeypatch):
+async def test_v2_proxy_allows_xss_payload_in_strict_mode_with_minimal_http_rule_set(monkeypatch):
     xss_html = b"""<html><body>payload:<img src=x onerror=alert(1)></body></html>"""
 
     class FakeClient:
@@ -240,7 +236,9 @@ async def test_v2_proxy_blocks_high_confidence_xss_payload(monkeypatch):
 
     monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
     original_filter = settings.v2_enable_response_command_filter
+    original_obvious_only = settings.v2_response_filter_obvious_only
     settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_obvious_only = False
     try:
         request = _build_request(
             headers={"x-target-url": "https://upstream.example.com/path"},
@@ -249,11 +247,78 @@ async def test_v2_proxy_blocks_high_confidence_xss_payload(monkeypatch):
         response = await v2_router.proxy_v2(request)
     finally:
         settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_obvious_only = original_obvious_only
 
-    assert response.status_code == 403
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["code"] == "v2_response_http_attack_blocked"
-    assert any("xss" in str(rule).lower() for rule in payload["aegisgate_v2"]["matched_rules"])
+    assert response.status_code == 200
+    assert b"onerror=alert(1)" in response.body
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_allows_onload_fetch_in_obvious_only_mode(monkeypatch):
+    html = b"""<html><body onload="fetch('/api/bootstrap')">ok</body></html>"""
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content=html,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    original_obvious_only = settings.v2_response_filter_obvious_only
+    settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_obvious_only = True
+    try:
+        request = _build_request(
+            headers={"x-target-url": "https://upstream.example.com/path"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_obvious_only = original_obvious_only
+
+    assert response.status_code == 200
+    assert b"fetch('/api/bootstrap')" in response.body
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_allows_high_confidence_xss_in_obvious_only_mode(monkeypatch):
+    xss_html = b"""<html><body>payload:<img src=x onerror=alert(1)></body></html>"""
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content=xss_html,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    original_obvious_only = settings.v2_response_filter_obvious_only
+    settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_obvious_only = True
+    try:
+        request = _build_request(
+            headers={"x-target-url": "https://upstream.example.com/path"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_obvious_only = original_obvious_only
+
+    assert response.status_code == 200
+    assert b"onerror=alert(1)" in response.body
 
 
 @pytest.mark.asyncio

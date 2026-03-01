@@ -306,9 +306,11 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_ORIGINAL_URL_HEADER` | v2 原始目标 URL 请求头名（默认；仍兼容 `x-target-url`） | `x-original-url` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
 | `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | v2 响应 HTTP 注入攻击过滤开关 | `true` |
-| `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | v2 宽松拦截模式（仅拦截高置信/多信号攻击） | `true` |
+| `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | v2 最小误拦模式（仅拦截协议层高危签名：走私/响应拆分/报文混淆） | `true` |
 | `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` | v2 响应拦截跳过域名（逗号分隔；支持 `example.com`/`.example.com`/`*.example.com`） | 空 |
 | `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | v2 响应注入检测最大字符数 | `200000` |
+
+说明：v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
 
 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 示例：
 `moltbook.com,semanticscholar.org,openalex.org,arxiv.org,pubmed.ncbi.nlm.nih.gov,search.crossref.org,core.ac.uk,doaj.org`

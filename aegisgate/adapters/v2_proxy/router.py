@@ -52,16 +52,6 @@ _DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
 )
 _DEFAULT_DANGEROUS_COMMAND_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("web_sqli_union_select", r"\bunion\s+select\b"),
-    ("web_sqli_tautology", r"\b(?:or|and)\s+1\s*=\s*1\b"),
-    ("web_sqli_time_blind", r"\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)"),
-    ("web_xss_script_event", r"(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)"),
-    ("web_command_injection_chain", r"(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b"),
-    ("web_path_traversal", r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)"),
-    ("web_xxe_external_entity", r"(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)"),
-    ("web_ssti_or_log4shell", r"(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)"),
-    ("web_ssrf_metadata", r"(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)"),
-    ("web_crlf_header_injection", r"(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)"),
     (
         "web_http_smuggling_cl_te",
         r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
@@ -89,35 +79,20 @@ _XSS_HIGH_CONFIDENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"</\s*script\s*>\s*<\s*script\b", re.IGNORECASE),
     re.compile(r"javascript\s*:\s*(?:alert|prompt|confirm)\s*\(", re.IGNORECASE),
     re.compile(
-        r"on(?:error|load|mouseover)\s*=\s*['\"]?\s*(?:alert|prompt|confirm|document\.cookie|fetch\s*\(|xmlhttprequest)",
+        r"on(?:error|load|mouseover)\s*=\s*['\"]?\s*(?:alert|prompt|confirm|document\.cookie)",
         re.IGNORECASE,
     ),
 )
-_V2_HIGH_CONFIDENCE_RULE_IDS = frozenset(
+_V2_OBVIOUS_ONLY_BLOCK_RULE_IDS = frozenset(
     {
-        "web_xss",
-        "web_xss_script_event",
+        # Prefer low-false-positive protocol/framing signatures only.
         "web_http_smuggling_cl_te",
         "web_http_smuggling_te_cl",
         "web_http_smuggling_te_te",
         "web_http_response_splitting",
         "web_http_obs_fold_header",
-        "web_xxe_external_entity",
-        "web_ssti_or_log4shell",
-        "web_ssrf_metadata",
     }
 )
-_V2_LOW_CONFIDENCE_RULE_IDS = frozenset(
-    {
-        "web_sqli_union_select",
-        "web_sqli_tautology",
-        "web_sqli_time_blind",
-        "web_command_injection_chain",
-        "web_path_traversal",
-        "web_crlf_header_injection",
-    }
-)
-_V2_OBVIOUS_ONLY_MIN_LOW_CONF_RULE_HITS = 2
 _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_sqli_union_select": "检测到 SQL 注入特征（UNION SELECT）",
     "web_sqli_tautology": "检测到 SQL 注入特征（恒真条件）",
@@ -502,12 +477,10 @@ def _detect_dangerous_commands(text: str) -> list[str]:
         return []
 
     if settings.v2_response_filter_obvious_only:
-        # 宽松拦截策略：只拦截高置信规则，或同时命中多个低置信规则（多信号攻击）。
-        has_high_conf = any(match_id in _V2_HIGH_CONFIDENCE_RULE_IDS for match_id in raw_matches)
-        if not has_high_conf:
-            low_conf_count = sum(1 for match_id in raw_matches if match_id in _V2_LOW_CONFIDENCE_RULE_IDS)
-            if low_conf_count < _V2_OBVIOUS_ONLY_MIN_LOW_CONF_RULE_HITS:
-                return []
+        # Strictly block only the most dangerous protocol-level signatures.
+        raw_matches = [match_id for match_id in raw_matches if match_id in _V2_OBVIOUS_ONLY_BLOCK_RULE_IDS]
+        if not raw_matches:
+            return []
 
     return raw_matches[:_V2_MAX_MATCH_IDS]
 
