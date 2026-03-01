@@ -42,7 +42,9 @@ PROXY_FETCH_TS = r'''import process from "node:process";
 
 const ENV_PROXY_URL = "OPENCLAW_PROXY_GATEWAY_URL";
 const ENV_PROXY_DIRECT_HOSTS = "OPENCLAW_PROXY_DIRECT_HOSTS";
+const ENV_PROXY_FETCH_LOG = "OPENCLAW_PROXY_FETCH_LOG";
 const TARGET_URL_HEADER = "X-Target-URL";
+const LOG_MARKER = "[AG_PROXY_FETCH_V2]";
 
 // Chat channels (Telegram, WhatsApp, Discord, Slack, Signal, etc.) are not included so they go through the gateway.
 const DEFAULT_DIRECT_HOSTS = new Set([
@@ -109,6 +111,30 @@ const DEFAULT_DIRECT_SUFFIXES = [
   "cloudfront.net",
 ];
 
+function isProxyFetchLogEnabled(): boolean {
+  const raw = (process.env[ENV_PROXY_FETCH_LOG] || "1").trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "off" || raw === "no");
+}
+
+function headersToObject(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
+function safeLog(enabled: boolean, event: string, payload: Record<string, unknown>): void {
+  if (!enabled) {
+    return;
+  }
+  try {
+    console.info(`${LOG_MARKER} ${event} ${JSON.stringify(payload)}`);
+  } catch {
+    console.info(`${LOG_MARKER} ${event}`);
+  }
+}
+
 function getDirectHosts(): { exact: Set<string>; suffixes: string[] } {
   const raw = process.env[ENV_PROXY_DIRECT_HOSTS]?.trim();
   if (raw) {
@@ -159,10 +185,17 @@ export function installProxyFetchIfConfigured(): void {
   const { proxyUrl, proxyOrigin } = config;
   const directHosts = getDirectHosts();
   const originalFetch = globalThis.fetch;
+  const logEnabled = isProxyFetchLogEnabled();
 
   if (!originalFetch) {
     return;
   }
+
+  safeLog(logEnabled, "install", {
+    use_v2: true,
+    proxy_url: proxyUrl,
+    proxy_origin: proxyOrigin,
+  });
 
   function isDirectHost(hostname: string): boolean {
     const h = hostname.toLowerCase();
@@ -187,15 +220,34 @@ export function installProxyFetchIfConfigured(): void {
 
     const trimmed = originalUrl.trim();
     if (!/^https?:\/\//i.test(trimmed)) {
+      safeLog(logEnabled, "bypass", {
+        use_v2: false,
+        reason: "non_http_url",
+        original_url: trimmed,
+      });
       return originalFetch(input, init);
     }
+
     const requestOrigin = getRequestOrigin(trimmed);
     if (requestOrigin === proxyOrigin) {
+      safeLog(logEnabled, "bypass", {
+        use_v2: false,
+        reason: "same_proxy_origin",
+        original_url: trimmed,
+        proxy_origin: proxyOrigin,
+      });
       return originalFetch(input, init);
     }
+
     try {
       const hostname = new URL(trimmed).hostname;
       if (isDirectHost(hostname)) {
+        safeLog(logEnabled, "bypass", {
+          use_v2: false,
+          reason: "direct_host",
+          original_url: trimmed,
+          hostname,
+        });
         return originalFetch(input, init);
       }
     } catch {
@@ -206,6 +258,42 @@ export function installProxyFetchIfConfigured(): void {
       input instanceof Request ? (input as Request).headers : (init?.headers as HeadersInit),
     );
     newHeaders.set(TARGET_URL_HEADER, trimmed);
+    const method = input instanceof Request ? input.method : (init?.method || "GET");
+
+    safeLog(logEnabled, "route_v2", {
+      use_v2: true,
+      method,
+      original_url: trimmed,
+      gateway_url: proxyUrl,
+      target_header: TARGET_URL_HEADER,
+      request_headers: headersToObject(newHeaders),
+    });
+
+    const startedAt = Date.now();
+    const withResponseLog = (p: Promise<Response>): Promise<Response> =>
+      p
+        .then((res) => {
+          safeLog(logEnabled, "response", {
+            use_v2: true,
+            method,
+            original_url: trimmed,
+            gateway_url: proxyUrl,
+            status: res.status,
+            duration_ms: Date.now() - startedAt,
+          });
+          return res;
+        })
+        .catch((err) => {
+          safeLog(logEnabled, "error", {
+            use_v2: true,
+            method,
+            original_url: trimmed,
+            gateway_url: proxyUrl,
+            duration_ms: Date.now() - startedAt,
+            error: String(err),
+          });
+          throw err;
+        });
 
     if (input instanceof Request) {
       const req = input as Request;
@@ -226,10 +314,10 @@ export function installProxyFetchIfConfigured(): void {
       if (req.body != null) {
         initFromReq.body = req.body;
       }
-      return originalFetch(proxyUrl, initFromReq);
+      return withResponseLog(originalFetch(proxyUrl, initFromReq));
     }
 
-    return originalFetch(proxyUrl, { ...init, headers: newHeaders });
+    return withResponseLog(originalFetch(proxyUrl, { ...init, headers: newHeaders }));
   };
 
   (globalThis as unknown as { fetch: typeof fetch }).fetch = wrapped;
