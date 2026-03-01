@@ -289,12 +289,7 @@ export function installProxyFetchIfConfigured(): void {
     try {
       const hostname = new URL(trimmed).hostname;
       if (isDirectHost(hostname)) {
-        safeLog(logEnabled, "bypass", {
-          use_v2: false,
-          reason: "direct_host",
-          original_url: trimmed,
-          hostname,
-        });
+        // White-listed direct hosts are intentionally silent in AG proxy logs.
         return originalFetch(input, init);
       }
     } catch {
