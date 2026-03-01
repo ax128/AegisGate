@@ -11,6 +11,7 @@
 用法：
   python openclaw-inject-proxy-fetch.py /path/to/openclaw   # 命令行指定根目录
   export OPENCLAW_ROOT=<OpenClaw 根目录路径>   # 或用环境变量指定（二选一，必须显式提供）
+  python openclaw-inject-proxy-fetch.py /path/to/openclaw --pin-local-build
   python openclaw-inject-proxy-fetch.py --remove
   python openclaw-inject-proxy-fetch.py -v / -vv
 """
@@ -18,6 +19,7 @@
 import argparse
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -253,6 +255,7 @@ DEFAULT_PROXY_DIRECT_HOSTS = (
     "registry.npmjs.org,api.github.com,raw.githubusercontent.com,codeload.github.com,"
     "objects.githubusercontent.com,pypi.org,pypi.python.org,docs.openclaw.ai,openclaw.ai"
 )
+LOCAL_EXECSTART_OVERRIDE_FILENAME = "91-openclaw-local-build.conf"
 
 # 注入前上下文校验：锚点行及其后必须出现的特征（避免项目迭代后误注入）
 ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
@@ -376,10 +379,128 @@ def _write_systemd_override(unit: str, env_assignments: dict[str, str]) -> Path:
     return override_file
 
 
-def _configure_gateway_service_env(env_assignments: dict[str, str]) -> bool:
-    """把代理环境变量持久化到 openclaw-gateway systemd 用户服务并重启。"""
+def _extract_execstart_argv(raw_value: str) -> list[str] | None:
+    """解析 `systemctl show -p ExecStart --value` 输出中的 argv。"""
+    text = (raw_value or "").strip()
+    if not text:
+        return None
+    value = text
+    marker = "argv[]="
+    marker_idx = text.find(marker)
+    if marker_idx >= 0:
+        value = text[marker_idx + len(marker) :]
+        sep = value.find(" ;")
+        if sep >= 0:
+            value = value[:sep]
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        return None
+    return tokens or None
+
+
+def _get_systemd_execstart_argv(unit: str) -> list[str] | None:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "ExecStart", "--value"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return _extract_execstart_argv(proc.stdout)
+
+
+def _format_systemd_execstart(tokens: list[str]) -> str:
+    return " ".join(_systemd_escape_env_value(token) for token in tokens)
+
+
+def _build_local_execstart_tokens(unit: str, root: str) -> list[str]:
+    local_dist_index = os.path.abspath(os.path.join(root, "dist", "index.js"))
+    existing = _get_systemd_execstart_argv(unit) or []
+
+    # 优先保留现有命令形态，只替换 dist/index.js 路径，最大限度兼容上游参数。
+    if len(existing) >= 2:
+        replaced = False
+        updated = list(existing)
+        for i, token in enumerate(updated):
+            if token.endswith("/dist/index.js"):
+                updated[i] = local_dist_index
+                replaced = True
+                break
+        if not replaced:
+            updated[1] = local_dist_index
+        return updated
+
+    node_bin = shutil.which("node") or "/usr/local/bin/node"
+    port = os.environ.get("OPENCLAW_GATEWAY_PORT", "18789").strip() or "18789"
+    return [node_bin, local_dist_index, "gateway", "--port", port]
+
+
+def _write_local_execstart_override(unit: str, tokens: list[str]) -> Path:
+    unit_name = unit.strip() or DEFAULT_GATEWAY_SYSTEMD_UNIT
+    override_dir = Path.home() / ".config" / "systemd" / "user" / f"{unit_name}.d"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    override_file = override_dir / LOCAL_EXECSTART_OVERRIDE_FILENAME
+    content = (
+        "[Service]\n"
+        "ExecStart=\n"
+        f"ExecStart={_format_systemd_execstart(tokens)}\n"
+    )
+
+    old_content = ""
+    if override_file.exists():
+        old_content = override_file.read_text(encoding="utf-8")
+    if content != old_content:
+        override_file.write_text(content, encoding="utf-8")
+        LOG.info("已写入本地构建 ExecStart 覆盖配置: %s", override_file)
+    else:
+        LOG.debug("本地构建 ExecStart 覆盖配置未变化: %s", override_file)
+    return override_file
+
+
+def _detect_execstart_script_path(tokens: list[str] | None) -> str | None:
+    if not tokens:
+        return None
+    for token in tokens:
+        if token.endswith("/dist/index.js"):
+            return token
+    if len(tokens) >= 2 and tokens[1].endswith(".js"):
+        return tokens[1]
+    return None
+
+
+def _warn_if_service_not_using_local_build(root: str, unit: str) -> None:
+    if shutil.which("systemctl") is None:
+        return
+    tokens = _get_systemd_execstart_argv(unit)
+    script_path = _detect_execstart_script_path(tokens)
+    local_dist_index = os.path.abspath(os.path.join(root, "dist", "index.js"))
+    if not script_path:
+        LOG.warning("无法识别当前 %s 的 ExecStart 脚本路径，建议手动检查 systemd 配置。", unit)
+        return
+    try:
+        same = os.path.realpath(script_path) == os.path.realpath(local_dist_index)
+    except OSError:
+        same = script_path == local_dist_index
+    if same:
+        LOG.info("当前 %s 已使用本地构建: %s", unit, script_path)
+        return
+    LOG.warning("当前 %s ExecStart 指向: %s", unit, script_path)
+    LOG.warning("注入源码路径为: %s", local_dist_index)
+    LOG.warning("若需让注入立即生效，请加参数 --pin-local-build 重新执行脚本。")
+
+
+def _configure_gateway_service(env_assignments: dict[str, str], root: str, pin_local_build: bool) -> bool:
+    """持久化代理环境变量，并可选覆盖 ExecStart 到本地构建，再重启服务。"""
     env_assignments = _normalize_proxy_env_assignments(env_assignments)
-    if not env_assignments:
+    if not env_assignments and not pin_local_build:
         return False
 
     for key, value in env_assignments.items():
@@ -390,7 +511,12 @@ def _configure_gateway_service_env(env_assignments: dict[str, str]) -> bool:
         return False
 
     unit = _resolve_gateway_systemd_unit()
-    _write_systemd_override(unit, env_assignments)
+    if env_assignments:
+        _write_systemd_override(unit, env_assignments)
+    if pin_local_build:
+        tokens = _build_local_execstart_tokens(unit, root)
+        _write_local_execstart_override(unit, tokens)
+
     LOG.info("正在应用 systemd 用户服务环境并重启: %s", unit)
     try:
         reload_proc = subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
@@ -405,7 +531,8 @@ def _configure_gateway_service_env(env_assignments: dict[str, str]) -> bool:
         LOG.error("执行 systemctl 失败: %s", exc)
         return False
 
-    LOG.info("已完成服务环境注入并重启：%s", unit)
+    LOG.info("已完成服务配置注入并重启：%s", unit)
+    _warn_if_service_not_using_local_build(root, unit)
     return True
 
 
@@ -773,6 +900,14 @@ def main() -> None:
         help="Remove the injection instead of applying it.",
     )
     parser.add_argument(
+        "--pin-local-build",
+        action="store_true",
+        help=(
+            "为 openclaw-gateway.service 生成 ExecStart 覆盖，"
+            "将服务固定到 <openclaw_root>/dist/index.js（避免注入源码未被加载）"
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -803,12 +938,13 @@ def main() -> None:
         if not run_build(root):
             LOG.error("注入成功，但自动 build 失败。请在 OpenClaw 根目录手动执行构建命令。")
             sys.exit(1)
-        if proxy_env_assignments:
-            applied = _configure_gateway_service_env(proxy_env_assignments)
+        unit = _resolve_gateway_systemd_unit()
+        if proxy_env_assignments or args.pin_local_build:
+            applied = _configure_gateway_service(proxy_env_assignments, root, args.pin_local_build)
             if not applied:
                 LOG.warning("未能自动注入服务环境，请手动配置并重启 OpenClaw gateway。")
             else:
-                LOG.info("环境变量已注入服务，注入流程完成。")
+                LOG.info("systemd 服务配置已更新，注入流程完成。")
         else:
             LOG.info("build完成。可直接在命令里附带网关环境变量自动注入，例如：")
             LOG.info(
@@ -816,6 +952,7 @@ def main() -> None:
                 root,
                 ENV_PROXY_GATEWAY_URL,
             )
+            _warn_if_service_not_using_local_build(root, unit)
     else:
         LOG.error("注入未成功，请根据上述错误检查 entry.ts 或更新脚本适配当前项目结构。")
         sys.exit(1)

@@ -27,6 +27,16 @@ python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_G
 4. 执行 `systemctl --user daemon-reload`
 5. 执行 `systemctl --user restart openclaw-gateway.service`
 
+若你希望 `openclaw-gateway.service` 明确运行“当前注入的本地源码构建”，建议加：
+
+```bash
+python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/<TOKEN> --pin-local-build
+```
+
+该参数会额外写入：
+- `~/.config/systemd/user/openclaw-gateway.service.d/91-openclaw-local-build.conf`
+- 覆盖 `ExecStart` 到 `/path/to/openclaw/dist/index.js`
+
 ## 3. 参数规则
 
 脚本不自动搜索目录。必须通过以下方式之一指定 OpenClaw 根目录（目录中必须存在 `src/entry.ts`）：
@@ -65,6 +75,12 @@ python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw --remove
 ```bash
 python scripts/openclaw-inject-proxy-fetch.py -v /path/to/openclaw
 python scripts/openclaw-inject-proxy-fetch.py -vv /path/to/openclaw
+```
+
+固定服务运行本地构建（可与上面网关变量一起使用）：
+
+```bash
+python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw --pin-local-build
 ```
 
 ## 6. 生效检查
