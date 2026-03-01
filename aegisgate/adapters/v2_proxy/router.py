@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
+from aegisgate.util.masking import mask_for_log
 
 router = APIRouter()
 
@@ -277,58 +278,69 @@ def _v2_http_attack_reasons(matches: list[str]) -> list[str]:
     return reasons[:_V2_MAX_MATCH_IDS]
 
 
-def _redact_text(text: str) -> tuple[str, int, list[str]]:
+def _redact_text(text: str) -> tuple[str, int, list[str], list[dict[str, str]]]:
+    """Returns (redacted_text, replacement_count, hit_ids, markers).
+
+    markers contains {kind, masked_value} for unique pattern hits (capped at _V2_MAX_MATCH_IDS).
+    """
     value = text
     replacement_count = 0
     hit_ids: list[str] = []
     hit_set: set[str] = set()
+    markers: list[dict[str, str]] = []
     for pattern_id, pattern in _v2_redaction_patterns():
         replacement = f"[REDACTED:{pattern_id}]"
 
-        def _repl(_: re.Match[str]) -> str:
+        def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
             nonlocal replacement_count
             replacement_count += 1
-            if pattern_id not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
-                hit_set.add(pattern_id)
-                hit_ids.append(pattern_id)
+            if _pid not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
+                hit_set.add(_pid)
+                hit_ids.append(_pid)
+                markers.append({"kind": _pid, "masked_value": mask_for_log(m.group(0))})
             return replacement
 
         value = pattern.sub(_repl, value)
-    return value, replacement_count, hit_ids
+    return value, replacement_count, hit_ids, markers
 
 
-def _sanitize_json_value(value: Any) -> tuple[Any, int, list[str]]:
+def _sanitize_json_value(value: Any) -> tuple[Any, int, list[str], list[dict[str, str]]]:
+    """Recursively sanitize a JSON-decoded value; returns (result, count, hit_ids, markers)."""
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, list):
         total = 0
         hit_ids: list[str] = []
         hit_set: set[str] = set()
+        markers: list[dict[str, str]] = []
         out: list[Any] = []
         for item in value:
-            next_item, next_count, next_hits = _sanitize_json_value(item)
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item)
             total += next_count
             out.append(next_item)
             for hit in next_hits:
                 if hit not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
                     hit_set.add(hit)
                     hit_ids.append(hit)
-        return out, total, hit_ids
+            markers.extend(next_markers)
+        return out, total, hit_ids, markers
     if isinstance(value, dict):
         total = 0
         hit_ids = []
         hit_set: set[str] = set()
+        markers: list[dict[str, str]] = []
         out: dict[str, Any] = {}
         for key, item in value.items():
-            next_item, next_count, next_hits = _sanitize_json_value(item)
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item)
             total += next_count
             out[key] = next_item
             for hit in next_hits:
                 if hit not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
                     hit_set.add(hit)
                     hit_ids.append(hit)
-        return out, total, hit_ids
-    return value, 0, []
+            markers.extend(next_markers)
+        return out, total, hit_ids, markers
+    return value, 0, [], []
 
 
 def _looks_textual_content_type(content_type: str) -> bool:
@@ -343,26 +355,29 @@ def _looks_textual_content_type(content_type: str) -> bool:
     )
 
 
-def _sanitize_request_body(body: bytes, content_type: str) -> tuple[bytes, int, list[str]]:
+def _sanitize_request_body(
+    body: bytes, content_type: str
+) -> tuple[bytes, int, list[str], list[dict[str, str]]]:
+    """Returns (sanitized_body, replacement_count, hit_ids, markers)."""
     if not body or not _looks_textual_content_type(content_type):
-        return body, 0, []
+        return body, 0, [], []
 
     if "json" in content_type.lower():
         try:
             raw = body.decode("utf-8")
             parsed = json.loads(raw)
-            sanitized, count, hits = _sanitize_json_value(parsed)
+            sanitized, count, hits, markers = _sanitize_json_value(parsed)
             if count <= 0:
-                return body, 0, []
-            return json.dumps(sanitized, ensure_ascii=False).encode("utf-8"), count, hits
+                return body, 0, [], []
+            return json.dumps(sanitized, ensure_ascii=False).encode("utf-8"), count, hits, markers
         except Exception:
             pass
 
     text = body.decode("utf-8", errors="replace")
-    sanitized, count, hits = _redact_text(text)
+    sanitized, count, hits, markers = _redact_text(text)
     if count <= 0:
-        return body, 0, []
-    return sanitized.encode("utf-8"), count, hits
+        return body, 0, [], []
+    return sanitized.encode("utf-8"), count, hits, markers
 
 
 
@@ -696,15 +711,23 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     redaction_count = 0
     outbound_body = request_body
     if settings.v2_enable_request_redaction:
-        outbound_body, redaction_count, redaction_hits = _sanitize_request_body(request_body, original_content_type)
+        outbound_body, redaction_count, redaction_hits, redaction_markers = _sanitize_request_body(
+            request_body, original_content_type
+        )
         if redaction_count > 0:
-            logger.info(
-                "v2 request redacted method=%s path=%s target=%s replacements=%s hit_ids=%s",
+            client_ip = (request.client.host if request.client else None) or "-"
+            user_agent = request.headers.get("user-agent", "-")
+            # WARNING 级别：含敏感字段的请求属于安全审计事件
+            logger.warning(
+                "v2 redaction method=%s path=%s target=%s client_ip=%s user_agent=%s replacements=%d hit_ids=%s markers=%s",
                 request.method,
                 request.url.path,
                 target_url,
+                client_ip,
+                user_agent,
                 redaction_count,
                 redaction_hits,
+                redaction_markers,
             )
 
     forward_headers = _build_forward_headers(request)

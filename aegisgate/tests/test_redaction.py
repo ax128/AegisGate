@@ -1,7 +1,8 @@
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest
-from aegisgate.filters.redaction import RedactionFilter, _mask_for_log
+from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.storage.sqlite_store import SqliteKVStore
+from aegisgate.util.masking import mask_for_log as _mask_for_log
 
 
 def test_redaction_replaces_email(tmp_path):
@@ -44,10 +45,11 @@ def test_redaction_log_masks_sensitive_value(tmp_path, monkeypatch):
     plugin = RedactionFilter(store)
     captured: list[str] = []
 
-    def fake_info(message, *args):
+    # 脱敏事件升级为 WARNING 级别
+    def fake_warning(message, *args):
         captured.append(message % args)
 
-    monkeypatch.setattr("aegisgate.filters.redaction.logger.info", fake_info)
+    monkeypatch.setattr("aegisgate.filters.redaction.logger.warning", fake_warning)
 
     raw_secret = "sk-test-abcdefghijklmnopqrstuvwxyz12345"
     req = InternalRequest(
@@ -65,8 +67,10 @@ def test_redaction_log_masks_sensitive_value(tmp_path, monkeypatch):
     last_log = captured[-1]
     assert raw_secret not in last_log
     assert _mask_for_log(raw_secret) in last_log
-    assert "redaction_applied" in last_log
-    assert "marker" in last_log
+    # 日志需包含 session_id、route 和 msg_role 以便追溯调用方
+    assert "s1" in last_log          # session_id
+    assert "user" in last_log        # msg_role
+    assert "TOKEN" in last_log       # kind
 
 
 def test_redaction_field_aware_bearer_token(tmp_path):
