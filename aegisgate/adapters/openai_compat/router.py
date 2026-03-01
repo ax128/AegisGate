@@ -493,6 +493,22 @@ def _looks_like_gateway_confirmation_text(text: str) -> bool:
     )
 
 
+def _looks_like_gateway_upstream_recovery_notice_text(text: str) -> bool:
+    body = str(text or "")
+    if not body:
+        return False
+    lowered = body.lower()
+    return (
+        _UPSTREAM_EOF_RECOVERY_NOTICE in body
+        or "[aegisgate] 上游流提前断开（未收到 [done]）" in lowered
+        or "upstream stream closed early (missing [done])" in lowered
+    )
+
+
+def _looks_like_gateway_internal_history_text(text: str) -> bool:
+    return _looks_like_gateway_confirmation_text(text) or _looks_like_gateway_upstream_recovery_notice_text(text)
+
+
 def _strip_system_exec_runtime_lines(text: str) -> str:
     body = str(text or "")
     if not body:
@@ -543,7 +559,7 @@ def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, l
 
             if node_role in {"assistant", "system", "developer"}:
                 content = node.get("content")
-                if isinstance(content, str) and _looks_like_gateway_confirmation_text(content):
+                if isinstance(content, str) and _looks_like_gateway_internal_history_text(content):
                     return None
 
             copied: dict[str, Any] = dict(node)
@@ -559,7 +575,7 @@ def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, l
                     for idx, part in enumerate(item):
                         if isinstance(part, dict):
                             text = part.get("text")
-                            if isinstance(text, str) and _looks_like_gateway_confirmation_text(text):
+                            if isinstance(text, str) and _looks_like_gateway_internal_history_text(text):
                                 continue
                         sanitized_part = _sanitize(
                             part,

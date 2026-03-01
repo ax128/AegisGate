@@ -214,6 +214,25 @@ def test_responses_upstream_payload_keeps_normal_assistant_history():
     assert len(items) == 2
 
 
+def test_responses_upstream_payload_drops_gateway_upstream_recovery_notice_from_history():
+    payload = {
+        "input": [
+            {
+                "role": "assistant",
+                "content": "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。",
+            },
+            {"role": "user", "content": "重试一下"},
+        ]
+    }
+    req = to_internal_responses(payload)
+    upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+    items = upstream_payload["input"]
+    assert isinstance(items, list)
+    assert len(items) == 1
+    assert items[0]["role"] == "user"
+    assert "重试一下" in str(items[0]["content"])
+
+
 def test_responses_upstream_payload_strips_system_exec_runtime_lines_in_user_input():
     payload = {
         "input": [
