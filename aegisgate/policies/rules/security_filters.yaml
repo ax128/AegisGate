@@ -444,6 +444,16 @@ anomaly_detector:
       regex: '(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)'
     - id: crlf_header_injection
       regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
+    - id: http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   points:
     repetition_ratio: 0.25
     max_run_length: 0.20
@@ -548,6 +558,16 @@ request_sanitizer:
       regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
     - id: web_ssrf_crlf
       regex: '((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))'
+    - id: web_http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: web_http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: web_http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: web_http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: web_http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   encoded_payload_patterns:
     - id: base64_long
       regex: '[A-Za-z0-9+/]{200,}={0,2}'
@@ -600,6 +620,16 @@ sanitizer:
       regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
     - id: web_ssrf_crlf
       regex: '((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))'
+    - id: web_http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: web_http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: web_http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: web_http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: web_http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
   force_block_command_patterns:
     - id: docker_compose_down
@@ -636,6 +666,16 @@ sanitizer:
       regex: '(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)'
     - id: web_crlf_header_injection
       regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
+    - id: web_http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: web_http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: web_http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: web_http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: web_http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   encoded_payload_patterns:
     - id: base64_long
       regex: '[A-Za-z0-9+/]{200,}={0,2}'

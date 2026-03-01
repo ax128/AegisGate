@@ -196,3 +196,43 @@ async def test_generic_provider_proxy_streaming_returns_error_chunk_when_upstrea
         assert "data: [DONE]" in body
     finally:
         settings.enforce_loopback_only = original_loopback
+
+
+@pytest.mark.asyncio
+async def test_generic_provider_proxy_blocks_http_smuggling_signature_in_response(monkeypatch):
+    async def fake_forward_json(url, payload, headers):
+        return 200, {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+    original_loopback = settings.enforce_loopback_only
+    try:
+        settings.enforce_loopback_only = False
+        request = _build_request(
+            headers={
+                "X-Upstream-Base": "https://upstream.example.com/v1",
+                "gateway-key": settings.gateway_key,
+            }
+        )
+        response = await openai_router.generic_provider_proxy(
+            "messages",
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            request,
+        )
+    finally:
+        settings.enforce_loopback_only = original_loopback
+
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "generic_response_blocked"
