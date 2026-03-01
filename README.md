@@ -195,6 +195,7 @@ OpenClaw 自动注入脚本位置：
 - `scripts/openclaw-inject-proxy-fetch.py`
 - 推荐命令（注入 + 构建 + 自动写入服务环境并重启网关）：
   - `python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
+  - 如需强制服务运行本地注入构建：在命令后追加 `--pin-local-build`
 - 关键行为：
   - 不自动检索目录；必须通过参数或 `OPENCLAW_ROOT` 显式指定 OpenClaw 根目录
   - 检测到已注入时，先恢复备份再重注入，避免重复注入错位
@@ -206,6 +207,7 @@ OpenClaw 自动注入脚本位置：
     - 写入 `OPENCLAW_PROXY_GATEWAY_URL`
     - 自动补充默认 `OPENCLAW_PROXY_DIRECT_HOSTS`（未显式传入时）
     - 执行 `systemctl --user daemon-reload && systemctl --user restart openclaw-gateway.service`
+  - 追加 `--pin-local-build` 时，脚本会额外写入 `91-openclaw-local-build.conf`，把 systemd `ExecStart` 固定到 `/path/to/openclaw/dist/index.js`
   - 若未携带网关变量，脚本只做注入 + build，不改服务环境
 
 ## 3. 本地开发
