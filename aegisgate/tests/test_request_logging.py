@@ -135,3 +135,20 @@ def test_sanitize_responses_input_for_upstream_records_hit_positions_and_is_idem
     assert not any(item["path"] == "input[1].output" for item in first_hits)
     assert second_sanitized == first_sanitized
     assert second_hits == []
+
+
+def test_sanitize_responses_input_for_upstream_respects_whitelist_key():
+    payload = [
+        {
+            "role": "user",
+            "content": "bn_key=sk-abcdeABCDE1234567890xyz token=sk-zzzzzzzzzz1234567890",
+        }
+    ]
+
+    sanitized = openai_router._sanitize_responses_input_for_upstream(
+        payload,
+        whitelist_keys={"bn_key"},
+    )
+    content = sanitized[0]["content"]
+    assert "bn_key=sk-abcdeABCDE1234567890xyz" in content
+    assert "sk-zzzzzzzzzz1234567890" not in content

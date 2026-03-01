@@ -180,6 +180,49 @@ async def test_v2_proxy_redaction_text_body_does_not_replace_ip(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v2_proxy_redaction_respects_whitelist_key_from_scope(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            captured["content"] = content
+            return httpx.Response(
+                status_code=200,
+                content=b'{"ok":true}',
+                headers={"content-type": "application/json"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_redaction = settings.v2_enable_request_redaction
+    settings.v2_enable_request_redaction = True
+    try:
+        request = _build_request(
+            headers={
+                "content-type": "application/json",
+                "x-target-url": "https://upstream.example.com/path",
+            },
+            body=json.dumps(
+                {
+                    "bn_key": "sk-abcdeABCDE1234567890xyz",
+                    "other": "token=sk-zzzzzzzzzz1234567890",
+                }
+            ).encode("utf-8"),
+        )
+        request.scope["aegis_redaction_whitelist_keys"] = ["bn_key"]
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_request_redaction = original_redaction
+
+    assert response.status_code == 200
+    forwarded = json.loads((captured["content"] or b"{}").decode("utf-8"))
+    assert forwarded["bn_key"] == "sk-abcdeABCDE1234567890xyz"
+    assert "sk-zzzzzzzzzz1234567890" not in str(forwarded["other"])
+
+
+@pytest.mark.asyncio
 async def test_v2_proxy_allows_non_protocol_payload_in_strict_mode(monkeypatch):
     class FakeClient:
         async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):

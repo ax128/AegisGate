@@ -41,20 +41,21 @@ def _build_request(path: str, body: dict, headers: dict[str, str] | None = None)
 
 @pytest.mark.asyncio
 async def test_gw_register_base_url_prefers_request_host(monkeypatch):
-    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key: ("token123", False))
+    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
     request = _build_request(
         "/__gw__/register",
-        {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent"},
+        {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": ["bn_key"]},
         headers={"host": "127.0.0.1:18080"},
     )
     resp = await gateway.gw_register(request)
     body = json.loads(resp.body.decode("utf-8"))
     assert body["baseUrl"] == "http://127.0.0.1:18080/v1/__gw__/t/token123"
+    assert body["whitelist_key"] == ["bn_key"]
 
 
 @pytest.mark.asyncio
 async def test_gw_register_base_url_uses_forwarded_headers(monkeypatch):
-    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key: ("token123", False))
+    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
     request = _build_request(
         "/__gw__/register",
         {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent"},
@@ -67,7 +68,32 @@ async def test_gw_register_base_url_uses_forwarded_headers(monkeypatch):
     resp = await gateway.gw_register(request)
     body = json.loads(resp.body.decode("utf-8"))
     assert body["baseUrl"] == "https://gw.example.com/v1/__gw__/t/token123"
+    assert body["whitelist_key"] == []
 
 
 def test_sanitize_public_host_replaces_zero_host():
     assert gateway._sanitize_public_host("0.0.0.0:18080") == "127.0.0.1:18080"
+
+
+@pytest.mark.asyncio
+async def test_gw_register_accepts_set_like_whitelist_payload(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_register(upstream, key, whitelist_key=None):
+        captured["whitelist_key"] = whitelist_key
+        return "token123", False
+
+    monkeypatch.setattr(gateway, "gw_tokens_register", fake_register)
+    request = _build_request(
+        "/__gw__/register",
+        {
+            "upstream_base": "https://gmn.chuangzuoli.com/v1",
+            "gateway_key": "agent",
+            "whitelist_key": {"bn_key": True, "okx_key": 1, "skip": 0},
+        },
+        headers={"host": "127.0.0.1:18080"},
+    )
+    resp = await gateway.gw_register(request)
+    body = json.loads(resp.body.decode("utf-8"))
+    assert captured["whitelist_key"] == ["bn_key", "okx_key"]
+    assert body["whitelist_key"] == ["bn_key", "okx_key"]

@@ -77,6 +77,11 @@ from aegisgate.policies.policy_engine import PolicyEngine
 from aegisgate.storage import create_store
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.redaction_whitelist import (
+    normalize_whitelist_keys,
+    protected_spans_for_text,
+    range_overlaps_protected,
+)
 
 
 router = APIRouter()
@@ -120,6 +125,7 @@ _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
     re.IGNORECASE,
 )
+_REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _pipeline_local = threading.local()
 
 
@@ -311,6 +317,7 @@ def _sanitize_text_for_upstream_with_hits(
     role: str,
     path: str,
     field: str,
+    whitelist_keys: set[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     if not text:
         return "", []
@@ -327,22 +334,41 @@ def _sanitize_text_for_upstream_with_hits(
         else _responses_function_output_redaction_patterns()
     )
     hits: list[dict[str, Any]] = []
+    whitelist = set(normalize_whitelist_keys(whitelist_keys))
+    normalized_field = str(field or "").strip().lower()
+    if normalized_field and normalized_field in whitelist:
+        return cleaned, []
     for pattern_id, pattern in patterns:
-        match_list = list(pattern.finditer(cleaned))
-        if not match_list:
+        protected_spans = protected_spans_for_text(cleaned, whitelist)
+        match_count = 0
+        first_raw = ""
+
+        def _repl(match: re.Match[str]) -> str:
+            nonlocal match_count, first_raw
+            if protected_spans and range_overlaps_protected(
+                protected_spans,
+                start=match.start(),
+                end=match.end(),
+            ):
+                return match.group(0)
+            if not first_raw:
+                first_raw = match.group(0)
+            match_count += 1
+            return f"[REDACTED:{pattern_id}]"
+
+        cleaned = pattern.sub(_repl, cleaned)
+        if match_count <= 0:
             continue
-        first_raw = match_list[0].group(0)
         hits.append(
             {
                 "path": path,
                 "field": field,
                 "role": role or "unknown",
                 "pattern": pattern_id,
-                "count": len(match_list),
+                "count": match_count,
                 "masked_value": mask_for_log(first_raw),
             }
         )
-        cleaned = pattern.sub(f"[REDACTED:{pattern_id}]", cleaned)
     return cleaned, hits
 
 
@@ -488,12 +514,16 @@ def _build_responses_upstream_payload(
     request_id: str = "-",
     session_id: str = "-",
     route: str = "-",
+    whitelist_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     upstream_payload = dict(payload)
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
-            sanitized_input, redaction_hits = _sanitize_responses_input_for_upstream_with_hits(original_input)
+            sanitized_input, redaction_hits = _sanitize_responses_input_for_upstream_with_hits(
+                original_input,
+                whitelist_keys=whitelist_keys,
+            )
             upstream_payload["input"] = sanitized_input
             if redaction_hits:
                 sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
@@ -571,7 +601,11 @@ def _should_skip_responses_field_redaction(field: str) -> bool:
     )
 
 
-def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, list[dict[str, Any]]]:
+def _sanitize_responses_input_for_upstream_with_hits(
+    value: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
     """
     Sanitize structured responses history before forwarding upstream.
     This pass is idempotent and records redaction hit positions.
@@ -588,6 +622,7 @@ def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, l
                 role=role,
                 path=path,
                 field=field or "text",
+                whitelist_keys=whitelist_keys,
             )
             hits.extend(node_hits)
             return cleaned
@@ -666,8 +701,8 @@ def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, l
     return sanitized, merged_hits
 
 
-def _sanitize_responses_input_for_upstream(value: Any) -> Any:
-    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(value)
+def _sanitize_responses_input_for_upstream(value: Any, *, whitelist_keys: set[str] | None = None) -> Any:
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(value, whitelist_keys=whitelist_keys)
     return sanitized
 
 
@@ -1733,6 +1768,13 @@ def _header_lookup(headers: Mapping[str, str], target: str) -> str:
     return ""
 
 
+def _extract_redaction_whitelist_keys(headers: Mapping[str, str] | None = None) -> set[str]:
+    if not headers:
+        return set()
+    raw = _header_lookup(headers, _REDACTION_WHITELIST_HEADER)
+    return set(normalize_whitelist_keys(raw))
+
+
 def _resolve_tenant_id(
     *,
     payload: Mapping[str, Any] | None = None,
@@ -2171,6 +2213,7 @@ async def _execute_chat_stream_once(
 ) -> StreamingResponse | JSONResponse:
     req = to_internal_chat(payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -2480,6 +2523,7 @@ async def _execute_responses_stream_once(
 ) -> StreamingResponse | JSONResponse:
     req = to_internal_responses(payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -2588,6 +2632,7 @@ async def _execute_responses_stream_once(
     upstream_payload = _build_responses_upstream_payload(
         payload, sanitized_req.messages,
         request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+        whitelist_keys=ctx.redaction_whitelist_keys,
     )
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
@@ -2868,6 +2913,7 @@ async def _execute_chat_once(
 ) -> dict | JSONResponse:
     req = to_internal_chat(payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -3111,6 +3157,7 @@ async def _execute_responses_once(
 ) -> dict | JSONResponse:
     req = to_internal_responses(payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
 
     try:
@@ -3165,6 +3212,7 @@ async def _execute_responses_once(
         upstream_payload = _build_responses_upstream_payload(
             payload, req.messages,
             request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
         )
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
@@ -3229,6 +3277,7 @@ async def _execute_responses_once(
         upstream_payload = _build_responses_upstream_payload(
             payload, sanitized_req.messages,
             request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
         )
 
     try:
@@ -3365,6 +3414,7 @@ async def _execute_generic_stream_once(
     session_id = str(payload.get("session_id") or request_id)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     logger.info("generic proxy stream start request_id=%s route=%s", ctx.request_id, request_path)
 
@@ -3519,6 +3569,7 @@ async def _execute_generic_once(
     session_id = str(payload.get("session_id") or request_id)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     logger.info("generic proxy start request_id=%s route=%s", ctx.request_id, request_path)
 

@@ -30,6 +30,7 @@ from aegisgate.core.security_boundary import (
     verify_hmac_signature,
 )
 from aegisgate.util.logger import logger
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
 # /v1/__gw__/t/{token}/chat/completions -> /v1/chat/completions
 # /v2/__gw__/t/{token}/proxy -> /v2/proxy
@@ -122,6 +123,7 @@ class GWTokenRewriteMiddleware:
 
         ub = mapping["upstream_base"]
         gk = mapping["gateway_key"]
+        wk = normalize_whitelist_keys(mapping.get("whitelist_key"))
         new_scope = dict(scope)
         new_scope["path"] = new_path
         new_scope["root_path"] = ""
@@ -130,14 +132,16 @@ class GWTokenRewriteMiddleware:
         new_scope["aegis_gateway_token"] = token
         new_scope["aegis_upstream_base"] = ub
         new_scope["aegis_gateway_key"] = gk
+        new_scope["aegis_redaction_whitelist_keys"] = wk
 
         headers = list(new_scope.get("headers") or [])
         # token 访问时移除客户端携带的网关内部头，避免冲突。
         ub_name = settings.upstream_base_header.encode("latin-1")
         gk_name = settings.gateway_key_header.encode("latin-1")
+        rk_name = b"x-aegis-redaction-whitelist"
         ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
         gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
-        skip = (ub_name.lower(), gk_name.lower(), ub_alt.lower(), gk_alt.lower())
+        skip = (ub_name.lower(), gk_name.lower(), rk_name.lower(), ub_alt.lower(), gk_alt.lower())
         headers = [(k, v) for k, v in headers if k.lower() not in skip]
         new_scope["headers"] = headers
 
@@ -378,6 +382,7 @@ async def gw_register(request: Request) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     upstream_base = (body.get("upstream_base") or "").strip()
     gateway_key = (body.get("gateway_key") or "").strip()
+    whitelist_key = body.get("whitelist_key")
     if not upstream_base or not gateway_key:
         return JSONResponse(
             status_code=400,
@@ -393,7 +398,12 @@ async def gw_register(request: Request) -> JSONResponse:
             },
         )
     upstream_base_normalized = upstream_base.rstrip("/")
-    token, already_registered = gw_tokens_register(upstream_base_normalized, gateway_key)
+    normalized_whitelist = normalize_whitelist_keys(whitelist_key)
+    token, already_registered = gw_tokens_register(
+        upstream_base_normalized,
+        gateway_key,
+        normalized_whitelist,
+    )
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     if already_registered:
         return JSONResponse(
@@ -402,9 +412,10 @@ async def gw_register(request: Request) -> JSONResponse:
                 "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
                 "token": token,
                 "baseUrl": base_url,
+                "whitelist_key": normalized_whitelist,
             },
         )
-    return JSONResponse(content={"token": token, "baseUrl": base_url})
+    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": normalized_whitelist})
 
 
 @app.post("/__gw__/lookup")
@@ -440,7 +451,9 @@ async def gw_lookup(request: Request) -> JSONResponse:
             },
         )
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
-    return JSONResponse(content={"token": token, "baseUrl": base_url})
+    mapping = gw_tokens_get(token) or {}
+    whitelist_key = normalize_whitelist_keys(mapping.get("whitelist_key"))
+    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": whitelist_key})
 
 
 @app.post("/__gw__/unregister")

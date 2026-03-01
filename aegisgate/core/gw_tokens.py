@@ -14,9 +14,10 @@ from typing import Any
 
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
-# 内存映射：token -> {"upstream_base": str, "gateway_key": str}
-_tokens: dict[str, dict[str, str]] = {}
+# 内存映射：token -> {"upstream_base": str, "gateway_key": str, "whitelist_key": list[str]}
+_tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _TOKEN_LEN = 10
 _GW_TOKENS_KEY = "tokens"
@@ -42,7 +43,11 @@ def load() -> None:
                 _tokens.clear()
                 for k, v in tokens.items():
                     if isinstance(v, dict) and "upstream_base" in v and "gateway_key" in v:
-                        _tokens[str(k)] = {"upstream_base": str(v["upstream_base"]), "gateway_key": str(v["gateway_key"])}
+                        _tokens[str(k)] = {
+                            "upstream_base": str(v["upstream_base"]),
+                            "gateway_key": str(v["gateway_key"]),
+                            "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
+                        }
                 logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
         except Exception as exc:
             logger.warning("gw_tokens load failed path=%s error=%s", path, exc)
@@ -56,7 +61,7 @@ def _save() -> None:
     logger.debug("gw_tokens saved path=%s count=%d", path, len(_tokens))
 
 
-def get(token: str) -> dict[str, str] | None:
+def get(token: str) -> dict[str, Any] | None:
     """根据 token 取映射，不存在返回 None。"""
     with _lock:
         return _tokens.get(token)
@@ -87,7 +92,7 @@ def find_token(upstream_base: str, gateway_key: str) -> str | None:
         return _find_token_holding_lock(ub, gk)
 
 
-def register(upstream_base: str, gateway_key: str) -> tuple[str, bool]:
+def register(upstream_base: str, gateway_key: str, whitelist_key: Any = None) -> tuple[str, bool]:
     """
     注册：同一 (upstream_base, gateway_key) 只保留一个 token。
     若已存在则返回 (已有 token, True)，否则新建并返回 (新 token, False)。
@@ -98,9 +103,16 @@ def register(upstream_base: str, gateway_key: str) -> tuple[str, bool]:
     gateway_key = (gateway_key or "").strip()
     if not gateway_key:
         raise ValueError("gateway_key required")
+    whitelist_keys = normalize_whitelist_keys(whitelist_key)
     with _lock:
         existing = _find_token_holding_lock(upstream_base, gateway_key)
         if existing is not None:
+            mapping = _tokens.get(existing) or {}
+            current = normalize_whitelist_keys(mapping.get("whitelist_key"))
+            if current != whitelist_keys:
+                mapping["whitelist_key"] = whitelist_keys
+                _tokens[existing] = mapping
+                _save()
             return existing, True
         for _ in range(10):
             token = secrets.token_urlsafe(_TOKEN_LEN)[:_TOKEN_LEN]
@@ -108,7 +120,11 @@ def register(upstream_base: str, gateway_key: str) -> tuple[str, bool]:
                 break
         else:
             token = secrets.token_hex(_TOKEN_LEN // 2)[:_TOKEN_LEN]
-        _tokens[token] = {"upstream_base": upstream_base, "gateway_key": gateway_key}
+        _tokens[token] = {
+            "upstream_base": upstream_base,
+            "gateway_key": gateway_key,
+            "whitelist_key": whitelist_keys,
+        }
         _save()
     return token, False
 
@@ -123,7 +139,7 @@ def unregister(token: str) -> bool:
         return True
 
 
-def list_tokens() -> dict[str, dict[str, str]]:
+def list_tokens() -> dict[str, dict[str, Any]]:
     """返回当前所有 token 映射（副本）。"""
     with _lock:
         return dict(_tokens)

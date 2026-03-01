@@ -87,6 +87,28 @@ def test_effective_gateway_headers_uses_scope_injected_upstream_and_key():
     assert headers["authorization"] == "Bearer demo"
 
 
+def test_effective_gateway_headers_includes_redaction_whitelist_from_scope():
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": [(b"authorization", b"Bearer demo")],
+        "aegis_redaction_whitelist_keys": ["bn_key", "okx_key"],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(scope, receive)
+    headers = _effective_gateway_headers(request)
+    assert headers["x-aegis-redaction-whitelist"] == "bn_key,okx_key"
+
+
 def test_upstream_whitelist_matching():
     original = settings.upstream_whitelist_url_list
     settings.upstream_whitelist_url_list = "https://upstream.example.com/v1, https://another-upstream.example.com/v1"
