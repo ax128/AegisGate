@@ -52,6 +52,46 @@ _DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
         rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{_DEFAULT_FIELD_VALUE_MIN_LEN},}}",
     ),
 )
+_V2_RELAXED_PII_IDS = frozenset(
+    {
+        "TOKEN",
+        "JWT",
+        "URL_TOKEN_QUERY",
+        "COOKIE_SESSION",
+        "PRIVATE_KEY_PEM",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "SLACK_TOKEN",
+        "EXCHANGE_API_SECRET",
+        "CRYPTO_WIF_KEY",
+        "CRYPTO_XPRV",
+        "CRYPTO_SEED_PHRASE",
+        "FIELD_SECRET",
+        "AUTH_BEARER",
+    }
+)
+_V2_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_V2_SKIP_REDACTION_FIELDS = frozenset(
+    {
+        # encryption/cipher blobs should be forwarded as-is to avoid breaking payload semantics
+        "encrypted_content",
+        "encrypted_payload",
+        "encrypted_text",
+        "ciphertext",
+        "cipher",
+        "iv",
+        "nonce",
+        "tag",
+        "auth_tag",
+        "mac",
+        "hmac",
+        "signature",
+        "sig",
+        "ephemeral_key",
+        "ephemeral_public_key",
+    }
+)
 _DEFAULT_DANGEROUS_COMMAND_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         "web_http_smuggling_cl_te",
@@ -255,6 +295,19 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
     return compiled
 
 
+def _normalize_pattern_id(pattern_id: str) -> str:
+    return str(pattern_id or "").strip().upper()
+
+
+@lru_cache(maxsize=1)
+def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
+    selected: list[tuple[str, re.Pattern[str]]] = []
+    for pattern_id, pattern in _v2_redaction_patterns():
+        if _normalize_pattern_id(pattern_id) in _V2_RELAXED_PII_IDS:
+            selected.append((pattern_id, pattern))
+    return selected
+
+
 @lru_cache(maxsize=1)
 def _v2_dangerous_command_patterns() -> list[tuple[str, re.Pattern[str]]]:
     sanitizer_rules = load_security_rules().get("sanitizer", {})
@@ -278,17 +331,41 @@ def _v2_http_attack_reasons(matches: list[str]) -> list[str]:
     return reasons[:_V2_MAX_MATCH_IDS]
 
 
-def _redact_text(text: str) -> tuple[str, int, list[str], list[dict[str, str]]]:
+def _should_skip_v2_field_redaction(field: str) -> bool:
+    normalized = str(field or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in _V2_NON_CONTENT_KEYS:
+        return True
+    if normalized in _V2_SKIP_REDACTION_FIELDS:
+        return True
+    return normalized.endswith(
+        (
+            "_ciphertext",
+            "_encrypted",
+            "_encrypted_content",
+            "_auth_tag",
+            "_nonce",
+            "_iv",
+            "_mac",
+            "_signature",
+        )
+    )
+
+
+def _redact_text(text: str, *, field: str = "") -> tuple[str, int, list[str], list[dict[str, str]]]:
     """Returns (redacted_text, replacement_count, hit_ids, markers).
 
     markers contains {kind, masked_value} for unique pattern hits (capped at _V2_MAX_MATCH_IDS).
     """
+    if _should_skip_v2_field_redaction(field):
+        return text, 0, [], []
     value = text
     replacement_count = 0
     hit_ids: list[str] = []
     hit_set: set[str] = set()
     markers: list[dict[str, str]] = []
-    for pattern_id, pattern in _v2_redaction_patterns():
+    for pattern_id, pattern in _v2_relaxed_redaction_patterns():
         replacement = f"[REDACTED:{pattern_id}]"
 
         def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
@@ -304,10 +381,10 @@ def _redact_text(text: str) -> tuple[str, int, list[str], list[dict[str, str]]]:
     return value, replacement_count, hit_ids, markers
 
 
-def _sanitize_json_value(value: Any) -> tuple[Any, int, list[str], list[dict[str, str]]]:
+def _sanitize_json_value(value: Any, *, field: str = "") -> tuple[Any, int, list[str], list[dict[str, str]]]:
     """Recursively sanitize a JSON-decoded value; returns (result, count, hit_ids, markers)."""
     if isinstance(value, str):
-        return _redact_text(value)
+        return _redact_text(value, field=field)
     if isinstance(value, list):
         total = 0
         hit_ids: list[str] = []
@@ -315,7 +392,7 @@ def _sanitize_json_value(value: Any) -> tuple[Any, int, list[str], list[dict[str
         markers: list[dict[str, str]] = []
         out: list[Any] = []
         for item in value:
-            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item)
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item, field=field)
             total += next_count
             out.append(next_item)
             for hit in next_hits:
@@ -331,7 +408,7 @@ def _sanitize_json_value(value: Any) -> tuple[Any, int, list[str], list[dict[str
         markers: list[dict[str, str]] = []
         out: dict[str, Any] = {}
         for key, item in value.items():
-            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item)
+            next_item, next_count, next_hits, next_markers = _sanitize_json_value(item, field=str(key))
             total += next_count
             out[key] = next_item
             for hit in next_hits:

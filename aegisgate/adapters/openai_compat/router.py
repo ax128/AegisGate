@@ -185,7 +185,7 @@ _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
         "computer_call_output",
     }
 )
-_RESPONSES_RELAXED_REDACTION_ROLES = frozenset({"system", "developer"})
+_RESPONSES_RELAXED_REDACTION_ROLES = frozenset({"system", "developer", "assistant", "user", "tool"})
 _RESPONSES_RELAXED_PII_IDS = frozenset(
     {
         "TOKEN",
@@ -201,11 +201,29 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
         "CRYPTO_WIF_KEY",
         "CRYPTO_XPRV",
         "CRYPTO_SEED_PHRASE",
-        "IPV4",
-        "IPV6",
     }
 )
 _RESPONSES_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
+    {
+        # encryption/cipher blobs should be forwarded as-is to avoid breaking payload semantics
+        "encrypted_content",
+        "encrypted_payload",
+        "encrypted_text",
+        "ciphertext",
+        "cipher",
+        "iv",
+        "nonce",
+        "tag",
+        "auth_tag",
+        "mac",
+        "hmac",
+        "signature",
+        "sig",
+        "ephemeral_key",
+        "ephemeral_public_key",
+    }
+)
 _MAX_REDACTION_HIT_LOG_ITEMS = 24
 
 
@@ -531,6 +549,28 @@ def _strip_system_exec_runtime_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _should_skip_responses_field_redaction(field: str) -> bool:
+    normalized = str(field or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in _RESPONSES_NON_CONTENT_KEYS:
+        return True
+    if normalized in _RESPONSES_SKIP_REDACTION_FIELDS:
+        return True
+    return normalized.endswith(
+        (
+            "_ciphertext",
+            "_encrypted",
+            "_encrypted_content",
+            "_auth_tag",
+            "_nonce",
+            "_iv",
+            "_mac",
+            "_signature",
+        )
+    )
+
+
 def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, list[dict[str, Any]]]:
     """
     Sanitize structured responses history before forwarding upstream.
@@ -541,7 +581,7 @@ def _sanitize_responses_input_for_upstream_with_hits(value: Any) -> tuple[Any, l
 
     def _sanitize(node: Any, *, path: str, role: str = "", field: str = "") -> Any:
         if isinstance(node, str):
-            if field in _RESPONSES_NON_CONTENT_KEYS:
+            if _should_skip_responses_field_redaction(field):
                 return node
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
                 node,
