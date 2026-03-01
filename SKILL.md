@@ -5,8 +5,9 @@
 ## 0) 先读项目要点（必须）
 
 - AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/阻断/确认放行；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
-- 当前只支持 **Token 路由**：
-  - `http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
+- 当前只支持 **Token 路由**（v1 和 v2 共用同一组 token）：
+  - `v1`（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
+  - `v2`（通用 HTTP 代理）：`http://<host>:18080/v2/__gw__/t/<TOKEN>`，须携带 `x-target-url: <完整目标URL>` 请求头
 - 管理接口（`/__gw__/register|lookup|unregister`）应只允许内网/管理机访问。
 
 ## 1) 环境检查

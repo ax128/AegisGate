@@ -92,11 +92,13 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 5. 记录审计事件（含风险标签、处置原因、确认状态）
 
 `v2` 链路（通用 HTTP 代理）：
-1. 读取 `x-target-url` 请求头获取原始目标 URL
-2. 请求侧按配置进行脱敏 + 报文边界歧义检测（默认开启）
-3. 转发到目标 HTTP(S) 地址
-4. 响应侧按配置进行 HTTP 注入检测（默认开启，文本类响应）+ 上游响应 framing 异常检测（CL/TE）
+1. 读取 `x-target-url` 请求头获取原始目标 URL（必须是 `http://` 或 `https://` 完整 URL，含 query string）
+2. 请求侧：报文边界歧义检测（CL/TE 冲突优先）+ 可选请求体脱敏（默认开启）
+3. 转发到目标 HTTP(S) 地址（`follow_redirects=false`：不自动跟随 3xx 重定向，直接透传给客户端）
+4. 响应侧按配置进行 framing 异常检测（CL/TE）+ HTTP 注入检测（默认开启，文本类响应）
 5. 命中即返回 `403` 格式化错误（不走确认放行）
+
+> **安全边界提示**：v2 代理不对目标主机做限制；防止 SSRF 应在网络层（防火墙、出口 ACL）控制，或通过 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 明确白名单高信任域名。
 
 ### 1.4 过滤范围、安全检查、审计能力
 
@@ -106,7 +108,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 | 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | HTTP 注入攻击检测 |
 | 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入 + HTTP smuggling/splitting（CL.TE/TE.CL/TE.TE） |
 | 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
-| 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 按普通 HTTP 响应处理 |
+| 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
 | 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |
 
 ### 1.5 命中后的处理方式（怎么处理）
@@ -289,7 +291,6 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | 仅允许本机访问 | `true` |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
-| `AEGIS_UPSTREAM_BASE_URL` | 默认上游地址 | `https://your-upstream.example.com/v1` |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔） | 空 |
 | `AEGIS_STORAGE_BACKEND` | `sqlite`/`redis`/`postgres` | `sqlite` |
 | `AEGIS_SQLITE_DB_PATH` | sqlite 文件路径 | `logs/aegisgate.db` |
@@ -308,6 +309,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | v2 最小误拦模式（仅拦截协议层高危签名：走私/响应拆分/报文混淆） | `true` |
 | `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` | v2 响应拦截跳过域名（逗号分隔；支持 `example.com`/`.example.com`/`*.example.com`） | 空 |
 | `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | v2 响应注入检测最大字符数 | `200000` |
+| `AEGIS_V2_SSE_FILTER_PROBE_MAX_CHARS` | v2 SSE 流式响应检测探针最大字符数 | `4000` |
 
 说明：v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
 
@@ -363,8 +365,21 @@ pytest -q
 - 网关会自动执行恢复并补发 `[DONE]`：
   - `chat/completions`：合成包含恢复提示的可见文本 chunk。
   - `responses`：合成 `response.completed` 终止事件（不保证回放已输出文本）。
+  - `v2`（SSE 流）：自动补发 `data: [DONE]\n\n`，保证客户端收到终止信号。
 - 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关确认匹配失败。
 - 建议同时排查上游超时、代理 `read timeout`、连接重置日志。
+
+### 8.5 v2 请求返回 `missing_target_url_header`
+
+原因：请求未携带 `x-target-url` 请求头，或头值为空。
+
+- `v2` 仅通过 `x-target-url` 请求头获取目标地址，URL 路径中的子路径（`/v2/{subpath}`）不用于路由。
+- 确认客户端在 Header 中传递完整 URL，包括 query string，例如：`x-target-url: https://api.example.com/v1/data?page=1`。
+
+### 8.6 v2 上游返回 3xx 重定向，但客户端未跳转
+
+v2 不自动跟随重定向（`follow_redirects=false`），`Location` 头会透传给客户端。
+客户端需自行处理重定向，或在 `x-target-url` 直接指定最终地址。
 
 ## 9. 许可证
 
