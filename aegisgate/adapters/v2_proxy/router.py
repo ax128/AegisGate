@@ -105,23 +105,11 @@ _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_ssti_or_log4shell": "检测到 SSTI/Log4Shell 注入特征",
     "web_ssrf_metadata": "检测到 SSRF 元数据访问特征",
     "web_crlf_header_injection": "检测到 CRLF 头注入特征",
-    "web_http_smuggling_cl_te": "检测到 HTTP 请求走私特征（CL.TE）",
-    "web_http_smuggling_te_cl": "检测到 HTTP 请求走私特征（TE.CL）",
-    "web_http_smuggling_te_te": "检测到 HTTP 请求走私特征（TE.TE）",
-    "web_http_response_splitting": "检测到 HTTP 响应拆分特征",
-    "web_http_obs_fold_header": "检测到 HTTP 头折叠/混淆特征",
-    "request_framing_cl_te_conflict": "检测到请求报文边界冲突（CL+TE）",
-    "request_framing_multiple_content_length": "检测到请求存在重复 Content-Length",
-    "request_framing_multiple_transfer_encoding": "检测到请求存在重复 Transfer-Encoding",
-    "request_framing_invalid_content_length": "检测到请求 Content-Length 非法",
-    "request_framing_te_ambiguous_value": "检测到请求 Transfer-Encoding 值可疑",
-    "request_framing_header_control_chars": "检测到请求头包含控制字符",
-    "response_framing_cl_te_conflict": "检测到上游响应报文边界冲突（CL+TE）",
-    "response_framing_multiple_content_length": "检测到上游响应存在重复 Content-Length",
-    "response_framing_multiple_transfer_encoding": "检测到上游响应存在重复 Transfer-Encoding",
-    "response_framing_invalid_content_length": "检测到上游响应 Content-Length 非法",
-    "response_framing_te_ambiguous_value": "检测到上游响应 Transfer-Encoding 值可疑",
-    "response_framing_header_control_chars": "检测到上游响应头包含控制字符",
+    "web_http_smuggling_cl_te": "检测到响应正文中嵌入的 HTTP 走私特征（CL.TE）",
+    "web_http_smuggling_te_cl": "检测到响应正文中嵌入的 HTTP 走私特征（TE.CL）",
+    "web_http_smuggling_te_te": "检测到响应正文中嵌入的 HTTP 走私特征（TE.TE）",
+    "web_http_response_splitting": "检测到响应正文中嵌入的 HTTP 响应拆分特征",
+    "web_http_obs_fold_header": "检测到响应正文中嵌入的 HTTP 头折叠/混淆特征",
 }
 
 _v2_async_client: httpx.AsyncClient | None = None
@@ -377,80 +365,6 @@ def _sanitize_request_body(body: bytes, content_type: str) -> tuple[bytes, int, 
     return sanitized.encode("utf-8"), count, hits
 
 
-def _raw_header_values(request: Request, header_name: str) -> list[str]:
-    name = header_name.lower().encode("latin-1")
-    values: list[str] = []
-    for raw_key, raw_value in request.scope.get("headers", []):
-        if raw_key.lower() != name:
-            continue
-        values.append(raw_value.decode("latin-1", errors="ignore"))
-    return values
-
-
-def _header_values(headers: Mapping[str, str], header_name: str) -> list[str]:
-    values: list[str] = []
-    get_list = getattr(headers, "get_list", None)
-    if callable(get_list):
-        for value in get_list(header_name):
-            values.append(str(value))
-    else:
-        value = headers.get(header_name, "")
-        if value:
-            values.append(str(value))
-    return values
-
-
-def _has_header_control_chars(values: list[str]) -> bool:
-    for value in values:
-        if any(ch in value for ch in ("\r", "\n", "\x00")):
-            return True
-    return False
-
-
-def _collect_framing_anomalies(
-    *,
-    content_length_values: list[str],
-    transfer_encoding_values: list[str],
-    prefix: str,
-) -> list[str]:
-    issues: list[str] = []
-    cl_values = [value.strip() for value in content_length_values if value is not None]
-    te_values = [value.strip().lower() for value in transfer_encoding_values if value is not None]
-
-    if len(cl_values) > 1:
-        issues.append(f"{prefix}_multiple_content_length")
-    if len(te_values) > 1:
-        issues.append(f"{prefix}_multiple_transfer_encoding")
-    if cl_values and te_values:
-        issues.append(f"{prefix}_cl_te_conflict")
-    if any(not re.fullmatch(r"\d+", value) for value in cl_values if value):
-        issues.append(f"{prefix}_invalid_content_length")
-    if any("chunked" in value and "," in value for value in te_values):
-        issues.append(f"{prefix}_te_ambiguous_value")
-    if _has_header_control_chars(cl_values) or _has_header_control_chars(te_values):
-        issues.append(f"{prefix}_header_control_chars")
-
-    deduped: list[str] = []
-    for issue in issues:
-        if issue not in deduped:
-            deduped.append(issue)
-    return deduped
-
-
-def _detect_request_framing_anomalies(request: Request) -> list[str]:
-    return _collect_framing_anomalies(
-        content_length_values=_raw_header_values(request, "content-length"),
-        transfer_encoding_values=_raw_header_values(request, "transfer-encoding"),
-        prefix="request_framing",
-    )
-
-
-def _detect_response_framing_anomalies(headers: Mapping[str, str]) -> list[str]:
-    return _collect_framing_anomalies(
-        content_length_values=_header_values(headers, "content-length"),
-        transfer_encoding_values=_header_values(headers, "transfer-encoding"),
-        prefix="response_framing",
-    )
 
 
 def _detect_dangerous_commands(text: str) -> list[str]:
@@ -577,34 +491,6 @@ async def _proxy_v2_streaming(
                     "type": "aegisgate_v2_error",
                     "code": "upstream_unreachable",
                 }
-            },
-        )
-
-    response_framing_issues = _detect_response_framing_anomalies(upstream_response.headers)
-    if settings.v2_enable_response_command_filter and response_framing_issues:
-        await exit_stack.aclose()
-        logger.warning(
-            "v2 response blocked method=%s path=%s target=%s status=%s reason=response_framing_ambiguous issues=%s",
-            request.method,
-            request.url.path,
-            target_url,
-            upstream_response.status_code,
-            response_framing_issues,
-        )
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "message": "上游响应存在可疑 HTTP 报文边界特征，已被安全网关拦截。",
-                    "type": "aegisgate_v2_security_block",
-                    "code": "v2_upstream_response_framing_blocked",
-                    "details": _v2_http_attack_reasons(response_framing_issues),
-                },
-                "aegisgate_v2": {
-                    "request_redaction_enabled": settings.v2_enable_request_redaction,
-                    "response_command_filter_enabled": settings.v2_enable_response_command_filter,
-                    "matched_rules": response_framing_issues,
-                },
             },
         )
 
@@ -789,31 +675,6 @@ def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
 async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     del proxy_path
 
-    request_framing_issues = _detect_request_framing_anomalies(request)
-    if request_framing_issues:
-        logger.warning(
-            "v2 request blocked method=%s path=%s reason=request_framing_ambiguous issues=%s",
-            request.method,
-            request.url.path,
-            request_framing_issues,
-        )
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "message": "该请求已被安全网关拦截，检测到可疑 HTTP 报文边界特征。",
-                    "type": "aegisgate_v2_security_block",
-                    "code": "v2_request_http_framing_blocked",
-                    "details": _v2_http_attack_reasons(request_framing_issues),
-                },
-                "aegisgate_v2": {
-                    "request_redaction_enabled": settings.v2_enable_request_redaction,
-                    "response_command_filter_enabled": settings.v2_enable_response_command_filter,
-                    "matched_rules": request_framing_issues,
-                },
-            },
-        )
-
     target_url, err = _extract_target_url(request)
     if err:
         return JSONResponse(
@@ -876,33 +737,6 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                     "type": "aegisgate_v2_error",
                     "code": "upstream_unreachable",
                 }
-            },
-        )
-
-    response_framing_issues = _detect_response_framing_anomalies(upstream_response.headers)
-    if settings.v2_enable_response_command_filter and response_framing_issues:
-        logger.warning(
-            "v2 response blocked method=%s path=%s target=%s status=%s reason=response_framing_ambiguous issues=%s",
-            request.method,
-            request.url.path,
-            target_url,
-            upstream_response.status_code,
-            response_framing_issues,
-        )
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "message": "上游响应存在可疑 HTTP 报文边界特征，已被安全网关拦截。",
-                    "type": "aegisgate_v2_security_block",
-                    "code": "v2_upstream_response_framing_blocked",
-                    "details": _v2_http_attack_reasons(response_framing_issues),
-                },
-                "aegisgate_v2": {
-                    "request_redaction_enabled": settings.v2_enable_request_redaction,
-                    "response_command_filter_enabled": settings.v2_enable_response_command_filter,
-                    "matched_rules": response_framing_issues,
-                },
             },
         )
 

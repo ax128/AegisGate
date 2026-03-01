@@ -462,9 +462,21 @@ async def test_v2_proxy_logs_request_body_when_debug_and_flag_enabled(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_blocks_ambiguous_request_framing(monkeypatch):
+async def test_v2_proxy_passes_request_with_cl_and_te_headers(monkeypatch):
+    """请求侧不再做 framing 检测，CL+TE 同时存在的合法请求应能正常透传。"""
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            captured["url"] = url
+            return httpx.Response(
+                status_code=200,
+                content=b"ok",
+                headers={"content-type": "text/plain"},
+            )
+
     async def fake_get_client():
-        raise AssertionError("upstream client should not be called for ambiguous request framing")
+        return FakeClient()
 
     monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
     request = _build_request(
@@ -476,14 +488,14 @@ async def test_v2_proxy_blocks_ambiguous_request_framing(monkeypatch):
         body=b'{"k":1}',
     )
     response = await v2_router.proxy_v2(request)
-    assert response.status_code == 400
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["code"] == "v2_request_http_framing_blocked"
-    assert any("cl_te" in str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
+    assert response.status_code == 200
+    assert captured["url"] == "https://upstream.example.com/path"
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_blocks_ambiguous_upstream_response_framing(monkeypatch):
+async def test_v2_proxy_passes_response_with_cl_and_te_headers(monkeypatch):
+    """响应侧不再做 header 层 framing 检测，CL+TE 并存的 CDN/Nginx 正常响应应能透传。"""
+
     class FakeClient:
         async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
             return httpx.Response(
@@ -511,10 +523,8 @@ async def test_v2_proxy_blocks_ambiguous_upstream_response_framing(monkeypatch):
     finally:
         settings.v2_enable_response_command_filter = original_filter
 
-    assert response.status_code == 502
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["code"] == "v2_upstream_response_framing_blocked"
-    assert any("response_framing_cl_te_conflict" == str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
+    assert response.status_code == 200
+    assert response.body == b"safe-body"
 
 
 @pytest.mark.asyncio

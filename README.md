@@ -93,10 +93,10 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 `v2` 链路（通用 HTTP 代理）：
 1. 读取 `x-target-url` 请求头获取原始目标 URL（必须是 `http://` 或 `https://` 完整 URL，含 query string）
-2. 请求侧：报文边界歧义检测（CL/TE 冲突优先）+ 可选请求体脱敏（默认开启）
+2. 请求侧：仅做请求体脱敏（可选，默认开启），不做其他拦截
 3. 转发到目标 HTTP(S) 地址（`follow_redirects=false`：不自动跟随 3xx 重定向，直接透传给客户端）
-4. 响应侧按配置进行 framing 异常检测（CL/TE）+ HTTP 注入检测（默认开启，文本类响应）
-5. 命中即返回 `403` 格式化错误（不走确认放行）
+4. 响应侧：仅对响应正文做高危代码检测（HTTP 走私、响应拆分等嵌入式攻击特征），命中返回 `403`
+5. 正常响应（含 CDN/Nginx 的 CL+TE 并存头）直接透传，不做干预
 
 > **安全边界提示**：v2 代理不对目标主机做限制；防止 SSRF 应在网络层（防火墙、出口 ACL）控制，或通过 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 明确白名单高信任域名。
 
@@ -104,9 +104,9 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 | 维度 | v1 | v2 |
 |---|---|---|
-| 请求体过滤 | 脱敏 + 请求清洗 + RAG 投毒检测 | 脱敏（文本/JSON） |
-| 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | HTTP 注入攻击检测 |
-| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入 + HTTP smuggling/splitting（CL.TE/TE.CL/TE.TE） |
+| 请求体过滤 | 脱敏 + 请求清洗 + RAG 投毒检测 | 仅脱敏（文本/JSON，可选） |
+| 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文） |
+| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则 |
 | 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
 | 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
 | 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |
