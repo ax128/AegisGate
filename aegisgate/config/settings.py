@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     v2_enable_request_redaction: bool = True
     v2_enable_response_command_filter: bool = True
     v2_response_filter_max_chars: int = 200_000
+    v2_sse_filter_probe_max_chars: int = 4_000
 
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60

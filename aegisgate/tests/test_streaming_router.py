@@ -9,7 +9,11 @@ from aegisgate.adapters.openai_compat.router import (
     _stream_block_reason,
     _stream_block_sse_chunk,
 )
-from aegisgate.adapters.openai_compat.stream_utils import _extract_stream_text_from_event, _stream_error_sse_chunk
+from aegisgate.adapters.openai_compat.stream_utils import (
+    _extract_stream_event_type,
+    _extract_stream_text_from_event,
+    _stream_error_sse_chunk,
+)
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 
@@ -63,6 +67,12 @@ def test_extract_stream_text_from_responses_delta_only():
     assert summary == ""
     assert done == ""
     assert completed == ""
+
+
+def test_extract_stream_event_type_normalizes_type():
+    assert _extract_stream_event_type('{"type":"response.completed"}') == "response.completed"
+    assert _extract_stream_event_type('{"type":" Response.Output_Text.Delta "}') == "response.output_text.delta"
+    assert _extract_stream_event_type('{"x":1}') == ""
 
 
 def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
@@ -328,7 +338,8 @@ def test_execute_responses_stream_replays_notice_on_upstream_eof_without_done_an
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"type":"response.created","response":{"id":"r1","object":"response","status":"in_progress","output":[]}}\n\n'
+        if False:  # pragma: no cover - keep async generator shape
+            yield b""
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
 
@@ -356,6 +367,40 @@ def test_execute_responses_stream_replays_notice_on_upstream_eof_without_done_an
     assert _UPSTREAM_EOF_RECOVERY_NOTICE in text
     assert '"type": "response.output_text.delta"' in text
     assert '"recovered": true' in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_responses_stream_injects_done_when_terminal_event_seen_without_done(monkeypatch):
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"type":"response.completed","response":{"id":"r1","object":"response","status":"completed","output":[]}}\n\n'
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+
+    payload = {
+        "request_id": "r-stream-resp-eof-3",
+        "session_id": "s-stream-resp-eof-3",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert text.count('"type":"response.completed"') + text.count('"type": "response.completed"') == 1
+    assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
     assert "data: [DONE]" in text
 
 

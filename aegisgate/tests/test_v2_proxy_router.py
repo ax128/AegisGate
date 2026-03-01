@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -419,3 +420,128 @@ async def test_v2_proxy_blocks_response_smuggling_signature(monkeypatch):
     payload = json.loads(response.body.decode("utf-8"))
     assert payload["error"]["code"] == "v2_response_http_attack_blocked"
     assert any("http_smuggling" in str(rule) for rule in payload["aegisgate_v2"]["matched_rules"])
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_streaming_injects_done_when_upstream_eof_without_done(monkeypatch):
+    class FakeStreamResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {"content-type": "text/event-stream"}
+
+        async def aiter_bytes(self):
+            yield b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def stream(self, method: str, url: str, *, headers: dict[str, str], content: bytes):
+            return FakeStreamContext()
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    request = _build_request(
+        headers={
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+            "x-target-url": "https://upstream.example.com/path",
+        },
+        body=b'{"stream": true, "input":"hello"}',
+    )
+
+    response = await v2_router.proxy_v2(request)
+    assert response.status_code == 200
+    chunks: list[bytes] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    body = b"".join(chunks).decode("utf-8", errors="replace")
+    assert '"response.output_text.delta"' in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_streaming_handles_high_concurrency(monkeypatch):
+    class FakeStreamResponse:
+        def __init__(self, idx: str):
+            self.status_code = 200
+            self.headers = {"content-type": "text/event-stream"}
+            self._idx = idx
+
+        async def aiter_bytes(self):
+            await asyncio.sleep(0)
+            yield f'data: {{"type":"response.output_text.delta","delta":"ok-{self._idx}"}}\n\n'.encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+    class FakeStreamContext:
+        def __init__(self, idx: str):
+            self._response = FakeStreamResponse(idx)
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self):
+            self.inflight = 0
+            self.max_inflight = 0
+            self._lock = asyncio.Lock()
+
+        def stream(self, method: str, url: str, *, headers: dict[str, str], content: bytes):
+            idx = url.rsplit("/", 1)[-1]
+            client = self
+            base_context = FakeStreamContext(idx)
+
+            class _TrackedContext:
+                async def __aenter__(self_inner):
+                    async with client._lock:
+                        client.inflight += 1
+                        client.max_inflight = max(client.max_inflight, client.inflight)
+                    return await base_context.__aenter__()
+
+                async def __aexit__(self_inner, exc_type, exc, tb):
+                    try:
+                        return await base_context.__aexit__(exc_type, exc, tb)
+                    finally:
+                        async with client._lock:
+                            client.inflight = max(0, client.inflight - 1)
+
+            return _TrackedContext()
+
+    fake_client = FakeClient()
+
+    async def fake_get_client():
+        return fake_client
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+
+    async def _one_call(i: int) -> str:
+        request = _build_request(
+            headers={
+                "content-type": "application/json",
+                "accept": "text/event-stream",
+                "x-target-url": f"https://upstream.example.com/path/{i}",
+            },
+            body=b'{"stream": true, "input":"hello"}',
+        )
+        response = await v2_router.proxy_v2(request)
+        chunks: list[bytes] = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    total = 40
+    results = await asyncio.gather(*(_one_call(i) for i in range(total)))
+    assert len(results) == total
+    for i, body in enumerate(results):
+        assert f"ok-{i}" in body
+        assert "data: [DONE]" in body
+    assert fake_client.max_inflight > 1

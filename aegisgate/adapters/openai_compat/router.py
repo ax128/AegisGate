@@ -23,6 +23,7 @@ from aegisgate.adapters.openai_compat.mapper import (
 from aegisgate.adapters.openai_compat.stream_utils import (
     _build_streaming_response,
     _extract_sse_data_payload,
+    _extract_stream_event_type,
     _extract_stream_text_from_event,
     _stream_block_reason,
     _stream_block_sse_chunk,
@@ -2521,6 +2522,8 @@ async def _execute_responses_stream_once(
         stream_window = ""
         stream_cached_parts: list[str] = []
         chunk_count = 0
+        saw_any_data_event = False
+        saw_terminal_event = False
         saw_done = False
         stream_end_reason = "upstream_eof_no_done"
         blocked_reason: str | None = None
@@ -2545,6 +2548,11 @@ async def _execute_responses_stream_once(
                         break
                     yield line
                     break
+
+                saw_any_data_event = True
+                event_type = _extract_stream_event_type(payload_text)
+                if event_type in {"response.completed", "response.failed", "error"}:
+                    saw_terminal_event = True
 
                 chunk_text = _extract_stream_text_from_event(payload_text)
                 if chunk_text:
@@ -2706,7 +2714,15 @@ async def _execute_responses_stream_once(
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
-                if chunk_count <= 0:
+                if saw_terminal_event:
+                    logger.warning(
+                        "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true terminal_event=true",
+                        ctx.request_id,
+                        chunk_count,
+                        len(stream_window),
+                    )
+                    yield _stream_done_sse_chunk()
+                elif chunk_count <= 0 and not saw_any_data_event:
                     replay_text = _build_upstream_eof_replay_text("")
                     logger.warning(
                         "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true replay_notice=true",

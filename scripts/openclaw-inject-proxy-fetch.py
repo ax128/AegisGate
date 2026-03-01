@@ -3,7 +3,9 @@
 在 OpenClaw 源码中注入「安全网关代理」逻辑：
 - 创建 src/infra/proxy-fetch.ts
 - 在 src/entry.ts 最早处加入 import "./infra/proxy-fetch.js"
-- 注入后：proxy-fetch.ts 写入 .gitignore，不参与提交；git 正常更新（pull）即可，更新完需手动再执行一次本脚本注入
+- 首次注入前会备份被改动文件到 .aegisgate-backups/openclaw-inject-proxy-fetch/
+- 再次运行若检测到已注入：先恢复备份，再重新注入，避免重复注入导致的错位
+- 注入后：proxy-fetch.ts 与备份目录写入 .gitignore，不参与提交；git 正常更新（pull）即可，更新完需手动再执行一次本脚本注入
 - 注入成功后：自动执行一次前端构建（build）
 
 用法：
@@ -249,7 +251,15 @@ ENTRY_NEXT_IMPORT_CONTAINS = 'from "./cli/profile.js"'
 ENTRY_CONTEXT_LOOKAHEAD = 6  # 锚点后最多看几行内要出现 profile.js import
 
 # 注入生成的文件，加入 .gitignore 以便 git 忽略
-GITIGNORE_ENTRY = "src/infra/proxy-fetch.ts"
+GITIGNORE_MARKER = "# openclaw-inject-proxy-fetch"
+GITIGNORE_PROXY_FETCH_ENTRY = "src/infra/proxy-fetch.ts"
+GITIGNORE_BACKUP_DIR_ENTRY = ".aegisgate-backups/"
+
+# 备份目录（位于 OpenClaw 目标项目根目录）
+BACKUP_DIR_REL = os.path.join(".aegisgate-backups", "openclaw-inject-proxy-fetch")
+ENTRY_BACKUP_FILENAME = "src__entry.ts.bak"
+PROXY_FETCH_BACKUP_FILENAME = "src__infra__proxy-fetch.ts.bak"
+PROXY_FETCH_MISSING_MARKER_FILENAME = "src__infra__proxy-fetch.ts.missing"
 
 
 def _is_valid_openclaw_root(path: str) -> bool:
@@ -329,52 +339,132 @@ def _entry_already_injected(content: str) -> bool:
     return MARKER_IMPORT in content
 
 
-def _update_gitignore(root: str, add: bool) -> None:
-    """注入时把 proxy-fetch.ts 加入 .gitignore，移除时删掉该条。"""
+def _backup_paths(root: str) -> tuple[str, str, str]:
+    """返回 (entry_backup_path, proxy_fetch_backup_path, proxy_fetch_missing_marker_path)。"""
+    backup_dir = os.path.join(root, BACKUP_DIR_REL)
+    return (
+        os.path.join(backup_dir, ENTRY_BACKUP_FILENAME),
+        os.path.join(backup_dir, PROXY_FETCH_BACKUP_FILENAME),
+        os.path.join(backup_dir, PROXY_FETCH_MISSING_MARKER_FILENAME),
+    )
+
+
+def _has_entry_backup(root: str) -> bool:
+    entry_backup_path, _, _ = _backup_paths(root)
+    return os.path.isfile(entry_backup_path)
+
+
+def _ensure_backup_baseline(root: str, entry_path: str, proxy_fetch_path: str) -> bool:
+    """
+    首次注入时建立“原始基线”备份。
+    已存在备份时不会覆盖，避免把“已注入状态”覆盖成基线。
+    """
+    backup_dir = os.path.join(root, BACKUP_DIR_REL)
+    entry_backup_path, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        if not os.path.isfile(entry_backup_path):
+            shutil.copy2(entry_path, entry_backup_path)
+            LOG.info("已创建备份: %s", entry_backup_path)
+        else:
+            LOG.debug("entry.ts 备份已存在，跳过: %s", entry_backup_path)
+
+        if os.path.isfile(proxy_fetch_path):
+            if not os.path.isfile(proxy_backup_path):
+                shutil.copy2(proxy_fetch_path, proxy_backup_path)
+                LOG.info("已创建备份: %s", proxy_backup_path)
+            else:
+                LOG.debug("proxy-fetch.ts 备份已存在，跳过: %s", proxy_backup_path)
+        else:
+            if not os.path.isfile(proxy_backup_path) and not os.path.isfile(proxy_missing_marker_path):
+                with open(proxy_missing_marker_path, "w", encoding="utf-8") as f:
+                    f.write("missing\n")
+                LOG.debug("记录原始状态（proxy-fetch.ts 不存在）: %s", proxy_missing_marker_path)
+        return True
+    except OSError as exc:
+        LOG.error("创建备份失败: %s", exc)
+        return False
+
+
+def _restore_from_backup(root: str, entry_path: str, proxy_fetch_path: str) -> bool:
+    """从备份恢复基线文件。成功恢复任一文件返回 True。"""
+    entry_backup_path, proxy_backup_path, proxy_missing_marker_path = _backup_paths(root)
+    restored = False
+    try:
+        if os.path.isfile(entry_backup_path):
+            shutil.copy2(entry_backup_path, entry_path)
+            LOG.info("已恢复备份: %s -> %s", entry_backup_path, entry_path)
+            restored = True
+
+        if os.path.isfile(proxy_backup_path):
+            os.makedirs(os.path.dirname(proxy_fetch_path), exist_ok=True)
+            shutil.copy2(proxy_backup_path, proxy_fetch_path)
+            LOG.info("已恢复备份: %s -> %s", proxy_backup_path, proxy_fetch_path)
+            restored = True
+        elif os.path.isfile(proxy_missing_marker_path):
+            if os.path.isfile(proxy_fetch_path):
+                os.remove(proxy_fetch_path)
+                LOG.info("已恢复原始状态（删除注入文件）: %s", proxy_fetch_path)
+                restored = True
+        return restored
+    except OSError as exc:
+        LOG.error("恢复备份失败: %s", exc)
+        return False
+
+
+def _update_gitignore(root: str, add_proxy_file: bool) -> None:
+    """维护 .gitignore：始终忽略备份目录；按需忽略 proxy-fetch.ts。"""
     path = os.path.join(root, ".gitignore")
-    if not os.path.isfile(path):
-        if add:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f"# openclaw-inject-proxy-fetch\n{GITIGNORE_ENTRY}\n")
-            LOG.info("已创建 .gitignore 并加入 %s", GITIGNORE_ENTRY)
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    marker = "# openclaw-inject-proxy-fetch\n"
-    entry_line = GITIGNORE_ENTRY + "\n"
-    if add:
-        if any(line.rstrip() == GITIGNORE_ENTRY for line in lines):
-            LOG.debug(".gitignore 已包含 %s，跳过", GITIGNORE_ENTRY)
-            return
-        if lines and not lines[-1].endswith("\n"):
-            lines.append("\n")
-        lines.append(marker)
-        lines.append(entry_line)
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        LOG.info("已在 .gitignore 中加入 %s", GITIGNORE_ENTRY)
-    else:
-        new_lines = []
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.rstrip()
-            if stripped == "# openclaw-inject-proxy-fetch" and i + 1 < len(lines) and lines[i + 1].rstrip() == GITIGNORE_ENTRY:
-                i += 2
-                continue
-            if stripped == GITIGNORE_ENTRY:
-                i += 1
-                continue
-            new_lines.append(line)
+    managed_entries = {GITIGNORE_PROXY_FETCH_ENTRY, GITIGNORE_BACKUP_DIR_ENTRY}
+    desired_entries = [GITIGNORE_BACKUP_DIR_ENTRY]
+    if add_proxy_file:
+        desired_entries.append(GITIGNORE_PROXY_FETCH_ENTRY)
+
+    existing_lines: list[str] = []
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing_lines = f.read().splitlines()
+
+    cleaned_lines: list[str] = []
+    i = 0
+    while i < len(existing_lines):
+        stripped = existing_lines[i].strip()
+        if stripped == GITIGNORE_MARKER:
             i += 1
-        if new_lines != lines:
-            with open(path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-            LOG.info("已从 .gitignore 移除 %s", GITIGNORE_ENTRY)
+            while i < len(existing_lines) and existing_lines[i].strip() in managed_entries:
+                i += 1
+            continue
+        if stripped in managed_entries:
+            i += 1
+            continue
+        cleaned_lines.append(existing_lines[i])
+        i += 1
+
+    if cleaned_lines and cleaned_lines[-1].strip() != "":
+        cleaned_lines.append("")
+    cleaned_lines.append(GITIGNORE_MARKER)
+    cleaned_lines.extend(desired_entries)
+    new_content = "\n".join(cleaned_lines).rstrip() + "\n"
+
+    old_content = ""
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            old_content = f.read()
+
+    if new_content != old_content:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        LOG.info(
+            "已更新 .gitignore（忽略备份目录%s）%s",
+            GITIGNORE_BACKUP_DIR_ENTRY,
+            f"，并忽略 {GITIGNORE_PROXY_FETCH_ENTRY}" if add_proxy_file else "，并移除 proxy-fetch 忽略项",
+        )
+    else:
+        LOG.debug(".gitignore 已是最新，跳过更新")
 
 
 def inject(root: str) -> bool:
-    """注入 proxy-fetch：创建文件并修改 entry.ts。返回是否成功（含已注入视为成功）。"""
+    """注入 proxy-fetch：若已注入则先恢复备份，再重新注入。"""
     infra_dir = os.path.join(root, "src", "infra")
     proxy_fetch_path = os.path.join(root, "src", "infra", "proxy-fetch.ts")
     entry_path = os.path.join(root, "src", "entry.ts")
@@ -384,6 +474,30 @@ def inject(root: str) -> bool:
         LOG.error("未找到 entry.ts: %s", entry_path)
         return False
     LOG.info("找到 entry.ts: %s", entry_path)
+
+    with open(entry_path, "r", encoding="utf-8") as f:
+        entry_lines = f.readlines()
+    entry_content = "".join(entry_lines)
+
+    if _entry_already_injected(entry_content):
+        LOG.info("检测到已注入：先恢复备份，再重新注入。")
+        if _has_entry_backup(root):
+            if not _restore_from_backup(root, entry_path, proxy_fetch_path):
+                LOG.error("已注入状态下恢复备份失败，终止以避免错误覆盖。")
+                return False
+        else:
+            LOG.warning("检测到已注入，但未找到备份；先执行一次移除，再继续重注入。")
+            remove(root)
+
+        with open(entry_path, "r", encoding="utf-8") as f:
+            entry_lines = f.readlines()
+        entry_content = "".join(entry_lines)
+        if _entry_already_injected(entry_content):
+            LOG.error("恢复后 entry.ts 仍检测到注入标记，终止以避免重复注入。")
+            return False
+
+    if not _ensure_backup_baseline(root, entry_path, proxy_fetch_path):
+        return False
 
     # 1) 写入 proxy-fetch.ts
     os.makedirs(infra_dir, exist_ok=True)
@@ -400,16 +514,7 @@ def inject(root: str) -> bool:
         else:
             LOG.debug("proxy-fetch.ts 已存在且内容一致，跳过写入")
 
-    # 2) 读取 entry.ts 并做上下文校验
-    with open(entry_path, "r", encoding="utf-8") as f:
-        entry_lines = f.readlines()
-    entry_content = "".join(entry_lines)
-
-    if _entry_already_injected(entry_content):
-        LOG.info("entry.ts 已包含 proxy-fetch 注入，无需重复注入")
-        _update_gitignore(root, True)
-        return True
-
+    # 2) 执行上下文校验
     ok, msg = _check_entry_context(entry_lines, entry_path)
     if not ok:
         LOG.error("entry.ts 上下文校验未通过: %s", msg)
@@ -445,6 +550,12 @@ def remove(root: str) -> bool:
     if not os.path.isfile(entry_path):
         LOG.error("未找到 entry.ts: %s", entry_path)
         return False
+
+    restored = _restore_from_backup(root, entry_path, proxy_fetch_path)
+    if restored:
+        LOG.info("已优先从备份恢复原始状态。")
+        _update_gitignore(root, False)
+        return True
 
     changed = False
     if os.path.isfile(proxy_fetch_path):
