@@ -485,32 +485,16 @@ def _detect_dangerous_commands(text: str) -> list[str]:
     return raw_matches[:_V2_MAX_MATCH_IDS]
 
 
-def _target_url_header_candidates() -> list[str]:
-    configured = (settings.v2_original_url_header or "").strip()
-    candidates: list[str] = []
-    if configured:
-        candidates.append(configured)
-    for alias in ("x-target-url", "x-original-url"):
-        if not configured or alias.lower() != configured.lower():
-            candidates.append(alias)
-    return candidates
+_V2_TARGET_URL_HEADER = "x-target-url"
 
 
 def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
-    value = ""
-    matched_header = ""
-    for header_name in _target_url_header_candidates():
-        candidate = request.headers.get(header_name, "").strip()
-        if candidate:
-            value = candidate
-            matched_header = header_name
-            break
+    value = request.headers.get(_V2_TARGET_URL_HEADER, "").strip()
     if not value:
-        accepted = ", ".join(_target_url_header_candidates())
-        return None, f"missing required target-url header (accepted: {accepted})"
+        return None, f"missing required header: {_V2_TARGET_URL_HEADER}"
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None, f"invalid target url in header: {matched_header or settings.v2_original_url_header}"
+        return None, f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https"
     return value, None
 
 
@@ -518,13 +502,12 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
     excluded = {
         "host",
         "content-length",
+        _V2_TARGET_URL_HEADER,
         settings.upstream_base_header.lower(),
         settings.gateway_key_header.lower(),
         settings.gateway_key_header.replace("-", "_").lower(),
         *_HOP_BY_HOP_HEADERS,
     }
-    for header_name in _target_url_header_candidates():
-        excluded.add(header_name.lower())
     headers: dict[str, str] = {}
     for key, value in request.headers.items():
         lowered = key.lower()
@@ -839,7 +822,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 "error": {
                     "message": err,
                     "type": "aegisgate_v2_error",
-                    "code": "invalid_original_url_header",
+                    "code": "missing_target_url_header",
                 }
             },
         )

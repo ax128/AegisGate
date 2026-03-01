@@ -20,7 +20,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - `POST /v1/{subpath}` 通用代理
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
-  - 必须携带原始目标头（兼容 `x-target-url` / `x-original-url`，优先读取 `AEGIS_V2_ORIGINAL_URL_HEADER`）
+  - 必须携带 `x-target-url` 请求头指定原始目标地址
   - 请求侧：脱敏 + 报文边界歧义检测（CL/TE 冲突、重复头、非法 framing）
   - 响应侧仅做 HTTP 注入攻击识别拦截（可开关，默认开）
     - 例如：SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入
@@ -92,7 +92,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 5. 记录审计事件（含风险标签、处置原因、确认状态）
 
 `v2` 链路（通用 HTTP 代理）：
-1. 读取原始目标 URL 头（支持 `x-target-url`、`x-original-url`，优先 `AEGIS_V2_ORIGINAL_URL_HEADER`）
+1. 读取 `x-target-url` 请求头获取原始目标 URL
 2. 请求侧按配置进行脱敏 + 报文边界歧义检测（默认开启）
 3. 转发到目标 HTTP(S) 地址
 4. 响应侧按配置进行 HTTP 注入检测（默认开启，文本类响应）+ 上游响应 framing 异常检测（CL/TE）
@@ -166,7 +166,7 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
   -d '{"api_key":"sk-test-1234567890","message":"hello"}'
 ```
 
-说明：`v2` 同时兼容 `x-target-url` 和 `x-original-url`；如果你有自定义头名，可通过 `AEGIS_V2_ORIGINAL_URL_HEADER` 配置。
+说明：`v2` 仅识别 `x-target-url` 请求头，头值必须是完整的 `http://` 或 `https://` URL。
 
 辅助接口：
 - 查询：`POST /__gw__/lookup`
@@ -303,7 +303,6 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high` | `medium` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
-| `AEGIS_V2_ORIGINAL_URL_HEADER` | v2 原始目标 URL 请求头名（默认；仍兼容 `x-target-url`） | `x-original-url` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
 | `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | v2 响应 HTTP 注入攻击过滤开关 | `true` |
 | `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | v2 最小误拦模式（仅拦截协议层高危签名：走私/响应拆分/报文混淆） | `true` |

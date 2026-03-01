@@ -1013,7 +1013,8 @@ def inject(root: str) -> bool:
         with open(proxy_fetch_path, "w", encoding="utf-8") as f:
             f.write(PROXY_FETCH_TS)
     else:
-        existing = open(proxy_fetch_path, encoding="utf-8").read()
+        with open(proxy_fetch_path, encoding="utf-8") as f:
+            existing = f.read()
         if existing != PROXY_FETCH_TS:
             LOG.info("更新 proxy-fetch.ts（内容与脚本不一致）: %s", proxy_fetch_path)
             with open(proxy_fetch_path, "w", encoding="utf-8") as f:

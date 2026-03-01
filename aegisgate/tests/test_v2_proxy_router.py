@@ -76,7 +76,7 @@ async def test_v2_proxy_redacts_request_body_before_forward(monkeypatch):
         request = _build_request(
             headers={
                 "content-type": "application/json",
-                "x-original-url": "https://upstream.example.com/path",
+                "x-target-url": "https://upstream.example.com/path",
             },
             body=body,
         )
@@ -112,7 +112,7 @@ async def test_v2_proxy_allows_non_protocol_payload_in_strict_mode(monkeypatch):
     settings.v2_response_filter_obvious_only = False
     try:
         request = _build_request(
-            headers={"x-original-url": "https://upstream.example.com/path"},
+            headers={"x-target-url": "https://upstream.example.com/path"},
             body=b"{}",
         )
         response = await v2_router.proxy_v2(request)
@@ -142,7 +142,7 @@ async def test_v2_proxy_can_disable_response_command_filter(monkeypatch):
     settings.v2_enable_response_command_filter = False
     try:
         request = _build_request(
-            headers={"x-original-url": "https://upstream.example.com/path"},
+            headers={"x-target-url": "https://upstream.example.com/path"},
             body=b"{}",
         )
         response = await v2_router.proxy_v2(request)
@@ -173,7 +173,7 @@ async def test_v2_proxy_allows_single_low_conf_signal_in_obvious_only_mode(monke
     settings.v2_response_filter_obvious_only = True
     try:
         request = _build_request(
-            headers={"x-original-url": "https://upstream.example.com/path"},
+            headers={"x-target-url": "https://upstream.example.com/path"},
             body=b"",
         )
         response = await v2_router.proxy_v2(request)
@@ -373,7 +373,7 @@ async def test_v2_proxy_does_not_block_docker_text_when_http_attack_filter_enabl
     settings.v2_enable_response_command_filter = True
     try:
         request = _build_request(
-            headers={"x-original-url": "https://upstream.example.com/path"},
+            headers={"x-target-url": "https://upstream.example.com/path"},
             body=b"{}",
         )
         response = await v2_router.proxy_v2(request)
@@ -385,12 +385,12 @@ async def test_v2_proxy_does_not_block_docker_text_when_http_attack_filter_enabl
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_requires_original_url_header():
+async def test_v2_proxy_requires_target_url_header():
     request = _build_request(headers={}, body=b"{}")
     response = await v2_router.proxy_v2(request)
     assert response.status_code == 400
     payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["code"] == "invalid_original_url_header"
+    assert payload["error"]["code"] == "missing_target_url_header"
 
 
 @pytest.mark.asyncio
@@ -469,7 +469,7 @@ async def test_v2_proxy_blocks_ambiguous_request_framing(monkeypatch):
     monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
     request = _build_request(
         raw_headers=[
-            ("x-original-url", "https://upstream.example.com/path"),
+            ("x-target-url", "https://upstream.example.com/path"),
             ("content-length", "8"),
             ("transfer-encoding", "chunked"),
         ],
@@ -504,7 +504,7 @@ async def test_v2_proxy_blocks_ambiguous_upstream_response_framing(monkeypatch):
     settings.v2_enable_response_command_filter = True
     try:
         request = _build_request(
-            headers={"x-original-url": "https://upstream.example.com/path"},
+            headers={"x-target-url": "https://upstream.example.com/path"},
             body=b"",
         )
         response = await v2_router.proxy_v2(request)
