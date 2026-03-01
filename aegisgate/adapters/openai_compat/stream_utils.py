@@ -68,6 +68,20 @@ def _extract_stream_text_from_event(data_payload: str) -> str:
     return ""
 
 
+def _extract_stream_event_type(data_payload: str) -> str:
+    """Return normalized stream event type, or empty string if unavailable."""
+    try:
+        event = json.loads(data_payload)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(event, dict):
+        return ""
+    event_type = event.get("type")
+    if not isinstance(event_type, str):
+        return ""
+    return event_type.strip().lower()
+
+
 def _stream_block_reason(ctx: RequestContext) -> str | None:
     # Command-like high risk output should always require confirmation in stream mode.
     if "response_anomaly_high_risk_command" in ctx.security_tags:

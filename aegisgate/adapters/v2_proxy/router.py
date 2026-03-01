@@ -6,13 +6,14 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import AsyncExitStack
 from functools import lru_cache
-from typing import Any, Mapping
+from typing import Any, AsyncGenerator, Mapping
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
@@ -33,6 +34,9 @@ _HOP_BY_HOP_HEADERS = {
 }
 _V2_MAX_MATCH_IDS = 24
 _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
+_STREAM_FLAG_DETECT_MAX_BYTES = 16_384
+_SSE_DONE_RECOVERY_CHUNK = b"data: [DONE]\n\n"
+_SSE_DONE_DETECT_TAIL_CHARS = 64
 _DEBUG_HEADERS_REDACT = frozenset(
     {"authorization", "gateway-key", "x-aegis-signature", "x-aegis-timestamp", "x-aegis-nonce"}
 )
@@ -133,7 +137,10 @@ def _v2_http_limits() -> httpx.Limits:
 
 def _v2_http_timeout() -> httpx.Timeout:
     timeout = float(settings.upstream_timeout_seconds)
-    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout)
+    # Under burst traffic allow longer pool wait than I/O timeout to reduce false
+    # upstream_unreachable caused by short queueing contention.
+    pool_timeout = max(timeout + 5.0, timeout * 2.0)
+    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=pool_timeout)
 
 
 async def _get_v2_async_client() -> httpx.AsyncClient:
@@ -476,6 +483,194 @@ def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]
     return out
 
 
+def _request_prefers_streaming(request: Request, body: bytes, content_type: str) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/event-stream" in accept:
+        return True
+    if "json" not in content_type.lower():
+        return False
+    sample = body[:_STREAM_FLAG_DETECT_MAX_BYTES]
+    return bool(re.search(rb'"stream"\s*:\s*true\b', sample, re.IGNORECASE))
+
+
+def _sse_done_seen_from_chunk(chunk: bytes, *, tail: str) -> tuple[bool, str]:
+    text = tail + chunk.decode("utf-8", errors="ignore")
+    done_seen = "data: [DONE]" in text or "data:[DONE]" in text
+    new_tail = text[-_SSE_DONE_DETECT_TAIL_CHARS:] if text else ""
+    return done_seen, new_tail
+
+
+async def _proxy_v2_streaming(
+    *,
+    request: Request,
+    client: httpx.AsyncClient,
+    target_url: str,
+    forward_headers: dict[str, str],
+    outbound_body: bytes,
+    redaction_count: int,
+) -> Response:
+    exit_stack = AsyncExitStack()
+    try:
+        upstream_response = await exit_stack.enter_async_context(
+            client.stream(
+                request.method,
+                target_url,
+                headers=forward_headers,
+                content=outbound_body,
+            )
+        )
+    except httpx.HTTPError as exc:
+        await exit_stack.aclose()
+        detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
+        logger.warning("v2 upstream unreachable target=%s error=%s", target_url, detail)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": f"upstream_unreachable: {detail}",
+                    "type": "aegisgate_v2_error",
+                    "code": "upstream_unreachable",
+                }
+            },
+        )
+
+    response_framing_issues = _detect_response_framing_anomalies(upstream_response.headers)
+    if settings.v2_enable_response_command_filter and response_framing_issues:
+        await exit_stack.aclose()
+        logger.warning(
+            "v2 response blocked method=%s path=%s target=%s status=%s reason=response_framing_ambiguous issues=%s",
+            request.method,
+            request.url.path,
+            target_url,
+            upstream_response.status_code,
+            response_framing_issues,
+        )
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": "上游响应存在可疑 HTTP 报文边界特征，已被安全网关拦截。",
+                    "type": "aegisgate_v2_security_block",
+                    "code": "v2_upstream_response_framing_blocked",
+                    "details": _v2_http_attack_reasons(response_framing_issues),
+                },
+                "aegisgate_v2": {
+                    "request_redaction_enabled": settings.v2_enable_request_redaction,
+                    "response_command_filter_enabled": settings.v2_enable_response_command_filter,
+                    "matched_rules": response_framing_issues,
+                },
+            },
+        )
+
+    response_headers = _build_client_response_headers(upstream_response.headers)
+    if redaction_count > 0:
+        response_headers["x-aegis-v2-request-redacted"] = "true"
+        response_headers["x-aegis-v2-redaction-count"] = str(redaction_count)
+
+    response_content_type = upstream_response.headers.get("content-type", "")
+    is_textual = _looks_textual_content_type(response_content_type)
+    is_sse = "text/event-stream" in response_content_type.lower()
+
+    buffered_chunks: list[bytes] = []
+    upstream_exhausted = False
+    if settings.v2_enable_response_command_filter and is_textual:
+        max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
+        if is_sse:
+            max_chars = max(256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars)))
+        probe_parts: list[str] = []
+        inspected_chars = 0
+        matches: list[str] = []
+        async for chunk in upstream_response.aiter_bytes():
+            if chunk:
+                buffered_chunks.append(chunk)
+                if inspected_chars < max_chars:
+                    piece = chunk.decode("utf-8", errors="replace")
+                    if piece:
+                        remain = max_chars - inspected_chars
+                        if remain > 0:
+                            capped = piece[:remain]
+                            if capped:
+                                probe_parts.append(capped)
+                                inspected_chars += len(capped)
+                    if probe_parts:
+                        matches = _detect_dangerous_commands("".join(probe_parts))
+                        if matches:
+                            break
+            if inspected_chars >= max_chars:
+                break
+        else:
+            upstream_exhausted = True
+
+        if matches:
+            await exit_stack.aclose()
+            logger.warning(
+                "v2 response blocked method=%s path=%s target=%s status=%s matches=%s",
+                request.method,
+                request.url.path,
+                target_url,
+                upstream_response.status_code,
+                matches,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "message": "该请求已被安全网关拦截，可能携带注入攻击。",
+                        "type": "aegisgate_v2_security_block",
+                        "code": "v2_response_http_attack_blocked",
+                        "details": _v2_http_attack_reasons(matches),
+                    },
+                    "aegisgate_v2": {
+                        "request_redaction_enabled": settings.v2_enable_request_redaction,
+                        "response_command_filter_enabled": settings.v2_enable_response_command_filter,
+                        "matched_rules": matches,
+                    },
+                },
+            )
+
+    async def _iter_body() -> AsyncGenerator[bytes, None]:
+        saw_done = False
+        sse_tail = ""
+        inject_done = False
+        try:
+            for chunk in buffered_chunks:
+                if not chunk:
+                    continue
+                if is_sse:
+                    detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
+                    saw_done = saw_done or detected
+                yield chunk
+            if not upstream_exhausted:
+                async for chunk in upstream_response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    if is_sse:
+                        detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
+                        saw_done = saw_done or detected
+                    yield chunk
+        except httpx.HTTPError as exc:
+            detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
+            logger.warning("v2 upstream stream interrupted target=%s error=%s", target_url, detail)
+        finally:
+            if is_sse and not saw_done:
+                inject_done = True
+            await exit_stack.aclose()
+        if inject_done:
+            logger.warning(
+                "v2 sse upstream closed without DONE method=%s path=%s target=%s inject_done=true",
+                request.method,
+                request.url.path,
+                target_url,
+            )
+            yield _SSE_DONE_RECOVERY_CHUNK
+
+    return StreamingResponse(
+        _iter_body(),
+        status_code=upstream_response.status_code,
+        headers=response_headers,
+    )
+
+
 def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
     if not logger.isEnabledFor(logging.DEBUG):
         return
@@ -598,6 +793,16 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
 
     forward_headers = _build_forward_headers(request)
     client = await _get_v2_async_client()
+    if _request_prefers_streaming(request, outbound_body, original_content_type):
+        return await _proxy_v2_streaming(
+            request=request,
+            client=client,
+            target_url=target_url,
+            forward_headers=forward_headers,
+            outbound_body=outbound_body,
+            redaction_count=redaction_count,
+        )
+
     try:
         upstream_response = await client.request(
             method=request.method,
