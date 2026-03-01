@@ -44,6 +44,7 @@ from aegisgate.adapters.openai_compat.upstream import (
 )
 from aegisgate.config.settings import settings
 from aegisgate.config.security_rules import load_security_rules
+from aegisgate.util.masking import mask_for_log
 from aegisgate.core.audit import write_audit
 from aegisgate.core.confirmation import (
     make_confirm_id,
@@ -309,16 +310,18 @@ def _sanitize_text_for_upstream_with_hits(
     )
     hits: list[dict[str, Any]] = []
     for pattern_id, pattern in patterns:
-        match_count = len(list(pattern.finditer(cleaned)))
-        if match_count <= 0:
+        match_list = list(pattern.finditer(cleaned))
+        if not match_list:
             continue
+        first_raw = match_list[0].group(0)
         hits.append(
             {
                 "path": path,
                 "field": field,
                 "role": role or "unknown",
                 "pattern": pattern_id,
-                "count": match_count,
+                "count": len(match_list),
+                "masked_value": mask_for_log(first_raw),
             }
         )
         cleaned = pattern.sub(f"[REDACTED:{pattern_id}]", cleaned)
@@ -460,7 +463,14 @@ def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages
     return upstream_payload
 
 
-def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
+def _build_responses_upstream_payload(
+    payload: dict[str, Any],
+    sanitized_req_messages: list,
+    *,
+    request_id: str = "-",
+    session_id: str = "-",
+    route: str = "-",
+) -> dict[str, Any]:
     upstream_payload = dict(payload)
     if sanitized_req_messages:
         original_input = payload.get("input")
@@ -469,9 +479,12 @@ def _build_responses_upstream_payload(payload: dict[str, Any], sanitized_req_mes
             upstream_payload["input"] = sanitized_input
             if redaction_hits:
                 sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
-                logger.info(
-                    "responses input redaction applied request_id=%s hits=%s positions=%s truncated=%s",
-                    str(payload.get("request_id") or "-"),
+                # WARNING 级别：含敏感字段的请求属于安全审计事件
+                logger.warning(
+                    "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+                    request_id,
+                    session_id,
+                    route,
                     len(redaction_hits),
                     sample,
                     len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
@@ -2532,7 +2545,10 @@ async def _execute_responses_stream_once(
         logger.info("responses stream request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
+    upstream_payload = _build_responses_upstream_payload(
+        payload, sanitized_req.messages,
+        request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+    )
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
@@ -3106,7 +3122,10 @@ async def _execute_responses_once(
 
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = _build_responses_upstream_payload(payload, req.messages)
+        upstream_payload = _build_responses_upstream_payload(
+            payload, req.messages,
+            request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+        )
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
@@ -3167,7 +3186,10 @@ async def _execute_responses_once(
             logger.info("responses endpoint request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
             return to_responses_output(confirmation_resp)
 
-        upstream_payload = _build_responses_upstream_payload(payload, sanitized_req.messages)
+        upstream_payload = _build_responses_upstream_payload(
+            payload, sanitized_req.messages,
+            request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+        )
 
     try:
         status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)

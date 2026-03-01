@@ -17,32 +17,12 @@ from aegisgate.filters.base import BaseFilter
 from aegisgate.storage.kv import KVStore
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.masking import mask_for_log
 
 
 _MAX_LOG_MARKERS = 10
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
-
-
-def _normalize_for_log(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _mask_for_log(value: str) -> str:
-    normalized = _normalize_for_log(value)
-    length = len(normalized)
-    if length <= 0:
-        return ""
-    if length == 1:
-        return "*"
-    if length <= 4:
-        return f"{normalized[:1]}{'*' * (length - 2)}{normalized[-1:]}"
-
-    head = 3 if length >= 10 else 2
-    tail = 2
-    if head + tail >= length:
-        head, tail = 1, 1
-    return f"{normalized[:head]}{'*' * (length - head - tail)}{normalized[-tail:]}"
 
 
 class RedactionFilter(BaseFilter):
@@ -139,6 +119,9 @@ class RedactionFilter(BaseFilter):
         serial = 0
         request_prefix = self._request_prefix(ctx.request_id)
 
+        # Mutable container so the inner closure can reference the current message role.
+        _current_role: list[str] = ["unknown"]
+
         def replace_in_text(text: str) -> str:
             nonlocal serial
 
@@ -156,11 +139,11 @@ class RedactionFilter(BaseFilter):
                 if len(log_markers) < _MAX_LOG_MARKERS:
                     log_markers.append(
                         {
-                            "redaction_applied": True,
-                            "marker": placeholder,
                             "kind": kind,
-                            "masked_value": _mask_for_log(raw_value),
+                            "msg_role": _current_role[0],
+                            "masked_value": mask_for_log(raw_value),
                             "value_length": len(raw_value),
+                            "marker": placeholder,
                         }
                     )
                 return placeholder
@@ -172,6 +155,7 @@ class RedactionFilter(BaseFilter):
             return text
 
         for msg in req.messages:
+            _current_role[0] = str(msg.role or "unknown")
             normalized = self._normalize_input(msg.content)
             msg.content = replace_in_text(normalized)
 
@@ -188,10 +172,13 @@ class RedactionFilter(BaseFilter):
                 "replacements": len(mapping),
             }
             ctx.security_tags.add("redaction_applied")
-            logger.info(
-                "redaction replacements=%d request_id=%s redaction_markers=%s truncated=%s",
-                len(mapping),
+            # WARNING 级别：含敏感字段的请求属于安全审计事件，需要可见
+            logger.warning(
+                "redaction request_id=%s session_id=%s route=%s replacements=%d markers=%s truncated=%s",
                 ctx.request_id,
+                ctx.session_id,
+                ctx.route,
+                len(mapping),
                 log_markers,
                 len(mapping) > _MAX_LOG_MARKERS,
             )
