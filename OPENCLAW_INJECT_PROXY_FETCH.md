@@ -54,7 +54,7 @@ python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_G
 2. 已设置 `OPENCLAW_PROXY_GATEWAY_URL`：将 HTTP(S) 请求改写到网关地址
 3. 改写请求会附带 `X-Target-URL: <原始URL>`
 4. 同源防重入：目标与网关同源时直连，防止循环代理
-5. 直连名单：默认内置常见基础站点，可用 `OPENCLAW_PROXY_DIRECT_HOSTS` 覆盖
+5. 直连名单：默认内置常见基础站点，可用 `OPENCLAW_PROXY_DIRECT_HOSTS` 追加（不覆盖默认）
 
 ## 5. 常用命令
 
