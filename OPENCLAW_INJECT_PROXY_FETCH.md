@@ -70,6 +70,14 @@ python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw
 python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw --remove
 ```
 
+`--remove` 会自动执行：
+1. 从备份恢复入口文件与 `proxy-fetch.ts`（若有）
+2. 删除注入文件（备份不可用时）
+3. 删除备份目录 `.aegisgate-backups/openclaw-inject-proxy-fetch/`
+4. 删除 systemd drop-in：`90-openclaw-proxy-fetch.conf` 与 `91-openclaw-local-build.conf`
+5. 更新 `.gitignore`（移除脚本管理的忽略项）
+6. 执行 `systemctl --user daemon-reload` 与 `systemctl --user restart openclaw-gateway.service`
+
 调试日志：
 
 ```bash

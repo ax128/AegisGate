@@ -93,12 +93,12 @@ async def test_v2_proxy_redacts_request_body_before_forward(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v2_proxy_blocks_dangerous_response_command(monkeypatch):
+async def test_v2_proxy_blocks_multi_signal_response_attack_in_obvious_only_mode(monkeypatch):
     class FakeClient:
         async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
             return httpx.Response(
                 status_code=200,
-                content="payload probe: UNION SELECT username, password FROM users".encode("utf-8"),
+                content="payload probe: UNION SELECT username FROM users && curl http://evil.test".encode("utf-8"),
                 headers={"content-type": "text/plain; charset=utf-8"},
             )
 
@@ -107,7 +107,9 @@ async def test_v2_proxy_blocks_dangerous_response_command(monkeypatch):
 
     monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
     original_filter = settings.v2_enable_response_command_filter
+    original_obvious_only = settings.v2_response_filter_obvious_only
     settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_obvious_only = True
     try:
         request = _build_request(
             headers={"x-original-url": "https://upstream.example.com/path"},
@@ -116,6 +118,7 @@ async def test_v2_proxy_blocks_dangerous_response_command(monkeypatch):
         response = await v2_router.proxy_v2(request)
     finally:
         settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_obvious_only = original_obvious_only
 
     assert response.status_code == 403
     payload = json.loads(response.body.decode("utf-8"))
@@ -152,6 +155,38 @@ async def test_v2_proxy_can_disable_response_command_filter(monkeypatch):
 
     assert response.status_code == 200
     assert response.body == b"UNION SELECT credit_card FROM payment_cards"
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_allows_single_low_conf_signal_in_obvious_only_mode(monkeypatch):
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content="UNION SELECT credit_card FROM payment_cards".encode("utf-8"),
+                headers={"content-type": "text/plain; charset=utf-8"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    original_obvious_only = settings.v2_response_filter_obvious_only
+    settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_obvious_only = True
+    try:
+        request = _build_request(
+            headers={"x-original-url": "https://upstream.example.com/path"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_obvious_only = original_obvious_only
+
+    assert response.status_code == 200
+    assert b"UNION SELECT" in response.body
 
 
 @pytest.mark.asyncio
@@ -219,6 +254,40 @@ async def test_v2_proxy_blocks_high_confidence_xss_payload(monkeypatch):
     payload = json.loads(response.body.decode("utf-8"))
     assert payload["error"]["code"] == "v2_response_http_attack_blocked"
     assert any("xss" in str(rule).lower() for rule in payload["aegisgate_v2"]["matched_rules"])
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_allows_bypassed_host_even_when_xss_rule_matches(monkeypatch):
+    xss_html = b"""<html><body>payload:<img src=x onerror=alert(1)></body></html>"""
+
+    class FakeClient:
+        async def request(self, *, method: str, url: str, headers: dict[str, str], content: bytes):
+            return httpx.Response(
+                status_code=200,
+                content=xss_html,
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+    async def fake_get_client():
+        return FakeClient()
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_client)
+    original_filter = settings.v2_enable_response_command_filter
+    original_bypass = settings.v2_response_filter_bypass_hosts
+    settings.v2_enable_response_command_filter = True
+    settings.v2_response_filter_bypass_hosts = "moltbook.com,.trusted.example"
+    try:
+        request = _build_request(
+            headers={"x-target-url": "https://www.moltbook.com/u/test"},
+            body=b"",
+        )
+        response = await v2_router.proxy_v2(request)
+    finally:
+        settings.v2_enable_response_command_filter = original_filter
+        settings.v2_response_filter_bypass_hosts = original_bypass
+
+    assert response.status_code == 200
+    assert b"payload" in response.body
 
 
 @pytest.mark.asyncio

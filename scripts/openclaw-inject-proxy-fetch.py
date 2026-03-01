@@ -7,6 +7,7 @@
 - 再次运行若检测到已注入：先恢复备份，再重新注入，避免重复注入导致的错位
 - 注入后：proxy-fetch.ts 与备份目录写入 .gitignore，不参与提交；git 正常更新（pull）即可，更新完需手动再执行一次本脚本注入
 - 注入成功后：自动执行一次前端构建（build）
+- --remove 时：恢复备份、删除注入文件与备份目录、清理 systemd drop-in，并自动 daemon-reload + restart
 
 用法：
   python openclaw-inject-proxy-fetch.py /path/to/openclaw   # 命令行指定根目录
@@ -391,6 +392,7 @@ DEFAULT_PROXY_DIRECT_HOSTS = (
     "api.whatsapp.com,s.whatsapp.net,static.whatsapp.net,mmg.whatsapp.net,signal.org"
 )
 LOCAL_EXECSTART_OVERRIDE_FILENAME = "91-openclaw-local-build.conf"
+PROXY_ENV_OVERRIDE_FILENAME = "90-openclaw-proxy-fetch.conf"
 
 # entry.ts 注入前上下文校验：避免项目迭代后误注入
 ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
@@ -514,7 +516,7 @@ def _write_systemd_override(unit: str, env_assignments: dict[str, str]) -> Path:
     unit_name = unit.strip() or DEFAULT_GATEWAY_SYSTEMD_UNIT
     override_dir = Path.home() / ".config" / "systemd" / "user" / f"{unit_name}.d"
     override_dir.mkdir(parents=True, exist_ok=True)
-    override_file = override_dir / "90-openclaw-proxy-fetch.conf"
+    override_file = override_dir / PROXY_ENV_OVERRIDE_FILENAME
 
     lines = ["[Service]"]
     for key in SUPPORTED_PROXY_ENV_KEYS:
@@ -619,6 +621,50 @@ def _write_local_execstart_override(unit: str, tokens: list[str]) -> Path:
     return override_file
 
 
+def _dropin_dir_for_unit(unit: str) -> Path:
+    unit_name = unit.strip() or DEFAULT_GATEWAY_SYSTEMD_UNIT
+    return Path.home() / ".config" / "systemd" / "user" / f"{unit_name}.d"
+
+
+def _remove_systemd_dropins(unit: str, filenames: tuple[str, ...]) -> bool:
+    dropin_dir = _dropin_dir_for_unit(unit)
+    changed = False
+    for filename in filenames:
+        target = dropin_dir / filename
+        if target.exists():
+            target.unlink()
+            LOG.info("已删除 systemd 覆盖配置: %s", target)
+            changed = True
+    if changed and dropin_dir.exists():
+        try:
+            next(dropin_dir.iterdir())
+        except StopIteration:
+            dropin_dir.rmdir()
+            LOG.info("已删除空目录: %s", dropin_dir)
+    return changed
+
+
+def _reload_and_restart_gateway_service(unit: str) -> bool:
+    if shutil.which("systemctl") is None:
+        LOG.warning("未检测到 systemctl，无法自动 daemon-reload/restart。")
+        return False
+    LOG.info("正在应用 systemd 用户服务并重启: %s", unit)
+    try:
+        reload_proc = subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+        if reload_proc.returncode != 0:
+            LOG.error("systemd daemon-reload 失败，退出码: %s", reload_proc.returncode)
+            return False
+        restart_proc = subprocess.run(["systemctl", "--user", "restart", unit], check=False)
+        if restart_proc.returncode != 0:
+            LOG.error("重启服务失败: %s（退出码: %s）", unit, restart_proc.returncode)
+            return False
+    except OSError as exc:
+        LOG.error("执行 systemctl 失败: %s", exc)
+        return False
+    LOG.info("已完成服务重载并重启：%s", unit)
+    return True
+
+
 def _detect_execstart_script_path(tokens: list[str] | None) -> str | None:
     if not tokens:
         return None
@@ -671,21 +717,10 @@ def _configure_gateway_service(env_assignments: dict[str, str], root: str, pin_l
         tokens = _build_local_execstart_tokens(unit, root)
         _write_local_execstart_override(unit, tokens)
 
-    LOG.info("正在应用 systemd 用户服务环境并重启: %s", unit)
-    try:
-        reload_proc = subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-        if reload_proc.returncode != 0:
-            LOG.error("systemd daemon-reload 失败，退出码: %s", reload_proc.returncode)
-            return False
-        restart_proc = subprocess.run(["systemctl", "--user", "restart", unit], check=False)
-        if restart_proc.returncode != 0:
-            LOG.error("重启服务失败: %s（退出码: %s）", unit, restart_proc.returncode)
-            return False
-    except OSError as exc:
-        LOG.error("执行 systemctl 失败: %s", exc)
+    if not _reload_and_restart_gateway_service(unit):
         return False
 
-    LOG.info("已完成服务配置注入并重启：%s", unit)
+    LOG.info("已完成服务配置注入：%s", unit)
     _warn_if_service_not_using_local_build(root, unit)
     return True
 
@@ -817,11 +852,13 @@ def _restore_from_backup(root: str, entry_paths: list[str], proxy_fetch_path: st
         return False
 
 
-def _update_gitignore(root: str, add_proxy_file: bool) -> None:
-    """维护 .gitignore：始终忽略备份目录；按需忽略 proxy-fetch.ts。"""
+def _update_gitignore(root: str, add_proxy_file: bool, keep_backup_dir_entry: bool = True) -> None:
+    """维护 .gitignore：按需忽略备份目录与 proxy-fetch.ts。"""
     path = os.path.join(root, ".gitignore")
     managed_entries = {GITIGNORE_PROXY_FETCH_ENTRY, GITIGNORE_BACKUP_DIR_ENTRY}
-    desired_entries = [GITIGNORE_BACKUP_DIR_ENTRY]
+    desired_entries: list[str] = []
+    if keep_backup_dir_entry:
+        desired_entries.append(GITIGNORE_BACKUP_DIR_ENTRY)
     if add_proxy_file:
         desired_entries.append(GITIGNORE_PROXY_FETCH_ENTRY)
 
@@ -845,10 +882,11 @@ def _update_gitignore(root: str, add_proxy_file: bool) -> None:
         cleaned_lines.append(existing_lines[i])
         i += 1
 
-    if cleaned_lines and cleaned_lines[-1].strip() != "":
-        cleaned_lines.append("")
-    cleaned_lines.append(GITIGNORE_MARKER)
-    cleaned_lines.extend(desired_entries)
+    if desired_entries:
+        if cleaned_lines and cleaned_lines[-1].strip() != "":
+            cleaned_lines.append("")
+        cleaned_lines.append(GITIGNORE_MARKER)
+        cleaned_lines.extend(desired_entries)
     new_content = "\n".join(cleaned_lines).rstrip() + "\n"
 
     old_content = ""
@@ -860,12 +898,31 @@ def _update_gitignore(root: str, add_proxy_file: bool) -> None:
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
         LOG.info(
-            "已更新 .gitignore（忽略备份目录%s）%s",
-            GITIGNORE_BACKUP_DIR_ENTRY,
-            f"，并忽略 {GITIGNORE_PROXY_FETCH_ENTRY}" if add_proxy_file else "，并移除 proxy-fetch 忽略项",
+            "已更新 .gitignore（backup_ignore=%s, proxy_ignore=%s）",
+            "on" if keep_backup_dir_entry else "off",
+            "on" if add_proxy_file else "off",
         )
     else:
         LOG.debug(".gitignore 已是最新，跳过更新")
+
+
+def _remove_backup_artifacts(root: str) -> bool:
+    backup_dir = os.path.join(root, BACKUP_DIR_REL)
+    backup_root = os.path.join(root, ".aegisgate-backups")
+    changed = False
+    if os.path.isdir(backup_dir):
+        shutil.rmtree(backup_dir)
+        LOG.info("已删除备份目录: %s", backup_dir)
+        changed = True
+    if os.path.isdir(backup_root):
+        try:
+            if not os.listdir(backup_root):
+                os.rmdir(backup_root)
+                LOG.info("已删除空备份根目录: %s", backup_root)
+                changed = True
+        except OSError as exc:
+            LOG.warning("清理备份根目录失败（可忽略）: %s", exc)
+    return changed
 
 
 def _inject_import_to_entry_file(entry_path: str, strict_context: bool) -> bool:
@@ -975,58 +1032,66 @@ def inject(root: str) -> bool:
 
 
 def remove(root: str) -> bool:
-    """移除注入：删除 proxy-fetch.ts 并从入口文件去掉 import。返回是否做了修改。"""
+    """移除注入并清理产物：恢复备份、删除注入文件/备份、重载并重启服务。"""
     proxy_fetch_path = os.path.join(root, "src", "infra", "proxy-fetch.ts")
     entry_paths = _resolve_entry_paths(root)
+    unit = _resolve_gateway_systemd_unit()
 
     LOG.info("移除注入，根目录: %s", root)
 
+    changed = False
     restored = _restore_from_backup(root, entry_paths, proxy_fetch_path)
     if restored:
         LOG.info("已优先从备份恢复原始状态。")
-        _update_gitignore(root, False)
-        return True
-
-    changed = False
-    if os.path.isfile(proxy_fetch_path):
-        os.remove(proxy_fetch_path)
-        LOG.info("已删除: %s", proxy_fetch_path)
         changed = True
-    else:
-        LOG.debug("proxy-fetch.ts 不存在，跳过删除")
 
-    for entry_path in entry_paths:
-        with open(entry_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        new_lines: list[str] = []
-        removed_what: list[str] = []
-        for line in lines:
-            if MARKER_IMPORT in line or ("./infra/proxy-fetch.js" in line and "import" in line):
-                changed = True
-                removed_what.append("import proxy-fetch.js")
-                continue
-            stripped = line.strip()
-            if stripped.startswith("//") and (
-                "Must run before any fetch" in line
-                or "OPENCLAW_PROXY_GATEWAY_URL" in line
-                or "X-Target-URL" in line
-            ):
-                changed = True
-                removed_what.append("proxy-fetch 注释行")
-                continue
-            new_lines.append(line)
-
-        if new_lines != lines:
-            with open(entry_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-            LOG.info("已从入口文件移除(%s): %s", entry_path, ", ".join(removed_what))
+    if not restored:
+        if os.path.isfile(proxy_fetch_path):
+            os.remove(proxy_fetch_path)
+            LOG.info("已删除: %s", proxy_fetch_path)
             changed = True
+        else:
+            LOG.debug("proxy-fetch.ts 不存在，跳过删除")
+
+        for entry_path in entry_paths:
+            with open(entry_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            new_lines: list[str] = []
+            removed_what: list[str] = []
+            for line in lines:
+                if MARKER_IMPORT in line or ("./infra/proxy-fetch.js" in line and "import" in line):
+                    changed = True
+                    removed_what.append("import proxy-fetch.js")
+                    continue
+                stripped = line.strip()
+                if stripped.startswith("//") and (
+                    "Must run before any fetch" in line
+                    or "OPENCLAW_PROXY_GATEWAY_URL" in line
+                    or "X-Target-URL" in line
+                ):
+                    changed = True
+                    removed_what.append("proxy-fetch 注释行")
+                    continue
+                new_lines.append(line)
+
+            if new_lines != lines:
+                with open(entry_path, "w", encoding="utf-8") as f:
+                    f.writelines(new_lines)
+                LOG.info("已从入口文件移除(%s): %s", entry_path, ", ".join(removed_what))
+                changed = True
+
+    if _remove_backup_artifacts(root):
+        changed = True
+
+    if _remove_systemd_dropins(unit, (PROXY_ENV_OVERRIDE_FILENAME, LOCAL_EXECSTART_OVERRIDE_FILENAME)):
+        changed = True
+
+    _update_gitignore(root, False, keep_backup_dir_entry=False)
+    _reload_and_restart_gateway_service(unit)
 
     if not changed:
         LOG.info("未发现 proxy-fetch 注入内容，无需移除")
-    if changed:
-        _update_gitignore(root, False)
     return changed
 
 
@@ -1091,7 +1156,7 @@ def main() -> None:
     parser.add_argument(
         "--remove",
         action="store_true",
-        help="Remove the injection instead of applying it.",
+        help="恢复并彻底移除注入（含备份/drop-in 清理，并自动重载重启服务）。",
     )
     parser.add_argument(
         "--pin-local-build",

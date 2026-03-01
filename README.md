@@ -209,6 +209,7 @@ OpenClaw 自动注入脚本位置：
     - 执行 `systemctl --user daemon-reload && systemctl --user restart openclaw-gateway.service`
   - 追加 `--pin-local-build` 时，脚本会额外写入 `91-openclaw-local-build.conf`，把 systemd `ExecStart` 固定到 `/path/to/openclaw/dist/index.js`
   - 若未携带网关变量，脚本只做注入 + build，不改服务环境
+  - `--remove` 会恢复备份、删除注入文件与备份目录、删除相关 systemd drop-in，并自动 `daemon-reload + restart`
 
 ## 3. 本地开发
 
@@ -305,7 +306,12 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_ORIGINAL_URL_HEADER` | v2 原始目标 URL 请求头名（默认；仍兼容 `x-target-url`） | `x-original-url` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
 | `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | v2 响应 HTTP 注入攻击过滤开关 | `true` |
+| `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | v2 宽松拦截模式（仅拦截高置信/多信号攻击） | `true` |
+| `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` | v2 响应拦截跳过域名（逗号分隔；支持 `example.com`/`.example.com`/`*.example.com`） | 空 |
 | `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | v2 响应注入检测最大字符数 | `200000` |
+
+`AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 示例：
+`moltbook.com,semanticscholar.org,openalex.org,arxiv.org,pubmed.ncbi.nlm.nih.gov,search.crossref.org,core.ac.uk,doaj.org`
 
 完整可调项见：
 - [config/.env.example](config/.env.example)
