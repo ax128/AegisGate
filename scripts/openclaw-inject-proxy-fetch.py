@@ -46,7 +46,8 @@ const ENV_PROXY_FETCH_LOG = "OPENCLAW_PROXY_FETCH_LOG";
 const TARGET_URL_HEADER = "X-Target-URL";
 const LOG_MARKER = "[AG_PROXY_FETCH_V2]";
 
-// Chat channels (Telegram, WhatsApp, Discord, Slack, Signal, etc.) are not included so they go through the gateway.
+// Default direct hosts include common infra and channel domains.
+// OPENCLAW_PROXY_DIRECT_HOSTS is appended on top (does not replace defaults).
 const DEFAULT_DIRECT_HOSTS = new Set([
   "registry.npmjs.org",
   "api.github.com",
@@ -101,6 +102,31 @@ const DEFAULT_DIRECT_HOSTS = new Set([
   "api.openai.com",
   "anthropic.com",
   "api.anthropic.com",
+  "api.telegram.org",
+  "telegram.org",
+  "t.me",
+  "discord.com",
+  "cdn.discordapp.com",
+  "media.discordapp.net",
+  "gateway.discord.gg",
+  "api.pluralkit.me",
+  "slack.com",
+  "api.slack.com",
+  "files.slack.com",
+  "hooks.slack.com",
+  "cdn.slack.com",
+  "slack-edge.com",
+  "slack-files.com",
+  "line.me",
+  "api.line.me",
+  "api-data.line.me",
+  "whatsapp.com",
+  "web.whatsapp.com",
+  "api.whatsapp.com",
+  "s.whatsapp.net",
+  "static.whatsapp.net",
+  "mmg.whatsapp.net",
+  "signal.org",
 ]);
 
 const DEFAULT_DIRECT_SUFFIXES = [
@@ -109,6 +135,16 @@ const DEFAULT_DIRECT_SUFFIXES = [
   "azure.com",
   "azurewebsites.net",
   "cloudfront.net",
+  "telegram.org",
+  "discord.com",
+  "discordapp.com",
+  "discord.gg",
+  "slack.com",
+  "slack-edge.com",
+  "slack-files.com",
+  "line.me",
+  "whatsapp.com",
+  "whatsapp.net",
 ];
 
 function isProxyFetchLogEnabled(): boolean {
@@ -136,17 +172,28 @@ function safeLog(enabled: boolean, event: string, payload: Record<string, unknow
 }
 
 function getDirectHosts(): { exact: Set<string>; suffixes: string[] } {
+  const exact = new Set(DEFAULT_DIRECT_HOSTS);
+  const suffixes = new Set(DEFAULT_DIRECT_SUFFIXES);
   const raw = process.env[ENV_PROXY_DIRECT_HOSTS]?.trim();
   if (raw) {
-    const exact = new Set(
-      raw
-        .split(",")
-        .map((h) => h.trim().toLowerCase())
-        .filter(Boolean),
-    );
-    return { exact, suffixes: [] };
+    for (const token of raw.split(",")) {
+      const value = token.trim().toLowerCase();
+      if (!value) {
+        continue;
+      }
+      // Support suffix style: "*.example.com" or ".example.com"
+      if (value.startsWith("*.")) {
+        suffixes.add(value.slice(2));
+        continue;
+      }
+      if (value.startsWith(".")) {
+        suffixes.add(value.slice(1));
+        continue;
+      }
+      exact.add(value);
+    }
   }
-  return { exact: DEFAULT_DIRECT_HOSTS, suffixes: DEFAULT_DIRECT_SUFFIXES };
+  return { exact, suffixes: [...suffixes] };
 }
 
 function getProxyConfig(): { proxyUrl: string; proxyOrigin: string } | null {
@@ -342,7 +389,11 @@ SUPPORTED_PROXY_ENV_KEYS = (ENV_PROXY_GATEWAY_URL, ENV_PROXY_DIRECT_HOSTS)
 DEFAULT_GATEWAY_SYSTEMD_UNIT = "openclaw-gateway.service"
 DEFAULT_PROXY_DIRECT_HOSTS = (
     "registry.npmjs.org,api.github.com,raw.githubusercontent.com,codeload.github.com,"
-    "objects.githubusercontent.com,pypi.org,pypi.python.org,docs.openclaw.ai,openclaw.ai"
+    "objects.githubusercontent.com,pypi.org,pypi.python.org,docs.openclaw.ai,openclaw.ai,"
+    "api.telegram.org,telegram.org,t.me,discord.com,cdn.discordapp.com,media.discordapp.net,gateway.discord.gg,"
+    "api.pluralkit.me,slack.com,api.slack.com,files.slack.com,hooks.slack.com,cdn.slack.com,"
+    "slack-edge.com,slack-files.com,line.me,api.line.me,api-data.line.me,whatsapp.com,web.whatsapp.com,"
+    "api.whatsapp.com,s.whatsapp.net,static.whatsapp.net,mmg.whatsapp.net,signal.org"
 )
 LOCAL_EXECSTART_OVERRIDE_FILENAME = "91-openclaw-local-build.conf"
 
