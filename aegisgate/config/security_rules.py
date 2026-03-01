@@ -318,12 +318,26 @@ _DEFAULT_RULES: dict[str, Any] = {
             r"(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)",
         ],
         "command_patterns": [
-            {"id": "web_sqli", "regex": r"(\bunion\s+select\b|\b(?:or|and)\s+1\s*=\s*1\b|\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\))"},
-            {"id": "web_xss", "regex": r"(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)"},
-            {"id": "web_path_traversal", "regex": r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)"},
-            {"id": "web_command_injection", "regex": r"(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b"},
-            {"id": "web_xxe_ssti", "regex": r"(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)"},
-            {"id": "web_ssrf_crlf", "regex": r"((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))"},
+            {
+                "id": "web_http_smuggling_cl_te",
+                "regex": r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
+            },
+            {
+                "id": "web_http_smuggling_te_cl",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+",
+            },
+            {
+                "id": "web_http_smuggling_te_te",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b",
+            },
+            {
+                "id": "web_http_response_splitting",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b",
+            },
+            {
+                "id": "web_http_obs_fold_header",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:",
+            },
         ],
         "force_block_command_patterns": [
             {"id": "docker_compose_down", "regex": r"(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b"},
@@ -336,16 +350,26 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "id": "docker_exec_interactive",
                 "regex": r"(?:^|\s)(?:/)?docker\s+exec\b[^\n]*(?:\s-(?:it|ti)\b|\s--interactive\b|\s--tty\b)",
             },
-            {"id": "web_sqli_union_select", "regex": r"\bunion\s+select\b"},
-            {"id": "web_sqli_tautology", "regex": r"\b(?:or|and)\s+1\s*=\s*1\b"},
-            {"id": "web_sqli_time_blind", "regex": r"\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)"},
-            {"id": "web_xss_script_event", "regex": r"(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)"},
-            {"id": "web_command_injection_chain", "regex": r"(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b"},
-            {"id": "web_path_traversal", "regex": r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)"},
-            {"id": "web_xxe_external_entity", "regex": r"(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)"},
-            {"id": "web_ssti_or_log4shell", "regex": r"(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)"},
-            {"id": "web_ssrf_metadata", "regex": r"(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)"},
-            {"id": "web_crlf_header_injection", "regex": r"(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)"},
+            {
+                "id": "web_http_smuggling_cl_te",
+                "regex": r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
+            },
+            {
+                "id": "web_http_smuggling_te_cl",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+",
+            },
+            {
+                "id": "web_http_smuggling_te_te",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b",
+            },
+            {
+                "id": "web_http_response_splitting",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b",
+            },
+            {
+                "id": "web_http_obs_fold_header",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:",
+            },
         ],
         "encoded_payload_patterns": [
             {"id": "base64_long", "regex": r"[A-Za-z0-9+/]{200,}={0,2}"},
