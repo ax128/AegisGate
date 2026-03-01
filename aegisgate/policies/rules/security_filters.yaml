@@ -649,14 +649,16 @@ sanitizer:
     markup: '[unsafe-tag-removed]'
   block_message: '[AegisGate] response blocked by security policy.'
   sanitize_prefix: '[AegisGate] content sanitized: '
+  # 仅在 LLM 明确「泄露」系统提示词时拦截；普通提及（如解释 AI 原理）不触发
   system_leak_patterns:
-    - id: system_leak_en
-      regex: '(system\s+prompt|developer\s+message|hidden\s+instructions?)'
-    - id: system_leak_zh
-      regex: '(系统提示词|开发者消息|隐藏指令)'
+    - id: system_leak_disclosure_en
+      regex: '(?:my\s+(?:system\s+)?(?:prompt|instructions?)\s+(?:say|says|read|state|include|tell\s+me)\s*[:：]|(?:here\s+is|following\s+is|below\s+is)\s+my\s+(?:system\s+)?(?:prompt|instructions?)\s*[:：]|i\s+(?:was|am|have\s+been)\s+(?:told|instructed|configured|programmed)\s+(?:not\s+)?to\s+(?:reveal|share|disclose|discuss|mention)\s)'
+    - id: system_leak_disclosure_zh
+      regex: '(?:(?:这里是|以下是|如下是|我的)系统提示词\s*[：:]|我的(?:指令|提示词)\s*(?:是|说|要求|内容)\s*[：:]|我被(?:告知|指示|设置|配置)(?:不要|不能|要|必须)(?:透露|分享|泄露|说|提及))'
+  # <img> 在 LLM 代码示例中属正常 HTML，不做脱敏；<script>/<iframe> 可执行/嵌入外部内容，保留
   unsafe_markup_patterns:
     - id: script
-      regex: '<\s*(script|img|iframe)\b'
+      regex: '<\s*(script|iframe)\b'
   unsafe_uri_patterns:
     - id: unsafe_uri
       regex: '(javascript:|data:text/html)'
@@ -728,7 +730,7 @@ action_map:
     indirect_injection: review
     direct: downgrade
     typoglycemia: review
-    html_markdown: sanitize
+    # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
   rag_poison_guard:
     ingestion_poison: block
     retrieval_poison: review
