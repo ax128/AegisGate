@@ -74,7 +74,6 @@ class Settings(BaseSettings):
 
     # v2 generic HTTP proxy (independent from v1 OpenAI-compatible filter chain)
     enable_v2_proxy: bool = True
-    v2_original_url_header: str = "x-original-url"
     v2_enable_request_redaction: bool = True
     v2_enable_response_command_filter: bool = True
     v2_response_filter_obvious_only: bool = True

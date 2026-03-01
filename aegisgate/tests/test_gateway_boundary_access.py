@@ -72,7 +72,7 @@ async def test_boundary_blocks_non_token_v2_requests():
     request = _build_request(
         "/v2/proxy",
         token_authenticated=False,
-        headers={"x-original-url": "https://example.com/api"},
+        headers={"x-target-url": "https://example.com/api"},
         body={"hello": "world"},
     )
     response = await gateway.security_boundary_middleware(request, _allow_next)
@@ -86,7 +86,7 @@ async def test_boundary_allows_token_authenticated_v2_requests():
     request = _build_request(
         "/v2/proxy",
         token_authenticated=True,
-        headers={"x-original-url": "https://example.com/api"},
+        headers={"x-target-url": "https://example.com/api"},
         body={"hello": "world"},
     )
     response = await gateway.security_boundary_middleware(request, _allow_next)
