@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 # 日志级别：默认 INFO；-v DEBUG；-vv 显示更多上下文
 LOG = logging.getLogger("openclaw-inject-proxy-fetch")
@@ -244,6 +245,14 @@ MARKER_AFTER = 'import { fileURLToPath } from "node:url";'
 
 # 环境变量：未提供命令行参数时，用于指定 OpenClaw 目标路径
 ENV_OPENCLAW_ROOT = "OPENCLAW_ROOT"
+ENV_PROXY_GATEWAY_URL = "OPENCLAW_PROXY_GATEWAY_URL"
+ENV_PROXY_DIRECT_HOSTS = "OPENCLAW_PROXY_DIRECT_HOSTS"
+SUPPORTED_PROXY_ENV_KEYS = (ENV_PROXY_GATEWAY_URL, ENV_PROXY_DIRECT_HOSTS)
+DEFAULT_GATEWAY_SYSTEMD_UNIT = "openclaw-gateway.service"
+DEFAULT_PROXY_DIRECT_HOSTS = (
+    "registry.npmjs.org,api.github.com,raw.githubusercontent.com,codeload.github.com,"
+    "objects.githubusercontent.com,pypi.org,pypi.python.org,docs.openclaw.ai,openclaw.ai"
+)
 
 # 注入前上下文校验：锚点行及其后必须出现的特征（避免项目迭代后误注入）
 ENTRY_ANCHOR = 'import { fileURLToPath } from "node:url";'
@@ -296,6 +305,108 @@ def find_openclaw_root(given: str | None) -> str | None:
     LOG.error("  export %s=/path/to/openclaw", ENV_OPENCLAW_ROOT)
     LOG.error("  python openclaw-inject-proxy-fetch.py")
     return None
+
+
+def _parse_root_and_proxy_env_tokens(tokens: list[str]) -> tuple[str | None, dict[str, str]]:
+    """解析参数：支持 [openclaw_root] + KEY=VALUE(代理环境变量) 混合输入。"""
+    root: str | None = None
+    env_assignments: dict[str, str] = {}
+    for raw in tokens:
+        token = (raw or "").strip()
+        if not token:
+            continue
+        if "=" in token:
+            key, value = token.split("=", 1)
+            key = key.strip()
+            if key in SUPPORTED_PROXY_ENV_KEYS:
+                env_assignments[key] = value
+                continue
+        if root is None:
+            root = token
+            continue
+        raise ValueError(
+            f"无法识别参数: {token!r}。只支持路径参数和以下环境变量赋值："
+            + ", ".join(f"{name}=..." for name in SUPPORTED_PROXY_ENV_KEYS)
+        )
+    return root, env_assignments
+
+
+def _normalize_proxy_env_assignments(env_assignments: dict[str, str]) -> dict[str, str]:
+    normalized = {k: str(v) for k, v in env_assignments.items() if k in SUPPORTED_PROXY_ENV_KEYS}
+    gateway_url = normalized.get(ENV_PROXY_GATEWAY_URL, "").strip()
+    if gateway_url and not normalized.get(ENV_PROXY_DIRECT_HOSTS, "").strip():
+        normalized[ENV_PROXY_DIRECT_HOSTS] = DEFAULT_PROXY_DIRECT_HOSTS
+        LOG.info("未提供 %s，已自动使用默认直连白名单。", ENV_PROXY_DIRECT_HOSTS)
+    return normalized
+
+
+def _systemd_escape_env_value(value: str) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _resolve_gateway_systemd_unit(env: dict[str, str] | None = None) -> str:
+    source = env or os.environ
+    hinted = str(source.get("OPENCLAW_SYSTEMD_UNIT", "")).strip()
+    if hinted:
+        return hinted
+    return DEFAULT_GATEWAY_SYSTEMD_UNIT
+
+
+def _write_systemd_override(unit: str, env_assignments: dict[str, str]) -> Path:
+    unit_name = unit.strip() or DEFAULT_GATEWAY_SYSTEMD_UNIT
+    override_dir = Path.home() / ".config" / "systemd" / "user" / f"{unit_name}.d"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    override_file = override_dir / "90-openclaw-proxy-fetch.conf"
+
+    lines = ["[Service]"]
+    for key in SUPPORTED_PROXY_ENV_KEYS:
+        if key in env_assignments:
+            lines.append(f"Environment={key}={_systemd_escape_env_value(env_assignments[key])}")
+    content = "\n".join(lines).rstrip() + "\n"
+
+    old_content = ""
+    if override_file.exists():
+        old_content = override_file.read_text(encoding="utf-8")
+    if content != old_content:
+        override_file.write_text(content, encoding="utf-8")
+        LOG.info("已写入 systemd 覆盖配置: %s", override_file)
+    else:
+        LOG.debug("systemd 覆盖配置未变化: %s", override_file)
+    return override_file
+
+
+def _configure_gateway_service_env(env_assignments: dict[str, str]) -> bool:
+    """把代理环境变量持久化到 openclaw-gateway systemd 用户服务并重启。"""
+    env_assignments = _normalize_proxy_env_assignments(env_assignments)
+    if not env_assignments:
+        return False
+
+    for key, value in env_assignments.items():
+        os.environ[key] = value
+
+    if shutil.which("systemctl") is None:
+        LOG.warning("未检测到 systemctl，已仅设置当前进程环境变量（不会持久化到服务）。")
+        return False
+
+    unit = _resolve_gateway_systemd_unit()
+    _write_systemd_override(unit, env_assignments)
+    LOG.info("正在应用 systemd 用户服务环境并重启: %s", unit)
+    try:
+        reload_proc = subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+        if reload_proc.returncode != 0:
+            LOG.error("systemd daemon-reload 失败，退出码: %s", reload_proc.returncode)
+            return False
+        restart_proc = subprocess.run(["systemctl", "--user", "restart", unit], check=False)
+        if restart_proc.returncode != 0:
+            LOG.error("重启服务失败: %s（退出码: %s）", unit, restart_proc.returncode)
+            return False
+    except OSError as exc:
+        LOG.error("执行 systemctl 失败: %s", exc)
+        return False
+
+    LOG.info("已完成服务环境注入并重启：%s", unit)
+    return True
 
 
 def _check_entry_context(lines: list[str], entry_path: str) -> tuple[bool, str]:
@@ -649,10 +760,12 @@ def run_build(root: str) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inject or remove OpenClaw proxy-fetch (gateway proxy).")
     parser.add_argument(
-        "openclaw_root",
-        nargs="?",
-        default=None,
-        help="OpenClaw 根目录（必填；或使用环境变量 OPENCLAW_ROOT）",
+        "targets",
+        nargs="*",
+        help=(
+            "参数列表：可包含 OpenClaw 根目录 + 代理环境变量赋值。示例："
+            " /root/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/xxx"
+        ),
     )
     parser.add_argument(
         "--remove",
@@ -670,7 +783,14 @@ def main() -> None:
 
     setup_log(args.verbose)
 
-    root = find_openclaw_root(args.openclaw_root)
+    try:
+        root_arg, proxy_env_assignments = _parse_root_and_proxy_env_tokens(list(args.targets or []))
+    except ValueError as exc:
+        LOG.error("%s", exc)
+        sys.exit(1)
+    proxy_env_assignments = _normalize_proxy_env_assignments(proxy_env_assignments)
+
+    root = find_openclaw_root(root_arg)
     if root is None:
         sys.exit(1)
     LOG.info("OpenClaw 根目录: %s", root)
@@ -683,11 +803,19 @@ def main() -> None:
         if not run_build(root):
             LOG.error("注入成功，但自动 build 失败。请在 OpenClaw 根目录手动执行构建命令。")
             sys.exit(1)
-        LOG.info("build完成，接下来需要进行：")
-        LOG.info("1) 导入环境变量，例如：")
-        LOG.info("   export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x")
-        LOG.info("2) 重启 OpenClaw：")
-        LOG.info("   openclaw gateway restart")
+        if proxy_env_assignments:
+            applied = _configure_gateway_service_env(proxy_env_assignments)
+            if not applied:
+                LOG.warning("未能自动注入服务环境，请手动配置并重启 OpenClaw gateway。")
+            else:
+                LOG.info("环境变量已注入服务，注入流程完成。")
+        else:
+            LOG.info("build完成。可直接在命令里附带网关环境变量自动注入，例如：")
+            LOG.info(
+                "python openclaw-inject-proxy-fetch.py %s %s=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x",
+                root,
+                ENV_PROXY_GATEWAY_URL,
+            )
     else:
         LOG.error("注入未成功，请根据上述错误检查 entry.ts 或更新脚本适配当前项目结构。")
         sys.exit(1)

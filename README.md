@@ -193,13 +193,20 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 
 OpenClaw 自动注入脚本位置：
 - `scripts/openclaw-inject-proxy-fetch.py`
-- 示例：
-  - `python scripts/openclaw-inject-proxy-fetch.py D:\agent_work\openclaw`
-- 行为：
+- 推荐命令（注入 + 构建 + 自动写入服务环境并重启网关）：
+  - `python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
+- 关键行为：
   - 不自动检索目录；必须通过参数或 `OPENCLAW_ROOT` 显式指定 OpenClaw 根目录
+  - 检测到已注入时，先恢复备份再重注入，避免重复注入错位
+  - 自动备份到 `.aegisgate-backups/openclaw-inject-proxy-fetch/`
+  - 自动维护 OpenClaw 仓库 `.gitignore`：忽略 `.aegisgate-backups/` 与 `src/infra/proxy-fetch.ts`（避免上传 git）
   - 注入成功后自动执行 `build`（`pnpm/yarn/npm` 自动检测）
-  - 设置环境变量示例：`export OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
-  - 修改环境变量后需重启 OpenClaw 进程才生效
+  - 命令携带 `OPENCLAW_PROXY_GATEWAY_URL=...` 时，脚本自动生成/更新：
+    - `~/.config/systemd/user/openclaw-gateway.service.d/90-openclaw-proxy-fetch.conf`
+    - 写入 `OPENCLAW_PROXY_GATEWAY_URL`
+    - 自动补充默认 `OPENCLAW_PROXY_DIRECT_HOSTS`（未显式传入时）
+    - 执行 `systemctl --user daemon-reload && systemctl --user restart openclaw-gateway.service`
+  - 若未携带网关变量，脚本只做注入 + build，不改服务环境
 
 ## 3. 本地开发
 
