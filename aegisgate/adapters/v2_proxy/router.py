@@ -93,6 +93,31 @@ _XSS_HIGH_CONFIDENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
+_V2_HIGH_CONFIDENCE_RULE_IDS = frozenset(
+    {
+        "web_xss",
+        "web_xss_script_event",
+        "web_http_smuggling_cl_te",
+        "web_http_smuggling_te_cl",
+        "web_http_smuggling_te_te",
+        "web_http_response_splitting",
+        "web_http_obs_fold_header",
+        "web_xxe_external_entity",
+        "web_ssti_or_log4shell",
+        "web_ssrf_metadata",
+    }
+)
+_V2_LOW_CONFIDENCE_RULE_IDS = frozenset(
+    {
+        "web_sqli_union_select",
+        "web_sqli_tautology",
+        "web_sqli_time_blind",
+        "web_command_injection_chain",
+        "web_path_traversal",
+        "web_crlf_header_injection",
+    }
+)
+_V2_OBVIOUS_ONLY_MIN_LOW_CONF_RULE_HITS = 2
 _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_sqli_union_select": "检测到 SQL 注入特征（UNION SELECT）",
     "web_sqli_tautology": "检测到 SQL 注入特征（恒真条件）",
@@ -126,6 +151,60 @@ _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
 
 _v2_async_client: httpx.AsyncClient | None = None
 _v2_client_lock: asyncio.Lock | None = None
+
+
+def _parse_host_allowlist(raw: str) -> tuple[set[str], tuple[str, ...]]:
+    exact: set[str] = set()
+    suffixes: list[str] = []
+    seen_suffixes: set[str] = set()
+    for token in raw.split(","):
+        value = token.strip().lower()
+        if not value:
+            continue
+        if value.startswith("*."):
+            value = value[2:]
+        elif value.startswith("."):
+            value = value[1:]
+        if not value:
+            continue
+        if value.startswith("*"):
+            value = value.lstrip("*").lstrip(".")
+        if not value:
+            continue
+        if token.strip().startswith("*.") or token.strip().startswith("."):
+            if value not in seen_suffixes:
+                seen_suffixes.add(value)
+                suffixes.append(value)
+            continue
+        exact.add(value)
+    return exact, tuple(suffixes)
+
+
+@lru_cache(maxsize=64)
+def _response_filter_bypass_host_rules(raw: str) -> tuple[set[str], tuple[str, ...]]:
+    return _parse_host_allowlist(raw)
+
+
+def _target_host(target_url: str) -> str:
+    try:
+        return (urlparse(target_url).hostname or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _should_bypass_v2_response_filter(target_url: str) -> bool:
+    raw = (settings.v2_response_filter_bypass_hosts or "").strip()
+    if not raw:
+        return False
+    host = _target_host(target_url)
+    if not host:
+        return False
+    exact, suffixes = _response_filter_bypass_host_rules(raw)
+    if host in exact:
+        return True
+    if any(host.endswith(f".{domain}") for domain in exact):
+        return True
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
 
 
 def _v2_http_limits() -> httpx.Limits:
@@ -419,6 +498,17 @@ def _detect_dangerous_commands(text: str) -> list[str]:
             # 普通网页经常包含 <script> 等标记；只有高置信载荷形态才作为注入拦截。
             raw_matches = [match_id for match_id in raw_matches if match_id not in xss_matches]
 
+    if not raw_matches:
+        return []
+
+    if settings.v2_response_filter_obvious_only:
+        # 宽松拦截策略：只拦截高置信规则，或同时命中多个低置信规则（多信号攻击）。
+        has_high_conf = any(match_id in _V2_HIGH_CONFIDENCE_RULE_IDS for match_id in raw_matches)
+        if not has_high_conf:
+            low_conf_count = sum(1 for match_id in raw_matches if match_id in _V2_LOW_CONFIDENCE_RULE_IDS)
+            if low_conf_count < _V2_OBVIOUS_ONLY_MIN_LOW_CONF_RULE_HITS:
+                return []
+
     return raw_matches[:_V2_MAX_MATCH_IDS]
 
 
@@ -570,10 +660,19 @@ async def _proxy_v2_streaming(
     response_content_type = upstream_response.headers.get("content-type", "")
     is_textual = _looks_textual_content_type(response_content_type)
     is_sse = "text/event-stream" in response_content_type.lower()
+    response_filter_bypassed = _should_bypass_v2_response_filter(target_url)
+    if response_filter_bypassed:
+        logger.info(
+            "v2 response filter bypass method=%s path=%s target=%s host=%s",
+            request.method,
+            request.url.path,
+            target_url,
+            _target_host(target_url),
+        )
 
     buffered_chunks: list[bytes] = []
     upstream_exhausted = False
-    if settings.v2_enable_response_command_filter and is_textual:
+    if settings.v2_enable_response_command_filter and not response_filter_bypassed and is_textual:
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
         if is_sse:
             max_chars = max(256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars)))
@@ -854,7 +953,21 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     response_headers = _build_client_response_headers(upstream_response.headers)
     response_body = upstream_response.content
     response_content_type = upstream_response.headers.get("content-type", "")
-    if settings.v2_enable_response_command_filter and response_body and _looks_textual_content_type(response_content_type):
+    response_filter_bypassed = _should_bypass_v2_response_filter(target_url)
+    if response_filter_bypassed:
+        logger.info(
+            "v2 response filter bypass method=%s path=%s target=%s host=%s",
+            request.method,
+            request.url.path,
+            target_url,
+            _target_host(target_url),
+        )
+    if (
+        settings.v2_enable_response_command_filter
+        and not response_filter_bypassed
+        and response_body
+        and _looks_textual_content_type(response_content_type)
+    ):
         text = response_body.decode("utf-8", errors="replace")
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
         matches = _detect_dangerous_commands(text[:max_chars])

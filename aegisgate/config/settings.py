@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     v2_original_url_header: str = "x-original-url"
     v2_enable_request_redaction: bool = True
     v2_enable_response_command_filter: bool = True
+    v2_response_filter_obvious_only: bool = True
+    v2_response_filter_bypass_hosts: str = ""
     v2_response_filter_max_chars: int = 200_000
     v2_sse_filter_probe_max_chars: int = 4_000
 
