@@ -1,6 +1,6 @@
 # AegisGate
 
-AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。
+AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。支持 **MCP**（Model Context Protocol）与 **Agent SKILL** 接入，可与 Cursor/Codex 等 Agent 环境配合使用。
 
 核心目标：
 - 统一入口：把安全策略集中在网关层，而不是散落在各个 Agent/应用里。
@@ -14,6 +14,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ## 1. 主要能力
 
+- **MCP 与 SKILL 支持**：支持 MCP（Model Context Protocol）与 Agent SKILL 接入，可与 Cursor/Codex 等 Agent 环境配合使用；Agent 安装与接入手册见 [SKILL.md](SKILL.md)。
 - OpenAI 兼容接口：
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
@@ -126,8 +127,8 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 ## 2. 接入模型
 
 当前支持 token 路由模式：
-- `v1`：`/v1/__gw__/t/<token>/...`
-- `v2`：`/v2/__gw__/t/<token>/...`（复用同一 token，无需单独注册）
+- `v1`：`/v1/__gw__/t/<token>/...`（**一个 token 绑定一个 upstream_base URL**）
+- `v2`：`/v2/__gw__/t/<token>/...`（可复用 v1 的 token；实际转发目标由 `x-target-url` 指定，不绑定 `upstream_base`）
 
 ### 2.1 Token 注册（必选）
 
@@ -153,7 +154,9 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 说明：
 1. token 长度为 10 位（沿用原有生成方式，长度调整为 10）。
-2. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
+2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
+3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
+4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
 
 然后请求：
 
@@ -177,6 +180,24 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
 辅助接口：
 - 查询：`POST /__gw__/lookup`
 - 删除：`POST /__gw__/unregister`
+- 追加白名单：`POST /__gw__/add`（必填：`token`、`gateway_key`、`whitelist_key`(list)；可选：`upstream_base`，传入则替换该 token 绑定上游）
+- 减少白名单：`POST /__gw__/remove`（必填：`token`、`gateway_key`、`whitelist_key`(list)）
+
+追加示例（在原 whitelist 基础上增加；可选替换 upstream_base）：
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/add \
+  -H "Content-Type: application/json" \
+  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"agent","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://your-upstream-new.example.com/v1"}'
+```
+
+减少示例（从原 whitelist 中删除）：
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/remove \
+  -H "Content-Type: application/json" \
+  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"agent","whitelist_key":["okx_key"]}'
+```
 
 ### 2.2 Claude 接入快速示例
 
@@ -337,7 +358,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
   - 使用高强度 `AEGIS_GATEWAY_KEY`（不要用默认值）
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
   - 在入口网关（Nginx/Caddy/WAF）上加 IP 白名单、限流与访问控制
-  - 管理端点 `POST /__gw__/register|lookup|unregister` 仅允许内网来源访问（网关入口已强制）
+  - 管理端点 `POST /__gw__/register|lookup|unregister|add|remove` 仅允许内网来源访问（网关入口已强制）
 - OAuth 托管登录模式通常无法配置 Base URL/Header，不适合接入 AegisGate；建议统一使用 API Key + Base URL 模式。
 
 ## 7. 测试
