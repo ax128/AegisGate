@@ -107,6 +107,19 @@ async def test_boundary_blocks_admin_endpoints_from_public_ip():
 
 
 @pytest.mark.asyncio
+async def test_boundary_blocks_add_endpoint_from_public_ip():
+    request = _build_request(
+        "/__gw__/add",
+        client_host="8.8.8.8",
+        body={"token": "tok123", "gateway_key": "agent", "whitelist_key": ["okx_key"]},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "admin_endpoint_network_restricted"
+
+
+@pytest.mark.asyncio
 async def test_boundary_allows_admin_endpoints_from_private_ip():
     original_loopback_only = gateway.settings.enforce_loopback_only
     gateway.settings.enforce_loopback_only = False

@@ -21,7 +21,14 @@ from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as 
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
-from aegisgate.core.gw_tokens import find_token as gw_tokens_find_token, get as gw_tokens_get, load as gw_tokens_load, register as gw_tokens_register, unregister as gw_tokens_unregister
+from aegisgate.core.gw_tokens import (
+    find_token as gw_tokens_find_token,
+    get as gw_tokens_get,
+    load as gw_tokens_load,
+    register as gw_tokens_register,
+    unregister as gw_tokens_unregister,
+    update as gw_tokens_update,
+)
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.core.security_boundary import (
     build_nonce_cache,
@@ -85,7 +92,7 @@ if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
 _nonce_cache = build_nonce_cache()
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister"})
+_ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
 
 
 class GWTokenRewriteMiddleware:
@@ -373,6 +380,16 @@ def _public_base_url(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
+def _string_field(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _normalize_required_whitelist_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return normalize_whitelist_keys(value)
+
+
 @app.post("/__gw__/register")
 async def gw_register(request: Request) -> JSONResponse:
     """一次性注册：返回短 token 与 baseUrl，映射写入 config/gw_tokens.json。"""
@@ -380,9 +397,10 @@ async def gw_register(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    upstream_base = (body.get("upstream_base") or "").strip()
-    gateway_key = (body.get("gateway_key") or "").strip()
-    whitelist_key = body.get("whitelist_key")
+    upstream_base = _string_field(body.get("upstream_base"))
+    gateway_key = _string_field(body.get("gateway_key"))
+    whitelist_present = "whitelist_key" in body
+    requested_whitelist = normalize_whitelist_keys(body.get("whitelist_key")) if whitelist_present else None
     if not upstream_base or not gateway_key:
         return JSONResponse(
             status_code=400,
@@ -398,11 +416,22 @@ async def gw_register(request: Request) -> JSONResponse:
             },
         )
     upstream_base_normalized = upstream_base.rstrip("/")
-    normalized_whitelist = normalize_whitelist_keys(whitelist_key)
-    token, already_registered = gw_tokens_register(
-        upstream_base_normalized,
-        gateway_key,
-        normalized_whitelist,
+    if whitelist_present:
+        token, already_registered = gw_tokens_register(
+            upstream_base_normalized,
+            gateway_key,
+            requested_whitelist,
+        )
+    else:
+        token, already_registered = gw_tokens_register(
+            upstream_base_normalized,
+            gateway_key,
+        )
+    stored = gw_tokens_get(token) or {}
+    effective_whitelist = (
+        normalize_whitelist_keys(stored.get("whitelist_key"))
+        if stored
+        else (requested_whitelist or [])
     )
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     if already_registered:
@@ -412,10 +441,132 @@ async def gw_register(request: Request) -> JSONResponse:
                 "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
                 "token": token,
                 "baseUrl": base_url,
-                "whitelist_key": normalized_whitelist,
+                "whitelist_key": effective_whitelist,
             },
         )
-    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": normalized_whitelist})
+    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": effective_whitelist})
+
+
+@app.post("/__gw__/add")
+async def gw_add(request: Request) -> JSONResponse:
+    """对指定 token 追加 whitelist_key；可选替换 upstream_base。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    token = _string_field(body.get("token"))
+    gateway_key = _string_field(body.get("gateway_key"))
+    whitelist_add = _normalize_required_whitelist_list(body.get("whitelist_key"))
+    if not token or not gateway_key or whitelist_add is None or not whitelist_add:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
+        )
+    upstream_base_input = _string_field(body.get("upstream_base"))
+    mapping = gw_tokens_get(token)
+    if not mapping:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    mapped_gateway_key = _string_field(mapping.get("gateway_key"))
+    if mapped_gateway_key != gateway_key:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
+        )
+    current_upstream_base = _string_field(mapping.get("upstream_base")).rstrip("/")
+    next_upstream_base = current_upstream_base
+    if upstream_base_input:
+        normalized_upstream = upstream_base_input.rstrip("/")
+        normalized_lower = normalized_upstream.lower()
+        if normalized_lower in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "example_upstream_forbidden",
+                    "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再更新。",
+                },
+            )
+        existing = gw_tokens_find_token(normalized_upstream, gateway_key)
+        if existing is not None and existing != token:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "upstream_pair_conflict", "detail": "target upstream_base + gateway_key already bound"},
+            )
+        next_upstream_base = normalized_upstream
+
+    current = normalize_whitelist_keys(mapping.get("whitelist_key"))
+    current_set = set(current)
+    added = [k for k in whitelist_add if k not in current_set]
+    next_whitelist = current + added
+    updated = gw_tokens_update(
+        token,
+        upstream_base=next_upstream_base,
+        gateway_key=gateway_key,
+        whitelist_key=next_whitelist,
+    )
+    if not updated:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
+    return JSONResponse(
+        content={
+            "token": token,
+            "gateway_key": gateway_key,
+            "upstream_base": next_upstream_base,
+            "baseUrl": base_url,
+            "whitelist_key": normalize_whitelist_keys(latest),
+            "added": added,
+        }
+    )
+
+
+@app.post("/__gw__/remove")
+async def gw_remove(request: Request) -> JSONResponse:
+    """仅对指定 token 移除 whitelist_key。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    token = _string_field(body.get("token"))
+    gateway_key = _string_field(body.get("gateway_key"))
+    whitelist_remove = _normalize_required_whitelist_list(body.get("whitelist_key"))
+    if not token or not gateway_key or whitelist_remove is None or not whitelist_remove:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
+        )
+    mapping = gw_tokens_get(token)
+    if not mapping:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    mapped_gateway_key = _string_field(mapping.get("gateway_key"))
+    if mapped_gateway_key != gateway_key:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
+        )
+    upstream_base = _string_field(mapping.get("upstream_base")).rstrip("/")
+    current = normalize_whitelist_keys(mapping.get("whitelist_key"))
+    remove_set = set(whitelist_remove)
+    removed = [k for k in current if k in remove_set]
+    next_whitelist = [k for k in current if k not in remove_set]
+    updated = gw_tokens_update(
+        token,
+        upstream_base=upstream_base,
+        gateway_key=gateway_key,
+        whitelist_key=next_whitelist,
+    )
+    if not updated:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
+    return JSONResponse(
+        content={
+            "token": token,
+            "gateway_key": gateway_key,
+            "baseUrl": base_url,
+            "whitelist_key": normalize_whitelist_keys(latest),
+            "removed": removed,
+        }
+    )
 
 
 @app.post("/__gw__/lookup")
@@ -425,8 +576,8 @@ async def gw_lookup(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    upstream_base = (body.get("upstream_base") or "").strip()
-    gateway_key = (body.get("gateway_key") or "").strip()
+    upstream_base = _string_field(body.get("upstream_base"))
+    gateway_key = _string_field(body.get("gateway_key"))
     if not upstream_base or not gateway_key:
         return JSONResponse(
             status_code=400,
@@ -463,9 +614,22 @@ async def gw_unregister(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    token = (body.get("token") or "").strip()
-    if not token:
-        return JSONResponse(status_code=400, content={"error": "missing_token"})
+    token = _string_field(body.get("token"))
+    gateway_key = _string_field(body.get("gateway_key"))
+    if not token or not gateway_key:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "token and gateway_key required"},
+        )
+    mapping = gw_tokens_get(token)
+    if not mapping:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    mapped_gateway_key = _string_field(mapping.get("gateway_key"))
+    if mapped_gateway_key != gateway_key:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
+        )
     if gw_tokens_unregister(token):
         return JSONResponse(content={"ok": True, "message": "token removed"})
     return JSONResponse(status_code=404, content={"error": "token_not_found"})

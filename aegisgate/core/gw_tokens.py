@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import secrets
@@ -21,6 +22,7 @@ _tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _TOKEN_LEN = 10
 _GW_TOKENS_KEY = "tokens"
+_WHITELIST_UNSET = object()
 
 
 def _path() -> Path:
@@ -64,7 +66,10 @@ def _save() -> None:
 def get(token: str) -> dict[str, Any] | None:
     """根据 token 取映射，不存在返回 None。"""
     with _lock:
-        return _tokens.get(token)
+        mapping = _tokens.get(token)
+        if mapping is None:
+            return None
+        return copy.deepcopy(mapping)
 
 
 def _normalize_upstream(s: str) -> str:
@@ -92,10 +97,11 @@ def find_token(upstream_base: str, gateway_key: str) -> str | None:
         return _find_token_holding_lock(ub, gk)
 
 
-def register(upstream_base: str, gateway_key: str, whitelist_key: Any = None) -> tuple[str, bool]:
+def register(upstream_base: str, gateway_key: str, whitelist_key: Any = _WHITELIST_UNSET) -> tuple[str, bool]:
     """
     注册：同一 (upstream_base, gateway_key) 只保留一个 token。
     若已存在则返回 (已有 token, True)，否则新建并返回 (新 token, False)。
+    未传 whitelist_key 时，已存在映射的 whitelist_key 保持不变。
     """
     upstream_base = _normalize_upstream(upstream_base)
     if not upstream_base:
@@ -103,16 +109,18 @@ def register(upstream_base: str, gateway_key: str, whitelist_key: Any = None) ->
     gateway_key = (gateway_key or "").strip()
     if not gateway_key:
         raise ValueError("gateway_key required")
-    whitelist_keys = normalize_whitelist_keys(whitelist_key)
+    whitelist_provided = whitelist_key is not _WHITELIST_UNSET
+    whitelist_keys = normalize_whitelist_keys(whitelist_key) if whitelist_provided else []
     with _lock:
         existing = _find_token_holding_lock(upstream_base, gateway_key)
         if existing is not None:
-            mapping = _tokens.get(existing) or {}
-            current = normalize_whitelist_keys(mapping.get("whitelist_key"))
-            if current != whitelist_keys:
-                mapping["whitelist_key"] = whitelist_keys
-                _tokens[existing] = mapping
-                _save()
+            if whitelist_provided:
+                mapping = _tokens.get(existing) or {}
+                current = normalize_whitelist_keys(mapping.get("whitelist_key"))
+                if current != whitelist_keys:
+                    mapping["whitelist_key"] = whitelist_keys
+                    _tokens[existing] = mapping
+                    _save()
             return existing, True
         for _ in range(10):
             token = secrets.token_urlsafe(_TOKEN_LEN)[:_TOKEN_LEN]
@@ -123,7 +131,7 @@ def register(upstream_base: str, gateway_key: str, whitelist_key: Any = None) ->
         _tokens[token] = {
             "upstream_base": upstream_base,
             "gateway_key": gateway_key,
-            "whitelist_key": whitelist_keys,
+            "whitelist_key": whitelist_keys if whitelist_provided else [],
         }
         _save()
     return token, False
@@ -139,7 +147,31 @@ def unregister(token: str) -> bool:
         return True
 
 
+def update(token: str, *, upstream_base: str | None = None, gateway_key: str | None = None, whitelist_key: Any = None) -> bool:
+    """按 token 更新映射并持久化。token 不存在返回 False。"""
+    with _lock:
+        mapping = _tokens.get(token)
+        if mapping is None:
+            return False
+        next_mapping = dict(mapping)
+        if upstream_base is not None:
+            normalized_upstream = _normalize_upstream(upstream_base)
+            if not normalized_upstream:
+                raise ValueError("upstream_base required")
+            next_mapping["upstream_base"] = normalized_upstream
+        if gateway_key is not None:
+            normalized_gateway_key = (gateway_key or "").strip()
+            if not normalized_gateway_key:
+                raise ValueError("gateway_key required")
+            next_mapping["gateway_key"] = normalized_gateway_key
+        if whitelist_key is not None:
+            next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
+        _tokens[token] = next_mapping
+        _save()
+        return True
+
+
 def list_tokens() -> dict[str, dict[str, Any]]:
     """返回当前所有 token 映射（副本）。"""
     with _lock:
-        return dict(_tokens)
+        return copy.deepcopy(_tokens)

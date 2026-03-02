@@ -146,6 +146,8 @@ model: claude-3-5-sonnet-latest
   - `POST /__gw__/register`
   - `POST /__gw__/lookup`
   - `POST /__gw__/unregister`
+  - `POST /__gw__/add`
+  - `POST /__gw__/remove`
 - Use strong `AEGIS_GATEWAY_KEY`.
 - Prefer Token mode for all new clients.
 - Do not use OAuth-hosted-only mode for AegisGate routing.

@@ -8,7 +8,7 @@
 - 当前只支持 **Token 路由**（v1 和 v2 共用同一组 token）：
   - `v1`（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
   - `v2`（通用 HTTP 代理）：`http://<host>:18080/v2/__gw__/t/<TOKEN>`，须携带 `x-target-url: <完整目标URL>` 请求头
-- 管理接口（`/__gw__/register|lookup|unregister`）应只允许内网/管理机访问。
+- 管理接口（`/__gw__/register|lookup|unregister|add|remove`）应只允许内网/管理机访问。
 
 ## 1) 环境检查
 
