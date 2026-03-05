@@ -3061,6 +3061,11 @@ async def _execute_chat_once(
         output_text=capped_upstream_text,
         raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": upstream_body},
     )
+    logger.debug(
+        "response_before_filters (chat) input_len=%s request_id=%s",
+        len(internal_resp.output_text),
+        req.request_id,
+    )
     debug_log_original("response_before_filters", internal_resp.output_text)
 
     final_resp = await _run_response_pipeline(pipeline, internal_resp, ctx)
@@ -3311,6 +3316,11 @@ async def _execute_responses_once(
         model=req.model,
         output_text=capped_upstream_text,
         raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": upstream_body},
+    )
+    logger.debug(
+        "response_before_filters (responses) input_len=%s request_id=%s",
+        len(internal_resp.output_text),
+        req.request_id,
     )
     debug_log_original("response_before_filters", internal_resp.output_text)
 
