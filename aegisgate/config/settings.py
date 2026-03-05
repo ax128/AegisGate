@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     upstream_max_connections: int = 100
     upstream_max_keepalive_connections: int = 20
     enable_thread_offload: bool = False
+    # 过滤管道（request/response pipeline）最大允许执行时间（秒）。
+    # 超时后该请求被拒绝（response: block，request: pass-through），event loop 不再被阻塞。
+    # 设为 0 表示不限制（不推荐生产使用）。
+    filter_pipeline_timeout_s: float = 30.0
     upstream_base_header: str = "x-upstream-base"
     upstream_whitelist_url_list: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
