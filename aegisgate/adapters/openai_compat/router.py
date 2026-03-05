@@ -442,7 +442,17 @@ def _flatten_text(value: Any) -> str:
     if isinstance(value, dict):
         if isinstance(value.get("text"), str):
             return value["text"]
-        for key in ("content", "message", "output", "choices"):
+        # Responses API: function_call / computer_call / bash items have no "text" key.
+        # Produce a compact, safe summary so callers never fall through to a full-body json.dumps.
+        item_type = str(value.get("type", ""))
+        if item_type == "function_call":
+            name = str(value.get("name", "?"))
+            args = str(value.get("arguments", ""))[:200]
+            return f"[function_call:{name}({args})]"
+        if item_type in ("computer_call", "bash"):
+            action = json.dumps(value.get("action", {}), ensure_ascii=False)[:200]
+            return f"[{item_type}:{action}]"
+        for key in ("content", "message", "output", "choices", "summary"):
             if key in value:
                 chunk = _flatten_text(value[key])
                 if chunk:
@@ -460,12 +470,28 @@ def _extract_chat_output_text(upstream_body: dict[str, Any] | str) -> str:
             text = _flatten_text(first.get("message", {}).get("content", ""))
             if text:
                 return text
+            # function_call / tool_calls finish reason: produce compact summary
+            finish_reason = str(first.get("finish_reason", ""))
+            tool_calls = first.get("message", {}).get("tool_calls")
+            if isinstance(tool_calls, list):
+                parts = []
+                for tc in tool_calls[:5]:
+                    fn = tc.get("function", {})
+                    parts.append(f"[tool_call:{fn.get('name','?')}({str(fn.get('arguments',''))[:200]})]")
+                if parts:
+                    return " ".join(parts)
+            if finish_reason:
+                return f"[finish_reason={finish_reason}]"
     for key in ("output_text", "text", "output"):
         if key in upstream_body:
             text = _flatten_text(upstream_body[key])
             if text:
                 return text
-    return json.dumps(upstream_body, ensure_ascii=False)
+    # Safe fallback: never dump the full body — it may contain large system prompts / inputs
+    error = upstream_body.get("error")
+    if error:
+        return f"[error={json.dumps(error, ensure_ascii=False)[:300]}]"
+    return "[no_text_content]"
 
 
 def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
@@ -476,7 +502,13 @@ def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
             text = _flatten_text(upstream_body[key])
             if text:
                 return text
-    return json.dumps(upstream_body, ensure_ascii=False)
+    # Safe fallback: never dump the full body — responses API body includes the entire
+    # `instructions` field (system prompt, can be 40k+ chars) which would cause filter slowdowns.
+    status = str(upstream_body.get("status", "unknown"))
+    error = upstream_body.get("error")
+    if error:
+        return f"[status={status} error={json.dumps(error, ensure_ascii=False)[:300]}]"
+    return f"[status={status}]"
 
 
 def _is_structured_content(value: Any) -> bool:
@@ -1171,11 +1203,52 @@ async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContext) -> Any:
-    return await _maybe_offload(pipeline.run_request, req, ctx)
+    # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+    # asyncio.wait_for lets us enforce a hard timeout as a safety net.
+    timeout_s = settings.filter_pipeline_timeout_s
+    if timeout_s <= 0:
+        return await asyncio.to_thread(pipeline.run_request, req, ctx)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(pipeline.run_request, req, ctx),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "request_pipeline timeout exceeded request_id=%s timeout_s=%s",
+            ctx.request_id,
+            timeout_s,
+        )
+        ctx.security_tags.add("filter_pipeline_timeout")
+        ctx.enforcement_actions.append("request_pipeline:timeout")
+        # On request-side timeout: pass the original request through rather than blocking.
+        return req
 
 
 async def _run_response_pipeline(pipeline: Pipeline, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
-    return await _maybe_offload(pipeline.run_response, resp, ctx)
+    # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+    # asyncio.wait_for lets us enforce a hard timeout as a safety net.
+    timeout_s = settings.filter_pipeline_timeout_s
+    if timeout_s <= 0:
+        return await asyncio.to_thread(pipeline.run_response, resp, ctx)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(pipeline.run_response, resp, ctx),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "response_pipeline timeout exceeded request_id=%s timeout_s=%s output_len=%s",
+            ctx.request_id,
+            timeout_s,
+            len(resp.output_text),
+        )
+        ctx.security_tags.add("filter_pipeline_timeout")
+        ctx.enforcement_actions.append("response_pipeline:timeout")
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("filter_timeout")
+        resp.output_text = "[AegisGate] response filter timed out."
+        return resp
 
 
 async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:

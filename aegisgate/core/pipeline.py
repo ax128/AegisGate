@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import time
+
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+
+# Filters slower than this threshold (seconds) will emit a WARNING for diagnosis.
+_SLOW_FILTER_WARN_S = 1.0
 
 
 class Pipeline:
@@ -19,14 +24,38 @@ class Pipeline:
         current = req
         for plugin in self.request_filters:
             if plugin.enabled(ctx):
+                t0 = time.monotonic()
                 current = plugin.process_request(current, ctx)
+                elapsed = time.monotonic() - t0
                 ctx.add_report(plugin.report())
+                if elapsed >= _SLOW_FILTER_WARN_S:
+                    logger.warning(
+                        "slow_filter phase=request filter=%s elapsed_s=%.3f request_id=%s",
+                        plugin.name, elapsed, ctx.request_id,
+                    )
+                else:
+                    logger.debug(
+                        "filter_done phase=request filter=%s elapsed_s=%.3f request_id=%s",
+                        plugin.name, elapsed, ctx.request_id,
+                    )
         return current
 
     def run_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         current = resp
         for plugin in self.response_filters:
             if plugin.enabled(ctx):
+                t0 = time.monotonic()
                 current = plugin.process_response(current, ctx)
+                elapsed = time.monotonic() - t0
                 ctx.add_report(plugin.report())
+                if elapsed >= _SLOW_FILTER_WARN_S:
+                    logger.warning(
+                        "slow_filter phase=response filter=%s elapsed_s=%.3f request_id=%s output_len=%s",
+                        plugin.name, elapsed, ctx.request_id, len(current.output_text),
+                    )
+                else:
+                    logger.debug(
+                        "filter_done phase=response filter=%s elapsed_s=%.3f request_id=%s",
+                        plugin.name, elapsed, ctx.request_id,
+                    )
         return current
