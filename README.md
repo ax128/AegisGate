@@ -7,9 +7,23 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、确认放行流程（yes/no）。
 
+## CLIProxyAPI 支持
+
+AegisGate 原生支持 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 作为上游代理，实现 **客户端零改动** 的安全接入：
+
+```
+客户端 → Caddy (TLS) → AegisGate (安检/过滤) → CLIProxyAPI → LLM API
+```
+
+- 一键部署：`docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build`
+- 不改 CLIProxyAPI 代码，客户端仍用原 base URL 和 API Key
+- 自动 TLS（Caddy）、流式传输、长上下文优化参数已内置
+
+详细接入步骤见 **[CLIPROXY-QUICKSTART.md](CLIPROXY-QUICKSTART.md)**
+
 ## Agent Skill
 
-给 Agent 直接执行的安装与接入手册：  
+给 Agent 直接执行的安装与接入手册：
 - [SKILL.md](SKILL.md)
 
 ## 1. 主要能力
