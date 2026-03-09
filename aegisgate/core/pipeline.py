@@ -41,6 +41,7 @@ class Pipeline:
         return current
 
     def run_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+        is_stream = resp.raw.get("stream", False) if isinstance(resp.raw, dict) else False
         current = resp
         for plugin in self.response_filters:
             if plugin.enabled(ctx):
@@ -53,9 +54,16 @@ class Pipeline:
                         "slow_filter phase=response filter=%s elapsed_s=%.3f request_id=%s output_len=%s",
                         plugin.name, elapsed, ctx.request_id, len(current.output_text),
                     )
-                else:
+                elif not is_stream:
+                    # Only emit per-filter DEBUG for non-stream; stream checks are
+                    # already interval-gated so individual filter logs add noise.
                     logger.debug(
                         "filter_done phase=response filter=%s elapsed_s=%.3f request_id=%s",
                         plugin.name, elapsed, ctx.request_id,
                     )
+        if is_stream:
+            logger.debug(
+                "stream_response_filters_done filters=%d elapsed_total_s=n/a request_id=%s",
+                len(self.response_filters), ctx.request_id,
+            )
         return current

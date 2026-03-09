@@ -45,18 +45,22 @@ services:
       - aegisgate
       - cli-proxy-api
 
-  # CLIProxyAPI：配置统一放在 ./cli-proxy/ 下，无需改代码、无需注册网关
+  # CLIProxyAPI：从本地 ./CLIProxyAPI/ 源码构建
+  # 更新：git -C ./CLIProxyAPI pull
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    build:
+      context: ./CLIProxyAPI
+      dockerfile: Dockerfile
+    image: cli-proxy-api:local
     container_name: cli-proxy-api
     environment:
       DEPLOY: ${DEPLOY:-}
     ports:
       - "127.0.0.1:8317:8317"
     volumes:
-      - ${CLI_PROXY_CONFIG_PATH:-./cli-proxy/config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./cli-proxy/auths}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./cli-proxy/logs}:/CLIProxyAPI/logs
+      - ${CLI_PROXY_CONFIG_PATH:-./CLIProxyAPI/config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./CLIProxyAPI/auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./CLIProxyAPI/logs}:/CLIProxyAPI/logs
     restart: unless-stopped
 
 volumes:

@@ -8,24 +8,41 @@
 客户端 → https://api.example.com/v1/... → Caddy → AegisGate(安检) → cli-proxy-api:8317
 ```
 
-## 1. 准备配置目录
+## 两种部署模式
 
-在 AegisGate 项目下建一个目录，把 CLIProxyAPI 的配置放进去：
+| 模式 | 命令 | 说明 |
+|------|------|------|
+| **基础模式** | `docker compose up -d --build` | 仅 AegisGate，不启用 CLIProxyAPI / Caddy |
+| **ProxyAPI 模式** | `docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build` | AegisGate + CLIProxyAPI + Caddy 完整栈 |
+
+## 1. 克隆 CLIProxyAPI 到 AegisGate 目录下
 
 ```bash
-mkdir -p cli-proxy/auths cli-proxy/logs
-cp /path/to/CLIProxyAPI/config.yaml cli-proxy/
-# 若已有 OAuth 等认证文件，复制到 cli-proxy/auths/
+cd ~/AegisGate
+git clone https://github.com/router-for-me/CLIProxyAPI.git
 ```
 
 目录结构：
 
 ```
 AegisGate/
-  cli-proxy/
-    config.yaml   # 从 CLIProxyAPI 项目复制
-    auths/        # 可选，认证文件
-    logs/         # 可选，日志会写在这里
+  CLIProxyAPI/          # git clone 的 API 项目（内容由 CLIProxyAPI 自身管理）
+    config.yaml         # CLIProxyAPI 配置（首次需从 config.example.yaml 复制）
+    config.example.yaml
+    auths/              # OAuth 认证文件（CLIProxyAPI 登录后自动生成）
+    logs/               # CLIProxyAPI 日志
+    Dockerfile          # 用于 docker build
+    ...
+  Caddyfile             # Caddy 反代配置（在 AegisGate 根目录）
+  docker-compose.yml    # 基础模式
+  docker-compose.cliproxy.yml  # ProxyAPI 叠加栈
+```
+
+初始化配置：
+
+```bash
+cp CLIProxyAPI/config.example.yaml CLIProxyAPI/config.yaml
+# 编辑 CLIProxyAPI/config.yaml 配置你的 API Keys 等参数
 ```
 
 ## 2. 启动
@@ -36,7 +53,9 @@ docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --buil
 
 compose 已把网关上游设为 `http://cli-proxy-api:8317/v1`，API 请求会默认走网关再转 CLIProxyAPI。
 
-首次启动后，网关会自动生成 `gateway_key`（保存在 `config/aegis_gateway.key`）。如需手动注册 token 或调用管理接口，需查看此 key：
+CLIProxyAPI 从本地源码构建 Docker 镜像，无需拉取远程镜像。
+
+首次启动后，网关会自动生成 `gateway_key`（保存在 `config/aegis_gateway.key`）：
 
 ```bash
 cat config/aegis_gateway.key
@@ -51,7 +70,24 @@ cat config/aegis_gateway.key
 
 管理后台仍直连：`https://panel.example.com/management.html`（不经网关）。
 
-## 4. 流式与长上下文（已内置）
+## 4. 更新 CLIProxyAPI
+
+```bash
+git -C ./CLIProxyAPI pull
+docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
+```
+
+## 5. CLIProxyAPI 登录认证
+
+```bash
+# Claude 登录
+docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI -no-browser --claude-login
+
+# Gemini 登录
+docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI -no-browser --login
+```
+
+## 6. 流式与长上下文（已内置）
 
 compose 已预置以下能力：
 - 流式传输：Caddy `flush_interval -1`，SSE 不缓冲，网关保留断流 `[DONE]` 恢复。
@@ -62,17 +98,6 @@ compose 已预置以下能力：
 `AEGIS_MAX_REQUEST_BODY_BYTES`、`AEGIS_MAX_MESSAGES_COUNT`、`AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE`、`AEGIS_MAX_RESPONSE_LENGTH`、`AEGIS_FILTER_PIPELINE_TIMEOUT_S`。
 
 ---
-
-## 可选：自定义路径
-
-若不想用 `./cli-proxy/`，可设置环境变量后再启动 CLIProxy 叠加栈：
-
-```bash
-export CLI_PROXY_CONFIG_PATH=/your/path/config.yaml
-export CLI_PROXY_AUTH_PATH=/your/path/auths
-export CLI_PROXY_LOG_PATH=/your/path/logs
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
-```
 
 ## 可选：多上游 / Token 模式
 

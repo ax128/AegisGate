@@ -97,6 +97,7 @@ semantic_service_client = SemanticServiceClient(
 _GATEWAY_PREFIX = "/v1"
 _STREAM_WINDOW_MAX_CHARS = 8000
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
+_STREAM_FILTER_CHECK_INTERVAL = 4  # run response pipeline every N chunks (not every chunk)
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
 _PENDING_PAYLOAD_KIND_KEY = "_aegisgate_pending_kind"
@@ -2424,16 +2425,17 @@ async def _execute_chat_stream_once(
                     stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
-                    # Keep stream memory bounded by carrying request reports + latest stream check only.
-                    ctx.report_items = list(base_reports)
-                    probe_resp = InternalResponse(
-                        request_id=req.request_id,
-                        session_id=req.session_id,
-                        model=req.model,
-                        output_text=stream_window,
-                        raw={"stream": True},
-                    )
-                    await _run_response_pipeline(pipeline, probe_resp, ctx)
+                    # Run response pipeline at intervals (not every chunk) to reduce overhead.
+                    if chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0:
+                        ctx.report_items = list(base_reports)
+                        probe_resp = InternalResponse(
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            output_text=stream_window,
+                            raw={"stream": True},
+                        )
+                        await _run_response_pipeline(pipeline, probe_resp, ctx)
 
                     if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
                         await _apply_semantic_review(ctx, stream_window, phase="response")
@@ -2755,7 +2757,7 @@ async def _execute_responses_stream_once(
                     stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
-                    if not blocked_reason:
+                    if not blocked_reason and chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0:
                         ctx.report_items = list(base_reports)
                         probe_resp = InternalResponse(
                             request_id=req.request_id,
@@ -2769,6 +2771,7 @@ async def _execute_responses_stream_once(
                         if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
                             await _apply_semantic_review(ctx, stream_window, phase="response")
 
+                    if not blocked_reason:
                         decision = _stream_block_reason(ctx)
                         if decision:
                             blocked_reason = decision
@@ -3598,18 +3601,19 @@ async def _execute_generic_stream_once(
                         stream_window = _trim_stream_window(stream_window, chunk_text)
                         chunk_count += 1
 
-                        ctx.report_items = list(base_reports)
-                        probe_resp = InternalResponse(
-                            request_id=req.request_id,
-                            session_id=req.session_id,
-                            model=req.model,
-                            output_text=stream_window,
-                            raw={"stream": True, "generic": True},
-                        )
-                        await _run_response_pipeline(pipeline, probe_resp, ctx)
+                        if chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0:
+                            ctx.report_items = list(base_reports)
+                            probe_resp = InternalResponse(
+                                request_id=req.request_id,
+                                session_id=req.session_id,
+                                model=req.model,
+                                output_text=stream_window,
+                                raw={"stream": True, "generic": True},
+                            )
+                            await _run_response_pipeline(pipeline, probe_resp, ctx)
 
-                        if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
-                            await _apply_semantic_review(ctx, stream_window, phase="response")
+                            if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                                await _apply_semantic_review(ctx, stream_window, phase="response")
 
                         block_reason = _stream_block_reason(ctx)
                         if block_reason:
