@@ -91,6 +91,39 @@ def _ensure_gateway_key() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Internal proxy token auto-generation (Caddy ↔ AegisGate auto-pairing)
+# ---------------------------------------------------------------------------
+_PROXY_TOKEN_FILE = "aegis_proxy_token.key"
+_PROXY_TOKEN_HEADER = "x-aegis-proxy-token"
+_proxy_token_value: str = ""
+
+
+def _ensure_proxy_token() -> str:
+    """Auto-generate an internal proxy token for Caddy ↔ AegisGate trust."""
+    global _proxy_token_value
+    from pathlib import Path
+
+    key_path = (Path.cwd() / "config" / _PROXY_TOKEN_FILE).resolve()
+    if key_path.is_file():
+        stored = key_path.read_text(encoding="utf-8").strip()
+        if stored:
+            _proxy_token_value = stored
+            logger.info("proxy_token loaded from %s", key_path)
+            return stored
+
+    new_token = secrets.token_urlsafe(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(new_token, encoding="utf-8")
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+    _proxy_token_value = new_token
+    logger.info("proxy_token auto-generated and saved to %s", key_path)
+    return new_token
+
+
+# ---------------------------------------------------------------------------
 # Simple in-memory rate limiter for admin endpoints
 # ---------------------------------------------------------------------------
 class _AdminRateLimiter:
@@ -127,6 +160,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         raise
 
     _ensure_gateway_key()
+    _ensure_proxy_token()
 
     # Log key config so operators can verify the right compose overlay is active.
     upstream = (settings.upstream_base_url or "").strip()
@@ -414,6 +448,18 @@ async def security_boundary_middleware(request: Request, call_next):
 
     protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
     protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
+
+    # --- Internal proxy token: Caddy ↔ AegisGate auto-pairing ---
+    # If the request carries a valid X-Aegis-Proxy-Token, authenticate it
+    # with the default upstream automatically (no token path needed).
+    if not bool(request.scope.get("aegis_token_authenticated")) and (protected_v1 or protected_v2):
+        proxy_token = (request.headers.get(_PROXY_TOKEN_HEADER) or "").strip()
+        if proxy_token and _proxy_token_value and hmac.compare_digest(proxy_token, _proxy_token_value):
+            default_base = (settings.upstream_base_url or "").strip()
+            if default_base:
+                request.scope["aegis_upstream_base"] = default_base
+                request.scope["aegis_token_authenticated"] = True
+                boundary["auth_verified"] = True
 
     if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
         # 若配置了默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://cli-proxy-api:8317/v1），

@@ -32,14 +32,17 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: aegisgate-caddy
+    entrypoint: ["/bin/sh", "/scripts/caddy-entrypoint.sh"]
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./scripts/caddy-entrypoint.sh:/scripts/caddy-entrypoint.sh:ro
+      - ./config:/config:ro
       - ./www:/srv/www
       - caddy_data:/data
-      - caddy_config:/config
+      - caddy_config:/caddy_config
     restart: unless-stopped
     depends_on:
       - aegisgate
