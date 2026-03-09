@@ -1,0 +1,79 @@
+# AIClient-2-API 代理栈（按需启用）：
+# 1) 启动命令：
+#    docker compose -f docker-compose.yml -f docker-compose.aiclient2api.yml up -d --build
+# 2) 关闭命令：
+#    docker compose -f docker-compose.yml -f docker-compose.aiclient2api.yml down
+#
+# 链路：
+#   api.example.com -> Caddy -> AegisGate -> aiclient2api:3000
+
+services:
+  aegisgate:
+    environment:
+      # AIClient-2-API 上游（带 /v1，保证 /v1/chat/completions、/v1/messages 等路径兼容）
+      AEGIS_UPSTREAM_BASE_URL: "http://aiclient2api:3000/v1"
+      # Caddy 容器 IP 作为可信代理，使 X-Forwarded-For/Host/Proto 被正确识别。
+      AEGIS_TRUSTED_PROXY_IPS: "${AEGIS_TRUSTED_PROXY_IPS:-172.16.0.0/12}"
+      # 大流量/长上下文/流式传输建议参数
+      AEGIS_ENABLE_THREAD_OFFLOAD: "true"
+      AEGIS_FILTER_PIPELINE_TIMEOUT_S: "90"
+      AEGIS_UPSTREAM_TIMEOUT_SECONDS: "600"
+      AEGIS_UPSTREAM_MAX_CONNECTIONS: "300"
+      AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS: "100"
+      AEGIS_MAX_REQUEST_BODY_BYTES: "12000000"
+      AEGIS_MAX_MESSAGES_COUNT: "300"
+      AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE: "250000"
+      AEGIS_MAX_PENDING_PAYLOAD_BYTES: "1200000"
+      AEGIS_MAX_RESPONSE_LENGTH: "2000000"
+    depends_on:
+      aiclient2api:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: aegisgate-caddy
+    entrypoint: ["/bin/sh", "/scripts/caddy-entrypoint.sh"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./scripts/caddy-entrypoint.sh:/scripts/caddy-entrypoint.sh:ro
+      - ./config:/config:ro
+      - ./www:/srv/www
+      - caddy_data:/data
+      - caddy_config:/caddy_config
+    restart: unless-stopped
+    depends_on:
+      - aegisgate
+      - aiclient2api
+
+  # ---------------------------------------------------------------------------
+  # AIClient-2-API：使用官方镜像
+  # 更新：docker compose -f ... pull aiclient2api && docker compose -f ... up -d
+  # ---------------------------------------------------------------------------
+  aiclient2api:
+    image: justlikemaki/aiclient-2-api:latest
+    container_name: aiclient2api
+    restart: unless-stopped
+    ports:
+      # Web UI 管理界面（仅本机访问）
+      - "127.0.0.1:3000:3000"
+      # OAuth 回调端口（Gemini / Antigravity / Codex / Kiro）
+      - "8085-8087:8085-8087"
+      - "1455:1455"
+      - "19876-19880:19876-19880"
+    volumes:
+      - ./aiclient2api/configs:/app/configs
+    environment:
+      - ARGS=${AICLIENT2API_ARGS:-}
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  caddy_data:
+  caddy_config:

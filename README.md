@@ -15,7 +15,7 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 
 | 模式 | 适用场景 | 说明 |
 |------|---------|------|
-| **Caddy 对外模式** | 需要对公网提供服务 | 通过 `docker-compose.cliproxy.yml` 或 `docker-compose.sub2api.yml` 叠加启动，Caddy 提供自动 TLS、域名绑定、管理端点阻断 |
+| **Caddy 对外模式** | 需要对公网提供服务 | 通过对应的 `docker-compose.*.yml` 叠加启动，Caddy 提供自动 TLS、域名绑定、管理端点阻断 |
 | **Token 内网模式** | 不对外开放，仅内部使用 | 仅启动基础 `docker-compose.yml`，通过 `/__gw__/register` 注册 token，客户端使用 `/v1/__gw__/t/<token>/...` 路径访问（推荐） |
 
 > **不对外开放中转服务时**，建议使用 Token 模式：无需 Caddy，无需域名，注册 token 绑定上游 URL 即可。详见下方「Token 路径」章节。
@@ -46,6 +46,20 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 - 使用官方镜像 `weishaw/sub2api:latest`，内置 PostgreSQL + Redis
 
 详细接入步骤见 **[SUB2API-QUICKSTART.md](SUB2API-QUICKSTART.md)**
+
+### AIClient-2-API
+
+[AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) — 多源 AI 客户端代理，支持 Gemini CLI / Antigravity / Qwen Code / Kiro / Grok / Codex，统一为 OpenAI 兼容接口。
+
+```
+客户端 → Caddy (TLS) → AegisGate (安检/过滤) → AIClient-2-API → LLM API
+```
+
+- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.aiclient2api.yml up -d --build`
+- **内网 Token 模式**：启动基础栈 + AIClient-2-API，注册 token 绑定 `http://aiclient2api:3000/v1`
+- 使用官方镜像 `justlikemaki/aiclient-2-api:latest`，Web UI 管理账号池
+
+详细接入步骤见 **[AICLIENT2API-QUICKSTART.md](AICLIENT2API-QUICKSTART.md)**
 
 ## Agent Skill
 
