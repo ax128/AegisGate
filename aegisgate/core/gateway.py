@@ -128,6 +128,16 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     _ensure_gateway_key()
 
+    # Log key config so operators can verify the right compose overlay is active.
+    upstream = (settings.upstream_base_url or "").strip()
+    logger.info(
+        "gateway config: upstream=%s security_level=%s enforce_loopback=%s v2_proxy=%s",
+        upstream or "(none — token path required)",
+        settings.security_level,
+        settings.enforce_loopback_only,
+        settings.enable_v2_proxy,
+    )
+
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
