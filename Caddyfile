@@ -29,6 +29,21 @@ api.agentop.dev {
     @gw_admin path /__gw__ /__gw__/*
     respond @gw_admin "forbidden" 403
 
+    # 拦截扫描器探测的静态资源路径，不转发到网关（减少日志噪音）
+    @scanner_probe {
+        path /assets/* /static/* /js/* /css/* /images/* /img/* /fonts/*
+        path /robots.txt /favicon.ico /sitemap.xml /.env /wp-login.php /wp-admin/*
+        path /.git/* /.svn/* /.DS_Store /server-status /server-info
+        path /phpmyadmin/* /pma/* /admin/* /administrator/* /cgi-bin/*
+    }
+    respond @scanner_probe 404
+
+    # 仅允许 API 路径（/v1/ /v2/）通过，其余非 API 路径直接 404
+    @not_api {
+        not path /v1/* /v2/*
+    }
+    respond @not_api 404
+
     reverse_proxy aegisgate:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
