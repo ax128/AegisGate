@@ -369,9 +369,9 @@ async def security_boundary_middleware(request: Request, call_next):
     }
     request.state.security_boundary = boundary
 
-    # Passthrough: let registered route handlers respond directly.
-    # Includes /health, /, and other GET/HEAD endpoints.
-    if request.url.path in _PASSTHROUGH_PATHS:
+    # Passthrough: only safe read-only methods (GET/HEAD) on info endpoints.
+    # POST/PUT/DELETE to these paths still go through the full security boundary.
+    if request.url.path in _PASSTHROUGH_PATHS and request.method.upper() in {"GET", "HEAD"}:
         return await call_next(request)
 
     logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
