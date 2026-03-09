@@ -166,6 +166,8 @@ _nonce_cache = build_nonce_cache()
 _admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
+# Paths that bypass security boundary and go directly to route handlers.
+_PASSTHROUGH_PATHS = frozenset({"/", "/health"})
 
 # ---------------------------------------------------------------------------
 # Trusted proxy handling
@@ -367,14 +369,10 @@ async def security_boundary_middleware(request: Request, call_next):
     }
     request.state.security_boundary = boundary
 
-    # Health / liveness probes: respond immediately, no logging.
-    if request.url.path == "/health":
+    # Passthrough: let registered route handlers respond directly.
+    # Includes /health, /, and other GET/HEAD endpoints.
+    if request.url.path in _PASSTHROUGH_PATHS:
         return await call_next(request)
-
-    # Reverse-proxy health checks (HEAD /, GET /, etc.) — return 200 silently
-    # to avoid 404 noise and let Caddy/ALB see the backend as healthy.
-    if request.url.path in {"/", "/_next"} and request.method.upper() in {"HEAD", "GET"}:
-        return JSONResponse(content={"status": "ok"})
 
     logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
@@ -857,10 +855,37 @@ async def gw_unregister(request: Request) -> JSONResponse:
     return JSONResponse(status_code=404, content={"error": "token_not_found"})
 
 
+# ---------------------------------------------------------------------------
+# Info / health / liveness endpoints
+# ---------------------------------------------------------------------------
+
+_BOOT_TIME = time.time()
+
+
 @app.get("/health")
+@app.head("/health")
 def health() -> dict:
-    logger.info("health check")
+    """Liveness probe — lightweight, no logging."""
     return {"status": "ok"}
+
+
+@app.api_route("/", methods=["GET", "HEAD"])
+def gateway_root(request: Request) -> dict:
+    """Gateway info — used by Caddy / ALB health checks and humans."""
+    from aegisgate import __version__
+
+    routes_summary = ["/v1/*"]
+    if settings.enable_v2_proxy:
+        routes_summary.append("/v2/*")
+    if settings.enable_relay_endpoint:
+        routes_summary.append("/relay/*")
+    return {
+        "name": settings.app_name,
+        "version": __version__,
+        "status": "ok",
+        "uptime_seconds": int(time.time() - _BOOT_TIME),
+        "routes": routes_summary,
+    }
 
 
 # Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。
