@@ -21,6 +21,21 @@ AegisGate 原生支持 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAP
 
 详细接入步骤见 **[CLIPROXY-QUICKSTART.md](CLIPROXY-QUICKSTART.md)**
 
+## Sub2API 支持
+
+AegisGate 同样支持 [Sub2API](https://github.com/Wei-Shaw/sub2api) 作为上游 AI API 订阅管理平台：
+
+```
+客户端 → Caddy (TLS) → AegisGate (安检/过滤) → Sub2API → Claude / Gemini / OpenAI
+```
+
+- 一键部署：`docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build`
+- 使用官方镜像 `weishaw/sub2api:latest`，无需克隆仓库
+- 内置 PostgreSQL + Redis 依赖，自动初始化数据库
+- 支持 Claude (`/v1/messages`)、Gemini (`/v1beta/`)、Antigravity、OpenAI 兼容等多上游
+
+详细接入步骤见 **[SUB2API-QUICKSTART.md](SUB2API-QUICKSTART.md)**
+
 ## Agent Skill
 
 给 Agent 直接执行的安装与接入手册：
