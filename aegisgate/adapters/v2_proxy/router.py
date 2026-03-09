@@ -11,6 +11,8 @@ from functools import lru_cache
 from typing import Any, AsyncGenerator, Mapping
 from urllib.parse import urlparse
 
+import ipaddress
+
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -532,6 +534,34 @@ def _detect_dangerous_commands(text: str) -> list[str]:
 _V2_TARGET_URL_HEADER = "x-target-url"
 
 
+_SSRF_METADATA_HOSTS = frozenset({
+    "169.254.169.254",
+    "169.254.170.2",
+    "metadata.google.internal",
+    "metadata.goog",
+})
+
+
+def _is_ssrf_target(hostname: str) -> bool:
+    """Check if the hostname resolves to an internal/private IP or cloud metadata endpoint."""
+    if not hostname:
+        return True
+    lowered = hostname.lower().strip(".")
+    if lowered in _SSRF_METADATA_HOSTS:
+        return True
+    if lowered in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        addr = ipaddress.ip_address(lowered)
+        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+    except ValueError:
+        pass
+    # Block .internal TLD commonly used for cloud metadata
+    if lowered.endswith(".internal"):
+        return True
+    return False
+
+
 def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
     value = request.headers.get(_V2_TARGET_URL_HEADER, "").strip()
     if not value:
@@ -539,6 +569,8 @@ def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None, f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https"
+    if settings.v2_block_internal_targets and _is_ssrf_target(parsed.hostname or ""):
+        return None, "target url points to an internal/private address (SSRF protection)"
     return value, None
 
 

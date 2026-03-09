@@ -82,6 +82,38 @@ async def test_boundary_blocks_non_token_v2_requests():
 
 
 @pytest.mark.asyncio
+async def test_boundary_allows_non_token_v1_when_default_upstream_configured(monkeypatch):
+    monkeypatch.setattr(gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1")
+    request = _build_request("/v1/responses", token_authenticated=False, body={"input": "hello"})
+    captured: dict[str, object] = {}
+
+    async def _capture_next(req: Request):
+        captured["aegis_token_authenticated"] = req.scope.get("aegis_token_authenticated")
+        captured["aegis_upstream_base"] = req.scope.get("aegis_upstream_base")
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    response = await gateway.security_boundary_middleware(request, _capture_next)
+    assert response.status_code == 200
+    assert captured["aegis_token_authenticated"] is True
+    assert captured["aegis_upstream_base"] == "http://cli-proxy-api:8317/v1"
+
+
+@pytest.mark.asyncio
+async def test_boundary_blocks_non_token_v2_when_default_upstream_configured(monkeypatch):
+    monkeypatch.setattr(gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1")
+    request = _build_request(
+        "/v2/proxy",
+        token_authenticated=False,
+        headers={"x-target-url": "https://example.com/api"},
+        body={"hello": "world"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "token_route_required"
+
+
+@pytest.mark.asyncio
 async def test_boundary_allows_token_authenticated_v2_requests():
     request = _build_request(
         "/v2/proxy",
@@ -98,6 +130,46 @@ async def test_boundary_blocks_admin_endpoints_from_public_ip():
     request = _build_request(
         "/__gw__/register",
         client_host="8.8.8.8",
+        body={"upstream_base": "https://upstream.example.com/v1", "gateway_key": "agent"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "admin_endpoint_network_restricted"
+
+
+@pytest.mark.asyncio
+async def test_boundary_ignores_xff_from_untrusted_proxy(monkeypatch):
+    """When no trusted proxies are configured, XFF headers are ignored.
+
+    The direct client IP (172.18.0.4, a private IP) is used, so the request
+    is allowed through the admin network restriction check.
+    """
+    monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "")
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    request = _build_request(
+        "/__gw__/register",
+        client_host="172.18.0.4",
+        headers={"x-forwarded-for": "8.8.8.8"},
+        body={"upstream_base": "https://upstream.example.com/v1", "gateway_key": "agent"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    # Direct IP is 172.18.0.4 (internal) so admin network check passes.
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_boundary_blocks_xff_public_when_trusted_proxy(monkeypatch):
+    """When the direct IP is a trusted proxy and XFF says public, block."""
+    monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "172.18.0.4")
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    # Reset the cached trusted proxy sets so the new setting takes effect.
+    monkeypatch.setattr(gateway, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway, "_trusted_proxy_networks", None)
+    request = _build_request(
+        "/__gw__/register",
+        client_host="172.18.0.4",
+        headers={"x-forwarded-for": "8.8.8.8"},
         body={"upstream_base": "https://upstream.example.com/v1", "gateway_key": "agent"},
     )
     response = await gateway.security_boundary_middleware(request, _allow_next)

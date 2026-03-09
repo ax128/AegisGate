@@ -20,7 +20,7 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 # 内存映射：token -> {"upstream_base": str, "gateway_key": str, "whitelist_key": list[str]}
 _tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
-_TOKEN_LEN = 10
+_TOKEN_LEN = 24
 _GW_TOKENS_KEY = "tokens"
 _WHITELIST_UNSET = object()
 
@@ -60,6 +60,10 @@ def _save() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {_GW_TOKENS_KEY: dict(_tokens)}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     logger.debug("gw_tokens saved path=%s count=%d", path, len(_tokens))
 
 

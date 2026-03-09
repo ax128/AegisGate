@@ -1215,13 +1215,18 @@ async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContex
         )
     except asyncio.TimeoutError:
         logger.error(
-            "request_pipeline timeout exceeded request_id=%s timeout_s=%s",
+            "request_pipeline timeout exceeded request_id=%s timeout_s=%s action=%s",
             ctx.request_id,
             timeout_s,
+            settings.request_pipeline_timeout_action,
         )
         ctx.security_tags.add("filter_pipeline_timeout")
         ctx.enforcement_actions.append("request_pipeline:timeout")
-        # On request-side timeout: pass the original request through rather than blocking.
+        if settings.request_pipeline_timeout_action == "pass":
+            return req
+        # Default "block": reject the request instead of passing unfiltered content.
+        ctx.response_disposition = "block"
+        ctx.disposition_reasons.append("request_filter_timeout")
         return req
 
 

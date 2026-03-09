@@ -60,7 +60,7 @@ def payload_hash(payload: dict[str, Any]) -> str:
 
 def make_action_bind_token(seed: str) -> str:
     raw = str(seed or "").encode("utf-8")
-    return f"act-{hashlib.sha256(raw).hexdigest()[:10]}"
+    return f"act-{hashlib.sha256(raw).hexdigest()[:16]}"
 
 
 def _tokenize_text(text: str) -> set[str]:

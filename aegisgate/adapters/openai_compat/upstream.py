@@ -107,9 +107,13 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
 
 def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
     raw = _header_value(headers, settings.upstream_base_header)
-    if not raw.strip():
+    if raw.strip():
+        return _normalize_upstream_base(raw)
+    # 未提供 x-upstream-base 时使用默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://cli-proxy-api:8317），无需注册
+    default = (settings.upstream_base_url or "").strip()
+    if not default:
         raise ValueError("missing_upstream_base")
-    return _normalize_upstream_base(raw)
+    return _normalize_upstream_base(default)
 
 
 def _resolve_gateway_key(headers: Mapping[str, str]) -> str:

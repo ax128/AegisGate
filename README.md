@@ -21,11 +21,12 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
   - `POST /v1/{subpath}` 通用代理
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
+  - 生产建议使用 token 路径：`/v2/__gw__/t/<token>/...`
   - 必须携带 `x-target-url` 请求头指定原始目标地址
-  - 请求侧：脱敏 + 报文边界歧义检测（CL/TE 冲突、重复头、非法 framing）
+  - 请求侧：请求体脱敏（可开关，默认开）
   - 响应侧仅做 HTTP 注入攻击识别拦截（可开关，默认开）
-    - 例如：SQLi / XSS / 路径穿越 / XXE / SSTI / Log4Shell / SSRF / CRLF 注入
-    - 以及：HTTP request smuggling / response splitting 特征（CL.TE / TE.CL / TE.TE / 多状态行注入）
+    - 默认最小误拦模式：协议层高危特征（HTTP request smuggling / response splitting，如 CL.TE / TE.CL / TE.TE）
+    - 可通过规则配置扩展检测模式
     - 命中后直接返回非 200（默认 `403`）格式化错误，不走确认放行链路
 - Claude 系列 API（通用代理）：
   - `POST /v1/messages`
@@ -81,9 +82,10 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 ### 1.3 v1 / v2 实现链路与逻辑
 
 统一入口（v1/v2 共用）：
-1. 客户端必须走 token 路径：`/v1/__gw__/t/<token>/...` 或 `/v2/__gw__/t/<token>/...`
-2. 中间件重写 token 路径到真实路由，并把 token 绑定信息注入请求上下文
-3. 安全边界中间件执行基础限制：token 路径强制、请求体大小限制、可选 loopback-only、可选 HMAC/nonce 防重放
+1. `v1` 支持两种方式：默认上游直连（配置 `AEGIS_UPSTREAM_BASE_URL`）或 token 路径 `/v1/__gw__/t/<token>/...`
+2. `v2` 必须走 token 路径：`/v2/__gw__/t/<token>/...`（避免非 token 的通用代理暴露）
+3. token 路径会先被中间件重写到真实路由，并把 token 绑定信息注入请求上下文
+4. 安全边界中间件执行基础限制：请求体大小限制、可选 loopback-only、可选 HMAC/nonce 防重放
 
 `v1` 链路（OpenAI 兼容）：
 1. 请求侧过滤：`redaction -> request_sanitizer -> rag_poison_guard`
@@ -99,7 +101,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 4. 响应侧：仅对响应正文做高危代码检测（HTTP 走私、响应拆分等嵌入式攻击特征），命中返回 `403`
 5. 正常响应（含 CDN/Nginx 的 CL+TE 并存头）直接透传，不做干预
 
-> **安全边界提示**：v2 代理不对目标主机做限制；防止 SSRF 应在网络层（防火墙、出口 ACL）控制，或通过 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 明确白名单高信任域名。
+> **安全边界提示**：v2 代理默认启用 SSRF 防护（`AEGIS_V2_BLOCK_INTERNAL_TARGETS=true`），会阻止请求到内网 IP（RFC1918/loopback/link-local）和云元数据端点（169.254.169.254 等）。如需访问内网服务，可设为 `false` 并在网络层（防火墙、出口 ACL）做补偿控制。`AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 仅用于跳过响应拦截，不是目标主机访问白名单。
 
 ### 1.4 过滤范围、安全检查、审计能力
 
@@ -126,37 +128,55 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ## 2. 接入模型
 
-当前支持 token 路由模式：
-- `v1`：`/v1/__gw__/t/<token>/...`（**一个 token 绑定一个 upstream_base URL**）
-- `v2`：`/v2/__gw__/t/<token>/...`（可复用 v1 的 token；实际转发目标由 `x-target-url` 指定，不绑定 `upstream_base`）
+当前支持两种接入模式：
+- `v1` 默认上游直连模式：配置 `AEGIS_UPSTREAM_BASE_URL` 后，客户端可直接请求 `/v1/...`（适合单上游、零注册）。
+- token 路由模式：
+  - `v1`：`/v1/__gw__/t/<token>/...`（**一个 token 绑定一个 upstream_base URL**）
+  - `v2`：`/v2/__gw__/t/<token>/...`（可复用 v1 的 token；实际转发目标由 `x-target-url` 指定，不绑定 `upstream_base`）
 
-### 2.1 Token 注册（必选）
+### 2.0 v1 默认上游直连（单上游最简模式）
+
+当 `AEGIS_UPSTREAM_BASE_URL` 已配置时，可直接请求：
+
+```bash
+curl -X POST http://127.0.0.1:18080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+```
+
+建议：
+1. 上游使用 v1 基路径，例如 CLIProxyAPI 配置为 `http://cli-proxy-api:8317/v1`。
+2. 该模式仅适用于 `v1`；`v2` 仍建议使用 token 路径。
+
+### 2.1 Token 注册（多上游/多租户推荐）
 
 先注册一次，之后客户端只配置 token baseUrl，不再每次传网关头。
 
 注册：
 
 ```bash
+# gateway_key 必须与 AEGIS_GATEWAY_KEY 一致（查看 config/aegis_gateway.key 或环境变量）
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"agent","whitelist_key":["bn_key","okx_key"]}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"]}'
 ```
 
 返回：
 
 ```json
 {
-  "token": "Ab3k9Qx7Yp",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp",
+  "token": "rQ5VZva-ssZsqAy1gAyondtS",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/rQ5VZva-ssZsqAy1gAyondtS",
   "whitelist_key": ["bn_key", "okx_key"]
 }
 ```
 
 说明：
-1. token 长度为 10 位（沿用原有生成方式，长度调整为 10）。
+1. token 长度为 24 位（`secrets.token_urlsafe` 生成，约 144 位熵）。
 2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
 3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
 4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
+5. 所有管理端点（register/lookup/add/remove/unregister）都需要在请求体中提供 `gateway_key`，且必须与 `AEGIS_GATEWAY_KEY` 配置一致。
 
 然后请求：
 
@@ -183,12 +203,14 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
 - 追加白名单：`POST /__gw__/add`（必填：`token`、`gateway_key`、`whitelist_key`(list)；可选：`upstream_base`，传入则替换该 token 绑定上游）
 - 减少白名单：`POST /__gw__/remove`（必填：`token`、`gateway_key`、`whitelist_key`(list)）
 
+> 若启用 `docker-compose.cliproxy.yml`（含 Caddy），“公网域名 -> /__gw__/*” 默认会被 `403` 阻断；请通过 `127.0.0.1:18080` 或内网入口执行注册/查询/变更。
+
 追加示例（在原 whitelist 基础上增加；可选替换 upstream_base）：
 
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/add \
   -H "Content-Type: application/json" \
-  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"agent","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://your-upstream-new.example.com/v1"}'
+  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://your-upstream-new.example.com/v1"}'
 ```
 
 减少示例（从原 whitelist 中删除）：
@@ -196,7 +218,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/add \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/remove \
   -H "Content-Type: application/json" \
-  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"agent","whitelist_key":["okx_key"]}'
+  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
 ```
 
 ### 2.2 Claude 接入快速示例
@@ -267,21 +289,35 @@ curl http://127.0.0.1:18080/health
 
 ## 4. Docker 部署（配置/日志/token 持久化到宿主机）
 
-本仓库的 `docker-compose.yml` 默认把关键数据挂到宿主机：
+本仓库默认基础部署（`docker-compose.yml`）仅启动 AegisGate，并把关键数据挂到宿主机：
 
 - `./config`：策略、`.env`、`gw_tokens.json`
 - `./logs`：`aegisgate.db`、`audit.jsonl`、`aegisgate.log`
 
-启动：
+基础模式启动：
 
 ```bash
 docker compose up -d --build
 ```
 
+CLIProxyAPI 代理优化模式（按需启用）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
+```
+
+该模式会额外启用：
+- `cli-proxy-api`（本地 `127.0.0.1:8317`）
+- `caddy`（读取 `./Caddyfile`，用于域名入口）
+- 网关高负载参数（流式、长上下文、连接池与超时优化）
+
 默认端口策略：
 - `127.0.0.1:18080:18080`：仅宿主机本机可访问，不对公网直接暴露。
 - `expose: 18080`：同 Docker 网络内其它容器可通过服务名 `aegisgate:18080` 访问。
 - `extra_hosts: host.docker.internal:host-gateway`：容器内可访问宿主机服务（Linux/WSL2 也可用）。
+- 若启用 `docker-compose.cliproxy.yml`（含 Caddy）：
+  - `api.<your-domain>` -> `aegisgate:18080`
+  - `__gw__` 管理端点默认不对公网开放
 
 查看日志：
 
@@ -292,13 +328,16 @@ docker compose logs -f aegisgate
 连通性快速自检（注册 + 响应）：
 
 ```bash
+# 0) 查看自动生成的 gateway_key（首次启动后）
+cat config/aegis_gateway.key
+
 # 1) 宿主机 -> 容器：健康检查
 curl -sS http://127.0.0.1:18080/health
 
-# 2) 宿主机 -> 容器：注册 token（检查 baseUrl）
+# 2) 宿主机 -> 容器：注册 token（检查 baseUrl；gateway_key 用上面查到的值）
 curl -sS -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-real-upstream.example.com/v1","gateway_key":"agent"}'
+  -d '{"upstream_base":"https://your-real-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
 
 # 3) 同网络容器 -> aegisgate（需要在同一 compose network）
 docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
@@ -315,12 +354,19 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `AEGIS_GATEWAY_KEY` | 网关校验 key | `agent` |
+| `AEGIS_GATEWAY_KEY` | 网关管理端点校验 key（留空则首次启动自动生成到 `config/aegis_gateway.key`） | 空（自动生成） |
+| `AEGIS_ENCRYPTION_KEY` | 脱敏映射加密密钥（Fernet AES-128-CBC+HMAC，留空自动生成到 `config/aegis_fernet.key`） | 空（自动生成） |
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` |
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | 仅允许本机访问 | `true` |
+| `AEGIS_TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔，支持 CIDR 如 `172.16.0.0/12`）；仅这些 IP 的 XFF 会被信任 | 空 |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
+| `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（启用后可直连 `/v1/...`） | 空 |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔） | 空 |
+| `AEGIS_ENABLE_THREAD_OFFLOAD` | 过滤管道线程池执行开关 | `false` |
+| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `30.0` |
+| `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
+| `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |
 | `AEGIS_STORAGE_BACKEND` | `sqlite`/`redis`/`postgres` | `sqlite` |
 | `AEGIS_SQLITE_DB_PATH` | sqlite 文件路径 | `logs/aegisgate.db` |
 | `AEGIS_AUDIT_LOG_PATH` | 审计日志路径 | `logs/audit.jsonl` |
@@ -339,6 +385,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` | v2 响应拦截跳过域名（逗号分隔；支持 `example.com`/`.example.com`/`*.example.com`） | 空 |
 | `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | v2 响应注入检测最大字符数 | `200000` |
 | `AEGIS_V2_SSE_FILTER_PROBE_MAX_CHARS` | v2 SSE 流式响应检测探针最大字符数 | `4000` |
+| `AEGIS_V2_BLOCK_INTERNAL_TARGETS` | v2 阻止请求到内网/私有 IP（SSRF 防护） | `true` |
 
 说明：v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
 
@@ -354,11 +401,17 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 - 网关是安全中间层，不负责上游模型参数（如 model/api-key/超时）语义正确性。
 - 默认会写日志和审计文件到本地；是否包含正文取决于日志级别与策略配置。
 - 当 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true` 时，请求体会完整打印（含 function/tool 输出原文），仅建议在受控环境短时开启。
+- 安全自动化：
+  - `AEGIS_GATEWAY_KEY` 留空时首次启动自动生成 32 字符随机密钥（持久化到 `config/aegis_gateway.key`，文件权限 `0600`）。
+  - `AEGIS_ENCRYPTION_KEY` 留空时自动生成 Fernet 加密密钥（持久化到 `config/aegis_fernet.key`，文件权限 `0600`）。脱敏映射使用 AES-128-CBC+HMAC 加密存储，不再使用 base64。
+  - 管理端点内置速率限制（默认每 IP 每分钟 30 次）和内网 IP 校验。
+  - v2 代理默认启用 SSRF 防护，阻止请求到内网地址和云元数据端点。
 - 若对外网开放，建议至少做到：
-  - 使用高强度 `AEGIS_GATEWAY_KEY`（不要用默认值）
+  - 确认 `AEGIS_GATEWAY_KEY` 已生成或已设置高强度值（所有管理端点都需要此 key 认证）
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
+  - 配置 `AEGIS_TRUSTED_PROXY_IPS`（仅信任你的反向代理 IP，支持 CIDR）
   - 在入口网关（Nginx/Caddy/WAF）上加 IP 白名单、限流与访问控制
-  - 管理端点 `POST /__gw__/register|lookup|unregister|add|remove` 仅允许内网来源访问（网关入口已强制）
+  - 管理端点 `POST /__gw__/register|lookup|unregister|add|remove` 仅允许内网来源访问
 - OAuth 托管登录模式通常无法配置 Base URL/Header，不适合接入 AegisGate；建议统一使用 API Key + Base URL 模式。
 
 ## 7. 测试

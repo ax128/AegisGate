@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # 设为 0 表示不限制（不推荐生产使用）。
     filter_pipeline_timeout_s: float = 30.0
     upstream_base_header: str = "x-upstream-base"
+    # 默认上游：设置后可直接请求 /v1/... 与 /v2/...，无需走 /v1/__gw__/t/{token}/... 注册流程（如对接 cli-proxy-api:8317）
+    upstream_base_url: str = ""
     upstream_whitelist_url_list: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
     sqlite_db_path: str = "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
@@ -40,7 +42,7 @@ class Settings(BaseSettings):
     max_pending_payload_bytes: int = 100_000
     max_response_length: int = 500_000
     gateway_key_header: str = "gateway-key"
-    gateway_key: str = "agent"
+    gateway_key: str = ""  # Required; empty triggers auto-generation on first startup
     tenant_id_header: str = "x-tenant-id"
     confirmation_ttl_seconds: int = 300
     confirmation_executing_timeout_seconds: int = 120
@@ -65,6 +67,11 @@ class Settings(BaseSettings):
     # token 映射表路径（config/gw_tokens.json），启动时加载，注册/删除时写入
     gw_tokens_path: str = "config/gw_tokens.json"
     enforce_loopback_only: bool = True
+    # Trusted reverse-proxy IPs (comma-separated); only these may set X-Forwarded-For.
+    # Empty = trust direct client IP only (safest default).
+    trusted_proxy_ips: str = ""
+    # Block internal/private IPs as v2 target URL (SSRF protection)
+    v2_block_internal_targets: bool = True
 
     enable_request_hmac_auth: bool = False
     request_hmac_secret: str = ""
@@ -103,6 +110,10 @@ class Settings(BaseSettings):
     enable_rag_poison_guard: bool = True
 
     risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Request pipeline timeout action: "block" (safe default) or "pass" (legacy)
+    request_pipeline_timeout_action: str = "block"
+    # Admin endpoint rate limit: max requests per minute per client IP
+    admin_rate_limit_per_minute: int = 30
 
 
 settings = Settings()

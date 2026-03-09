@@ -4,15 +4,17 @@ This page is the **Wiki-style navigation hub** for connecting terminal/desktop I
 
 ## Start Here
 
-1. Use **Token mode** first.
-2. For Claude, use `POST /v1/messages` (supports streaming).
-3. OAuth-hosted login mode is **not supported**.
+1. Multi-upstream / multi-tenant: use **Token mode** first.
+2. Single-upstream fast path: use `AEGIS_UPSTREAM_BASE_URL` and call `/v1/...` directly.
+3. For Claude, use `POST /v1/messages` (supports streaming).
+4. OAuth-hosted login mode is **not supported**.
 
 ---
 
 ## Wiki Navigation
 
 - [Quick Start (Token Mode)](#quick-start-token-mode)
+- [Quick Start (Direct v1 Mode)](#quick-start-direct-v1-mode)
 - [Claude API Support](#claude-api-support)
 - [Platform Notes (Windows/macOS/Linux/WSL2)](#platform-notes-windowsmacoslinuxwsl2)
 - [Client Matrix](#client-matrix)
@@ -30,7 +32,7 @@ Register once:
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"agent"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
 ```
 
 Use returned `baseUrl`:
@@ -42,6 +44,37 @@ http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>
 Client config baseline:
 - `baseUrl = token baseUrl`
 - `apiKey = upstream real API key`
+
+> If you enable the `docker-compose.cliproxy.yml` stack (with Caddy), public domain requests to `/__gw__/*` are blocked.  
+> Run registration against `http://127.0.0.1:18080` (localhost) or an internal admin ingress.
+
+---
+
+## Quick Start (Direct v1 Mode)
+
+For single-upstream deployments, configure:
+
+```text
+AEGIS_UPSTREAM_BASE_URL=<YOUR_UPSTREAM_V1_BASE>
+```
+
+Then call:
+
+```text
+http://127.0.0.1:18080/v1/...
+```
+
+Example:
+
+```bash
+curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Notes:
+- Use an upstream base that includes provider API prefix (e.g. `.../v1`).
+- `v2` should still use token path: `/v2/__gw__/t/<TOKEN>/...` + `x-target-url`.
 
 ---
 
@@ -148,7 +181,9 @@ model: claude-3-5-sonnet-latest
   - `POST /__gw__/unregister`
   - `POST /__gw__/add`
   - `POST /__gw__/remove`
-- Use strong `AEGIS_GATEWAY_KEY`.
+- In public ingress, block `/__gw__/*` externally and keep it localhost/internal only.
+- Keep `v2` on token path (`/v2/__gw__/t/<TOKEN>/...`), avoid exposing non-token generic proxy.
+- Use strong `AEGIS_GATEWAY_KEY` (auto-generated if left empty; check `config/aegis_gateway.key`).
 - Prefer Token mode for all new clients.
 - Do not use OAuth-hosted-only mode for AegisGate routing.
 
@@ -157,4 +192,4 @@ model: claude-3-5-sonnet-latest
 ## Related Docs
 
 - `README.md`
-- `docs/other-terminal-clients-usage.md` (longer draft)
+- `OPENCLAW_INJECT_PROXY_FETCH.md`

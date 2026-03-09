@@ -1,0 +1,59 @@
+# 接入 AegisGate：api.example.com 先到网关安检，再转 cli-proxy-api:8317
+# 需 80/443 开放；证书由 Caddy 自动申请
+
+example.com, www.example.com {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.example.com https://panel.example.com; frame-ancestors 'self'"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    root * /srv/www
+    file_server
+}
+
+# API：先经 AegisGate 安检与过滤，再由网关转发到 cli-proxy-api
+api.example.com {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-XSS-Protection "1; mode=block"
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    }
+    # 管理端点不对公网开放，避免通过反代触发 /__gw__ 管理操作
+    @gw_admin path /__gw__ /__gw__/*
+    respond @gw_admin "forbidden" 403
+
+    reverse_proxy aegisgate:18080 {
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Real-IP {remote_host}
+        flush_interval -1
+    }
+}
+
+# 管理后台：直连 CLIProxyAPI，不经过网关。
+# 生产环境建议加 IP 白名单或 Basic Auth 限制公网访问：
+#   @allowed remote_ip 你的管理IP/32
+#   respond @denied "forbidden" 403
+panel.example.com {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        X-XSS-Protection "1; mode=block"
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    }
+    reverse_proxy cli-proxy-api:8317 {
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        flush_interval -1
+    }
+}

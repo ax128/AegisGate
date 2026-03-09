@@ -57,6 +57,13 @@ def test_resolve_upstream_base_requires_header():
         raise AssertionError("expected ValueError for missing upstream header")
 
 
+def test_resolve_upstream_base_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(settings, "upstream_base_url", "http://cli-proxy-api:8317")
+    headers = {}
+    resolved = _resolve_upstream_base(headers)
+    assert resolved == "http://cli-proxy-api:8317"
+
+
 def test_resolve_gateway_key_accepts_underscore_header():
     headers = {"gateway_key": "abc123"}
     assert _resolve_gateway_key(headers) == "abc123"

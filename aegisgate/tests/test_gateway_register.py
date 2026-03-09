@@ -6,6 +6,12 @@ from starlette.requests import Request
 from aegisgate.core import gateway
 
 
+@pytest.fixture(autouse=True)
+def _set_gateway_key(monkeypatch):
+    """All admin endpoint tests use gateway_key='agent' — ensure settings match."""
+    monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
+
+
 def _build_request(path: str, body: dict, headers: dict[str, str] | None = None) -> Request:
     payload = json.dumps(body).encode("utf-8")
     raw_headers = [(b"content-type", b"application/json")]
@@ -56,6 +62,10 @@ async def test_gw_register_base_url_prefers_request_host(monkeypatch):
 @pytest.mark.asyncio
 async def test_gw_register_base_url_uses_forwarded_headers(monkeypatch):
     monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
+    # 127.0.0.1 must be a trusted proxy for forwarded headers to be honoured.
+    monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "127.0.0.1")
+    monkeypatch.setattr(gateway, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway, "_trusted_proxy_networks", None)
     request = _build_request(
         "/__gw__/register",
         {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent"},
@@ -277,6 +287,8 @@ async def test_gw_add_rejects_gateway_key_mismatch(monkeypatch):
         if token == "tok123"
         else None,
     )
+    # The request sends "other" as gateway_key, which mismatches settings.gateway_key="agent".
+    # This is caught by the admin auth layer first (gateway_key_invalid).
     request = _build_request(
         "/__gw__/add",
         {"token": "tok123", "gateway_key": "other", "whitelist_key": ["okx_key"]},
@@ -285,7 +297,7 @@ async def test_gw_add_rejects_gateway_key_mismatch(monkeypatch):
     resp = await gateway.gw_add(request)
     body = json.loads(resp.body.decode("utf-8"))
     assert resp.status_code == 403
-    assert body["error"] == "gateway_key_mismatch"
+    assert body["error"] == "gateway_key_invalid"
 
 
 @pytest.mark.asyncio
@@ -381,6 +393,7 @@ async def test_gw_unregister_rejects_gateway_key_mismatch(monkeypatch):
         if token == "tok123"
         else None,
     )
+    # "wrong" mismatches settings.gateway_key="agent" → rejected at admin auth layer.
     request = _build_request(
         "/__gw__/unregister",
         {"token": "tok123", "gateway_key": "wrong"},
@@ -389,7 +402,7 @@ async def test_gw_unregister_rejects_gateway_key_mismatch(monkeypatch):
     resp = await gateway.gw_unregister(request)
     body = json.loads(resp.body.decode("utf-8"))
     assert resp.status_code == 403
-    assert body["error"] == "gateway_key_mismatch"
+    assert body["error"] == "gateway_key_invalid"
 
 
 @pytest.mark.asyncio

@@ -20,29 +20,29 @@ _DEFAULT_RULES: dict[str, Any] = {
         "strip_invisible_chars": True,
         "field_value_min_len": 12,
         "pii_patterns": [
-            {"id": "EMAIL", "regex": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"},
-            {"id": "TOKEN", "regex": r"\\b(?:sk|rk|pk)-[A-Za-z0-9\\-_]{10,}\\b"},
+            {"id": "EMAIL", "regex": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"},
+            {"id": "TOKEN", "regex": r"\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b"},
             {"id": "PHONE", "regex": r"\b(?:\+?1[-.\s]?)?(?:[(]?\d{3}[)]?[-.\s]?)\d{3}[-.\s]?\d{4}\b"},
-            {"id": "SSN", "regex": r"\\b\\d{3}-\\d{2}-\\d{4}\\b"},
-            {"id": "CARD", "regex": r"\\b(?:\\d[ -]*?){13,16}\\b"},
-            {"id": "CN_MOBILE", "regex": r"(?<!\\d)1[3-9]\\d{9}(?!\\d)"},
-            {"id": "CN_ID", "regex": r"(?<!\\d)\\d{17}[\\dXx](?!\\d)"},
-            {"id": "AWS_ACCESS_KEY", "regex": r"\\bAKIA[0-9A-Z]{16}\\b"},
-            {"id": "GITHUB_TOKEN", "regex": r"\\bghp_[A-Za-z0-9]{20,}\\b"},
-            {"id": "SLACK_TOKEN", "regex": r"\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b"},
-            {"id": "IBAN", "regex": r"\\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\\b"},
+            {"id": "SSN", "regex": r"\b\d{3}-\d{2}-\d{4}\b"},
+            {"id": "CARD", "regex": r"\b(?:\d[ -]*?){13,16}\b"},
+            {"id": "CN_MOBILE", "regex": r"(?<!\d)1[3-9]\d{9}(?!\d)"},
+            {"id": "CN_ID", "regex": r"(?<!\d)\d{17}[\dXx](?!\d)"},
+            {"id": "AWS_ACCESS_KEY", "regex": r"\bAKIA[0-9A-Z]{16}\b"},
+            {"id": "GITHUB_TOKEN", "regex": r"\bghp_[A-Za-z0-9]{20,}\b"},
+            {"id": "SLACK_TOKEN", "regex": r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"},
+            {"id": "IBAN", "regex": r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b"},
         ],
     },
     "restoration": {
-        "placeholder_regex": r"\\{\\{AG_[A-Z0-9]+_[A-Z_]+_\\d+\\}\\}",
+        "placeholder_regex": r"\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}",
         "suspicious_context_patterns": [
             {
                 "id": "exfiltration_en",
-                "regex": r"(reveal|show|dump|leak|print|secret|password|token|api\\s*key|system\\s+prompt)",
+                "regex": r"(reveal|show|dump|leak|print|secret|password|token|api\s*key|system\s+prompt)",
             },
             {
                 "id": "exfiltration_zh",
-                "regex": r"(泄露|暴露|显示|输出|打印|给我|提供).*(密钥|口令|密码|令牌|token|api\\s*key|系统提示词|系统提示)",
+                "regex": r"(泄露|暴露|显示|输出|打印|给我|提供).*(密钥|口令|密码|令牌|token|api\s*key|系统提示词|系统提示)",
             },
         ],
         "restore_policy": {
@@ -68,7 +68,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         "instructional_patterns": [
             {
                 "id": "instructional_en",
-                "regex": r"(ignore\\s+.*instructions?|bypass\\s+.*(policy|safety)|reveal\\s+.*(system\\s+prompt|developer\\s+message)|run\\s+command|execute\\s+shell)",
+                "regex": r"(ignore\s+.*instructions?|bypass\s+.*(policy|safety)|reveal\s+.*(system\s+prompt|developer\s+message)|run\s+command|execute\s+shell)",
             },
             {
                 "id": "instructional_zh",
@@ -78,8 +78,8 @@ _DEFAULT_RULES: dict[str, Any] = {
     },
     "injection_detector": {
         "base64_candidate_regex": r"[A-Za-z0-9+/]{24,}={0,2}",
-        "hex_candidate_regex": r"\\b[0-9a-fA-F]{32,}\\b",
-        "word_regex": r"\\b[a-z]{4,}\\b",
+        "hex_candidate_regex": r"\b[0-9a-fA-F]{32,}\b",
+        "word_regex": r"\b[a-z]{4,}\b",
         "base64_max_candidates": 8,
         "hex_max_candidates": 8,
         "multi_stage_decode": {
@@ -105,31 +105,31 @@ _DEFAULT_RULES: dict[str, Any] = {
         "unicode_invisible_chars": ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"],
         "unicode_bidi_chars": ["\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"],
         "direct_patterns": [
-            {"id": "ignore_previous_en", "regex": r"ignore\\s+(all\\s+)?(previous|prior)\\s+instructions?"},
-            {"id": "override_safety_en", "regex": r"(bypass|override)\\s+.*(safety|guardrails?|policy)"},
-            {"id": "developer_mode_en", "regex": r"(you\\s+are\\s+now|act\\s+as)\\s+.*(developer|root|admin)"},
+            {"id": "ignore_previous_en", "regex": r"ignore\s+(all\s+)?(previous|prior)\s+instructions?"},
+            {"id": "override_safety_en", "regex": r"(bypass|override)\s+.*(safety|guardrails?|policy)"},
+            {"id": "developer_mode_en", "regex": r"(you\s+are\s+now|act\s+as)\s+.*(developer|root|admin)"},
             {
                 "id": "reveal_hidden_en",
-                "regex": r"(reveal|show|print|dump|leak)\\s+.*(system\\s+prompt|developer\\s+message|hidden\\s+instructions?)",
+                "regex": r"(reveal|show|print|dump|leak)\s+.*(system\s+prompt|developer\s+message|hidden\s+instructions?)",
             },
-            {"id": "repeat_prompt_en", "regex": r"(repeat|quote|verbatim)\\s+.*(prompt|instructions?)"},
+            {"id": "repeat_prompt_en", "regex": r"(repeat|quote|verbatim)\s+.*(prompt|instructions?)"},
             {"id": "ignore_previous_zh", "regex": r"(忽略|无视).*(之前|以上|先前).*(指令|说明|规则)"},
             {"id": "override_safety_zh", "regex": r"(绕过|关闭).*(安全|防护|策略|限制)"},
             {"id": "reveal_hidden_zh", "regex": r"(泄露|显示|输出|打印).*(系统提示词|开发者消息|隐藏指令)"},
             {"id": "repeat_prompt_zh", "regex": r"(逐字|原样|完整).*(复述|输出).*(提示词|指令)"},
         ],
         "system_exfil_patterns": [
-            {"id": "system_prompt_request_en", "regex": r"(what|show|reveal)\\s+.*system\\s+prompt"},
-            {"id": "developer_message_request_en", "regex": r"(show|reveal|print)\\s+.*developer\\s+message"},
-            {"id": "delimiter_breakout_en", "regex": r"(ignore|forget)\\s+.*(system|developer)\\s+instructions"},
+            {"id": "system_prompt_request_en", "regex": r"(what|show|reveal)\s+.*system\s+prompt"},
+            {"id": "developer_message_request_en", "regex": r"(show|reveal|print)\s+.*developer\s+message"},
+            {"id": "delimiter_breakout_en", "regex": r"(ignore|forget)\s+.*(system|developer)\s+instructions"},
             {"id": "system_prompt_request_zh", "regex": r"(显示|告诉|输出|泄露).*(系统提示词|系统提示)"},
             {"id": "developer_message_request_zh", "regex": r"(显示|输出|泄露).*(开发者消息|开发提示)"},
         ],
         "html_markdown_patterns": [
-            {"id": "script_tag", "regex": r"<\\s*script\\b"},
-            {"id": "img_tag", "regex": r"<\\s*img\\b"},
-            {"id": "javascript_uri", "regex": r"javascript:\\s*"},
-            {"id": "data_uri", "regex": r"data:\\s*text/html"},
+            {"id": "script_tag", "regex": r"<\s*script\b"},
+            {"id": "img_tag", "regex": r"<\s*img\b"},
+            {"id": "javascript_uri", "regex": r"javascript:\s*"},
+            {"id": "data_uri", "regex": r"data:\s*text/html"},
         ],
         "remote_content_patterns": [
             {"id": "markdown_link_instruction_en", "regex": r"\[[^\]]+\]\(https?://[^)]+\).*(follow|execute|instructions?)"},
@@ -385,11 +385,11 @@ _DEFAULT_RULES: dict[str, Any] = {
         "block_message": "[AegisGate] response blocked by security policy.",
         "sanitize_prefix": "[AegisGate] content sanitized: ",
         "system_leak_patterns": [
-            {"id": "system_leak_en", "regex": r"(system\\s+prompt|developer\\s+message|hidden\\s+instructions?)"},
+            {"id": "system_leak_en", "regex": r"(system\s+prompt|developer\s+message|hidden\s+instructions?)"},
             {"id": "system_leak_zh", "regex": r"(系统提示词|开发者消息|隐藏指令)"},
         ],
         "unsafe_markup_patterns": [
-            {"id": "script", "regex": r"<\\s*(script|img|iframe)\\b"},
+            {"id": "script", "regex": r"<\s*(script|img|iframe)\b"},
         ],
         "unsafe_uri_patterns": [
             {"id": "unsafe_uri", "regex": r"(javascript:|data:text/html)"},
@@ -402,7 +402,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"tool": "weather", "param": "location", "regex": r"^.{1,120}$"},
         ],
         "dangerous_param_patterns": [
-            {"id": "shell", "regex": r"(;|\|\||&&|`|\$\(|/etc/passwd|rm\\s+-rf)"},
+            {"id": "shell", "regex": r"(;|\|\||&&|`|\$\(|/etc/passwd|rm\s+-rf)"},
             {"id": "path_traversal", "regex": r"(\.\./|~/.ssh|/var/run/secrets)"},
             {"id": "zh_sensitive", "regex": r"(删除|提权|读取本地|密钥|口令)"},
         ],

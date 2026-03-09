@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
+import os
 import re
+import secrets
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
+from threading import Lock
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -45,7 +51,70 @@ _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
 
 _confirmation_cache_task: ConfirmationCacheTask | None = None
 
+# ---------------------------------------------------------------------------
+# Gateway key auto-generation
+# ---------------------------------------------------------------------------
+_GENERATED_KEY_FILE = "aegis_gateway.key"
 
+
+def _ensure_gateway_key() -> str:
+    """Return the effective gateway_key; auto-generate if empty."""
+    key = (settings.gateway_key or "").strip()
+    if key:
+        return key
+
+    # Try loading persisted auto-generated key
+    from pathlib import Path
+    key_path = (Path.cwd() / "config" / _GENERATED_KEY_FILE).resolve()
+    if key_path.is_file():
+        stored = key_path.read_text(encoding="utf-8").strip()
+        if stored:
+            settings.gateway_key = stored
+            logger.info("gateway_key loaded from %s", key_path)
+            return stored
+
+    # Generate new key
+    new_key = secrets.token_urlsafe(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(new_key, encoding="utf-8")
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+    settings.gateway_key = new_key
+    logger.warning(
+        "gateway_key was empty — auto-generated and saved to %s. "
+        "Set AEGIS_GATEWAY_KEY env var to use your own key.",
+        key_path,
+    )
+    return new_key
+
+
+# ---------------------------------------------------------------------------
+# Simple in-memory rate limiter for admin endpoints
+# ---------------------------------------------------------------------------
+class _AdminRateLimiter:
+    def __init__(self, max_per_minute: int = 30) -> None:
+        self._max = max(1, max_per_minute)
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._lock = Lock()
+
+    def is_allowed(self, client_ip: str) -> bool:
+        now = time.monotonic()
+        cutoff = now - 60.0
+        with self._lock:
+            bucket = self._buckets[client_ip]
+            # Prune old entries
+            self._buckets[client_ip] = [t for t in bucket if t > cutoff]
+            if len(self._buckets[client_ip]) >= self._max:
+                return False
+            self._buckets[client_ip].append(now)
+            return True
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     # --- startup ---
@@ -56,6 +125,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     except Exception as exc:  # pragma: no cover
         logger.error("init_config on startup failed: %s", exc)
         raise
+
+    _ensure_gateway_key()
+
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
@@ -91,8 +163,71 @@ if settings.enable_v2_proxy:
 if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
 _nonce_cache = build_nonce_cache()
+_admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
+
+# ---------------------------------------------------------------------------
+# Trusted proxy handling
+# ---------------------------------------------------------------------------
+_trusted_proxy_exact: set[str] | None = None
+_trusted_proxy_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
+
+
+def _parse_trusted_proxy_ips() -> None:
+    """Parse AEGIS_TRUSTED_PROXY_IPS into exact IPs and CIDR networks."""
+    global _trusted_proxy_exact, _trusted_proxy_networks
+    exact: set[str] = set()
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    raw = (settings.trusted_proxy_ips or "").strip()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "/" in token:
+            try:
+                networks.append(ipaddress.ip_network(token, strict=False))
+            except ValueError:
+                logger.warning("trusted_proxy_ips: invalid CIDR %s, skipped", token)
+        else:
+            exact.add(token)
+    _trusted_proxy_exact = exact
+    _trusted_proxy_networks = networks
+
+
+def _is_trusted_proxy(ip_str: str) -> bool:
+    """Check if an IP is in the trusted proxy list (exact match or CIDR)."""
+    global _trusted_proxy_exact, _trusted_proxy_networks
+    if _trusted_proxy_exact is None:
+        _parse_trusted_proxy_ips()
+    assert _trusted_proxy_exact is not None and _trusted_proxy_networks is not None
+    if not _trusted_proxy_exact and not _trusted_proxy_networks:
+        return False
+    if ip_str in _trusted_proxy_exact:
+        return True
+    if _trusted_proxy_networks:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            return any(addr in net for net in _trusted_proxy_networks)
+        except ValueError:
+            pass
+    return False
+
+
+def _real_client_ip(request: Request) -> str:
+    """
+    Determine the real client IP.
+    Only trust X-Forwarded-For when the direct connection comes from a trusted proxy.
+    """
+    direct_ip = (request.client.host if request.client else "").strip()
+    if not _is_trusted_proxy(direct_ip):
+        # Not from trusted proxy — use direct connection IP (ignore XFF).
+        return direct_ip
+    # From trusted proxy — take the leftmost (original client) IP from XFF.
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",", 1)[0].strip()
+    return direct_ip
 
 
 class GWTokenRewriteMiddleware:
@@ -156,17 +291,23 @@ class GWTokenRewriteMiddleware:
 
 
 def _blocked_response(status_code: int, reason: str, detail: str | None = None) -> JSONResponse:
-    detail_text = (detail or reason).strip() or reason
+    # Sanitize detail: never expose internal exception info to client.
+    safe_detail = reason
+    if detail:
+        safe = detail.strip()
+        # Only use detail if it doesn't look like an internal traceback/exception.
+        if not any(marker in safe for marker in ("Traceback", "File ", "line ", "Error:", "Exception:")):
+            safe_detail = safe
     return JSONResponse(
         status_code=status_code,
         content={
             "error": {
-                "message": detail_text,
+                "message": safe_detail,
                 "type": "aegisgate_error",
                 "code": reason,
             },
             "error_code": reason,
-            "detail": detail_text,
+            "detail": safe_detail,
             "aegisgate": {
                 "action": "block",
                 "risk_score": 1.0,
@@ -176,8 +317,22 @@ def _blocked_response(status_code: int, reason: str, detail: str | None = None) 
     )
 
 
-def _is_internal_client(request: Request) -> bool:
-    host = (request.client.host if request.client else "").strip()
+def _is_loopback_ip(host: str) -> bool:
+    if not host:
+        return False
+    if host in _LOOPBACK_HOSTS:
+        return True
+    normalized = host
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return ip.is_loopback
+
+
+def _is_internal_ip(host: str) -> bool:
     if not host:
         return False
     if host in _LOOPBACK_HOSTS:
@@ -190,6 +345,15 @@ def _is_internal_client(request: Request) -> bool:
     except ValueError:
         return False
     return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
+def _verify_admin_gateway_key(body: dict) -> bool:
+    """Constant-time comparison of gateway_key from request body against configured key."""
+    provided = str(body.get("gateway_key") or "").strip()
+    expected = (settings.gateway_key or "").strip()
+    if not provided or not expected:
+        return False
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
 @app.middleware("http")
@@ -213,14 +377,24 @@ async def security_boundary_middleware(request: Request, call_next):
     if request.url.path == "/health":
         return await call_next(request)
 
+    # --- Admin endpoint protection ---
     if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
-        if not _is_internal_client(request):
+        client_ip = _real_client_ip(request)
+
+        # Rate limiting
+        if not _admin_rate_limiter.is_allowed(client_ip):
+            await request.body()
+            boundary["rejected_reason"] = "admin_rate_limited"
+            logger.warning("boundary reject admin rate limit host=%s path=%s", client_ip, request.url.path)
+            return _blocked_response(status_code=429, reason="admin_rate_limited", detail="too many requests")
+
+        # Network restriction: require loopback or internal IP
+        if not _is_internal_ip(client_ip):
             await request.body()
             boundary["rejected_reason"] = "admin_endpoint_network_restricted"
-            client_host = request.client.host if request.client else ""
             logger.warning(
                 "boundary reject admin endpoint from non-internal host=%s path=%s",
-                client_host,
+                client_ip,
                 request.url.path,
             )
             return _blocked_response(
@@ -231,14 +405,34 @@ async def security_boundary_middleware(request: Request, call_next):
 
     protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
     protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
-    if (protected_v1 or protected_v2) and not bool(request.scope.get("aegis_token_authenticated")):
+
+    if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
+        # 若配置了默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://cli-proxy-api:8317/v1），
+        # 则 v1 可直接转发到该上游，无需 token 注册。
+        # CLIProxyAPI 自行负责 API key 校验。
+        default_base = (settings.upstream_base_url or "").strip()
+        if default_base:
+            request.scope["aegis_upstream_base"] = default_base
+            request.scope["aegis_token_authenticated"] = True
+            logger.debug("using default upstream for v1 path=%s", request.url.path)
+        else:
+            await request.body()
+            boundary["rejected_reason"] = "token_route_required"
+            logger.warning("boundary reject non-token request path=%s", request.url.path)
+            return _blocked_response(
+                status_code=403,
+                reason="token_route_required",
+                detail="use /v1/__gw__/t/<token>/... or /v2/__gw__/t/<token>/... routes; header mode is disabled",
+            )
+
+    if protected_v2 and not bool(request.scope.get("aegis_token_authenticated")):
         await request.body()
         boundary["rejected_reason"] = "token_route_required"
-        logger.warning("boundary reject non-token request path=%s", request.url.path)
+        logger.warning("boundary reject non-token v2 request path=%s", request.url.path)
         return _blocked_response(
             status_code=403,
             reason="token_route_required",
-            detail="use /v1/__gw__/t/<token>/... or /v2/__gw__/t/<token>/... routes; header mode is disabled",
+            detail="use /v2/__gw__/t/<token>/... routes for v2 proxy access",
         )
 
     cached_body: bytes | None = None
@@ -332,7 +526,7 @@ async def security_boundary_middleware(request: Request, call_next):
         return _blocked_response(
             status_code=500,
             reason="gateway_internal_error",
-            detail=f"gateway internal error: {exc}",
+            detail="an internal error occurred",  # Never expose exc details
         )
     if boundary.get("auth_verified"):
         response.headers["x-aegis-auth-verified"] = "true"
@@ -372,9 +566,15 @@ def _sanitize_public_host(raw_host: str) -> str:
 
 
 def _public_base_url(request: Request) -> str:
-    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    # Only trust forwarded headers from trusted proxies.
+    direct_ip = (request.client.host if request.client else "").strip()
+    if _is_trusted_proxy(direct_ip):
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    else:
+        forwarded_proto = ""
+        forwarded_host = ""
     scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme or "http"
-    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
     host_header = (request.headers.get("host") or "").strip()
     host = _sanitize_public_host(forwarded_host or host_header or f"{settings.host}:{settings.port}")
     return f"{scheme}://{host}"
@@ -406,6 +606,15 @@ async def gw_register(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "upstream_base and gateway_key required"},
         )
+
+    # Authenticate: gateway_key must match the configured key.
+    if not _verify_admin_gateway_key(body):
+        logger.warning("register rejected: gateway_key mismatch")
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match the configured key"},
+        )
+
     upstream_normalized = upstream_base.rstrip("/").lower()
     if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
         return JSONResponse(
@@ -462,6 +671,9 @@ async def gw_add(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
         )
+    # Authenticate: gateway_key must match the configured key.
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     upstream_base_input = _string_field(body.get("upstream_base"))
     mapping = gw_tokens_get(token)
     if not mapping:
@@ -534,6 +746,9 @@ async def gw_remove(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
         )
+    # Authenticate
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     mapping = gw_tokens_get(token)
     if not mapping:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
@@ -583,6 +798,9 @@ async def gw_lookup(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "upstream_base and gateway_key required"},
         )
+    # Authenticate
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     upstream_normalized = upstream_base.rstrip("/").lower()
     if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
         return JSONResponse(
@@ -621,6 +839,9 @@ async def gw_unregister(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "token and gateway_key required"},
         )
+    # Authenticate
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     mapping = gw_tokens_get(token)
     if not mapping:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})

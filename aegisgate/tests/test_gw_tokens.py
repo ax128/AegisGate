@@ -1,7 +1,7 @@
 from aegisgate.core import gw_tokens
 
 
-def test_register_generates_10_char_token_and_reuses_pair(monkeypatch, tmp_path):
+def test_register_generates_token_and_reuses_pair(monkeypatch, tmp_path):
     monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
     with gw_tokens._lock:
         gw_tokens._tokens.clear()
@@ -12,7 +12,7 @@ def test_register_generates_10_char_token_and_reuses_pair(monkeypatch, tmp_path)
         ["bn_key", "ak_secret", "bn_key"],
     )
     assert existed is False
-    assert len(token) == 10
+    assert len(token) == gw_tokens._TOKEN_LEN
     assert gw_tokens.get(token)["whitelist_key"] == ["bn_key", "ak_secret"]
 
     token2, existed2 = gw_tokens.register(

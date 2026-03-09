@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **[Critical] 真正的加密存储**：脱敏映射改用 Fernet (AES-128-CBC+HMAC) 加密，替代原有的 base64 编码。密钥自动生成并持久化到 `config/aegis_fernet.key`（权限 0600）。支持 `AEGIS_ENCRYPTION_KEY` 环境变量显式指定。向后兼容旧 base64 数据。
+- **[Critical] Gateway Key 自动生成**：`AEGIS_GATEWAY_KEY` 留空时首次启动自动生成 32 字符 `secrets.token_urlsafe` 密钥，持久化到 `config/aegis_gateway.key`（权限 0600）。所有管理端点使用 `hmac.compare_digest` 常量时间比较。
+- **管理端点全面鉴权**：register/lookup/add/remove/unregister 端点均需要 `gateway_key` 匹配配置值，且仅允许内网 IP 访问。
+- **管理端点速率限制**：新增 `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE`（默认 30），按 IP 限流。
+- **可信代理处理**：新增 `AEGIS_TRUSTED_PROXY_IPS`（支持 CIDR），仅从配置的代理 IP 信任 X-Forwarded-For。默认不信任任何 XFF。
+- **v2 SSRF 防护**：新增 `AEGIS_V2_BLOCK_INTERNAL_TARGETS`（默认 true），阻止 v2 代理请求到 RFC1918、loopback、link-local、云元数据端点。
+- **请求管道超时改为阻断**：新增 `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION`（默认 `block`），请求过滤超时时默认阻断而非放行未过滤内容。
+- **Token 熵增强**：网关 token 从 10 字符增至 24 字符（约 144 位熵）；确认动作绑定 token 从 40 位增至 64 位熵。
+- **错误信息脱敏**：阻断响应不再暴露内部异常堆栈信息。
+- **正则规则修复**：修复 `security_rules.py` 中约 30 个双转义正则表达式（PII 检测、注入检测、输出清洗），此前这些规则因 `\\b` 等模式无法正确匹配。
+- **依赖补全**：`pyproject.toml` 新增 `cryptography>=41.0.0`。
+
+### Changed
+
+- **文档口径与当前实现同步（CLIProxyAPI 接入与边界说明）**
+  - `README.md`：补充 `v1` 默认上游直连模式（`AEGIS_UPSTREAM_BASE_URL`）与 token 模式并行说明；明确 `v2` 需走 token 路径的安全边界。
+  - `README.md`：修正 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 含义，仅用于响应过滤跳过，不是目标主机访问白名单。
+  - `config/README.md`：更新 `gw_tokens.json` 默认持久化路径与 `config/.env` 可选行为说明。
+  - `CLIPROXY-QUICKSTART.md` / `OTHER_TERMINAL_CLIENTS_USAGE.md`：同步 Caddy 对公网 `__gw__` 管理端点阻断策略、流式与长上下文建议参数、直连/Token 双接入方式。
+
+- **部署默认行为调整：默认不启用 Caddy / CLIProxyAPI**
+  - `docker-compose.yml` 改为基础栈，仅启动 `aegisgate`。
+  - 新增 `docker-compose.cliproxy.yml` 作为按需叠加文件，显式启用 `caddy + cli-proxy-api` 与 CLIProxy 代理优化参数。
+
 ### Fixed
 
 - **[Critical] 网关卡死：`_flatten_text` 无法处理 Responses API 的 `function_call` 类型输出**
