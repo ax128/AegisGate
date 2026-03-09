@@ -35,6 +35,11 @@ api.example.com {
         header_up X-Forwarded-Host {host}
         header_up X-Real-IP {remote_host}
         flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
     }
 }
 
@@ -55,5 +60,10 @@ panel.example.com {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
     }
 }

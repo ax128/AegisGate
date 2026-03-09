@@ -35,6 +35,11 @@ api.agentop.dev {
         header_up X-Real-IP {remote_host}
         header_up X-Aegis-Proxy-Token {env.AEGIS_PROXY_TOKEN}
         flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
     }
 }
 
@@ -52,5 +57,10 @@ panel.agentop.dev {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
     }
 }

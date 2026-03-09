@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     port: int = 18080
     enable_relay_endpoint: bool = False
 
-    upstream_timeout_seconds: float = 60.0
+    upstream_timeout_seconds: float = 600.0
     upstream_max_connections: int = 100
     upstream_max_keepalive_connections: int = 20
     enable_thread_offload: bool = True

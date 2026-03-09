@@ -228,10 +228,12 @@ def _v2_http_limits() -> httpx.Limits:
 
 def _v2_http_timeout() -> httpx.Timeout:
     timeout = float(settings.upstream_timeout_seconds)
+    # connect uses a capped value; read uses the full timeout for long-running requests
+    connect = min(timeout, 30.0)
     # Under burst traffic allow longer pool wait than I/O timeout to reduce false
     # upstream_unreachable caused by short queueing contention.
     pool_timeout = max(timeout + 5.0, timeout * 2.0)
-    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=pool_timeout)
+    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=pool_timeout)
 
 
 async def _get_v2_async_client() -> httpx.AsyncClient:

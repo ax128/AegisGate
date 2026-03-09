@@ -44,7 +44,9 @@ def _upstream_http_limits() -> httpx.Limits:
 
 def _upstream_http_timeout() -> httpx.Timeout:
     timeout = float(settings.upstream_timeout_seconds)
-    return httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout)
+    # connect/write use capped values; read uses the full timeout for long-running LLM requests
+    connect = min(timeout, 30.0)
+    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=timeout)
 
 
 async def _get_upstream_async_client() -> httpx.AsyncClient:
