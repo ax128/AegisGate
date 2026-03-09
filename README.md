@@ -7,32 +7,43 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、确认放行流程（yes/no）。
 
-## CLIProxyAPI 支持
+## 上游代理支持
 
-AegisGate 原生支持 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 作为上游代理，实现 **客户端零改动** 的安全接入：
+AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
+
+### 接入模式
+
+| 模式 | 适用场景 | 说明 |
+|------|---------|------|
+| **Caddy 对外模式** | 需要对公网提供服务 | 通过 `docker-compose.cliproxy.yml` 或 `docker-compose.sub2api.yml` 叠加启动，Caddy 提供自动 TLS、域名绑定、管理端点阻断 |
+| **Token 内网模式** | 不对外开放，仅内部使用 | 仅启动基础 `docker-compose.yml`，通过 `/__gw__/register` 注册 token，客户端使用 `/v1/__gw__/t/<token>/...` 路径访问（推荐） |
+
+> **不对外开放中转服务时**，建议使用 Token 模式：无需 Caddy，无需域名，注册 token 绑定上游 URL 即可。详见下方「Token 路径」章节。
+
+### CLIProxyAPI
+
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — 基于 OAuth 的多账号 LLM 代理，支持 Claude / Gemini / OpenAI。
 
 ```
 客户端 → Caddy (TLS) → AegisGate (安检/过滤) → CLIProxyAPI → LLM API
 ```
 
-- 一键部署：`docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build`
-- 不改 CLIProxyAPI 代码，客户端仍用原 base URL 和 API Key
-- 自动 TLS（Caddy）、流式传输、长上下文优化参数已内置
+- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build`
+- **内网 Token 模式**：启动基础栈 + CLIProxyAPI，注册 token 绑定 `http://cli-proxy-api:8317/v1`
 
 详细接入步骤见 **[CLIPROXY-QUICKSTART.md](CLIPROXY-QUICKSTART.md)**
 
-## Sub2API 支持
+### Sub2API
 
-AegisGate 同样支持 [Sub2API](https://github.com/Wei-Shaw/sub2api) 作为上游 AI API 订阅管理平台：
+[Sub2API](https://github.com/Wei-Shaw/sub2api) — AI API 订阅管理平台，支持 Claude / Gemini / Antigravity / OpenAI 兼容。
 
 ```
 客户端 → Caddy (TLS) → AegisGate (安检/过滤) → Sub2API → Claude / Gemini / OpenAI
 ```
 
-- 一键部署：`docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build`
-- 使用官方镜像 `weishaw/sub2api:latest`，无需克隆仓库
-- 内置 PostgreSQL + Redis 依赖，自动初始化数据库
-- 支持 Claude (`/v1/messages`)、Gemini (`/v1beta/`)、Antigravity、OpenAI 兼容等多上游
+- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build`
+- **内网 Token 模式**：启动基础栈 + Sub2API，注册 token 绑定 `http://sub2api:8080/v1`
+- 使用官方镜像 `weishaw/sub2api:latest`，内置 PostgreSQL + Redis
 
 详细接入步骤见 **[SUB2API-QUICKSTART.md](SUB2API-QUICKSTART.md)**
 
