@@ -14,11 +14,18 @@ _SLOW_FILTER_WARN_S = 1.0
 
 
 class Pipeline:
+    _logged_once: bool = False
+
     def __init__(self, request_filters: list[BaseFilter], response_filters: list[BaseFilter]) -> None:
         self.request_filters = request_filters
         self.response_filters = response_filters
-        logger.debug("request filter running: %s", [plugin.name for plugin in self.request_filters])
-        logger.debug("response filter running: %s", [plugin.name for plugin in self.response_filters])
+        if not Pipeline._logged_once:
+            Pipeline._logged_once = True
+            logger.info(
+                "pipeline initialized request_filters=%s response_filters=%s",
+                [p.name for p in self.request_filters],
+                [p.name for p in self.response_filters],
+            )
 
     def run_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         current = req

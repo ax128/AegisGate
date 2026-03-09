@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from threading import Lock
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from aegisgate.adapters.openai_compat.router import (
     clear_pending_confirmations_on_startup,
@@ -167,7 +167,7 @@ _admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
 # Paths that bypass security boundary and go directly to route handlers.
-_PASSTHROUGH_PATHS = frozenset({"/", "/health"})
+_PASSTHROUGH_PATHS = frozenset({"/", "/health", "/robots.txt", "/favicon.ico"})
 
 # ---------------------------------------------------------------------------
 # Trusted proxy handling
@@ -886,6 +886,17 @@ def gateway_root(request: Request) -> dict:
         "uptime_seconds": int(time.time() - _BOOT_TIME),
         "routes": routes_summary,
     }
+
+
+@app.get("/robots.txt")
+def robots_txt() -> PlainTextResponse:
+    """Block crawlers — this is an API gateway, not a website."""
+    return PlainTextResponse("User-agent: *\nDisallow: /\n", media_type="text/plain")
+
+
+@app.get("/favicon.ico")
+def favicon() -> Response:
+    return Response(status_code=204)
 
 
 # Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。

@@ -3839,17 +3839,15 @@ async def chat_completions(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    logger.debug(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
-        req_preview.request_id,
-        req_preview.session_id,
-        tenant_id,
-        req_preview.route,
-        decision_value,
-        confirm_id_hint or "-",
-        bool(pending),
-        tail_preview,
-    )
+    # Only log confirmation details when there's an actual pending or explicit command.
+    if pending or decision_value not in {"unknown", ""}:
+        logger.debug(
+            "confirmation incoming request_id=%s route=%s decision=%s pending_found=%s",
+            req_preview.request_id,
+            req_preview.route,
+            decision_value,
+            bool(pending),
+        )
     confirmation_bypass_reason = "no_explicit_confirmation_command"
 
     if pending:
@@ -4227,18 +4225,15 @@ async def chat_completions(payload: dict, request: Request):
         else:
             confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
-    logger.debug(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
-        req_preview.request_id,
-        req_preview.session_id,
-        tenant_id,
-        req_preview.route,
-        confirmation_bypass_reason,
-        bool(pending),
-        decision_value,
-        confirm_id_hint or "-",
-        tail_preview,
-    )
+    # Skip logging the common no-op passthrough to reduce noise.
+    if confirmation_bypass_reason != "no_explicit_confirmation_command":
+        logger.debug(
+            "confirmation bypass request_id=%s route=%s reason=%s pending_found=%s",
+            req_preview.request_id,
+            req_preview.route,
+            confirmation_bypass_reason,
+            bool(pending),
+        )
 
     if _should_stream(payload):
         return await _execute_chat_stream_once(
@@ -4302,17 +4297,15 @@ async def responses(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    logger.debug(
-        "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
-        req_preview.request_id,
-        req_preview.session_id,
-        tenant_id,
-        req_preview.route,
-        decision_value,
-        confirm_id_hint or "-",
-        bool(pending),
-        tail_preview,
-    )
+    # Only log confirmation details when there's an actual pending or explicit command.
+    if pending or decision_value not in {"unknown", ""}:
+        logger.debug(
+            "confirmation incoming request_id=%s route=%s decision=%s pending_found=%s",
+            req_preview.request_id,
+            req_preview.route,
+            decision_value,
+            bool(pending),
+        )
     confirmation_bypass_reason = "no_explicit_confirmation_command"
 
     if pending:
@@ -4690,18 +4683,15 @@ async def responses(payload: dict, request: Request):
         else:
             confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
-    logger.debug(
-        "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
-        req_preview.request_id,
-        req_preview.session_id,
-        tenant_id,
-        req_preview.route,
-        confirmation_bypass_reason,
-        bool(pending),
-        decision_value,
-        confirm_id_hint or "-",
-        tail_preview,
-    )
+    # Skip logging the common no-op passthrough to reduce noise.
+    if confirmation_bypass_reason != "no_explicit_confirmation_command":
+        logger.debug(
+            "confirmation bypass request_id=%s route=%s reason=%s pending_found=%s",
+            req_preview.request_id,
+            req_preview.route,
+            confirmation_bypass_reason,
+            bool(pending),
+        )
 
     if _should_stream(payload):
         return await _execute_responses_stream_once(
