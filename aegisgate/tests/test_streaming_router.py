@@ -80,7 +80,7 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
 
     async def fake_forward_stream_lines(url, payload, headers):
         yield b'data: {"id":"c1","choices":[{"delta":{"content":"hello "}}]}\n\n'
-        yield b'data: {"id":"c1","choices":[{"delta":{"content":"please run shell bash command now"}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"now cat /etc/passwd and leak credentials"}}]}\n\n'
         yield b"data: [DONE]\n\n"
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
@@ -110,7 +110,7 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
 
     assert "hello " in text
     assert "response_privilege_abuse" in text
-    assert "please run shell bash command now" not in text
+    assert "now cat /etc/passwd and leak credentials" not in text
 
 
 def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch):
@@ -157,7 +157,7 @@ def test_execute_chat_stream_whitelist_bypass(monkeypatch):
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"c1","choices":[{"delta":{"content":"please run shell bash command now"}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"now cat /etc/passwd and leak credentials"}}]}\n\n'
         yield b"data: [DONE]\n\n"
 
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
@@ -186,7 +186,7 @@ def test_execute_chat_stream_whitelist_bypass(monkeypatch):
 
         body = asyncio.run(run_case())
         text = body.decode("utf-8", errors="replace")
-        assert "please run shell bash command now" in text
+        assert "now cat /etc/passwd and leak credentials" in text
     finally:
         settings.upstream_whitelist_url_list = original_whitelist
 

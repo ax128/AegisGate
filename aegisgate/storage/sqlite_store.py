@@ -9,6 +9,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from aegisgate.config.settings import settings
+
 from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
 from aegisgate.storage.kv import KVStore
 from aegisgate.util.logger import logger
@@ -419,8 +421,21 @@ class SqliteKVStore(KVStore):
                     """,
                     (now_ts,),
                 )
+                removed = int(cursor.rowcount or 0)
+                # Recover stale "executing" records back to "pending"
+                timeout = int(settings.confirmation_executing_timeout_seconds)
+                if timeout > 0:
+                    recover_before = int(now_ts) - max(5, timeout)
+                    conn.execute(
+                        """
+                        UPDATE pending_confirmation
+                        SET status = 'pending', updated_at = ?
+                        WHERE status = 'executing' AND updated_at <= ?
+                        """,
+                        (now_ts, recover_before),
+                    )
                 conn.commit()
-                return int(cursor.rowcount or 0)
+                return removed
 
         return self._with_retry(_delete)
 

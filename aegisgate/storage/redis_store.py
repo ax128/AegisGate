@@ -323,22 +323,40 @@ class RedisKVStore(KVStore):
     def prune_pending_confirmations(self, now_ts: int) -> int:
         retention_idx = self._pending_retention_key()
         candidate_ids = self.client.zrangebyscore(retention_idx, min="-inf", max=now_ts)
-        if not candidate_ids:
-            return 0
 
         removed = 0
-        pipe = self.client.pipeline()
-        for raw_id in candidate_ids:
-            confirm_id = _to_str(raw_id)
-            key = self._pending_key(confirm_id)
-            session_id = _to_str(self.client.hget(key, "session_id") or "")
-            tenant_id = _to_str(self.client.hget(key, "tenant_id") or "default")
-            pipe.delete(key)
-            pipe.zrem(retention_idx, confirm_id)
-            if session_id:
-                pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
-            removed += 1
-        pipe.execute()
+        if candidate_ids:
+            pipe = self.client.pipeline()
+            for raw_id in candidate_ids:
+                confirm_id = _to_str(raw_id)
+                key = self._pending_key(confirm_id)
+                session_id = _to_str(self.client.hget(key, "session_id") or "")
+                tenant_id = _to_str(self.client.hget(key, "tenant_id") or "default")
+                pipe.delete(key)
+                pipe.zrem(retention_idx, confirm_id)
+                if session_id:
+                    pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
+                removed += 1
+            pipe.execute()
+
+        # Recover stale "executing" records back to "pending"
+        timeout = int(settings.confirmation_executing_timeout_seconds)
+        if timeout > 0:
+            recover_before = int(now_ts) - max(5, timeout)
+            pattern = f"{self.key_prefix}:pending:*"
+            cursor = 0
+            while True:
+                cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=200)
+                for key in keys:
+                    status = _to_str(self.client.hget(key, "status") or "")
+                    if status != "executing":
+                        continue
+                    updated_at = int(_to_str(self.client.hget(key, "updated_at") or "0"))
+                    if updated_at <= recover_before:
+                        self.client.hset(key, mapping={"status": "pending", "updated_at": str(now_ts)})
+                if cursor == 0:
+                    break
+
         return removed
 
     def clear_all_pending_confirmations(self) -> int:

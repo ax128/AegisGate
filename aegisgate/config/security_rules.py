@@ -179,21 +179,21 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "anomaly": 0.1,
             },
             "signal_profiles": {
-                "direct": {"bucket": "intent", "severity": 9},
+                "direct": {"bucket": "intent", "severity": 7},
                 "system_exfil": {"bucket": "intent", "severity": 10},
                 "obfuscated": {"bucket": "payload", "severity": 9},
-                "html_markdown": {"bucket": "payload", "severity": 6},
-                "remote_content": {"bucket": "hijack", "severity": 8},
-                "remote_content_instruction": {"bucket": "hijack", "severity": 9},
-                "indirect_injection": {"bucket": "hijack", "severity": 9},
-                "typoglycemia": {"bucket": "hijack", "severity": 7},
-                "unicode_invisible": {"bucket": "anomaly", "severity": 6},
+                "html_markdown": {"bucket": "payload", "severity": 4},
+                "remote_content": {"bucket": "hijack", "severity": 7},
+                "remote_content_instruction": {"bucket": "hijack", "severity": 8},
+                "indirect_injection": {"bucket": "hijack", "severity": 8},
+                "typoglycemia": {"bucket": "hijack", "severity": 5},
+                "unicode_invisible": {"bucket": "anomaly", "severity": 5},
                 "unicode_bidi": {"bucket": "anomaly", "severity": 10},
             },
         },
         "false_positive_mitigation": {
             "enabled": True,
-            "max_risk_reduction": 0.35,
+            "max_risk_reduction": 0.45,
             "non_reducible_categories": ["system_exfil", "obfuscated", "unicode_bidi"],
             "discussion_patterns": [
                 r"(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)",
@@ -206,8 +206,8 @@ _DEFAULT_RULES: dict[str, Any] = {
         },
     },
     "privilege_guard": {
-        "request_risk_floor": 0.9,
-        "response_risk_floor": 0.85,
+        "request_risk_floor": 0.75,
+        "response_risk_floor": 0.70,
         "blocked_patterns": [
             {"id": "read_etc_passwd_en", "regex": r"(cat|type|more)\s+/etc/passwd"},
             {"id": "read_ssh_en", "regex": r"(read|cat|show)\s+~/.ssh"},
@@ -220,9 +220,9 @@ _DEFAULT_RULES: dict[str, Any] = {
     },
     "anomaly_detector": {
         "repetition": {
-            "repetition_ratio_threshold": 0.35,
-            "max_run_length_threshold": 40,
-            "repeated_line_threshold": 20,
+            "repetition_ratio_threshold": 0.45,
+            "max_run_length_threshold": 50,
+            "repeated_line_threshold": 28,
         },
         "encoded_payload": {
             "base64_min_length": 200,
@@ -413,9 +413,9 @@ _DEFAULT_RULES: dict[str, Any] = {
         "default_action": "block",
     },
     "rag_poison_guard": {
-        "ingestion_risk_score": 0.9,
-        "retrieval_risk_score": 0.86,
-        "propagation_risk_score": 0.88,
+        "ingestion_risk_score": 0.88,
+        "retrieval_risk_score": 0.78,
+        "propagation_risk_score": 0.82,
         "traceback_excerpt_max_chars": 180,
         "ingestion_poison_patterns": [
             {"id": "ingestion_override_en", "regex": r"(ignore|override|bypass).*(instructions|policy|guardrails?)"},
@@ -448,7 +448,6 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "indirect_injection": "review",
                 "direct": "downgrade",
                 "typoglycemia": "review",
-                "html_markdown": "sanitize",
             },
         "untrusted_content_guard": {
             "suspicious_untrusted": "review",
@@ -471,7 +470,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         "request_sanitizer": {
             "secret_exfiltration": "review",
             "privilege_escalation": "review",
-            "rule_bypass": "block",
+            "rule_bypass": "review",
             "leak_check": "block",
             "shape_anomaly": "sanitize",
         },

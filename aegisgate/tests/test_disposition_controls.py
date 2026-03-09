@@ -70,7 +70,8 @@ def test_request_sanitizer_sanitizes_research_command_payload():
     assert "[REDACTED:command]" in req.messages[0].content
 
 
-def test_request_sanitizer_blocks_explicit_rule_bypass():
+def test_request_sanitizer_reviews_explicit_rule_bypass():
+    """rule_bypass action is 'review' — records intent but does not block."""
     plugin = RequestSanitizer()
     req = InternalRequest(
         request_id="disp-4",
@@ -82,9 +83,9 @@ def test_request_sanitizer_blocks_explicit_rule_bypass():
     ctx = RequestContext(request_id="disp-4", session_id="s1", route=req.route, enabled_filters={"request_sanitizer"})
 
     plugin.process_request(req, ctx)
-    assert ctx.request_disposition == "block"
-    assert "request_rule_bypass" in ctx.disposition_reasons
-    assert "blocked by security policy" in req.messages[0].content.lower()
+    # review action: recorded but not blocked — request passes through
+    assert ctx.request_disposition != "block"
+    assert any("rule_bypass" in a for a in ctx.enforcement_actions)
 
 
 def test_output_sanitizer_prefers_sanitize_for_discussion_context():
@@ -139,8 +140,8 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
 @pytest.mark.parametrize(
     "payload_text",
     [
-        "docker compose logs -f --tail=200 web",
-        "docker ps -a",
+        "docker compose down --remove-orphans",
+        "docker stop my_container",
         "Content-Length: 8\r\nTransfer-Encoding: chunked\r\n\r\n",
         "Transfer-Encoding: chunked\r\nContent-Length: 8\r\n\r\n",
         "Transfer-Encoding: gzip, chunked",

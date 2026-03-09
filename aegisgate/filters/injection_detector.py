@@ -318,7 +318,9 @@ class PromptInjectionDetector(BaseFilter):
             "signal_breakdown": signal_breakdown,
         }
 
-    def _apply_action(self, ctx: RequestContext, category: str, contextual_discussion: bool = False) -> None:
+    def _apply_action(
+        self, ctx: RequestContext, category: str, *, contextual_discussion: bool = False, phase: str = "request"
+    ) -> None:
         action = self._action_map.get(category)
         if not action:
             return
@@ -330,6 +332,11 @@ class PromptInjectionDetector(BaseFilter):
         if action == "block":
             ctx.risk_score = max(ctx.risk_score, 0.95)
             ctx.requires_human_review = True
+            if phase == "response":
+                ctx.response_disposition = "block"
+            else:
+                ctx.request_disposition = "block"
+            ctx.disposition_reasons.append(f"injection_{category}")
         elif action in {"review", "sanitize"}:
             ctx.risk_score = max(ctx.risk_score, 0.58 if contextual_discussion else 0.85)
             ctx.requires_human_review = not contextual_discussion
@@ -415,7 +422,7 @@ class PromptInjectionDetector(BaseFilter):
             ctx.risk_score = max(ctx.risk_score, risk_score)
             for category in signals:
                 ctx.security_tags.add(f"response_injection_{category}")
-                self._apply_action(ctx, category, contextual_discussion=contextual_discussion)
+                self._apply_action(ctx, category, contextual_discussion=contextual_discussion, phase="response")
 
             if ctx.risk_score >= self._risk_thresholds["review"]:
                 ctx.requires_human_review = True

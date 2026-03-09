@@ -8,6 +8,8 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+from aegisgate.config.settings import settings
+
 from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
 from aegisgate.storage.kv import KVStore
 
@@ -473,6 +475,15 @@ class PostgresKVStore(KVStore):
                     (int(now_ts),),
                 )
                 removed = int(cur.rowcount or 0)
+                # Recover stale "executing" records back to "pending"
+                timeout = int(settings.confirmation_executing_timeout_seconds)
+                if timeout > 0:
+                    recover_before = int(now_ts) - max(5, timeout)
+                    cur.execute(
+                        f"UPDATE {pending_table} SET status = 'pending', updated_at = %s"
+                        f" WHERE status = 'executing' AND updated_at <= %s",
+                        (now_ts, recover_before),
+                    )
             conn.commit()
         return removed
 

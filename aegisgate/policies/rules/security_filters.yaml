@@ -299,7 +299,7 @@ injection_detector:
     signal_profiles:
       direct:
         bucket: intent
-        severity: 9
+        severity: 7
       system_exfil:
         bucket: intent
         severity: 10
@@ -308,28 +308,28 @@ injection_detector:
         severity: 9
       html_markdown:
         bucket: payload
-        severity: 6
+        severity: 4
       remote_content:
         bucket: hijack
-        severity: 8
+        severity: 7
       remote_content_instruction:
         bucket: hijack
-        severity: 9
+        severity: 8
       indirect_injection:
         bucket: hijack
-        severity: 9
+        severity: 8
       typoglycemia:
         bucket: hijack
-        severity: 7
+        severity: 5
       unicode_invisible:
         bucket: anomaly
-        severity: 6
+        severity: 5
       unicode_bidi:
         bucket: anomaly
         severity: 10
   false_positive_mitigation:
     enabled: true
-    max_risk_reduction: 0.35
+    max_risk_reduction: 0.45
     non_reducible_categories:
       - system_exfil
       - obfuscated
@@ -342,9 +342,9 @@ injection_detector:
       - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
 
 rag_poison_guard:
-  ingestion_risk_score: 0.90
-  retrieval_risk_score: 0.86
-  propagation_risk_score: 0.88
+  ingestion_risk_score: 0.88
+  retrieval_risk_score: 0.78
+  propagation_risk_score: 0.82
   traceback_excerpt_max_chars: 180
   ingestion_poison_patterns:
     - id: ingestion_override_en
@@ -377,29 +377,29 @@ rag_poison_guard:
       regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
 
 privilege_guard:
-  request_risk_floor: 0.9
-  response_risk_floor: 0.85
+  request_risk_floor: 0.75
+  response_risk_floor: 0.70
   blocked_patterns:
     - id: read_etc_passwd_en
       regex: '(cat|type|more)\s+/etc/passwd'
     - id: read_ssh_en
       regex: '(read|cat|show)\s+~/.ssh'
     - id: dump_secret_en
-      regex: '(dump|show|reveal|print).*(secret|token|password|api\s*key)'
+      regex: '(dump|reveal|leak|exfiltrate).*(secret|password|api\s*key|private\s*key|credentials?)'
     - id: execute_shell_en
-      regex: '(run|execute).*(shell|bash|powershell|cmd)'
+      regex: '(run|execute)\s+(a\s+)?(shell|bash|powershell|cmd)\s+(command|script)'
     - id: read_local_zh
-      regex: '(读取|打开|导出).*(本地文件|系统文件|配置文件|日志|数据库)'
+      regex: '(读取|导出).*(系统文件|\/etc\/|\/proc\/|\.ssh)'
     - id: leak_secret_zh
-      regex: '(输出|泄露|显示|打印).*(密钥|口令|密码|token|api\s*key)'
+      regex: '(泄露|导出).*(密钥|口令|密码|私钥|凭据)'
     - id: run_cmd_zh
-      regex: '(执行|运行).*(命令|shell|脚本|powershell|终端)'
+      regex: '(执行|运行).*(shell|powershell|cmd|bash)\s*(命令|脚本)'
 
 anomaly_detector:
   repetition:
-    repetition_ratio_threshold: 0.35
-    max_run_length_threshold: 40
-    repeated_line_threshold: 20
+    repetition_ratio_threshold: 0.45
+    max_run_length_threshold: 50
+    repeated_line_threshold: 28
   encoded_payload:
     base64_min_length: 200
     hex_min_length: 300
@@ -610,15 +610,10 @@ sanitizer:
     - id: web_http_obs_fold_header
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
+  # 仅保留破坏性 docker 命令；docker ps/images/logs 为只读诊断，不拦截
   force_block_command_patterns:
     - id: docker_compose_down
       regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b'
-    - id: docker_compose_logs
-      regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+logs\b'
-    - id: docker_images
-      regex: '(?:^|\s)(?:/)?docker\s+images\b'
-    - id: docker_ps
-      regex: '(?:^|\s)(?:/)?docker\s+ps\b'
     - id: docker_stop
       regex: '(?:^|\s)(?:/)?docker\s+stop\b'
     - id: docker_restart
@@ -753,7 +748,7 @@ action_map:
     # review=仅记录不拦截，降低误拦；改为 block 可恢复严格拦截
     secret_exfiltration: review
     privilege_escalation: review
-    rule_bypass: block
+    rule_bypass: review
     leak_check: block
     shape_anomaly: sanitize
   post_restore_guard:

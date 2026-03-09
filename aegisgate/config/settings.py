@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: float = 60.0
     upstream_max_connections: int = 100
     upstream_max_keepalive_connections: int = 20
-    enable_thread_offload: bool = False
+    enable_thread_offload: bool = True
     # 过滤管道（request/response pipeline）最大允许执行时间（秒）。
     # 超时后该请求被拒绝（response: block，request: pass-through），event loop 不再被阻塞。
     # 设为 0 表示不限制（不推荐生产使用）。
@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     gateway_key_header: str = "gateway-key"
     gateway_key: str = ""  # Required; empty triggers auto-generation on first startup
     tenant_id_header: str = "x-tenant-id"
-    confirmation_ttl_seconds: int = 300
+    confirmation_ttl_seconds: int = 600
     confirmation_executing_timeout_seconds: int = 120
     pending_data_ttl_seconds: int = 86400
     # 是否在确认文案中展示「命中片段（安全变形）」预览，默认开启

@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **安全过滤强度调优（减少误杀 + 防止高危放行）**
+  - `privilege_guard`：降低 risk_floor（0.9→0.75 / 0.85→0.70），精确化中英文模式——"读取配置文件"、"show token usage" 不再误杀，"cat /etc/passwd"、"泄露密钥" 仍被拦截。
+  - `injection_detector`：降低 `direct` severity（9→7）、`html_markdown` severity（6→4），增大误报降分上限（0.35→0.45）——HTML 代码示例从 risk=0.85 降至 0.197，学术讨论 risk=0.58 放行。
+  - `output_sanitizer`：移除 `docker ps/images/logs` 等只读诊断命令的强制拦截，仅保留 `down/stop/restart/exec -it`。
+  - `request_sanitizer`：`rule_bypass` 动作从 `block` 改为 `review`（教学讨论提到"绕过"不再直接拦截）。
+  - `anomaly_detector`：放宽重复阈值（ratio 0.35→0.45, repeated_line 20→28），减少重复格式内容误触。
+  - `rag_poison_guard`：降低 retrieval（0.86→0.78）和 propagation（0.88→0.82）风险分。
+
+- **[Critical] 修复 action=block 在 low 级别下失效的问题**
+  - `security_level=low` 时 risk_threshold 被 cap 到 1.0，导致 `injection_detector`（system_exfil/obfuscated/unicode_bidi）和 `privilege_guard` 的 block action 仅提升 risk=0.95 但无法达到阈值——真正的高危指令被放行。
+  - **修复**：所有 action=block 的过滤器现在直接设置 `disposition=block`，绕过 risk_threshold 限制，确保高危指令在任何安全级别下都被拦截。
+  - 涉及：`injection_detector`（区分 request/response phase）、`privilege_guard`（request + response）。
+
+### Changed
+
+- **默认安全级别改为 `low`**：减少正常对话的误拦截；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。
+- **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认改为 `true`**：Store 操作在线程池执行，避免 SQLite 读写阻塞 event loop，提升高并发性能。
+- **`confirmation_ttl_seconds` 从 300s 增加到 600s**：给用户更充裕的时间做 yes/no 决策。
+- **Stale executing 状态自动恢复**：prune 后台任务每 60s 自动将卡在 `executing` 超过 120s 的确认记录恢复为 `pending`，不再依赖下次请求触发。涉及 SQLite/Redis/PostgreSQL 三个存储后端。
+
+### Previous Security
+
 - **[Critical] 真正的加密存储**：脱敏映射改用 Fernet (AES-128-CBC+HMAC) 加密，替代原有的 base64 编码。密钥自动生成并持久化到 `config/aegis_fernet.key`（权限 0600）。支持 `AEGIS_ENCRYPTION_KEY` 环境变量显式指定。向后兼容旧 base64 数据。
 - **[Critical] Gateway Key 自动生成**：`AEGIS_GATEWAY_KEY` 留空时首次启动自动生成 32 字符 `secrets.token_urlsafe` 密钥，持久化到 `config/aegis_gateway.key`（权限 0600）。所有管理端点使用 `hmac.compare_digest` 常量时间比较。
 - **管理端点全面鉴权**：register/lookup/add/remove/unregister 端点均需要 `gateway_key` 匹配配置值，且仅允许内网 IP 访问。
@@ -67,7 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `30.0` | 过滤管道最大执行时间（秒），超时后响应被拦截，请求被放行，`0` 表示不限制 |
-| `AEGIS_ENABLE_THREAD_OFFLOAD` | `false` | 旧开关，现已冗余（管道强制在线程池执行），保留向后兼容 |
+| `AEGIS_ENABLE_THREAD_OFFLOAD` | `true` | 控制 Store 操作是否在线程池执行（默认开启，避免 SQLite 阻塞 event loop） |
 
 ### 调试日志配置
 

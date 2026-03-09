@@ -45,6 +45,9 @@ class PrivilegeGuard(BaseFilter):
 
         if blocked:
             ctx.risk_score = max(ctx.risk_score, self._request_risk_floor)
+            ctx.request_disposition = "block"
+            ctx.disposition_reasons.append("privilege_abuse")
+            ctx.requires_human_review = True
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -52,13 +55,16 @@ class PrivilegeGuard(BaseFilter):
                 "blocked": sorted(set(blocked)),
             }
             ctx.security_tags.add("privilege_abuse")
-            logger.info("privilege guard hit request_id=%s", ctx.request_id)
+            logger.info("privilege guard hit request_id=%s blocked=%s", ctx.request_id, sorted(set(blocked)))
         return req
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         blocked = self._matches(resp.output_text)
         if blocked:
             ctx.risk_score = max(ctx.risk_score, self._response_risk_floor)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("response_privilege_abuse")
+            ctx.requires_human_review = True
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -66,7 +72,7 @@ class PrivilegeGuard(BaseFilter):
                 "blocked": sorted(set(blocked)),
             }
             ctx.security_tags.add("response_privilege_abuse")
-            logger.info("privilege-like response detected request_id=%s", ctx.request_id)
+            logger.info("privilege-like response detected request_id=%s blocked=%s", ctx.request_id, sorted(set(blocked)))
         return resp
 
     def report(self) -> dict:
