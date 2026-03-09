@@ -407,11 +407,10 @@ def _log_request_if_debug(request: Request, payload: dict[str, Any], route: str)
         body_str = str(payload_for_log)
     total_len = len(body_str)
     logger.debug(
-        "incoming request method=%s path=%s route=%s headers=%s body_size=%d",
+        "incoming request method=%s path=%s route=%s body_size=%d",
         request.method,
         request.url.path,
         route,
-        headers_safe,
         total_len,
     )
     if not settings.log_full_request_body:
@@ -3840,7 +3839,7 @@ async def chat_completions(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    logger.info(
+    logger.debug(
         "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
@@ -4228,7 +4227,7 @@ async def chat_completions(payload: dict, request: Request):
         else:
             confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
-    logger.info(
+    logger.debug(
         "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
@@ -4303,7 +4302,7 @@ async def responses(payload: dict, request: Request):
         expected_route=req_preview.route,
         tenant_id=tenant_id,
     )
-    logger.info(
+    logger.debug(
         "confirmation incoming request_id=%s session_id=%s tenant_id=%s route=%s decision=%s confirm_id_hint=%s pending_found=%s parser=tail_explicit tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,
@@ -4691,7 +4690,7 @@ async def responses(payload: dict, request: Request):
         else:
             confirmation_bypass_reason = "confirmation_command_without_unique_pending"
 
-    logger.info(
+    logger.debug(
         "confirmation bypass request_id=%s session_id=%s tenant_id=%s route=%s reason=%s forward_as_new_request=true pending_found=%s decision=%s confirm_id_hint=%s tail_preview=%s",
         req_preview.request_id,
         req_preview.session_id,

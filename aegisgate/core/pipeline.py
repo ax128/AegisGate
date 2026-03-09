@@ -61,9 +61,5 @@ class Pipeline:
                         "filter_done phase=response filter=%s elapsed_s=%.3f request_id=%s",
                         plugin.name, elapsed, ctx.request_id,
                     )
-        if is_stream:
-            logger.debug(
-                "stream_response_filters_done filters=%d elapsed_total_s=n/a request_id=%s",
-                len(self.response_filters), ctx.request_id,
-            )
+        # Stream: no per-check log — the caller (router) logs stream start/finish.
         return current

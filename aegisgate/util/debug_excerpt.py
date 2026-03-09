@@ -51,20 +51,7 @@ def debug_log_original(
             max_len = int(env_max)
         except ValueError:
             pass
-    original_len = len(original_text or "")
     excerpt = excerpt_for_debug(original_text, max_len=max_len)
-    excerpt_len = len(excerpt)
-    truncated = "[truncated" in excerpt if isinstance(excerpt, str) else False
-    # 诊断：便于排查「为何仍被截断」
-    logger.debug(
-        "debug_excerpt label=%s AEGIS_DEBUG_EXCERPT_MAX_LEN=%s max_len_used=%s original_len=%s excerpt_len=%s truncated=%s",
-        label,
-        env_max,
-        max_len,
-        original_len,
-        excerpt_len,
-        truncated,
-    )
     if reason:
         logger.debug("%s original_excerpt request_id=see_context reason=%s excerpt=%s", label, reason, excerpt)
     else:

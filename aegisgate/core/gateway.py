@@ -366,13 +366,9 @@ async def security_boundary_middleware(request: Request, call_next):
         "max_request_body_bytes": settings.max_request_body_bytes,
     }
     request.state.security_boundary = boundary
-    logger.debug(
-        "boundary enter method=%s path=%s loopback_only=%s hmac=%s",
-        request.method,
-        request.url.path,
-        settings.enforce_loopback_only,
-        settings.enable_request_hmac_auth,
-    )
+    # boundary enter logged only for non-health paths to reduce noise
+    if request.url.path != "/health":
+        logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
     if request.url.path == "/health":
         return await call_next(request)
