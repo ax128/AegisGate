@@ -417,11 +417,15 @@ async def security_boundary_middleware(request: Request, call_next):
         else:
             await request.body()
             boundary["rejected_reason"] = "token_route_required"
-            logger.warning("boundary reject non-token request path=%s", request.url.path)
+            client_ip = _real_client_ip(request)
+            logger.warning(
+                "boundary reject non-token request path=%s client=%s hint=set AEGIS_UPSTREAM_BASE_URL or use token path",
+                request.url.path, client_ip,
+            )
             return _blocked_response(
                 status_code=403,
                 reason="token_route_required",
-                detail="use /v1/__gw__/t/<token>/... or /v2/__gw__/t/<token>/... routes; header mode is disabled",
+                detail="no default upstream configured; use /v1/__gw__/t/<token>/... or set AEGIS_UPSTREAM_BASE_URL",
             )
 
     if protected_v2 and not bool(request.scope.get("aegis_token_authenticated")):

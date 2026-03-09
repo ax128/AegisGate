@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     confirmation_show_hit_preview: bool = True
     # 开启后：命中「强制拦截命令」规则即直接拦截（不依赖 security_level/risk 阈值）
     strict_command_block_enabled: bool = False
-    # high|medium|low 三档均已整体放宽，medium 为默认
-    security_level: str = "medium"
+    # high|medium|low 三档均已整体放宽，low 为默认（减少误拦截）
+    security_level: str = "low"
     enable_semantic_module: bool = False  # 默认关闭；仅在具备 1G 1vCPU 可用的语义模型或接受内置正则占位时设为 True
     semantic_gray_low: float = 0.25
     semantic_gray_high: float = 0.75
