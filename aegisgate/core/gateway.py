@@ -366,12 +366,17 @@ async def security_boundary_middleware(request: Request, call_next):
         "max_request_body_bytes": settings.max_request_body_bytes,
     }
     request.state.security_boundary = boundary
-    # boundary enter logged only for non-health paths to reduce noise
-    if request.url.path != "/health":
-        logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
+    # Health / liveness probes: respond immediately, no logging.
     if request.url.path == "/health":
         return await call_next(request)
+
+    # Reverse-proxy health checks (HEAD /, GET /, etc.) — return 200 silently
+    # to avoid 404 noise and let Caddy/ALB see the backend as healthy.
+    if request.url.path in {"/", "/_next"} and request.method.upper() in {"HEAD", "GET"}:
+        return JSONResponse(content={"status": "ok"})
+
+    logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
     # --- Admin endpoint protection ---
     if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
