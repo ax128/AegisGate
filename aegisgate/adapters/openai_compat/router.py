@@ -2933,7 +2933,7 @@ async def _execute_responses_stream_once(
                     stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
-                    if not blocked_reason and chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0:
+                    if not blocked_reason and (chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0):
                         ctx.report_items = list(base_reports)
                         probe_resp = InternalResponse(
                             request_id=req.request_id,
