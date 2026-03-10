@@ -1656,6 +1656,19 @@ def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
     return "".join(parts)
 
 
+def _build_sanitized_full_response(ctx: RequestContext, source_text: str = "") -> str:
+    """Return the full LLM response with dangerous fragments sanitized, plus a warning note.
+
+    When ``require_confirmation_on_block`` is False the client should receive
+    the **entire** response – not just a truncated excerpt – with only the
+    matched dangerous regions obfuscated / replaced.
+    """
+    sanitized = _sanitize_hit_fragments(source_text, ctx) if source_text else ""
+    reason, summary = _confirmation_reason_and_summary(ctx, source_text=source_text)
+    warning = f"\n\n---\n⚠ [AegisGate] {reason}: {summary}"
+    return sanitized + warning
+
+
 def _build_sanitized_warning_note(ctx: RequestContext, source_text: str = "") -> str:
     """Build a short warning note appended when returning sanitized (non-confirmation) responses."""
     reason, summary = _confirmation_reason_and_summary(ctx, source_text=source_text)
@@ -2610,12 +2623,13 @@ async def _execute_chat_stream_once(
                         reason, summary = _confirmation_reason_and_summary(ctx, source_text=stream_window)
 
                         if not settings.require_confirmation_on_block:
-                            # Auto-sanitize: yield warning note directly, no confirmation needed.
-                            warning_note = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                            # Auto-sanitize: return full text with dangerous fragments obfuscated.
+                            cached_full = "".join(stream_cached_parts)
+                            sanitized_response = _build_sanitized_full_response(ctx, source_text=cached_full)
                             ctx.response_disposition = "sanitize"
-                            ctx.enforcement_actions.append("auto_sanitize:stream_hit_warning")
+                            ctx.enforcement_actions.append("auto_sanitize:stream_full_sanitized")
                             logger.info("chat stream auto-sanitized (no confirmation) request_id=%s reason=%s", ctx.request_id, block_reason)
-                            yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, warning_note, None)
+                            yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, sanitized_response, None)
                             yield _stream_done_sse_chunk()
                             stream_end_reason = "policy_auto_sanitize"
                             break
@@ -3009,12 +3023,13 @@ async def _execute_responses_stream_once(
                 yield line
             if blocked_reason:
                 if not settings.require_confirmation_on_block:
-                    # Auto-sanitize: yield warning note directly.
-                    warning_note = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                    # Auto-sanitize: return full text with dangerous fragments obfuscated.
+                    cached_full = "".join(stream_cached_parts)
+                    sanitized_response = _build_sanitized_full_response(ctx, source_text=cached_full)
                     ctx.response_disposition = "sanitize"
-                    ctx.enforcement_actions.append("auto_sanitize:stream_hit_warning")
+                    ctx.enforcement_actions.append("auto_sanitize:stream_full_sanitized")
                     logger.info("responses stream auto-sanitized (no confirmation) request_id=%s reason=%s", ctx.request_id, blocked_reason)
-                    yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, warning_note, None)
+                    yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, sanitized_response, None)
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_auto_sanitize"
                 else:
@@ -3865,10 +3880,9 @@ async def _execute_generic_stream_once(
                                 ctx.disposition_reasons.append(block_reason)
                             if not settings.require_confirmation_on_block:
                                 ctx.enforcement_actions.append("stream:auto_sanitize")
-                                warning = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                                sanitized_response = _build_sanitized_full_response(ctx, source_text=stream_window)
                                 logger.info("generic stream auto-sanitized request_id=%s reason=%s", ctx.request_id, block_reason)
-                                yield line
-                                yield _stream_block_sse_chunk(ctx, model, block_reason, request_path)
+                                yield _stream_confirmation_sse_chunk(ctx, model, request_path, sanitized_response, None)
                                 yield _stream_done_sse_chunk()
                                 return
                             ctx.enforcement_actions.append("stream:block")
