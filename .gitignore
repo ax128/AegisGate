@@ -26,10 +26,18 @@ docker-compose-me.yml
 # Caddy config (local per-deployment)
 Caddyfile
 
+# Encryption keys (NEVER commit)
+config/aegis_fernet.key
+config/aegis_gateway.key
+*.key
+
 # Local config secrets
 .env
 .env.*
-!.env.example
+!config/.env.example
+
+# Auto-generated IDE/agent files
+AGENTS.md
 
 # Local editor/OS files
 .DS_Store
