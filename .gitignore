@@ -23,6 +23,9 @@ logs/*
 使用教程.log
 docker-compose-me.yml
 
+# Caddy config (local per-deployment)
+Caddyfile
+
 # Local config secrets
 .env
 .env.*
