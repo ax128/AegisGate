@@ -1527,6 +1527,68 @@ def _collect_source_hit_fragments(source_text: str) -> list[str]:
     return fragments
 
 
+_SANITIZE_HIT_CONTEXT_CHARS = 20
+
+
+def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
+    """Replace dangerous fragments in *source_text* with obfuscated versions.
+
+    For each hit fragment, the matched region plus ±20 surrounding characters is
+    replaced by an obfuscated (chunked-hyphen) form.  This lets us return the
+    LLM output directly without waiting for a yes/no confirmation.
+    """
+    if not source_text:
+        return source_text
+
+    # 1) Collect hit fragments from filter reports (evidence).
+    fragments = _collect_confirmation_hit_fragments(ctx)
+    if not fragments:
+        fragments = _collect_source_hit_fragments(source_text)
+    if not fragments:
+        return source_text
+
+    # 2) Build a list of (start, end) regions to obfuscate, then merge overlaps.
+    regions: list[tuple[int, int]] = []
+    for frag in fragments:
+        escaped = re.escape(frag)
+        for m in re.finditer(escaped, source_text, flags=re.IGNORECASE):
+            left = max(0, m.start() - _SANITIZE_HIT_CONTEXT_CHARS)
+            right = min(len(source_text), m.end() + _SANITIZE_HIT_CONTEXT_CHARS)
+            regions.append((left, right))
+
+    if not regions:
+        return source_text
+
+    # Merge overlapping / adjacent regions.
+    regions.sort()
+    merged: list[tuple[int, int]] = [regions[0]]
+    for left, right in regions[1:]:
+        prev_left, prev_right = merged[-1]
+        if left <= prev_right:
+            merged[-1] = (prev_left, max(prev_right, right))
+        else:
+            merged.append((left, right))
+
+    # 3) Rebuild text, replacing each merged region with obfuscated version.
+    parts: list[str] = []
+    cursor = 0
+    for left, right in merged:
+        parts.append(source_text[cursor:left])
+        original_segment = source_text[left:right]
+        obfuscated = _obfuscate_hit_fragment(original_segment)
+        parts.append(f"[{obfuscated}]")
+        cursor = right
+    parts.append(source_text[cursor:])
+
+    return "".join(parts)
+
+
+def _build_sanitized_warning_note(ctx: RequestContext, source_text: str = "") -> str:
+    """Build a short warning note appended when returning sanitized (non-confirmation) responses."""
+    reason, summary = _confirmation_reason_and_summary(ctx, source_text=source_text)
+    return f"\n\n---\n⚠ [AegisGate] {reason}: {summary}"
+
+
 def _semantic_gray_zone_enabled(ctx: RequestContext) -> bool:
     if not settings.enable_semantic_module:
         return False
@@ -2354,6 +2416,21 @@ async def _execute_chat_stream_once(
             phase=PHASE_REQUEST,
             source_text=request_user_text,
         )
+
+        if not settings.require_confirmation_on_block:
+            block_text = f"[AegisGate] {reason}: {summary}"
+            ctx.enforcement_actions.append("auto_block:no_confirmation")
+
+            def request_block_generator() -> Generator[bytes, None, None]:
+                try:
+                    yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, block_text, None)
+                    yield _stream_done_sse_chunk()
+                finally:
+                    _write_audit_event(ctx, boundary=boundary)
+
+            logger.info("chat stream request blocked (no confirmation) request_id=%s", ctx.request_id)
+            return _build_streaming_response(request_block_generator())
+
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -2458,6 +2535,18 @@ async def _execute_chat_stream_once(
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
                         reason, summary = _confirmation_reason_and_summary(ctx, source_text=stream_window)
+
+                        if not settings.require_confirmation_on_block:
+                            # Auto-sanitize: yield warning note directly, no confirmation needed.
+                            warning_note = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                            ctx.response_disposition = "sanitize"
+                            ctx.enforcement_actions.append("auto_sanitize:stream_hit_warning")
+                            logger.info("chat stream auto-sanitized (no confirmation) request_id=%s reason=%s", ctx.request_id, block_reason)
+                            yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, warning_note, None)
+                            yield _stream_done_sse_chunk()
+                            stream_end_reason = "policy_auto_sanitize"
+                            break
+
                         confirm_id = make_confirm_id()
                         now_ts = int(time.time())
                         cached_text = "".join(stream_cached_parts)
@@ -2665,6 +2754,21 @@ async def _execute_responses_stream_once(
             phase=PHASE_REQUEST,
             source_text=request_user_text,
         )
+
+        if not settings.require_confirmation_on_block:
+            block_text = f"[AegisGate] {reason}: {summary}"
+            ctx.enforcement_actions.append("auto_block:no_confirmation")
+
+            def request_block_generator() -> Generator[bytes, None, None]:
+                try:
+                    yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, block_text, None)
+                    yield _stream_done_sse_chunk()
+                finally:
+                    _write_audit_event(ctx, boundary=boundary)
+
+            logger.info("responses stream request blocked (no confirmation) request_id=%s", ctx.request_id)
+            return _build_streaming_response(request_block_generator())
+
         confirm_id = make_confirm_id()
         now_ts = int(time.time())
         pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -2827,87 +2931,97 @@ async def _execute_responses_stream_once(
 
                 yield line
             if blocked_reason:
-                now_ts = int(time.time())
-                cached_text = "".join(stream_cached_parts)
-                pending_payload = _build_response_pending_payload(
-                    route=req.route,
-                    request_id=req.request_id,
-                    session_id=req.session_id,
-                    model=req.model,
-                    fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                    content=cached_text,
-                )
-                pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
-                await _store_call(
-                    "save_pending_confirmation",
-                    confirm_id=blocked_confirm_id,
-                    session_id=req.session_id,
-                    route=req.route,
-                    request_id=req.request_id,
-                    model=req.model,
-                    upstream_base=upstream_base,
-                    pending_request_payload=pending_payload,
-                    pending_request_hash=pending_payload_hash,
-                    reason=blocked_confirmation_reason,
-                    summary=blocked_confirmation_summary,
-                    tenant_id=ctx.tenant_id,
-                    created_at=now_ts,
-                    expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                    retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-                )
-                ctx.response_disposition = "block"
-                if "awaiting_user_confirmation" not in ctx.disposition_reasons:
-                    ctx.disposition_reasons.append("awaiting_user_confirmation")
-                ctx.security_tags.add("confirmation_required")
-                ctx.enforcement_actions.append("confirmation:pending")
-                logger.info(
-                    "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
-                    ctx.request_id,
-                    blocked_confirm_id,
-                    blocked_reason,
-                )
-                logger.info(
-                    "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
-                    ctx.request_id,
-                    blocked_confirm_id,
-                    req.route,
-                    _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                    pending_payload_size,
-                )
-                logger.info(
-                    "responses stream block drain completed request_id=%s confirm_id=%s saw_done=%s chunk_count=%s cached_chars=%s",
-                    ctx.request_id,
-                    blocked_confirm_id,
-                    saw_done,
-                    chunk_count,
-                    len(cached_text),
-                )
-                confirmation_meta = blocked_confirmation_meta or _flow_confirmation_metadata(
-                    confirm_id=blocked_confirm_id,
-                    status="pending",
-                    reason=blocked_confirmation_reason,
-                    summary=blocked_confirmation_summary,
-                    phase=PHASE_RESPONSE,
-                    payload_omitted=False,
-                    action_token=make_action_bind_token(
-                        f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                    ),
-                )
-                message_text = blocked_message_text or _build_confirmation_message(
-                    confirm_id=blocked_confirm_id,
-                    reason=blocked_confirmation_reason,
-                    summary=blocked_confirmation_summary,
-                    phase=PHASE_RESPONSE,
-                )
-                yield _stream_confirmation_sse_chunk(
-                    ctx,
-                    req.model,
-                    req.route,
-                    message_text,
-                    confirmation_meta,
-                )
-                yield _stream_done_sse_chunk()
-                stream_end_reason = "policy_confirmation"
+                if not settings.require_confirmation_on_block:
+                    # Auto-sanitize: yield warning note directly.
+                    warning_note = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                    ctx.response_disposition = "sanitize"
+                    ctx.enforcement_actions.append("auto_sanitize:stream_hit_warning")
+                    logger.info("responses stream auto-sanitized (no confirmation) request_id=%s reason=%s", ctx.request_id, blocked_reason)
+                    yield _stream_confirmation_sse_chunk(ctx, req.model, req.route, warning_note, None)
+                    yield _stream_done_sse_chunk()
+                    stream_end_reason = "policy_auto_sanitize"
+                else:
+                    now_ts = int(time.time())
+                    cached_text = "".join(stream_cached_parts)
+                    pending_payload = _build_response_pending_payload(
+                        route=req.route,
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                        content=cached_text,
+                    )
+                    pending_payload, pending_payload_hash, pending_payload_size = _prepare_response_pending_payload(pending_payload)
+                    await _store_call(
+                        "save_pending_confirmation",
+                        confirm_id=blocked_confirm_id,
+                        session_id=req.session_id,
+                        route=req.route,
+                        request_id=req.request_id,
+                        model=req.model,
+                        upstream_base=upstream_base,
+                        pending_request_payload=pending_payload,
+                        pending_request_hash=pending_payload_hash,
+                        reason=blocked_confirmation_reason,
+                        summary=blocked_confirmation_summary,
+                        tenant_id=ctx.tenant_id,
+                        created_at=now_ts,
+                        expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
+                        retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
+                    )
+                    ctx.response_disposition = "block"
+                    if "awaiting_user_confirmation" not in ctx.disposition_reasons:
+                        ctx.disposition_reasons.append("awaiting_user_confirmation")
+                    ctx.security_tags.add("confirmation_required")
+                    ctx.enforcement_actions.append("confirmation:pending")
+                    logger.info(
+                        "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
+                        ctx.request_id,
+                        blocked_confirm_id,
+                        blocked_reason,
+                    )
+                    logger.info(
+                        "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                        ctx.request_id,
+                        blocked_confirm_id,
+                        req.route,
+                        _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
+                        pending_payload_size,
+                    )
+                    logger.info(
+                        "responses stream block drain completed request_id=%s confirm_id=%s saw_done=%s chunk_count=%s cached_chars=%s",
+                        ctx.request_id,
+                        blocked_confirm_id,
+                        saw_done,
+                        chunk_count,
+                        len(cached_text),
+                    )
+                    confirmation_meta = blocked_confirmation_meta or _flow_confirmation_metadata(
+                        confirm_id=blocked_confirm_id,
+                        status="pending",
+                        reason=blocked_confirmation_reason,
+                        summary=blocked_confirmation_summary,
+                        phase=PHASE_RESPONSE,
+                        payload_omitted=False,
+                        action_token=make_action_bind_token(
+                            f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
+                        ),
+                    )
+                    message_text = blocked_message_text or _build_confirmation_message(
+                        confirm_id=blocked_confirm_id,
+                        reason=blocked_confirmation_reason,
+                        summary=blocked_confirmation_summary,
+                        phase=PHASE_RESPONSE,
+                    )
+                    yield _stream_confirmation_sse_chunk(
+                        ctx,
+                        req.model,
+                        req.route,
+                        message_text,
+                        confirmation_meta,
+                    )
+                    yield _stream_done_sse_chunk()
+                    stream_end_reason = "policy_confirmation"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
@@ -3060,6 +3174,20 @@ async def _execute_chat_once(
                 phase=PHASE_REQUEST,
                 source_text=request_user_text,
             )
+
+            if not settings.require_confirmation_on_block:
+                # Direct block notice without confirmation flow.
+                block_text = f"[AegisGate] {reason}: {summary}"
+                block_resp = InternalResponse(
+                    request_id=req.request_id, session_id=req.session_id,
+                    model=req.model, output_text=block_text,
+                )
+                ctx.enforcement_actions.append("auto_block:no_confirmation")
+                _attach_security_metadata(block_resp, ctx, boundary=boundary)
+                _write_audit_event(ctx, boundary=boundary)
+                logger.info("chat completion request blocked (no confirmation) request_id=%s", ctx.request_id)
+                return to_chat_response(block_resp)
+
             confirm_id = make_confirm_id()
             now_ts = int(time.time())
             pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -3161,6 +3289,19 @@ async def _execute_chat_once(
     if not skip_confirmation and _needs_confirmation(ctx):
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
+
+        if not settings.require_confirmation_on_block:
+            # Direct sanitization mode: obfuscate dangerous fragments and return immediately.
+            sanitized_text = _sanitize_hit_fragments(final_resp.output_text, ctx)
+            sanitized_text += _build_sanitized_warning_note(ctx, source_text=final_resp.output_text)
+            final_resp.output_text = sanitized_text
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+            logger.info("chat completion auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            _write_audit_event(ctx, boundary=boundary)
+            return _render_chat_response(upstream_body, final_resp)
+
         reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
         cached_output = _passthrough_chat_response(upstream_body, req)
         pending_payload = _build_response_pending_payload(
@@ -3313,6 +3454,19 @@ async def _execute_responses_once(
                 phase=PHASE_REQUEST,
                 source_text=request_user_text,
             )
+
+            if not settings.require_confirmation_on_block:
+                block_text = f"[AegisGate] {reason}: {summary}"
+                block_resp = InternalResponse(
+                    request_id=req.request_id, session_id=req.session_id,
+                    model=req.model, output_text=block_text,
+                )
+                ctx.enforcement_actions.append("auto_block:no_confirmation")
+                _attach_security_metadata(block_resp, ctx, boundary=boundary)
+                _write_audit_event(ctx, boundary=boundary)
+                logger.info("responses endpoint request blocked (no confirmation) request_id=%s", ctx.request_id)
+                return to_responses_output(block_resp)
+
             confirm_id = make_confirm_id()
             now_ts = int(time.time())
             pending_payload, pending_payload_hash, pending_payload_omitted, pending_payload_size = _prepare_pending_payload(
@@ -3417,6 +3571,18 @@ async def _execute_responses_once(
     if not skip_confirmation and _needs_confirmation(ctx):
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
+
+        if not settings.require_confirmation_on_block:
+            sanitized_text = _sanitize_hit_fragments(final_resp.output_text, ctx)
+            sanitized_text += _build_sanitized_warning_note(ctx, source_text=final_resp.output_text)
+            final_resp.output_text = sanitized_text
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+            logger.info("responses endpoint auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            _write_audit_event(ctx, boundary=boundary)
+            return _render_responses_output(upstream_body, final_resp)
+
         reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
         cached_output = _passthrough_responses_output(upstream_body, req)
         pending_payload = _build_response_pending_payload(
@@ -3620,6 +3786,14 @@ async def _execute_generic_stream_once(
                             ctx.response_disposition = "block"
                             if block_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(block_reason)
+                            if not settings.require_confirmation_on_block:
+                                ctx.enforcement_actions.append("stream:auto_sanitize")
+                                warning = _build_sanitized_warning_note(ctx, source_text=stream_window)
+                                logger.info("generic stream auto-sanitized request_id=%s reason=%s", ctx.request_id, block_reason)
+                                yield line
+                                yield _stream_block_sse_chunk(ctx, model, block_reason, request_path)
+                                yield _stream_done_sse_chunk()
+                                return
                             ctx.enforcement_actions.append("stream:block")
                             logger.info("generic stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
                             break
@@ -3785,6 +3959,17 @@ async def _execute_generic_once(
         ctx.disposition_reasons,
     )
     if _needs_confirmation(ctx):
+        if not settings.require_confirmation_on_block:
+            sanitized_text = _sanitize_hit_fragments(capped_upstream_text, ctx)
+            sanitized_text += _build_sanitized_warning_note(ctx, source_text=capped_upstream_text)
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+            logger.info("generic proxy auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            _write_audit_event(ctx, boundary=boundary)
+            return _passthrough_any_response(
+                {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
+            )
+
         return _error_response(
             status_code=403,
             reason="generic_response_blocked",

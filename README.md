@@ -433,6 +433,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
+| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | 拦截后是否走 yes/no 确认流程（`false`=直接变形返回，`true`=缓存 pending 等待放行） | `false` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |

@@ -149,7 +149,8 @@ def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch
     body = asyncio.run(run_case())
     text = body.decode("utf-8", errors="replace")
     assert "response_forbidden_command" in text
-    assert "安全确认" in text
+    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
+    assert "[AegisGate]" in text
     assert "data: [DONE]" in text
 
 
@@ -452,6 +453,56 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
         return b"".join(out)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
+    assert "[AegisGate]" in text
+    assert "data: [DONE]" in text
+
+
+def test_chat_stream_returns_confirmation_chunk_when_require_confirmation_enabled(monkeypatch):
+    """When require_confirmation_on_block=True, the old confirmation flow kicks in."""
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block", True)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"unsafe output"}}]}\n\n'
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_store_call(method, **kwargs):
+        assert method == "save_pending_confirmation"
+        return None
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_privilege_abuse")
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
+
+    payload = {
+        "request_id": "r-stream-5c",
+        "session_id": "s-stream-5c",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     assert "放行（复制这一行）：yes cfm-" in text
     assert "确认编号：cfm-" in text
     assert "data: [DONE]" in text
@@ -487,6 +538,56 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
     payload = {
         "request_id": "r-stream-6",
         "session_id": "s-stream-6",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
+    assert "[AegisGate]" in text
+    assert "data: [DONE]" in text
+
+
+def test_responses_stream_returns_confirmation_chunk_when_require_confirmation_enabled(monkeypatch):
+    """When require_confirmation_on_block=True, the old confirmation flow kicks in."""
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block", True)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"r1","output_text":"unsafe output"}\n\n'
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_store_call(method, **kwargs):
+        assert method == "save_pending_confirmation"
+        return None
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_system_prompt_leak")
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
+
+    payload = {
+        "request_id": "r-stream-6c",
+        "session_id": "s-stream-6c",
         "model": "test-model",
         "stream": True,
         "input": "hello",
@@ -541,6 +642,63 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     payload = {
         "request_id": "r-stream-7",
         "session_id": "s-stream-7",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        resp = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        out: list[bytes] = []
+        async for chunk in resp:
+            out.append(chunk)
+        return b"".join(out)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    # Default require_confirmation_on_block=False: auto-sanitize, no pending store
+    assert cached_contents == []
+    assert "[AegisGate]" in text
+    assert "data: [DONE]" in text
+
+
+def test_responses_stream_block_drains_and_caches_when_require_confirmation_enabled(monkeypatch):
+    """When require_confirmation_on_block=True, drain caches full text and stores pending."""
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block", True)
+    cached_contents: list[str] = []
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"r1","output_text":"unsafe output "}\n\n'
+        yield b'data: {"id":"r1","output_text":"tail text [[reply_to_current]]"}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_store_call(method, **kwargs):
+        assert method == "save_pending_confirmation"
+        assert kwargs["route"] == "/v1/responses"
+        pending_payload = kwargs["pending_request_payload"]
+        cached_contents.append(str(pending_payload["content"]))
+        return None
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_privilege_abuse")
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
+
+    payload = {
+        "request_id": "r-stream-7c",
+        "session_id": "s-stream-7c",
         "model": "test-model",
         "stream": True,
         "input": "hello",

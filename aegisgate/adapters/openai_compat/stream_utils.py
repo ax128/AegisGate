@@ -181,9 +181,15 @@ def _stream_confirmation_sse_chunk(
     model: str,
     route: str,
     content: str,
-    confirmation_meta: dict[str, Any],
+    confirmation_meta: dict[str, Any] | None,
 ) -> bytes:
-    """流式返回一条「确认放行」内容，带 aegisgate.confirmation 元数据（非 block）。"""
+    """流式返回一条「确认放行」或「直接拦截」内容。confirmation_meta 为 None 时不附带确认元数据。"""
+    aegis_meta: dict[str, Any] = {}
+    if confirmation_meta is not None:
+        aegis_meta["confirmation"] = confirmation_meta
+        aegis_meta["action"] = "awaiting_confirmation"
+    else:
+        aegis_meta["action"] = "blocked"
     if route == "/v1/responses":
         payload = {
             "id": ctx.request_id,
@@ -191,7 +197,7 @@ def _stream_confirmation_sse_chunk(
             "model": model,
             "type": "response.output_text.delta",
             "delta": content,
-            "aegisgate": {"confirmation": confirmation_meta, "action": "awaiting_confirmation"},
+            "aegisgate": aegis_meta,
         }
     else:
         payload = {
@@ -201,7 +207,7 @@ def _stream_confirmation_sse_chunk(
             "choices": [
                 {"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": "stop"}
             ],
-            "aegisgate": {"confirmation": confirmation_meta, "action": "awaiting_confirmation"},
+            "aegisgate": aegis_meta,
         }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 

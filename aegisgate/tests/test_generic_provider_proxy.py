@@ -233,6 +233,8 @@ async def test_generic_provider_proxy_blocks_http_smuggling_signature_in_respons
     finally:
         settings.enforce_loopback_only = original_loopback
 
-    assert response.status_code == 403
+    # Default require_confirmation_on_block=False: auto-sanitize returns 200
+    assert response.status_code == 200
     body = json.loads(response.body.decode("utf-8"))
-    assert body["error"]["code"] == "generic_response_blocked"
+    assert "sanitized_text" in body
+    assert "[AegisGate]" in body["sanitized_text"]

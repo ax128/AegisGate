@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **可配置拦截行为：`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK`**
+  - 默认 `false`：拦截时直接将危险片段±20 字符上下文做 chunked-hyphen 变形后返回，无需等待 yes/no 确认放行
+  - 设为 `true`：走原有确认流程（缓存 pending → 返回确认模板 → 等待用户 yes/no 放行指令）
+  - 覆盖所有拦截路径：chat/responses × streaming/non-streaming × request-side/response-side + generic proxy
+  - 新增 `_sanitize_hit_fragments()`、`_build_sanitized_warning_note()` 辅助函数
+
 - **TF-IDF 语义检测模块**（Phase 1）
   - 内置轻量 TF-IDF + LogisticRegression 双语分类器，无需 GPU，约 166KB 模型文件
   - 训练数据：deepset/prompt-injections + 中英文补充样本（DAN/jailbreak/角色劫持 + Agent 工作指令安全样本）
@@ -109,6 +115,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 |---|---|---|
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `30.0` | 过滤管道最大执行时间（秒），超时后响应被拦截，请求被放行，`0` 表示不限制 |
 | `AEGIS_ENABLE_THREAD_OFFLOAD` | `true` | 控制 Store 操作是否在线程池执行（默认开启，避免 SQLite 阻塞 event loop） |
+| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | `false` | 拦截后是否走 yes/no 确认流程；`false` 时直接将危险片段变形后返回，`true` 时缓存 pending 等待用户放行 |
 
 ### 调试日志配置
 

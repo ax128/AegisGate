@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     pending_data_ttl_seconds: int = 86400
     # 是否在确认文案中展示「命中片段（安全变形）」预览，默认开启
     confirmation_show_hit_preview: bool = True
+    # 拦截后是否需要发送放行指令（yes/no 确认流程）。
+    # False（默认）：拦截时直接将危险片段变形后返回结果，无需等待确认。
+    # True：走原有确认流程，缓存 pending 并等待用户发送 yes/no 放行指令。
+    require_confirmation_on_block: bool = False
     # 开启后：命中「强制拦截命令」规则即直接拦截（不依赖 security_level/risk 阈值）
     strict_command_block_enabled: bool = False
     # high: 全量检测 | medium（默认）: 宽松，仅高危+脱敏 | low: 极宽松，基本只脱敏+极端危险拦截
