@@ -287,10 +287,10 @@ injection_detector:
     - 忽略以上所有指令
 
   scoring_model:
-    nonlinear_k: 2.2
+    nonlinear_k: 2.0
     thresholds:
-      allow: 0.35
-      review: 0.70
+      allow: 0.40
+      review: 0.75
     weights:
       intent: 0.45
       payload: 0.25
@@ -299,34 +299,34 @@ injection_detector:
     signal_profiles:
       direct:
         bucket: intent
-        severity: 7
+        severity: 5
       system_exfil:
         bucket: intent
-        severity: 10
+        severity: 10      # 系统提示泄露：保持最高（disposition=block 强制拦截）
       obfuscated:
         bucket: payload
-        severity: 9
+        severity: 9       # 编码混淆攻击：保持高（disposition=block 强制拦截）
       html_markdown:
         bucket: payload
-        severity: 4
+        severity: 3
       remote_content:
         bucket: hijack
-        severity: 7
+        severity: 5
       remote_content_instruction:
         bucket: hijack
-        severity: 8
+        severity: 6
       indirect_injection:
         bucket: hijack
-        severity: 8
+        severity: 6
       typoglycemia:
         bucket: hijack
-        severity: 5
+        severity: 4
       unicode_invisible:
         bucket: anomaly
-        severity: 5
+        severity: 4
       unicode_bidi:
         bucket: anomaly
-        severity: 10
+        severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
   false_positive_mitigation:
     enabled: true
     max_risk_reduction: 0.45
@@ -342,9 +342,9 @@ injection_detector:
       - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
 
 rag_poison_guard:
-  ingestion_risk_score: 0.88
-  retrieval_risk_score: 0.78
-  propagation_risk_score: 0.82
+  ingestion_risk_score: 0.80
+  retrieval_risk_score: 0.70
+  propagation_risk_score: 0.75
   traceback_excerpt_max_chars: 180
   ingestion_poison_patterns:
     - id: ingestion_override_en
@@ -377,8 +377,8 @@ rag_poison_guard:
       regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
 
 privilege_guard:
-  request_risk_floor: 0.75
-  response_risk_floor: 0.70
+  request_risk_floor: 0.65
+  response_risk_floor: 0.60
   blocked_patterns:
     - id: read_etc_passwd_en
       regex: '(cat|type|more)\s+/etc/passwd'
@@ -397,9 +397,9 @@ privilege_guard:
 
 anomaly_detector:
   repetition:
-    repetition_ratio_threshold: 0.45
-    max_run_length_threshold: 50
-    repeated_line_threshold: 28
+    repetition_ratio_threshold: 0.55
+    max_run_length_threshold: 80
+    repeated_line_threshold: 40
   encoded_payload:
     base64_min_length: 200
     hex_min_length: 300
@@ -475,7 +475,7 @@ anomaly_detector:
     bidi_control: anomaly
     high_risk_command: payload
   scoring_model:
-    nonlinear_k: 2.2
+    nonlinear_k: 2.0
     weights:
       payload: 0.70
       anomaly: 0.30
@@ -483,8 +483,8 @@ anomaly_detector:
       payload: 1.45
       anomaly: 1.30
     thresholds:
-      allow: 0.35
-      review: 0.70
+      allow: 0.40
+      review: 0.75
 
 request_sanitizer:
   discussion_context_patterns:
