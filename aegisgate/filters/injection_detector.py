@@ -435,7 +435,7 @@ class PromptInjectionDetector(BaseFilter):
                 "risk_model": risk_model,
                 "diagnostics": diagnostics,
             }
-            logger.info(
+            logger.debug(
                 "injection-like response detected request_id=%s categories=%s",
                 ctx.request_id,
                 sorted(signals.keys()),

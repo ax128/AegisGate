@@ -2967,37 +2967,41 @@ async def _execute_responses_stream_once(
                             debug_log_original("response_stream_blocked", stream_window, reason=blocked_reason)
                             if blocked_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(blocked_reason)
-                            blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(
-                                ctx,
-                                source_text=stream_window,
-                            )
-                            blocked_confirm_id = make_confirm_id()
-                            blocked_confirmation_meta = _flow_confirmation_metadata(
-                                confirm_id=blocked_confirm_id,
-                                status="pending",
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                                payload_omitted=False,
-                                action_token=make_action_bind_token(
-                                    f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                                ),
-                            )
-                            blocked_message_text = _build_confirmation_message(
-                                confirm_id=blocked_confirm_id,
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                            )
-                            stream_end_reason = "policy_confirmation_draining_upstream"
-                            logger.info(
-                                "responses stream block drain started request_id=%s confirm_id=%s reason=%s chunk_count=%s cached_chars=%s",
-                                ctx.request_id,
-                                blocked_confirm_id,
-                                blocked_reason,
-                                chunk_count,
-                                len(stream_window),
-                            )
+
+                            # Only prepare confirmation metadata when confirmation flow is enabled.
+                            if settings.require_confirmation_on_block:
+                                blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(
+                                    ctx,
+                                    source_text=stream_window,
+                                )
+                                blocked_confirm_id = make_confirm_id()
+                                blocked_confirmation_meta = _flow_confirmation_metadata(
+                                    confirm_id=blocked_confirm_id,
+                                    status="pending",
+                                    reason=blocked_confirmation_reason,
+                                    summary=blocked_confirmation_summary,
+                                    phase=PHASE_RESPONSE,
+                                    payload_omitted=False,
+                                    action_token=make_action_bind_token(
+                                        f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
+                                    ),
+                                )
+                                blocked_message_text = _build_confirmation_message(
+                                    confirm_id=blocked_confirm_id,
+                                    reason=blocked_confirmation_reason,
+                                    summary=blocked_confirmation_summary,
+                                    phase=PHASE_RESPONSE,
+                                )
+                                logger.info(
+                                    "responses stream block drain started request_id=%s confirm_id=%s reason=%s chunk_count=%s cached_chars=%s",
+                                    ctx.request_id,
+                                    blocked_confirm_id,
+                                    blocked_reason,
+                                    chunk_count,
+                                    len(stream_window),
+                                )
+
+                            stream_end_reason = "policy_confirmation_draining_upstream" if settings.require_confirmation_on_block else "policy_auto_sanitize_draining"
 
                 if blocked_reason:
                     continue

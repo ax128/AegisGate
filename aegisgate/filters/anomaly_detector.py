@@ -251,7 +251,7 @@ class AnomalyDetector(BaseFilter):
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": [], "risk_model": {}}
         self._process_text(resp.output_text, ctx, phase="response")
         if self._report.get("hit"):
-            logger.info(
+            logger.debug(
                 "anomaly detected on response request_id=%s signals=%s",
                 ctx.request_id,
                 self._report.get("signals", []),

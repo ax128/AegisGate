@@ -72,7 +72,7 @@ class PrivilegeGuard(BaseFilter):
                 "blocked": sorted(set(blocked)),
             }
             ctx.security_tags.add("response_privilege_abuse")
-            logger.info("privilege-like response detected request_id=%s blocked=%s", ctx.request_id, sorted(set(blocked)))
+            logger.debug("privilege-like response detected request_id=%s blocked=%s", ctx.request_id, sorted(set(blocked)))
         return resp
 
     def report(self) -> dict:
