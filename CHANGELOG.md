@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 覆盖所有拦截路径：chat/responses × streaming/non-streaming × request-side/response-side + generic proxy
   - 新增 `_sanitize_hit_fragments()`、`_build_sanitized_warning_note()` 辅助函数
 
+- **极度危险指令完全移除（分级变形策略）**
+  - 匹配约 45 条高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `（危险指令已移除）`，原文**不会出现在返回中**
+  - 一般危险片段仍使用 chunked-hyphen 分词变形
+  - 模式来源：`anomaly_detector.command_patterns` + `sanitizer.force_block_command_patterns` + `privilege_guard.blocked_patterns` + 硬编码高危 shell 命令（13 条）
+
 - **TF-IDF 语义检测模块**（Phase 1）
   - 内置轻量 TF-IDF + LogisticRegression 双语分类器，无需 GPU，约 166KB 模型文件
   - 训练数据：deepset/prompt-injections + 中英文补充样本（DAN/jailbreak/角色劫持 + Agent 工作指令安全样本）

@@ -174,7 +174,13 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 1. `allow`：直接透传结果。
 2. `sanitize`：替换敏感片段或可疑片段后返回。
 3. `block`：立即拒绝并返回统一错误结构（v2 默认为 `403`）。
-4. `confirmation`（仅 v1）：返回确认模板，用户需发送绑定确认指令 `yes/no cfm-...--act-...` 再继续。
+4. `confirmation`（仅 v1，需 `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`）：返回确认模板，用户需发送绑定确认指令 `yes/no cfm-...--act-...` 再继续。
+
+默认行为（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=false`）：拦截时不走确认流程，危险片段±20 字符上下文直接变形后返回，附带 `⚠ [AegisGate]` 警告。
+
+**分级变形策略**：
+- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `（危险指令已移除）`，**原文不会出现在返回中**。
+- **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
 1. LLM 主链路用 `v1`（具备确认放行与完整审计）。
