@@ -335,10 +335,10 @@ injection_detector:
       - obfuscated
       - unicode_bidi
     discussion_patterns:
-      - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是)'
-      - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture)'
+      - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
+      - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
     quoted_instruction_patterns:
-      - '["''`].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`]'
+      - '["''`\u201c\u201d\u300c\u300d\u300e\u300f].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`\u201c\u201d\u300c\u300d\u300e\u300f]'
       - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
 
 rag_poison_guard:
