@@ -1529,6 +1529,74 @@ def _collect_source_hit_fragments(source_text: str) -> list[str]:
 
 _SANITIZE_HIT_CONTEXT_CHARS = 20
 
+_CRITICAL_DANGER_PLACEHOLDER = "（危险指令已移除）"
+
+
+@lru_cache(maxsize=1)
+def _critical_danger_patterns() -> tuple[re.Pattern[str], ...]:
+    """Compile patterns for commands so dangerous that the original text must
+    never appear in the response — not even in obfuscated form."""
+    rules = load_security_rules()
+    pattern_strings: list[str] = []
+
+    # anomaly_detector command_patterns (SQLi, XSS, command injection, path traversal, etc.)
+    for item in rules.get("anomaly_detector", {}).get("command_patterns", []):
+        regex = item.get("regex") if isinstance(item, dict) else None
+        if regex:
+            pattern_strings.append(str(regex))
+
+    # output_sanitizer force_block_command_patterns (docker destroy, HTTP smuggling, etc.)
+    for item in rules.get("sanitizer", {}).get("force_block_command_patterns", []):
+        regex = item.get("regex") if isinstance(item, dict) else None
+        if regex:
+            pattern_strings.append(str(regex))
+
+    # privilege_guard blocked_patterns (read /etc/passwd, dump secrets, etc.)
+    for item in rules.get("privilege_guard", {}).get("blocked_patterns", []):
+        regex = item.get("regex") if isinstance(item, dict) else None
+        if regex:
+            pattern_strings.append(str(regex))
+
+    # Hardcoded critical shell commands that must always be fully redacted.
+    pattern_strings.extend([
+        r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s",
+        r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s",
+        r"mkfs\b",
+        r"dd\s+if=.*of=",
+        r"chmod\s+-R\s+777\s+/",
+        r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # fork bomb
+        r">\s*/dev/sd[a-z]",
+        r"curl\s+[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash)\b",
+        r"wget\s+[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash)\b",
+        r"python[23]?\s+-c\s+['\"].*(?:exec|eval|import\s+os)",
+        r"nc\s+-[a-z]*e\s",  # netcat reverse shell
+        r"bash\s+-i\s+>&\s*/dev/tcp/",  # bash reverse shell
+        r"powershell(?:\.exe)?\s+(?:-enc|-e\b|-encodedcommand)",
+    ])
+
+    deduped: list[str] = []
+    for p in pattern_strings:
+        if p not in deduped:
+            deduped.append(p)
+
+    compiled: list[re.Pattern[str]] = []
+    for p in deduped:
+        try:
+            compiled.append(re.compile(p, re.IGNORECASE))
+        except re.error:
+            continue
+    return tuple(compiled)
+
+
+def _contains_critical_danger(text: str) -> bool:
+    """Return True if *text* matches any critical danger pattern."""
+    if not text:
+        return False
+    for pattern in _critical_danger_patterns():
+        if pattern.search(text):
+            return True
+    return False
+
 
 def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
     """Replace dangerous fragments in *source_text* with obfuscated versions.
@@ -1569,14 +1637,19 @@ def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
         else:
             merged.append((left, right))
 
-    # 3) Rebuild text, replacing each merged region with obfuscated version.
+    # 3) Rebuild text, replacing each merged region.
+    #    Critical danger commands → fully redacted placeholder (original never exposed).
+    #    Other fragments → chunked-hyphen obfuscation.
     parts: list[str] = []
     cursor = 0
     for left, right in merged:
         parts.append(source_text[cursor:left])
         original_segment = source_text[left:right]
-        obfuscated = _obfuscate_hit_fragment(original_segment)
-        parts.append(f"[{obfuscated}]")
+        if _contains_critical_danger(original_segment):
+            parts.append(f"[{_CRITICAL_DANGER_PLACEHOLDER}]")
+        else:
+            obfuscated = _obfuscate_hit_fragment(original_segment)
+            parts.append(f"[{obfuscated}]")
         cursor = right
     parts.append(source_text[cursor:])
 
