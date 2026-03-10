@@ -6,15 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **TF-IDF 语义检测模块**（Phase 1）
+  - 内置轻量 TF-IDF + LogisticRegression 双语分类器，无需 GPU，约 166KB 模型文件
+  - 训练数据：deepset/prompt-injections + 中英文补充样本（DAN/jailbreak/角色劫持 + Agent 工作指令安全样本）
+  - 三层检测逻辑：TF-IDF 高置信度安全直接放行 → 高置信度注入标记 → 灰区交正则细分 → TF-IDF 安全中置信度抑制正则误报
+  - 新增 `AEGIS_ENABLE_SEMANTIC_MODULE`（默认 `true`）
+  - 重训练脚本：`scripts/train_tfidf.py`
+  - 新增可选依赖组：`pip install ".[semantic]"`（scikit-learn、jieba、joblib）
+
 ### Security
 
-- **安全过滤强度调优（减少误杀 + 防止高危放行）**
-  - `privilege_guard`：降低 risk_floor（0.9→0.75 / 0.85→0.70），精确化中英文模式——"读取配置文件"、"show token usage" 不再误杀，"cat /etc/passwd"、"泄露密钥" 仍被拦截。
-  - `injection_detector`：降低 `direct` severity（9→7）、`html_markdown` severity（6→4），增大误报降分上限（0.35→0.45）——HTML 代码示例从 risk=0.85 降至 0.197，学术讨论 risk=0.58 放行。
-  - `output_sanitizer`：移除 `docker ps/images/logs` 等只读诊断命令的强制拦截，仅保留 `down/stop/restart/exec -it`。
-  - `request_sanitizer`：`rule_bypass` 动作从 `block` 改为 `review`（教学讨论提到"绕过"不再直接拦截）。
-  - `anomaly_detector`：放宽重复阈值（ratio 0.35→0.45, repeated_line 20→28），减少重复格式内容误触。
-  - `rag_poison_guard`：降低 retrieval（0.86→0.78）和 propagation（0.88→0.82）风险分。
+- **安全阈值全面调低（语义化检测 + 减少误杀）**
+  - **默认安全级别改为 `medium`**：大部分"可能危险"指令不拦截，仅高危 + 脱敏
+  - `injection_detector` 评分模型：`nonlinear_k` 2.2→2.0，`allow` 0.35→0.40，`review` 0.70→0.75
+  - `injection_detector` 信号严重度：`direct` 7→5，`html_markdown` 4→3，`remote_content` 7→5，`remote_content_instruction` 8→6，`indirect_injection` 8→6，`typoglycemia` 5→4，`unicode_invisible` 5→4
+  - `privilege_guard` 风险地板：request 0.75→0.65，response 0.70→0.60
+  - `anomaly_detector` 重复阈值：ratio 0.45→0.55，max_run_length 50→80，repeated_line 28→40
+  - `anomaly_detector` 评分模型：`nonlinear_k` 2.2→2.0，`allow` 0.35→0.40，`review` 0.70→0.75
+  - `rag_poison_guard` 风险分：ingestion 0.88→0.80，retrieval 0.78→0.70，propagation 0.82→0.75
+  - 安全级别乘数：medium（阈值×1.30，地板×0.85），low（阈值×1.60，地板×0.70）
+  - **保持 disposition=block 强制拦截**：system_exfil（10）、obfuscated（9）、unicode_bidi（10）在任何安全级别下都被拦截
+  - `leak_check` 从 `block` 改为 `review`：Agent 工作指令提到 "system prompt"/"write_file" 不再被拦截
+
+- **此前已修复的安全过滤问题（保留记录）**
+  - `privilege_guard`：精确化中英文模式——"读取配置文件"、"show token usage" 不再误杀
+  - `output_sanitizer`：移除 `docker ps/images/logs` 等只读诊断命令的强制拦截
+  - `request_sanitizer`：`rule_bypass` 动作从 `block` 改为 `review`
 
 - **[Critical] 修复 action=block 在 low 级别下失效的问题**
   - `security_level=low` 时 risk_threshold 被 cap 到 1.0，导致 `injection_detector`（system_exfil/obfuscated/unicode_bidi）和 `privilege_guard` 的 block action 仅提升 risk=0.95 但无法达到阈值——真正的高危指令被放行。
@@ -23,7 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **默认安全级别改为 `low`**：减少正常对话的误拦截；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。
+- **默认安全级别改为 `medium`**：宽松模式，大部分"可能危险"指令不拦截，仅高危 + 脱敏；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。语义检测模块（TF-IDF）默认开启，进一步降低误报。
 - **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认改为 `true`**：Store 操作在线程池执行，避免 SQLite 读写阻塞 event loop，提升高并发性能。
 - **`confirmation_ttl_seconds` 从 300s 增加到 600s**：给用户更充裕的时间做 yes/no 决策。
 - **Stale executing 状态自动恢复**：prune 后台任务每 60s 自动将卡在 `executing` 超过 120s 的确认记录恢复为 `pending`，不再依赖下次请求触发。涉及 SQLite/Redis/PostgreSQL 三个存储后端。

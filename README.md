@@ -93,8 +93,9 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 - `responses` 结构化 `input` 预转发脱敏：覆盖 `user/developer/system/assistant` 与 `function_call_output/tool_output` 等节点
 - 高风险确认：命中高风险可返回确认模板，确认指令在 request 入口按三态处理
 - 流式韧性：上游未发送 `[DONE]` 提前断流时，网关会合成恢复完成事件并补齐 `[DONE]`
+- **语义检测（TF-IDF）**：内置轻量 TF-IDF + LogisticRegression 分类器，中英文双语 prompt injection 检测，无需 GPU，启动时自动加载（约 166KB 模型文件）。高置信度安全文本直接放行（跳过正则），高置信度注入文本提前标记，灰区交由正则细分。
 - 可选能力：
-  - 语义灰区复核（超时、熔断、缓存）
+  - 外部语义服务（超时、熔断、缓存）
   - HMAC + nonce 防重放
   - loopback-only 边界限制
 - 存储后端：`sqlite` / `redis` / `postgres`
@@ -430,7 +431,8 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `50000` |
 | `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `100000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
-| `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high` | `low` |
+| `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
+| `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
@@ -442,6 +444,33 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_BLOCK_INTERNAL_TARGETS` | v2 阻止请求到内网/私有 IP（SSRF 防护） | `true` |
 
 说明：v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
+
+### 5.1 安全级别（`AEGIS_SECURITY_LEVEL`）
+
+三档定位，控制所有阈值/地板的缩放系数：
+
+| 级别 | 定位 | 行为 |
+|------|------|------|
+| `high` | 全量检测，宁可误拦不放过 | 阈值缩小（×0.90），地板抬高（×1.05），更容易触发拦截 |
+| **`medium`（默认）** | 宽松，仅高危 + 脱敏 | 阈值放大（×1.30），地板降低（×0.85），大部分"可能危险"指令不拦截 |
+| `low` | 极宽松，基本只脱敏 | 阈值放大（×1.60），地板大幅降低（×0.70），几乎不触发 risk-based 拦截 |
+
+**所有级别下，`disposition=block` 的特殊类别始终强制拦截**（不受阈值影响）：
+- `system_exfil`（系统提示泄露）
+- `obfuscated`（编码混淆攻击）
+- `unicode_bidi`（bidi 方向控制攻击）
+
+### 5.2 语义检测模块
+
+内置 TF-IDF + LogisticRegression 双语分类器（`AEGIS_ENABLE_SEMANTIC_MODULE=true`，默认开启）：
+
+- **模型**：char n-gram (3-5) + sublinear TF-IDF，约 166KB（vectorizer 104KB + classifier 62KB）
+- **训练数据**：deepset/prompt-injections + 中英文补充样本（DAN/jailbreak/角色劫持 + Agent 工作指令安全样本）
+- **三层检测逻辑**：
+  1. TF-IDF 高置信度安全（≥0.88）→ 跳过正则，直接放行
+  2. TF-IDF 高置信度注入（≥0.85）→ 标记 + 风险提升，再交正则细分
+  3. 灰区 → 正则分类 → TF-IDF 安全中置信度（≥0.70）可抑制正则误报
+- **重训练**：`pip install scikit-learn jieba datasets && python scripts/train_tfidf.py`
 
 `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 示例：
 `moltbook.com,semanticscholar.org,openalex.org,arxiv.org,pubmed.ncbi.nlm.nih.gov,search.crossref.org,core.ac.uk,doaj.org`
