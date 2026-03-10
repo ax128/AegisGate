@@ -471,7 +471,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             "secret_exfiltration": "review",
             "privilege_escalation": "review",
             "rule_bypass": "review",
-            "leak_check": "block",
+            "leak_check": "review",
             "shape_anomaly": "sanitize",
         },
         "rag_poison_guard": {

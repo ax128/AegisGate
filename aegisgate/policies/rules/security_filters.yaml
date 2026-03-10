@@ -749,7 +749,7 @@ action_map:
     secret_exfiltration: review
     privilege_escalation: review
     rule_bypass: review
-    leak_check: block
+    leak_check: review
     shape_anomaly: sanitize
   post_restore_guard:
     restored_secret_lure: sanitize

@@ -158,12 +158,17 @@ class RequestSanitizer(BaseFilter):
             shape_hits.update(self._shape_hits(text))
 
         if has_leak:
-            action = self._apply_action(ctx, "leak_check", "block")
+            action = self._apply_action(ctx, "leak_check", "review")
             if action == "block":
                 self._block_request(req, ctx, reason="request_leak_check_failed")
                 self._report = {"filter": self.name, "hit": True, "risk_score": ctx.risk_score, "action": "block"}
                 logger.info("request blocked request_id=%s reason=leak_check", ctx.request_id)
                 return req
+            # review: elevate risk and flag, but allow the request through
+            ctx.risk_score = max(ctx.risk_score, 0.6)
+            ctx.security_tags.add("request_leak_check")
+            self._report = {"filter": self.name, "hit": True, "risk_score": ctx.risk_score, "action": "review"}
+            logger.info("request leak_check review request_id=%s", ctx.request_id)
 
         if strong_intent_categories:
             if "secret_exfiltration" in strong_intent_categories:

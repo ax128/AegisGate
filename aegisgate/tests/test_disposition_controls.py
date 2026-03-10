@@ -29,7 +29,7 @@ def test_injection_detector_reduces_false_positive_in_discussion_context():
     assert ctx.risk_score < 0.7
 
 
-def test_request_sanitizer_blocks_secret_exfiltration():
+def test_request_sanitizer_reviews_secret_exfiltration():
     plugin = RequestSanitizer()
     req = InternalRequest(
         request_id="disp-1",
@@ -41,12 +41,10 @@ def test_request_sanitizer_blocks_secret_exfiltration():
     ctx = RequestContext(request_id="disp-1", session_id="s1", route=req.route, enabled_filters={"request_sanitizer"})
 
     plugin.process_request(req, ctx)
-    assert ctx.request_disposition == "block"
-    assert (
-        "request_secret_exfiltration" in ctx.disposition_reasons
-        or "request_leak_check_failed" in ctx.disposition_reasons
-    )
-    assert "blocked by security policy" in req.messages[0].content.lower()
+    # leak_check and secret_exfiltration are both review (not block)
+    assert ctx.request_disposition != "block"
+    assert ctx.risk_score >= 0.5
+    assert any("leak_check" in a or "secret_exfiltration" in a for a in ctx.enforcement_actions)
 
 
 def test_request_sanitizer_sanitizes_research_command_payload():
