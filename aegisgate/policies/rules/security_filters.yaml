@@ -201,32 +201,32 @@ injection_detector:
     - id: ignore_previous_en
       regex: 'ignore\s+(all\s+)?(previous|prior)\s+instructions?'
     - id: override_safety_en
-      regex: '(bypass|override)\s+.*(safety|guardrails?|policy)'
+      regex: '(bypass|override)\s+.{0,40}(safety|guardrails?|policy)'
     - id: developer_mode_en
-      regex: '(you\s+are\s+now|act\s+as)\s+.*(developer|root|admin)'
+      regex: '(you\s+are\s+now|act\s+as)\s+.{0,40}(developer|root|admin)'
     - id: reveal_hidden_en
-      regex: '(reveal|show|print|dump|leak)\s+.*(system\s+prompt|developer\s+message|hidden\s+instructions?)'
+      regex: '(reveal|show|print|dump|leak)\s+.{0,40}(system\s+prompt|developer\s+message|hidden\s+instructions?)'
     - id: repeat_prompt_en
-      regex: '(repeat|quote|verbatim)\s+.*(prompt|instructions?)'
+      regex: '(repeat|quote|verbatim)\s+.{0,40}(prompt|instructions?)'
     - id: ignore_previous_zh
-      regex: '(忽略|无视).*(之前|以上|先前).*(指令|说明|规则)'
+      regex: '(忽略|无视).{0,8}(之前|以上|先前).{0,8}(指令|说明|规则)'
     - id: override_safety_zh
-      regex: '(绕过|关闭).*(安全|防护|策略|限制)'
+      regex: '(绕过|关闭).{0,4}(安全|防护|策略|限制)'
     - id: reveal_hidden_zh
-      regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|隐藏指令)'
+      regex: '(泄露|显示|输出|打印).{0,10}(系统提示词|开发者消息|隐藏指令)'
     - id: repeat_prompt_zh
-      regex: '(逐字|原样|完整).*(复述|输出).*(提示词|指令)'
+      regex: '(逐字|原样|完整).{0,8}(复述|输出).{0,8}(提示词|指令)'
   system_exfil_patterns:
     - id: system_prompt_request_en
-      regex: '(what|show|reveal)\s+.*system\s+prompt'
+      regex: '(what|show|reveal)\s+.{0,40}system\s+prompt'
     - id: developer_message_request_en
-      regex: '(show|reveal|print)\s+.*developer\s+message'
+      regex: '(show|reveal|print)\s+.{0,40}developer\s+message'
     - id: delimiter_breakout_en
-      regex: '(ignore|forget)\s+.*(system|developer)\s+instructions'
+      regex: '(ignore|forget)\s+.{0,40}(system|developer)\s+instructions'
     - id: system_prompt_request_zh
-      regex: '(显示|告诉|输出|泄露).*(系统提示词|系统提示)'
+      regex: '(显示|告诉|输出|泄露).{0,10}(系统提示词|系统提示)'
     - id: developer_message_request_zh
-      regex: '(显示|输出|泄露).*(开发者消息|开发提示)'
+      regex: '(显示|输出|泄露).{0,10}(开发者消息|开发提示)'
   html_markdown_patterns:
     - id: script_tag
       regex: '<\s*script\b'
@@ -238,31 +238,31 @@ injection_detector:
       regex: 'data:\s*text/html'
   remote_content_patterns:
     - id: markdown_link_instruction_en
-      regex: '\[[^\]]+\]\(https?://[^)]+\).*(follow|execute|instructions?)'
+      regex: '\[[^\]]+\]\(https?://[^)]+\).{0,60}(follow|execute|instructions?)'
     - id: url_instruction_en
-      regex: 'https?://\S+.*(follow|execute|instructions?)'
+      regex: 'https?://\S+.{0,60}(follow|execute|instructions?)'
     - id: markdown_link_instruction_zh
-      regex: '\[[^\]]+\]\(https?://[^)]+\).*(按|执行|遵循).*(指令|说明)'
+      regex: '\[[^\]]+\]\(https?://[^)]+\).{0,40}(按|执行|遵循).{0,20}(指令|说明)'
     - id: url_instruction_zh
-      regex: 'https?://\S+.*(按|执行|遵循).*(指令|说明)'
+      regex: 'https?://\S+.{0,40}(按|执行|遵循).{0,20}(指令|说明)'
   indirect_injection_patterns:
     - id: retrieved_override_en
-      regex: '(retrieved|document|knowledge\s*base|web\s*page).*(ignore|override|bypass).*(instructions|policy|guardrails?)'
+      regex: '(retrieved|document|knowledge\s*base|web\s*page).{0,60}(ignore|override|bypass).{0,40}(instructions|policy|guardrails?)'
     - id: context_priority_hijack_en
-      regex: '(treat|use).*(this|retrieved|external).*(as|with).*(highest|top).*(priority|authority)'
+      regex: '(treat|use).{0,40}(this|retrieved|external).{0,30}(as|with).{0,30}(highest|top).{0,30}(priority|authority)'
     - id: retrieved_override_zh
-      regex: '(检索|文档|知识库|网页).*(忽略|覆盖|绕过).*(指令|规则|策略|安全)'
+      regex: '(检索|文档|知识库|网页).{0,3}(忽略|覆盖|绕过).{0,4}(指令|规则|策略|安全)'
     - id: context_priority_hijack_zh
-      regex: '(将|把).*(检索内容|外部内容|文档).*(作为|设为).*(最高|最高级).*(优先级|权威)'
+      regex: '(将|把).{0,12}(检索内容|外部内容|文档).{0,8}(作为|设为).{0,8}(最高|最高级).{0,8}(优先级|权威)'
   remote_content_instruction_patterns:
     - id: copy_paste_terminal_en
-      regex: '(copy|paste).*(terminal|shell|powershell|cmd)|(run|execute).*(from|in).*(url|link|document)'
+      regex: '(copy|paste).{0,40}(terminal|shell|powershell|cmd)|(run|execute).{0,30}(from|in).{0,30}(url|link|document)'
     - id: remote_tool_invocation_en
-      regex: '(follow|execute).*(tool|function|api).*(from|in).*(link|url|document)'
+      regex: '(follow|execute).{0,30}(tool|function|api).{0,30}(from|in).{0,30}(link|url|document)'
     - id: copy_paste_terminal_zh
-      regex: '(复制|粘贴).*(终端|shell|powershell|cmd)|(按|执行).*(链接|网页|文档).*(命令|脚本)'
+      regex: '(复制|粘贴).{0,10}(终端|shell|powershell|cmd)|(按|执行).{0,10}(链接|网页|文档).{0,10}(命令|脚本)'
     - id: remote_tool_invocation_zh
-      regex: '(根据|按照).*(链接|文档|网页).*(调用|执行).*(工具|函数|接口)'
+      regex: '(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)'
   typoglycemia_targets:
     - ignore
     - bypass
@@ -335,8 +335,8 @@ injection_detector:
       - obfuscated
       - unicode_bidi
     discussion_patterns:
-      - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)'
-      - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)'
+      - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是)'
+      - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture)'
     quoted_instruction_patterns:
       - '["''`].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`]'
       - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
