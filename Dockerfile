@@ -14,8 +14,10 @@ COPY config/.env.example /app/config/.env.example
 # 镜像内保留一份只读策略模板，避免 rules 目录被 volume 挂载覆盖后无法回填
 COPY aegisgate/policies/rules /app/bootstrap/rules
 
+COPY aegisgate/models /app/aegisgate/models
+
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir . \
+    && python -m pip install --no-cache-dir ".[semantic]" \
     && useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/logs \
     && chown -R appuser:appuser /app

@@ -12,6 +12,7 @@ from threading import Lock
 
 import httpx
 
+from aegisgate.core.tfidf_model import get_tfidf_classifier
 from aegisgate.util.logger import logger
 
 
@@ -55,6 +56,10 @@ class SemanticAnalyzer:
             r"|((泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|cookie|密码))",
             re.IGNORECASE,
         )
+        # Pre-warm TF-IDF model (loads joblib + jieba dictionary) outside the
+        # thread pool so the first _classify_sync call doesn't pay the cost.
+        get_tfidf_classifier()
+
         self._privilege_re = re.compile(
             r"(read|open|cat|dump).*(local\s+file|system\s+file|config|log|database)"
             r"|((execute|run).*(command|shell|powershell|cmd|bash))"
@@ -123,6 +128,23 @@ class SemanticAnalyzer:
         reasons: list[str] = []
         risk = 0.0
 
+        # --- TF-IDF semantic pre-filter ---
+        tfidf = get_tfidf_classifier()
+        tfidf_label, tfidf_conf = "unknown", 0.5
+        if tfidf.available:
+            tfidf_label, tfidf_conf = tfidf.predict(norm)
+
+            # High confidence safe → skip regex, directly return low risk
+            if tfidf_label == "safe" and tfidf_conf >= 0.88:
+                return 0.0, [], ["tfidf_safe"]
+
+            # High confidence injection → flag it, but still run regex for specifics
+            if tfidf_label == "injection" and tfidf_conf >= 0.85:
+                tags.append("semantic_tfidf_injection")
+                reasons.append("tfidf_injection_detected")
+                risk = max(risk, 0.55 + (tfidf_conf - 0.85) * 2.0)  # 0.55 ~ 0.85
+
+        # --- Regex classification (original logic) ---
         if self._injection_re.search(norm):
             tags.append("semantic_injection")
             reasons.append("semantic_injection_intent")
@@ -139,9 +161,15 @@ class SemanticAnalyzer:
         if len(tags) >= 2:
             risk = min(1.0, risk + 0.06)
 
+        # Discussion context reduces risk (both tfidf and regex hits)
         if tags and self._discussion_re.search(norm):
             risk = max(0.0, risk * 0.72)
             reasons.append("semantic_discussion_context_reduction")
+
+        # TF-IDF says safe with moderate confidence → dampen regex risk
+        if tfidf_label == "safe" and tfidf_conf >= 0.70 and risk > 0:
+            risk = max(0.0, risk * 0.75)
+            reasons.append("tfidf_safe_dampening")
 
         return risk, sorted(set(tags)), reasons
 
