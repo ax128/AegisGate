@@ -1,0 +1,755 @@
+version: 2
+languages:
+  - en
+  - zh
+
+redaction:
+  request_prefix_max_len: 12
+  normalize_nfkc: true
+  strip_invisible_chars: true
+  # 字段感知脱敏阈值：避免把过短普通值误判为敏感数据
+  field_value_min_len: 12
+  pii_patterns:
+    - id: EMAIL
+      regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+    - id: TOKEN
+      regex: '\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b'
+    - id: PHONE
+      regex: '\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b'
+    - id: SSN
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
+    - id: CARD
+      regex: '\b(?:\d[ -]*?){13,16}\b'
+    - id: CN_MOBILE
+      regex: '(?<!\d)1[3-9]\d{9}(?!\d)'
+    - id: CN_ID
+      regex: '(?<!\d)\d{17}[\dXx](?!\d)'
+    - id: AWS_ACCESS_KEY
+      regex: '\bAKIA[0-9A-Z]{16}\b'
+    - id: GITHUB_TOKEN
+      regex: '\bghp_[A-Za-z0-9]{20,}\b'
+    - id: SLACK_TOKEN
+      regex: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
+    - id: IBAN
+      regex: '\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b'
+    - id: IPV4
+      regex: '\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b'
+    - id: IPV6
+      regex: '\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b'
+    - id: JWT
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: URL_TOKEN_QUERY
+      regex: 'https?://[^\s]+[?&](?:access_token|token|api[_-]?key|key|sig|signature|session(?:id)?|jwt|auth)=[A-Za-z0-9._%\-~+/=]{8,}'
+    - id: COOKIE_SESSION
+      regex: '\b(?:session(?:id)?|sid|set-cookie|csrftoken|xsrf-token)\b\s*[:=]\s*[A-Za-z0-9._%\-]{8,}\b'
+    - id: PRIVATE_KEY_PEM
+      regex: '-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP|PRIVATE) KEY-----'
+    - id: AWS_SECRET_ACCESS_KEY
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: BANK_ACCOUNT
+      regex: '\b(?:bank[_\s-]?account|acct(?:ount)?(?:[_\s-]?no)?|账户(?:号)?)\b\s*[:=]\s*[A-Za-z0-9\-]{8,24}\b'
+    - id: SWIFT_BIC
+      regex: '\b(?:swift|bic)\b\s*[:=]\s*[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'
+    - id: ROUTING_NUMBER
+      regex: '\b(?:routing|aba)\b\s*[:=]\s*\d{9}\b'
+    - id: PASSPORT_NO
+      regex: '\b(?:passport|护照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9]{6,12}\b'
+    - id: DRIVER_LICENSE_NO
+      regex: '\b(?:driver(?:[_\s-]?license)?|驾照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9\-]{5,20}\b'
+    - id: TAX_ID
+      regex: '\b(?:tax[_\s-]?(?:id|no|number)|ein|ssn|tin|税号)\b\s*[:=]\s*[A-Z0-9\-]{6,20}\b'
+    - id: MAC_ADDRESS
+      regex: '\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
+    - id: IMEI
+      regex: '\b(?:imei|设备imei)\b\s*[:=]\s*\d{15}\b'
+    - id: IMSI
+      regex: '\b(?:imsi|subscriber[_\s-]?id)\b\s*[:=]\s*\d{14,16}\b'
+    - id: DEVICE_SERIAL
+      regex: '\b(?:serial(?:[_\s-]?number)?|sn|设备序列号)\b\s*[:=]\s*[A-Za-z0-9\-]{6,40}\b'
+    - id: CRYPTO_BTC_ADDR
+      regex: '\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b'
+    - id: CRYPTO_ETH_ADDR
+      regex: '\b0x[a-fA-F0-9]{40}\b'
+    - id: CRYPTO_SOL_ADDR
+      regex: '\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
+    - id: CRYPTO_TRON_ADDR
+      regex: '\bT[1-9A-HJ-NP-Za-km-z]{33}\b'
+    - id: CRYPTO_WIF_KEY
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: CRYPTO_XPRV
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: CRYPTO_XPUB
+      regex: '\bxpub[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: CRYPTO_SEED_PHRASE
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: EXCHANGE_API_SECRET
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
+    - id: NAME_FIELD
+      regex: '(?i)\b(?:name|full[_\-\s]?name|real[_\-\s]?name|patient[_\-\s]?name|姓名|真实姓名)\b\s*[:=]\s*[^\n,;]{2,60}'
+    - id: GEO_FIELD
+      regex: '(?i)\b(?:address|street|city|district|county|province|state|zip|zipcode|postal[_\-\s]?code|gps|lat(?:itude)?|lon(?:gitude)?|地址|省|市|区|县|街道|门牌|邮编)\b\s*[:=]\s*[^\n,;]{3,120}'
+    - id: DATE_EXACT_FIELD
+      regex: '(?i)\b(?:dob|birth(?:date)?|admission(?:[_\-\s]?date)?|discharge(?:[_\-\s]?date)?|death(?:[_\-\s]?date)?|生日|出生日期|入院日期|出院日期|死亡日期)\b\s*[:=]\s*(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})'
+    - id: FAX_FIELD
+      regex: '(?i)\b(?:fax|传真)\b\s*[:=]\s*(?:\+?\d[\d\-\s]{6,20})'
+    - id: MEDICAL_RECORD_NO
+      regex: '(?i)\b(?:mrn|medical[_\-\s]?record(?:[_\-\s]?(?:id|no|number))?|病历(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: HEALTH_PLAN_BENEFICIARY_NO
+      regex: '(?i)\b(?:member[_\-\s]?id|beneficiary[_\-\s]?(?:id|no|number)|health[_\-\s]?plan[_\-\s]?(?:id|no|number)|医保(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: CERT_LICENSE_NO
+      regex: '(?i)\b(?:cert(?:ificate)?[_\-\s]?(?:id|no|number)|license[_\-\s]?(?:id|no|number)|执照(?:号|编号)|证书(?:号|编号))\b\s*[:=]\s*[A-Za-z0-9\-]{4,30}'
+    - id: VEHICLE_VIN
+      regex: '(?i)\b(?:vin|vehicle[_\-\s]?id|车辆识别码)\b\s*[:=]\s*[A-HJ-NPR-Z0-9]{17}\b'
+    - id: VEHICLE_PLATE
+      regex: '(?i)\b(?:plate|license[_\-\s]?plate|车牌)\b\s*[:=]\s*[A-Za-z0-9\u4e00-\u9fff\-]{5,12}'
+    - id: BIOMETRIC_TEMPLATE
+      regex: '(?i)\b(?:fingerprint|faceprint|voiceprint|iris|retina|biometric|指纹|面纹|声纹|虹膜|生物特征)\b\s*[:=]\s*[A-Za-z0-9+/=._\-]{8,}'
+
+restoration:
+  placeholder_regex: '\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}'
+  suspicious_context_patterns:
+    - id: exfiltration_en
+      regex: '(reveal|show|dump|leak|print|secret|password|token|api\s*key|system\s+prompt)'
+    - id: exfiltration_zh
+      regex: '(泄露|暴露|显示|输出|打印|给我|提供).*(密钥|口令|密码|令牌|token|api\s*key|系统提示词|系统提示)'
+  restore_policy:
+    max_placeholders_per_response: 20
+    restore_ttl_seconds: 1800
+    allow_partial_restore: false
+
+untrusted_content_guard:
+  untrusted_sources:
+    - external
+    - retrieval
+    - web
+    - tool
+    - plugin
+    - document
+  source_trust_matrix:
+    system:
+      trusted: true
+      risk_multiplier: 0.2
+    user:
+      trusted: true
+      risk_multiplier: 0.5
+    retrieval:
+      trusted: false
+      risk_multiplier: 1.0
+    web:
+      trusted: false
+      risk_multiplier: 1.1
+    tool:
+      trusted: false
+      risk_multiplier: 1.1
+    external:
+      trusted: false
+      risk_multiplier: 1.2
+    partner_feed:
+      trusted: false
+      risk_multiplier: 1.2
+  boundary_start: '[UNTRUSTED_CONTENT_START]'
+  boundary_end: '[UNTRUSTED_CONTENT_END]'
+  risk_score: 0.88
+  instructional_patterns:
+    - id: instructional_en
+      regex: '(ignore\s+.*instructions?|bypass\s+.*(policy|safety)|reveal\s+.*(system\s+prompt|developer\s+message)|run\s+command|execute\s+shell)'
+    - id: instructional_zh
+      regex: '(忽略|无视).*(指令|规则|说明)|(绕过|关闭).*(安全|策略|限制)|(泄露|显示).*(系统提示词|开发者消息)'
+
+injection_detector:
+  base64_candidate_regex: '[A-Za-z0-9+/]{24,}={0,2}'
+  hex_candidate_regex: '\b[0-9a-fA-F]{32,}\b'
+  word_regex: '\b[a-z]{4,}\b'
+  base64_max_candidates: 8
+  hex_max_candidates: 8
+  multi_stage_decode:
+    enabled: true
+    max_decode_depth: 2
+    url_decode_enabled: true
+  unicode_confusable_map:
+    а: a
+    е: e
+    о: o
+    р: p
+    с: c
+    у: y
+    х: x
+    і: i
+    ѕ: s
+    ο: o
+    ρ: p
+    ν: v
+    ｍ: m
+  unicode_invisible_chars:
+    - "\u200B"
+    - "\u200C"
+    - "\u200D"
+    - "\u2060"
+    - "\uFEFF"
+    - "\u00AD"
+  unicode_bidi_chars:
+    - "\u202A"
+    - "\u202B"
+    - "\u202D"
+    - "\u202E"
+    - "\u202C"
+    - "\u2066"
+    - "\u2067"
+    - "\u2068"
+    - "\u2069"
+  direct_patterns:
+    - id: ignore_previous_en
+      regex: 'ignore\s+(all\s+)?(previous|prior)\s+instructions?'
+    - id: override_safety_en
+      regex: '(bypass|override)\s+.{0,40}(safety|guardrails?|policy)'
+    - id: developer_mode_en
+      regex: '(you\s+are\s+now|act\s+as)\s+.{0,40}(developer|root|admin)'
+    - id: reveal_hidden_en
+      regex: '(reveal|show|print|dump|leak)\s+.{0,40}(system\s+prompt|developer\s+message|hidden\s+instructions?)'
+    - id: repeat_prompt_en
+      regex: '(repeat|quote|verbatim)\s+.{0,40}(prompt|instructions?)'
+    - id: ignore_previous_zh
+      regex: '(忽略|无视).{0,8}(之前|以上|先前).{0,8}(指令|说明|规则)'
+    - id: override_safety_zh
+      regex: '(绕过|关闭).{0,4}(安全|防护|策略|限制)'
+    - id: reveal_hidden_zh
+      regex: '(泄露|显示|输出|打印).{0,10}(系统提示词|开发者消息|隐藏指令)'
+    - id: repeat_prompt_zh
+      regex: '(逐字|原样|完整).{0,8}(复述|输出).{0,8}(提示词|指令)'
+  system_exfil_patterns:
+    - id: system_prompt_request_en
+      regex: '(what|show|reveal)\s+.{0,40}system\s+prompt'
+    - id: developer_message_request_en
+      regex: '(show|reveal|print)\s+.{0,40}developer\s+message'
+    - id: delimiter_breakout_en
+      regex: '(ignore|forget)\s+.{0,40}(system|developer)\s+instructions'
+    - id: system_prompt_request_zh
+      regex: '(显示|告诉|输出|泄露).{0,10}(系统提示词|系统提示)'
+    - id: developer_message_request_zh
+      regex: '(显示|输出|泄露).{0,10}(开发者消息|开发提示)'
+  html_markdown_patterns:
+    - id: script_tag
+      regex: '<\s*script\b'
+    - id: img_tag
+      regex: '<\s*img\b'
+    - id: javascript_uri
+      regex: 'javascript:\s*'
+    - id: data_uri
+      regex: 'data:\s*text/html'
+  remote_content_patterns:
+    - id: markdown_link_instruction_en
+      regex: '\[[^\]]+\]\(https?://[^)]+\).{0,60}(follow|execute|instructions?)'
+    - id: url_instruction_en
+      regex: 'https?://\S+.{0,60}(follow|execute|instructions?)'
+    - id: markdown_link_instruction_zh
+      regex: '\[[^\]]+\]\(https?://[^)]+\).{0,40}(按|执行|遵循).{0,20}(指令|说明)'
+    - id: url_instruction_zh
+      regex: 'https?://\S+.{0,40}(按|执行|遵循).{0,20}(指令|说明)'
+  indirect_injection_patterns:
+    - id: retrieved_override_en
+      regex: '(retrieved|document|knowledge\s*base|web\s*page).{0,60}(ignore|override|bypass).{0,40}(instructions|policy|guardrails?)'
+    - id: context_priority_hijack_en
+      regex: '(treat|use).{0,40}(this|retrieved|external).{0,30}(as|with).{0,30}(highest|top).{0,30}(priority|authority)'
+    - id: retrieved_override_zh
+      regex: '(检索|文档|知识库|网页).{0,3}(忽略|覆盖|绕过).{0,4}(指令|规则|策略|安全)'
+    - id: context_priority_hijack_zh
+      regex: '(将|把).{0,12}(检索内容|外部内容|文档).{0,8}(作为|设为).{0,8}(最高|最高级).{0,8}(优先级|权威)'
+  remote_content_instruction_patterns:
+    - id: copy_paste_terminal_en
+      regex: '(copy|paste).{0,40}(terminal|shell|powershell|cmd)|(run|execute).{0,30}(from|in).{0,30}(url|link|document)'
+    - id: remote_tool_invocation_en
+      regex: '(follow|execute).{0,30}(tool|function|api).{0,30}(from|in).{0,30}(link|url|document)'
+    - id: copy_paste_terminal_zh
+      regex: '(复制|粘贴).{0,10}(终端|shell|powershell|cmd)|(按|执行).{0,10}(链接|网页|文档).{0,10}(命令|脚本)'
+    - id: remote_tool_invocation_zh
+      regex: '(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)'
+  typoglycemia_targets:
+    - ignore
+    - bypass
+    - override
+    - reveal
+    - system
+    - prompt
+    - instructions
+  decoded_keywords:
+    - ignore previous instructions
+    - reveal system prompt
+    - developer message
+    - bypass safety
+    - override policy
+    - 忽略之前所有指令
+    - 忽略以上所有指令
+    - 泄露系统提示词
+    - 显示开发者消息
+  obfuscated_markers:
+    - ignoreallpreviousinstructions
+    - 忽略之前所有指令
+    - 忽略以上所有指令
+
+  scoring_model:
+    nonlinear_k: 2.0
+    thresholds:
+      allow: 0.40
+      review: 0.75
+    weights:
+      intent: 0.45
+      payload: 0.25
+      hijack: 0.20
+      anomaly: 0.10
+    signal_profiles:
+      direct:
+        bucket: intent
+        severity: 5
+      system_exfil:
+        bucket: intent
+        severity: 10      # 系统提示泄露：保持最高（disposition=block 强制拦截）
+      obfuscated:
+        bucket: payload
+        severity: 9       # 编码混淆攻击：保持高（disposition=block 强制拦截）
+      html_markdown:
+        bucket: payload
+        severity: 3
+      remote_content:
+        bucket: hijack
+        severity: 5
+      remote_content_instruction:
+        bucket: hijack
+        severity: 6
+      indirect_injection:
+        bucket: hijack
+        severity: 6
+      typoglycemia:
+        bucket: hijack
+        severity: 4
+      unicode_invisible:
+        bucket: anomaly
+        severity: 4
+      unicode_bidi:
+        bucket: anomaly
+        severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
+  false_positive_mitigation:
+    enabled: true
+    max_risk_reduction: 0.45
+    non_reducible_categories:
+      - system_exfil
+      - obfuscated
+      - unicode_bidi
+    discussion_patterns:
+      - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
+      - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
+    quoted_instruction_patterns:
+      - '["''`\u201c\u201d\u300c\u300d\u300e\u300f].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`\u201c\u201d\u300c\u300d\u300e\u300f]'
+      - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
+
+rag_poison_guard:
+  ingestion_risk_score: 0.80
+  retrieval_risk_score: 0.70
+  propagation_risk_score: 0.75
+  traceback_excerpt_max_chars: 180
+  ingestion_poison_patterns:
+    - id: ingestion_override_en
+      regex: '(ignore|override|bypass).*(instructions|policy|guardrails?)'
+    - id: ingestion_exfil_en
+      regex: '(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)'
+    - id: ingestion_override_zh
+      regex: '(忽略|覆盖|绕过).*(指令|规则|策略|安全)'
+    - id: ingestion_exfil_zh
+      regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
+    - id: hidden_markup_payload
+      regex: '(<!--[\s\S]{0,300}(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)'
+  retrieval_poison_patterns:
+    - id: retrieval_instruction_en
+      regex: '(retrieved|document|web|link).*(follow|execute|run|copy|paste).*(instruction|command|script|shell)'
+    - id: retrieval_tool_en
+      regex: '(call|invoke|use).*(tool|function|api).*(from|according to).*(retrieved|document|web|link)'
+    - id: retrieval_instruction_zh
+      regex: '(检索|文档|网页|链接).*(按|执行|运行|复制|粘贴).*(指令|命令|脚本|shell)'
+    - id: retrieval_tool_zh
+      regex: '(调用|使用|执行).*(工具|函数|接口).*(根据|按照).*(检索|文档|网页|链接)'
+  propagation_patterns:
+    - id: propagation_cmd_en
+      regex: '(run|execute|copy|paste).*(shell|powershell|cmd|bash)|curl\s+[^|]+\|\s*(sh|bash)'
+    - id: propagation_exfil_en
+      regex: '(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)'
+    - id: propagation_cmd_zh
+      regex: '(执行|运行|复制|粘贴).*(命令|脚本|终端|shell)'
+    - id: propagation_exfil_zh
+      regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
+
+privilege_guard:
+  request_risk_floor: 0.65
+  response_risk_floor: 0.60
+  blocked_patterns:
+    - id: read_etc_passwd_en
+      regex: '(cat|type|more)\s+/etc/passwd'
+    - id: read_ssh_en
+      regex: '(read|cat|show)\s+~/.ssh'
+    - id: dump_secret_en
+      regex: '(dump|reveal|leak|exfiltrate).*(secret|password|api\s*key|private\s*key|credentials?)'
+    - id: execute_shell_en
+      regex: '(run|execute)\s+(a\s+)?(shell|bash|powershell|cmd)\s+(command|script)'
+    - id: read_local_zh
+      regex: '(读取|导出).*(系统文件|\/etc\/|\/proc\/|\.ssh)'
+    - id: leak_secret_zh
+      regex: '(泄露|导出).*(密钥|口令|密码|私钥|凭据)'
+    - id: run_cmd_zh
+      regex: '(执行|运行).*(shell|powershell|cmd|bash)\s*(命令|脚本)'
+
+anomaly_detector:
+  repetition:
+    repetition_ratio_threshold: 0.55
+    max_run_length_threshold: 80
+    repeated_line_threshold: 40
+  encoded_payload:
+    base64_min_length: 200
+    hex_min_length: 300
+    url_encoded_min_count: 12
+  unicode:
+    invisible_chars:
+      - "\u200B"
+      - "\u200C"
+      - "\u200D"
+      - "\u2060"
+      - "\uFEFF"
+      - "\u00AD"
+    bidi_chars:
+      - "\u202A"
+      - "\u202B"
+      - "\u202D"
+      - "\u202E"
+      - "\u202C"
+      - "\u2066"
+      - "\u2067"
+      - "\u2068"
+      - "\u2069"
+    invisible_char_threshold: 6
+  command_patterns:
+    - id: sqli_union_select
+      regex: '\bunion\s+select\b'
+    - id: sqli_tautology
+      regex: '\b(?:or|and)\s+1\s*=\s*1\b'
+    - id: sqli_time_blind
+      regex: '\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)'
+    - id: xss_script_event
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: command_injection_chain
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: xxe_external_entity
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)'
+    - id: ssti_or_log4shell
+      regex: '(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: ssrf_metadata
+      regex: '(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)'
+    - id: crlf_header_injection
+      regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
+    - id: http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
+  points:
+    repetition_ratio: 0.25
+    max_run_length: 0.20
+    repeated_line: 0.20
+    base64_payload: 0.35
+    hex_payload: 0.30
+    url_encoded_payload: 0.20
+    invisible_chars: 0.25
+    bidi_control: 0.40
+    high_risk_command: 0.40
+  point_buckets:
+    repetition_ratio: anomaly
+    max_run_length: anomaly
+    repeated_line: anomaly
+    base64_payload: payload
+    hex_payload: payload
+    url_encoded_payload: payload
+    invisible_chars: anomaly
+    bidi_control: anomaly
+    high_risk_command: payload
+  scoring_model:
+    nonlinear_k: 2.0
+    weights:
+      payload: 0.70
+      anomaly: 0.30
+    points_max:
+      payload: 1.45
+      anomaly: 1.30
+    thresholds:
+      allow: 0.40
+      review: 0.75
+
+request_sanitizer:
+  discussion_context_patterns:
+    - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)'
+    - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)'
+  strong_intent_patterns:
+    - id: secret_exfiltration_en
+      category: secret_exfiltration
+      regex: '(reveal|show|dump|print|leak|output|export).*(system\s+prompt|developer\s+message|api\s*key|token|cookie|password|private\s*key|ssh\s*key|seed\s*phrase|mnemonic|wallet\s*key|xprv|exchange\s*secret)'
+    - id: secret_exfiltration_zh
+      category: secret_exfiltration
+      regex: '(泄露|显示|输出|打印|给我|提供|导出).*(系统提示词|开发者消息|密钥|口令|密码|令牌|token|cookie|私钥|ssh\s*key|助记词|种子短语|钱包密钥|交易所密钥)'
+    - id: privilege_escalation_en
+      category: privilege_escalation
+      regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|config|log|database)|((execute|run).*(shell|powershell|cmd|bash))|(access|scan).*(intranet|internal\s+network|server|database)'
+    - id: privilege_escalation_zh
+      category: privilege_escalation
+      regex: '(读取|打开|导出).*(本地文件|系统文件|配置|日志|数据库)|(执行|运行).*(命令|shell|powershell|cmd|bash)|(访问|探测).*(内网|服务器|数据库)'
+    - id: rule_bypass_en
+      category: rule_bypass
+      regex: '(ignore|override|bypass).*(previous\s+instructions?|safety|policy)|from\s+now\s+on.*(you\s+are|act\s+as).*(system|developer|admin)'
+    - id: rule_bypass_zh
+      category: rule_bypass
+      regex: '(忽略|无视|绕过).*(之前|先前).*(指令|规则|安全策略)|从现在起.*(你是|你扮演).*(system|developer|admin|管理员)'
+  leak_check_patterns:
+    - id: api_key_generic
+      regex: '\b(?:api[_-]?key|token|cookie|password)\s*[:=]\s*[A-Za-z0-9._\-]{8,}\b'
+    - id: openai_like
+      regex: '\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b'
+    - id: aws_access_key
+      regex: '\bAKIA[0-9A-Z]{16}\b'
+    - id: github_token
+      regex: '\bghp_[A-Za-z0-9]{20,}\b'
+    - id: private_key_block
+      regex: '-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----'
+    - id: cookie_header
+      regex: '\bcookie\s*:\s*[^;\n]{8,}'
+    - id: jwt_token
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: aws_secret_access_key
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: crypto_private_key_wif
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: crypto_xprv
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: crypto_seed_phrase
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: exchange_secret
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
+    - id: url_token_query
+      regex: 'https?://[^\s]+[?&](?:access_token|token|api[_-]?key|key|sig|signature|session(?:id)?|jwt|auth)=[A-Za-z0-9._%\-~+/=]{8,}'
+  shape_anomaly_patterns:
+    - id: dense_base64
+      regex: '[A-Za-z0-9+/]{200,}={0,2}'
+    - id: dense_hex
+      regex: '\b[0-9a-fA-F]{300,}\b'
+    - id: dense_url_encoded
+      regex: '(%[0-9A-Fa-f]{2}){12,}'
+    - id: prompt_flood
+      regex: '(?i)(ignore previous instructions){3,}'
+  command_patterns:
+    - id: web_sqli
+      regex: '(\bunion\s+select\b|\b(?:or|and)\s+1\s*=\s*1\b|\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\))'
+    - id: web_xss
+      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
+    - id: web_path_traversal
+      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
+    - id: web_command_injection
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+    - id: web_xxe_ssti
+      regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
+    - id: web_ssrf_crlf
+      regex: '((?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)|(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-))'
+  encoded_payload_patterns:
+    - id: base64_long
+      regex: '[A-Za-z0-9+/]{200,}={0,2}'
+    - id: hex_long
+      regex: '\b[0-9a-fA-F]{300,}\b'
+    - id: url_encoded_dense
+      regex: '(%[0-9A-Fa-f]{2}){12,}'
+  redactions:
+    command: '[REDACTED:command]'
+    payload: '[REDACTED:encoded-payload]'
+    shape: '[REDACTED:shape-anomaly]'
+  block_message: '[AegisGate] request blocked by security policy.'
+  invisible_char_threshold: 6
+  truncate_at: 4000
+  unicode_invisible_chars:
+    - "\u200B"
+    - "\u200C"
+    - "\u200D"
+    - "\u2060"
+    - "\uFEFF"
+    - "\u00AD"
+  unicode_bidi_chars:
+    - "\u202A"
+    - "\u202B"
+    - "\u202D"
+    - "\u202E"
+    - "\u202C"
+    - "\u2066"
+    - "\u2067"
+    - "\u2068"
+    - "\u2069"
+
+sanitizer:
+  thresholds:
+    sanitize: 0.35
+    block: 0.70
+  discussion_context_patterns:
+    - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)'
+    - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)'
+  # v1/v2 共享：仅保留协议层高危 HTTP 报文特征，降低正常网页误触。
+  command_patterns:
+    - id: web_http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: web_http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: web_http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: web_http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: web_http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
+  # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
+  # 仅保留破坏性 docker 命令；docker ps/images/logs 为只读诊断，不拦截
+  force_block_command_patterns:
+    - id: docker_compose_down
+      regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b'
+    - id: docker_stop
+      regex: '(?:^|\s)(?:/)?docker\s+stop\b'
+    - id: docker_restart
+      regex: '(?:^|\s)(?:/)?docker\s+restart\b'
+    - id: docker_exec_interactive
+      regex: '(?:^|\s)(?:/)?docker\s+exec\b[^\n]*(?:\s-(?:it|ti)\b|\s--interactive\b|\s--tty\b)'
+    - id: web_http_smuggling_cl_te
+      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+    - id: web_http_smuggling_te_cl
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+    - id: web_http_smuggling_te_te
+      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+    - id: web_http_response_splitting
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
+    - id: web_http_obs_fold_header
+      regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
+  encoded_payload_patterns:
+    - id: base64_long
+      regex: '[A-Za-z0-9+/]{200,}={0,2}'
+    - id: hex_long
+      regex: '\b[0-9a-fA-F]{300,}\b'
+    - id: url_encoded_dense
+      regex: '(%[0-9A-Fa-f]{2}){12,}'
+  redactions:
+    command: '[REDACTED:command]'
+    payload: '[REDACTED:encoded-payload]'
+    uri: '[unsafe-uri-removed]'
+    markup: '[unsafe-tag-removed]'
+  block_message: '[AegisGate] response blocked by security policy.'
+  sanitize_prefix: '[AegisGate] content sanitized: '
+  # 仅在 LLM 明确「泄露」系统提示词时拦截；普通提及（如解释 AI 原理）不触发
+  system_leak_patterns:
+    - id: system_leak_disclosure_en
+      regex: '(?:my\s+(?:system\s+)?(?:prompt|instructions?)\s+(?:say|says|read|state|include|tell\s+me)\s*[:：]|(?:here\s+is|following\s+is|below\s+is)\s+my\s+(?:system\s+)?(?:prompt|instructions?)\s*[:：]|i\s+(?:was|am|have\s+been)\s+(?:told|instructed|configured|programmed)\s+(?:not\s+)?to\s+(?:reveal|share|disclose|discuss|mention)\s)'
+    - id: system_leak_disclosure_zh
+      regex: '(?:(?:这里是|以下是|如下是|我的)系统提示词\s*[：:]|我的(?:指令|提示词)\s*(?:是|说|要求|内容)\s*[：:]|我被(?:告知|指示|设置|配置)(?:不要|不能|要|必须)(?:透露|分享|泄露|说|提及))'
+  # <img> 在 LLM 代码示例中属正常 HTML，不做脱敏；<script>/<iframe> 可执行/嵌入外部内容，保留
+  unsafe_markup_patterns:
+    - id: script
+      regex: '<\s*(script|iframe)\b'
+  unsafe_uri_patterns:
+    - id: unsafe_uri
+      regex: '(javascript:|data:text/html)'
+
+tool_call_guard:
+  tool_whitelist:
+    - search
+    - calculator
+    - weather
+  parameter_rules:
+    - tool: search
+      param: q
+      regex: '^.{1,500}$'
+    - tool: weather
+      param: location
+      regex: '^.{1,120}$'
+  dangerous_param_patterns:
+    - id: shell
+      regex: '(;|\|\||&&|`|\$\(|/etc/passwd|rm\s+-rf)'
+    - id: path_traversal
+      regex: '(\.\./|~/.ssh|/var/run/secrets)'
+    - id: zh_sensitive
+      regex: '(删除|提权|读取本地|密钥|口令)'
+  semantic_approval_patterns:
+    - id: approval_en
+      regex: '(delete|drop|shutdown|exfiltrate|leak)'
+    - id: approval_zh
+      regex: '(删除|清空|泄露|导出敏感)'
+  default_action: block
+
+post_restore_guard:
+  lure_patterns:
+    - id: copy_paste_en
+      regex: '(copy|paste|send|share|post).*(token|key|secret|credential|config)'
+    - id: copy_paste_zh
+      regex: '(复制|粘贴|发送|分享|贴到).*(token|密钥|口令|凭据|配置)'
+  secret_patterns:
+    - id: openai_like
+      regex: '\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b'
+    - id: aws_access_key
+      regex: '\bAKIA[0-9A-Z]{16}\b'
+    - id: github_token
+      regex: '\bghp_[A-Za-z0-9]{20,}\b'
+    - id: private_key_block
+      regex: '-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----'
+    - id: jwt_token
+      regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    - id: aws_secret_access_key
+      regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
+    - id: crypto_private_key_wif
+      regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
+    - id: crypto_xprv
+      regex: '\bxprv[1-9A-HJ-NP-Za-km-z]{60,120}\b'
+    - id: crypto_seed_phrase
+      regex: '(?i)\b(?:seed(?:\s+phrase)?|mnemonic|助记词)\b\s*[:=]\s*(?:[a-z]{3,}\s+){11,23}[a-z]{3,}'
+    - id: exchange_secret
+      regex: '(?i)\b(?:binance|okx|bybit|kucoin|gate|coinbase|bitget|kraken)[_\-\s]?(?:api[_\-\s]?(?:key|secret)|passphrase)\b\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}'
+  replacement: '[REDACTED:restored-secret]'
+  block_message: '[AegisGate] response blocked by security policy.'
+
+action_map:
+  injection_detector:
+    system_exfil: block
+    obfuscated: block
+    unicode_bidi: block
+    unicode_invisible: review
+    remote_content: review
+    remote_content_instruction: review
+    indirect_injection: review
+    direct: downgrade
+    typoglycemia: review
+    # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
+  rag_poison_guard:
+    ingestion_poison: block
+    retrieval_poison: review
+    poison_propagation: block
+  untrusted_content_guard:
+    suspicious_untrusted: review
+  restoration:
+    exfiltration: block
+    too_many_placeholders: block
+    stale_mapping: block
+    partial_restore: review
+  tool_call_guard:
+    disallowed_tool: block
+    dangerous_param: block
+    invalid_param: review
+    semantic_review: review
+  sanitizer:
+    system_leak: block
+  request_sanitizer:
+    # review=仅记录不拦截，降低误拦；改为 block 可恢复严格拦截
+    secret_exfiltration: review
+    privilege_escalation: review
+    rule_bypass: review
+    leak_check: review
+    shape_anomaly: sanitize
+  post_restore_guard:
+    restored_secret_lure: sanitize
