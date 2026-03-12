@@ -151,10 +151,15 @@ def _build_pipeline() -> Pipeline:
 
 
 def _get_pipeline() -> Pipeline:
+    from aegisgate.core.hot_reload import get_pipeline_generation
+
     pipeline = getattr(_pipeline_local, "pipeline", None)
-    if pipeline is None:
+    gen = getattr(_pipeline_local, "pipeline_gen", -1)
+    current_gen = get_pipeline_generation()
+    if pipeline is None or gen != current_gen:
         pipeline = _build_pipeline()
         _pipeline_local.pipeline = pipeline
+        _pipeline_local.pipeline_gen = current_gen
     return pipeline
 
 

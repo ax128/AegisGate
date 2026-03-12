@@ -27,6 +27,7 @@ from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as 
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
+from aegisgate.core.hot_reload import HotReloader, build_watcher
 from aegisgate.core.gw_tokens import (
     find_token as gw_tokens_find_token,
     get as gw_tokens_get,
@@ -50,6 +51,7 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
 
 _confirmation_cache_task: ConfirmationCacheTask | None = None
+_hot_reloader: HotReloader | None = None
 
 # ---------------------------------------------------------------------------
 # Gateway key auto-generation
@@ -183,14 +185,22 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 logger.info("cleared %d pending confirmation(s) on startup", n)
         except Exception as exc:  # pragma: no cover
             logger.warning("clear pending confirmations on startup failed: %s", exc)
-    global _confirmation_cache_task
+    global _confirmation_cache_task, _hot_reloader
     if settings.enable_pending_prune_task and _confirmation_cache_task is None:
         _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
         await _confirmation_cache_task.start()
 
+    # Start hot-reload file watcher
+    if _hot_reloader is None:
+        _hot_reloader = build_watcher()
+        await _hot_reloader.start()
+
     yield
 
     # --- shutdown ---
+    if _hot_reloader is not None:
+        await _hot_reloader.stop()
+        _hot_reloader = None
     if _confirmation_cache_task is not None:
         await _confirmation_cache_task.stop()
         _confirmation_cache_task = None
