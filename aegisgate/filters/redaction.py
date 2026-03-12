@@ -29,7 +29,6 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
         "TOKEN",
         "JWT",
         "URL_TOKEN_QUERY",
-        "COOKIE_SESSION",
         "PRIVATE_KEY_PEM",
         "AWS_ACCESS_KEY",
         "AWS_SECRET_ACCESS_KEY",
