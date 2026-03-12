@@ -244,6 +244,11 @@ _DEFAULT_RULES: dict[str, Any] = {
     "privilege_guard": {
         "request_risk_floor": 0.65,
         "response_risk_floor": 0.60,
+        "discussion_risk_score": 0.30,
+        "discussion_context_patterns": [
+            r"(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|案例|复盘)",
+            r"(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|postmortem|writeup|best\s+practice)",
+        ],
         "blocked_patterns": [
             {"id": "read_etc_passwd_en", "regex": r"(cat|type|more)\s+/etc/passwd"},
             {"id": "read_ssh_en", "regex": r"(read|cat|show)\s+~/.ssh"},
@@ -432,7 +437,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         ],
     },
     "tool_call_guard": {
-        "tool_whitelist": ["search", "calculator", "weather"],
+        "tool_whitelist": [],
         "parameter_rules": [
             {"tool": "search", "param": "q", "regex": r"^.{1,500}$"},
             {"tool": "weather", "param": "location", "regex": r"^.{1,120}$"},
@@ -446,7 +451,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "approval_en", "regex": r"(delete|drop|shutdown|exfiltrate|leak)"},
             {"id": "approval_zh", "regex": r"(删除|清空|泄露|导出敏感)"},
         ],
-        "default_action": "block",
+        "default_action": "review",
     },
     "rag_poison_guard": {
         "ingestion_risk_score": 0.80,
@@ -496,7 +501,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             "partial_restore": "review",
         },
         "tool_call_guard": {
-            "disallowed_tool": "block",
+            "disallowed_tool": "review",
             "dangerous_param": "block",
             "invalid_param": "review",
             "semantic_review": "review",

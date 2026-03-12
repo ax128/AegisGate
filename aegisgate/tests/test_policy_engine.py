@@ -18,3 +18,13 @@ def test_policy_engine_always_enables_redaction(tmp_path: Path):
 
     assert "redaction" in result["enabled_filters"]
     assert "redaction" in ctx.enabled_filters
+
+
+def test_builtin_default_policy_enables_low_false_positive_guards(tmp_path: Path):
+    engine = PolicyEngine(rules_dir=str(tmp_path / "missing-rules"))
+    ctx = RequestContext(request_id="p2", session_id="s1", route="/v1/chat/completions")
+
+    result = engine.resolve(ctx, policy_name="default")
+
+    assert "untrusted_content_guard" in result["enabled_filters"]
+    assert "tool_call_guard" in result["enabled_filters"]

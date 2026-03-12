@@ -74,6 +74,7 @@ from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.filters.restoration import RestorationFilter
 from aegisgate.filters.sanitizer import OutputSanitizer
 from aegisgate.filters.tool_call_guard import ToolCallGuard
+from aegisgate.filters.untrusted_content_guard import UntrustedContentGuard
 from aegisgate.policies.policy_engine import PolicyEngine
 from aegisgate.storage import create_store
 from aegisgate.util.debug_excerpt import debug_log_original
@@ -134,6 +135,7 @@ _pipeline_local = threading.local()
 def _build_pipeline() -> Pipeline:
     request_filters = [
         RedactionFilter(store),
+        UntrustedContentGuard(),
         RequestSanitizer(),
         RagPoisonGuard(),
     ]

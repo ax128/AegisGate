@@ -94,6 +94,7 @@ class HotReloader:
 
 def reload_settings() -> None:
     """Reload .env into the global settings singleton."""
+    from aegisgate.config.feature_flags import refresh_feature_flags
     from aegisgate.config.settings import Settings, settings
 
     try:
@@ -101,6 +102,7 @@ def reload_settings() -> None:
         # Copy all field values from the fresh instance to the singleton.
         for field_name in fresh.model_fields:
             setattr(settings, field_name, getattr(fresh, field_name))
+        refresh_feature_flags()
         logger.info("hot_reload settings reloaded from environment / .env")
     except Exception:
         logger.exception("hot_reload settings reload failed")

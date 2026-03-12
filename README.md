@@ -143,11 +143,17 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 4. 安全边界中间件执行基础限制：请求体大小限制、可选 loopback-only、可选 HMAC/nonce 防重放
 
 `v1` 链路（OpenAI 兼容）：
-1. 请求侧过滤：`redaction -> request_sanitizer -> rag_poison_guard`
+1. 请求侧过滤：`redaction -> untrusted_content_guard -> request_sanitizer -> rag_poison_guard`
 2. 转发到上游 LLM（chat/responses/generic 子路径）
 3. 响应侧过滤：`anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
 4. 按风险处置：`allow / sanitize / block / confirmation(yes/no)`
 5. 记录审计事件（含风险标签、处置原因、确认状态）
+
+说明：
+- 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
+- 当前默认策略已启用 `untrusted_content_guard` 与 `tool_call_guard`，但默认采取低误拦策略：
+  - `untrusted_content_guard` 默认只做不可信来源包裹与风险抬升，不直接阻断。
+  - `tool_call_guard` 默认重点阻断危险参数；工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
 
 `v2` 链路（通用 HTTP 代理）：
 1. 读取 `x-target-url` 请求头获取原始目标 URL（必须是 `http://` 或 `https://` 完整 URL，含 query string）
@@ -162,9 +168,9 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 
 | 维度 | v1 | v2 |
 |---|---|---|
-| 请求体过滤 | 脱敏 + 请求清洗 + RAG 投毒检测 | 仅脱敏（文本/JSON，可选） |
+| 请求体过滤 | 脱敏 + 非可信来源隔离 + 请求清洗 + RAG 投毒检测 | 仅脱敏（文本/JSON，可选） |
 | 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文） |
-| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、异常命令/高危输出、投毒传播等 | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则 |
+| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、危险 tool call 参数、投毒传播等 | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则 |
 | 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
 | 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
 | 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |
@@ -177,6 +183,10 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 4. `confirmation`（仅 v1，需 `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`）：返回确认模板，用户需发送绑定确认指令 `yes/no cfm-...--act-...` 再继续。
 
 默认行为（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=false`）：拦截时不走确认流程，危险片段±20 字符上下文直接变形后返回，附带 `⚠ [AegisGate]` 警告。
+
+补充：
+- `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
+- `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
 
 **分级变形策略**：
 - **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `（危险指令已移除）`，**原文不会出现在返回中**。

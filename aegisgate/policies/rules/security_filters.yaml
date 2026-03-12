@@ -465,6 +465,10 @@ rag_poison_guard:
 privilege_guard:
   request_risk_floor: 0.65
   response_risk_floor: 0.60
+  discussion_risk_score: 0.30
+  discussion_context_patterns:
+    - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|案例|复盘)'
+    - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|postmortem|writeup|best\s+practice)'
   blocked_patterns:
     - id: read_etc_passwd_en
       regex: '(cat|type|more)\s+/etc/passwd'
@@ -745,10 +749,8 @@ sanitizer:
       regex: '(javascript:|data:text/html)'
 
 tool_call_guard:
-  tool_whitelist:
-    - search
-    - calculator
-    - weather
+  # 默认不做工具名白名单阻断；如需收紧，请按业务显式配置。
+  tool_whitelist: []
   parameter_rules:
     - tool: search
       param: q
@@ -768,7 +770,7 @@ tool_call_guard:
       regex: '(delete|drop|shutdown|exfiltrate|leak)'
     - id: approval_zh
       regex: '(删除|清空|泄露|导出敏感)'
-  default_action: block
+  default_action: review
 
 post_restore_guard:
   lure_patterns:
@@ -825,7 +827,7 @@ action_map:
     stale_mapping: block
     partial_restore: review
   tool_call_guard:
-    disallowed_tool: block
+    disallowed_tool: review
     dangerous_param: block
     invalid_param: review
     semantic_review: review

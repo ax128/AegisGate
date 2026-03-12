@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     enable_post_restore_guard: bool = True
     enable_system_prompt_guard: bool = False
     enable_untrusted_content_guard: bool = True
-    enable_tool_call_guard: bool = False
+    enable_tool_call_guard: bool = True
     enable_rag_poison_guard: bool = True
 
     risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)

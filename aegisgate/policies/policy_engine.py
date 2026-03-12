@@ -20,11 +20,13 @@ from aegisgate.util.logger import logger
 _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "redaction",
+        "untrusted_content_guard",
         "request_sanitizer",
         "rag_poison_guard",
         "anomaly_detector",
         "injection_detector",
         "privilege_guard",
+        "tool_call_guard",
         "restoration",
         "post_restore_guard",
         "output_sanitizer",

@@ -1,10 +1,12 @@
 enabled_filters:
   - redaction
+  - untrusted_content_guard
   - request_sanitizer
   - rag_poison_guard
   - anomaly_detector
   - injection_detector
   - privilege_guard
+  - tool_call_guard
   - restoration
   - post_restore_guard
   - output_sanitizer

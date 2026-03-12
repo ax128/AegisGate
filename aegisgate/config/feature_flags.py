@@ -22,3 +22,18 @@ class FeatureFlags:
 
 
 feature_flags = FeatureFlags()
+
+
+def refresh_feature_flags() -> None:
+    feature_flags.redaction = settings.enable_redaction
+    feature_flags.restoration = settings.enable_restoration
+    feature_flags.injection_detector = settings.enable_injection_detector
+    feature_flags.privilege_guard = settings.enable_privilege_guard
+    feature_flags.anomaly_detector = settings.enable_anomaly_detector
+    feature_flags.request_sanitizer = settings.enable_request_sanitizer
+    feature_flags.output_sanitizer = settings.enable_output_sanitizer
+    feature_flags.post_restore_guard = settings.enable_post_restore_guard
+    feature_flags.system_prompt_guard = settings.enable_system_prompt_guard
+    feature_flags.untrusted_content_guard = settings.enable_untrusted_content_guard
+    feature_flags.tool_call_guard = settings.enable_tool_call_guard
+    feature_flags.rag_poison_guard = settings.enable_rag_poison_guard

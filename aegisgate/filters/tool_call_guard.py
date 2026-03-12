@@ -71,6 +71,72 @@ class ToolCallGuard(BaseFilter):
         except Exception:
             return str(value)
 
+    @staticmethod
+    def _normalize_tool_call(tool_call: object) -> dict[str, object] | None:
+        if not isinstance(tool_call, dict):
+            return None
+
+        tool_name = str(tool_call.get("name", "")).strip()
+        arguments = tool_call.get("arguments", {})
+
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            tool_name = str(function.get("name", tool_name)).strip()
+            arguments = function.get("arguments", arguments)
+
+        item_type = str(tool_call.get("type", "")).strip().lower()
+        if item_type == "function_call":
+            tool_name = str(tool_call.get("name", tool_name)).strip()
+            arguments = tool_call.get("arguments", arguments)
+        elif item_type in {"bash", "computer_call"}:
+            tool_name = tool_name or item_type
+            arguments = tool_call.get("action", arguments)
+
+        if isinstance(arguments, str):
+            stripped = arguments.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    arguments = json.loads(stripped)
+                except Exception:
+                    arguments = stripped
+
+        if not tool_name and arguments in ({}, "", None):
+            return None
+        return {"name": tool_name, "arguments": arguments}
+
+    def _extract_tool_calls(self, resp: InternalResponse) -> list[dict[str, object]]:
+        raw_tool_calls = resp.metadata.get("tool_calls")
+        if isinstance(raw_tool_calls, list):
+            normalized = [item for item in (self._normalize_tool_call(tc) for tc in raw_tool_calls) if item]
+            if normalized:
+                return normalized
+
+        raw = resp.raw if isinstance(resp.raw, dict) else {}
+
+        choices = raw.get("choices")
+        if isinstance(choices, list):
+            extracted: list[dict[str, object]] = []
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    continue
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                extracted.extend(item for item in (self._normalize_tool_call(tc) for tc in tool_calls) if item)
+            if extracted:
+                return extracted
+
+        output = raw.get("output")
+        if isinstance(output, list):
+            extracted = [item for item in (self._normalize_tool_call(tc) for tc in output) if item]
+            if extracted:
+                return extracted
+
+        return []
+
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {
             "filter": self.name,
@@ -79,8 +145,8 @@ class ToolCallGuard(BaseFilter):
             "violations": [],
         }
 
-        tool_calls = resp.metadata.get("tool_calls")
-        if not isinstance(tool_calls, list):
+        tool_calls = self._extract_tool_calls(resp)
+        if not tool_calls:
             return resp
 
         violations: list[str] = []
