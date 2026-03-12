@@ -9,6 +9,8 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 ## 上游代理支持
 
+本地 Web 控制台使用说明见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)。
+
 AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 
 ### 接入模式
@@ -337,12 +339,7 @@ OpenClaw 自动注入脚本位置：
 
 ## 3. 本地开发与本地 UI
 
-除了 API 接口外，AegisGate 现在还提供本地 Web UI：`/__ui__`。
-
-- UI 入口：`http://127.0.0.1:18080/__ui__/login`
-- UI 登录密码：`config/aegis_gateway.key` 文件中的密钥（`cat config/aegis_gateway.key` 查看）
-- UI 能力：查看 `README.md` / `docs/` 文档、查看和修改部分网关配置、触发热重载
-- 安全边界：UI 默认只允许本机访问，适合作为本地控制面，不建议直接暴露到公网
+本节保留本地开发启动命令；Web UI 的单独说明见 `WEBUI-QUICKSTART.md`。
 
 ### 3.1 直接用 launcher 启动（推荐）
 
@@ -411,22 +408,6 @@ UI 检查：
 ```bash
 curl -I http://127.0.0.1:18080/__ui__/login
 ```
-
-### 3.3 服务器部署时通过 SSH 隧道访问本地 UI
-
-如果部署在远程服务器上，不要把 `__ui__` 直接暴露到公网。推荐通过 SSH 本地端口转发访问：
-
-```bash
-ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 用户名@ip
-```
-
-建立隧道后，在你自己的电脑浏览器中访问：
-
-```text
-http://127.0.0.1:18080/__ui__/login
-```
-
-这样浏览器访问的是你本机的 `127.0.0.1:18080`，再通过 SSH 安全转发到服务器本机的 AegisGate 端口，适合访问 UI 和 `__gw__` 管理接口。
 
 ## 4. Docker 部署（配置/日志/token 持久化到宿主机）
 

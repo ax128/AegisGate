@@ -1,0 +1,90 @@
+# AegisGate Web UI 使用说明
+
+AegisGate 提供本地 Web UI，适合作为单机或内网环境下的轻量控制面。
+
+## 1. 适用场景
+
+- 本机启动 AegisGate 后，通过浏览器查看状态、配置和 Token
+- 不想每次都手动改 `config/.env` 或调用管理接口
+- 通过 SSH 隧道远程访问服务器上的本地控制台
+
+## 2. 启动方式
+
+推荐使用仓库根目录的一键启动器：`aegisgate-local.py`
+
+```bash
+# 首次安装依赖
+python aegisgate-local.py install
+
+# 初始化本地配置
+python aegisgate-local.py init
+
+# 后台启动网关
+python aegisgate-local.py start
+```
+
+默认地址：
+
+```text
+API: http://127.0.0.1:18080
+UI:  http://127.0.0.1:18080/__ui__/login
+```
+
+常用命令：
+
+```bash
+python aegisgate-local.py status
+python aegisgate-local.py logs --tail 50
+python aegisgate-local.py stop
+```
+
+如果你使用手动开发方式，也可以直接运行：
+
+```bash
+uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
+```
+
+## 3. 登录方式
+
+- 登录入口：`http://127.0.0.1:18080/__ui__/login`
+- 登录密码：`config/aegis_gateway.key` 文件内容
+
+查看网关密钥：
+
+```bash
+cat config/aegis_gateway.key
+```
+
+## 4. UI 能力
+
+- 查看服务状态、监听地址、安全级别、默认上游
+- 编辑基础设置、安全设置和部分 v2 代理配置
+- 查看当前 Token 列表并执行注册
+- 阅读仓库根目录下的说明文档
+- 查看日志信息并触发热重载
+
+## 5. 安全说明
+
+- Web UI 默认只允许本机访问
+- 不建议把 `__ui__` 直接暴露到公网
+- 登录密码与管理接口使用同一份网关密钥，请妥善保管 `config/aegis_gateway.key`
+
+## 6. 远程服务器访问
+
+如果 AegisGate 部署在远程机器上，推荐通过 SSH 隧道访问：
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 用户名@服务器IP
+```
+
+建立隧道后，在你自己的浏览器打开：
+
+```text
+http://127.0.0.1:18080/__ui__/login
+```
+
+## 7. 故障排查
+
+- 打不开页面：先检查 `http://127.0.0.1:18080/health`
+- 登录失败：确认 `config/aegis_gateway.key` 存在，且输入内容完整无多余空格
+- 无法远程访问：确认你访问的是 SSH 转发后的本机地址，而不是服务器公网直接暴露的 `__ui__`
