@@ -47,6 +47,20 @@ def test_assert_security_bootstrap_ready_passes_when_rules_dir_is_empty(tmp_path
     init_config.assert_security_bootstrap_ready(rules_dir)
 
 
+def test_assert_security_bootstrap_ready_passes_when_only_security_rules_exist(tmp_path, monkeypatch):
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    (rules_dir / "security_filters.yaml").write_text("redaction: {}\n", encoding="utf-8")
+    bootstrap = tmp_path / "bootstrap"
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    for name in ("default.yaml", "security_filters.yaml", "permissive.yaml", "strict.yaml"):
+        (bootstrap / name).write_text(f"# {name}\n", encoding="utf-8")
+    monkeypatch.setenv("AEGIS_CONFIG_DIR", str(rules_dir))
+    monkeypatch.setenv("AEGIS_BOOTSTRAP_RULES_DIR", str(bootstrap))
+
+    init_config.assert_security_bootstrap_ready(rules_dir)
+
+
 def test_assert_security_bootstrap_ready_raises_when_rules_dir_partially_populated(tmp_path, monkeypatch):
     rules_dir = tmp_path / "rules"
     rules_dir.mkdir(parents=True, exist_ok=True)

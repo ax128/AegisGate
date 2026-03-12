@@ -14,7 +14,9 @@ from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
 # 必须存在的策略 YAML（少则从内置复制）
-_REQUIRED_YAML = ("default.yaml", "security_filters.yaml", "permissive.yaml", "strict.yaml")
+_POLICY_YAML = ("default.yaml", "permissive.yaml", "strict.yaml")
+_SECURITY_RULES_YAML = "security_filters.yaml"
+_REQUIRED_YAML = (*_POLICY_YAML, _SECURITY_RULES_YAML)
 # 内置策略目录（包内）
 _PACKAGE_RULES_DIR = Path(__file__).resolve().parent / "policies" / "rules"
 # 项目根目录（如 /app）
@@ -78,26 +80,41 @@ def missing_required_rules(config_dir: Path | None = None) -> list[str]:
     return missing
 
 
-def _config_dir_has_any_required_rule(config_dir: Path | None = None) -> bool:
-    rules_dir = config_dir or _config_dir()
-    return any((rules_dir / name).exists() for name in _REQUIRED_YAML)
+def _file_ready(path: Path) -> bool:
+    return path.exists() and path.stat().st_size > 0
 
 
-def _bootstrap_has_all_required_rules() -> bool:
-    """若 bootstrap 目录存在且包含全部必须 YAML，返回 True。"""
+def _bootstrap_has_all_policy_rules() -> bool:
     src = _rules_source_dir()
     if src is None:
         return False
-    return len(missing_required_rules(src)) == 0
+    return all(_file_ready(src / name) for name in _POLICY_YAML)
+
+
+def _bootstrap_has_security_rules() -> bool:
+    src = _rules_source_dir()
+    if src is None:
+        return False
+    return _file_ready(src / _SECURITY_RULES_YAML)
 
 
 def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
     rules_dir = config_dir or _config_dir()
-    missing = missing_required_rules(rules_dir)
+    missing: list[str] = []
+
+    # PolicyEngine 只要发现挂载目录没有 default.yaml，就会整体回退到 bootstrap 目录。
+    if _file_ready(rules_dir / "default.yaml"):
+        for name in _POLICY_YAML:
+            if not _file_ready(rules_dir / name):
+                missing.append(name)
+    elif not _bootstrap_has_all_policy_rules():
+        missing.extend(name for name in _POLICY_YAML if not _file_ready(rules_dir / name))
+
+    # security_filters.yaml 单文件独立解析；缺失时允许单独回退到 bootstrap。
+    if not _file_ready(rules_dir / _SECURITY_RULES_YAML) and not _bootstrap_has_security_rules():
+        missing.append(_SECURITY_RULES_YAML)
+
     if missing:
-        # 仅当挂载目录完全为空时，允许用 bootstrap 目录兜底；部分缺失仍应在启动时失败。
-        if _bootstrap_has_all_required_rules() and not _config_dir_has_any_required_rule(rules_dir):
-            return
         raise RuntimeError(f"missing required security policy files in {rules_dir}: {', '.join(missing)}")
 
 
