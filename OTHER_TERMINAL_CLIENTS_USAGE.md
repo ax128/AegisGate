@@ -183,7 +183,7 @@ model: claude-3-5-sonnet-latest
   - `POST /__gw__/remove`
 - In public ingress, block `/__gw__/*` externally and keep it localhost/internal only.
 - Keep `v2` on token path (`/v2/__gw__/t/<TOKEN>/...`), avoid exposing non-token generic proxy.
-- Use strong `AEGIS_GATEWAY_KEY` (auto-generated if left empty; check `config/aegis_gateway.key`).
+- Gateway key is stored in `config/aegis_gateway.key` (auto-generated on first run, chmod 600). Read it with `cat config/aegis_gateway.key`.
 - Prefer Token mode for all new clients.
 - Do not use OAuth-hosted-only mode for AegisGate routing.
 

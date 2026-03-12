@@ -226,7 +226,7 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
 注册：
 
 ```bash
-# gateway_key 必须与 AEGIS_GATEWAY_KEY 一致（查看 config/aegis_gateway.key 或环境变量）
+# gateway_key 的值即 config/aegis_gateway.key 文件内容（cat config/aegis_gateway.key 查看）
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
   -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"]}'
@@ -247,7 +247,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
 3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
 4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
-5. 所有管理端点（register/lookup/add/remove/unregister）都需要在请求体中提供 `gateway_key`，且必须与 `AEGIS_GATEWAY_KEY` 配置一致。
+5. 所有管理端点（register/lookup/add/remove/unregister）都需要在请求体中提供 `gateway_key`，其值即 `config/aegis_gateway.key` 文件内容（`cat config/aegis_gateway.key` 查看）。
 
 然后请求：
 
@@ -335,7 +335,55 @@ OpenClaw 自动注入脚本位置：
   - 若未携带网关变量，脚本只做注入 + build，不改服务环境
   - `--remove` 会恢复备份、删除注入文件与备份目录、删除相关 systemd drop-in，并自动 `daemon-reload + restart`
 
-## 3. 本地开发
+## 3. 本地开发与本地 UI
+
+除了 API 接口外，AegisGate 现在还提供本地 Web UI：`/__ui__`。
+
+- UI 入口：`http://127.0.0.1:18080/__ui__/login`
+- UI 登录密码：`config/aegis_gateway.key` 文件中的密钥（`cat config/aegis_gateway.key` 查看）
+- UI 能力：查看 `README.md` / `docs/` 文档、查看和修改部分网关配置、触发热重载
+- 安全边界：UI 默认只允许本机访问，适合作为本地控制面，不建议直接暴露到公网
+
+### 3.1 直接用 launcher 启动（推荐）
+
+仓库根目录提供了一键启动入口：`aegisgate-local.py`。
+
+常用命令：
+
+```bash
+# 首次安装依赖
+python aegisgate-local.py install
+
+# 初始化 config/.env 和默认策略文件
+python aegisgate-local.py init
+
+# 后台启动网关
+python aegisgate-local.py start
+
+# 查看状态
+python aegisgate-local.py status
+
+# 查看日志路径，或输出 stdout 最后 50 行
+python aegisgate-local.py logs --tail 50
+
+# 停止网关
+python aegisgate-local.py stop
+```
+
+启动成功后默认访问：
+
+```text
+API: http://127.0.0.1:18080
+UI:  http://127.0.0.1:18080/__ui__/login
+```
+
+说明：
+
+- `start` 会在需要时自动创建 `.venv`、安装项目依赖、执行 `aegisgate.init_config`，并以后台方式启动网关
+- launcher 会把自身状态与输出写入 `logs/launcher/`
+- 若当前环境下项目默认 sqlite 路径不可用，launcher 会自动切换到用户本地状态目录中的 sqlite 文件，避免启动失败
+
+### 3.2 手动开发启动
 
 安装：
 
@@ -357,6 +405,28 @@ uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
 ```bash
 curl http://127.0.0.1:18080/health
 ```
+
+UI 检查：
+
+```bash
+curl -I http://127.0.0.1:18080/__ui__/login
+```
+
+### 3.3 服务器部署时通过 SSH 隧道访问本地 UI
+
+如果部署在远程服务器上，不要把 `__ui__` 直接暴露到公网。推荐通过 SSH 本地端口转发访问：
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 用户名@ip
+```
+
+建立隧道后，在你自己的电脑浏览器中访问：
+
+```text
+http://127.0.0.1:18080/__ui__/login
+```
+
+这样浏览器访问的是你本机的 `127.0.0.1:18080`，再通过 SSH 安全转发到服务器本机的 AegisGate 端口，适合访问 UI 和 `__gw__` 管理接口。
 
 ## 4. Docker 部署（配置/日志/token 持久化到宿主机）
 
@@ -399,13 +469,13 @@ docker compose logs -f aegisgate
 连通性快速自检（注册 + 响应）：
 
 ```bash
-# 0) 查看自动生成的 gateway_key（首次启动后）
+# 0) 查看网关密钥（保存在 config/aegis_gateway.key，首次启动自动生成）
 cat config/aegis_gateway.key
 
 # 1) 宿主机 -> 容器：健康检查
 curl -sS http://127.0.0.1:18080/health
 
-# 2) 宿主机 -> 容器：注册 token（检查 baseUrl；gateway_key 用上面查到的值）
+# 2) 宿主机 -> 容器：注册 token（gateway_key 用上面查到的值）
 curl -sS -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
   -d '{"upstream_base":"https://your-real-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
@@ -425,7 +495,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `AEGIS_GATEWAY_KEY` | 网关管理端点校验 key（留空则首次启动自动生成到 `config/aegis_gateway.key`） | 空（自动生成） |
+| `AEGIS_GATEWAY_KEY` | 网关密钥（可选，Docker/CI 覆盖用）；默认从 `config/aegis_gateway.key` 自动加载，首次启动自动生成 | 文件加载 |
 | `AEGIS_ENCRYPTION_KEY` | 脱敏映射加密密钥（Fernet AES-128-CBC+HMAC，留空自动生成到 `config/aegis_fernet.key`） | 空（自动生成） |
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` |
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` |
@@ -502,12 +572,12 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 - 默认会写日志和审计文件到本地；是否包含正文取决于日志级别与策略配置。
 - 当 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true` 时，请求体会完整打印（含 function/tool 输出原文），仅建议在受控环境短时开启。
 - 安全自动化：
-  - `AEGIS_GATEWAY_KEY` 留空时首次启动自动生成 32 字符随机密钥（持久化到 `config/aegis_gateway.key`，文件权限 `0600`）。
+  - 网关密钥保存在 `config/aegis_gateway.key`（首次启动自动生成，权限 `0600`）。查看：`cat config/aegis_gateway.key`。
   - `AEGIS_ENCRYPTION_KEY` 留空时自动生成 Fernet 加密密钥（持久化到 `config/aegis_fernet.key`，文件权限 `0600`）。脱敏映射使用 AES-128-CBC+HMAC 加密存储，不再使用 base64。
   - 管理端点内置速率限制（默认每 IP 每分钟 30 次）和内网 IP 校验。
   - v2 代理默认启用 SSRF 防护，阻止请求到内网地址和云元数据端点。
 - 若对外网开放，建议至少做到：
-  - 确认 `AEGIS_GATEWAY_KEY` 已生成或已设置高强度值（所有管理端点都需要此 key 认证）
+  - 确认 `config/aegis_gateway.key` 已存在且为高强度值（所有管理端点和 UI 登录都需要此 key 认证）
   - 启用 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true`
   - 配置 `AEGIS_TRUSTED_PROXY_IPS`（仅信任你的反向代理 IP，支持 CIDR）
   - 在入口网关（Nginx/Caddy/WAF）上加 IP 白名单、限流与访问控制

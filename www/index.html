@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AegisGate 控制台</title>
+    <link rel="stylesheet" href="/__ui__/assets/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+
+      <!-- ── Header ── -->
+      <header class="app-header">
+        <a class="header-brand" href="#overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          AegisGate
+        </a>
+        <div class="header-sep"></div>
+        <div class="header-status">
+          <span class="status-dot" id="header-status-dot"></span>
+          <span class="header-status-label" id="status-text">连接中…</span>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-bootstrap" class="btn-hdr" type="button" title="刷新状态">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23,4 23,10 17,10"/>
+              <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+            </svg>
+            刷新
+          </button>
+          <button id="open-health" class="btn-hdr" type="button" title="Health JSON">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/>
+            </svg>
+            Health
+          </button>
+          <button id="logout-button" class="btn-hdr btn-hdr-danger" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16,17 21,12 16,7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            退出
+          </button>
+        </div>
+      </header>
+
+      <div class="app-body">
+
+        <!-- ── Sidebar ── -->
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">监控</span>
+            <a href="#overview" class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              概览
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">配置</span>
+            <a href="#settings" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
+                <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
+                <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+                <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
+              </svg>
+              基础设置
+            </a>
+            <a href="#security" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <polyline points="9,12 11,14 15,10"/>
+              </svg>
+              安全设置
+            </a>
+            <a href="#v2" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+                <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
+                <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
+              </svg>
+              v2 代理
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">资源</span>
+            <a href="#tokens" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="15" r="4"/>
+                <line x1="11.8" y1="11.2" x2="21" y2="2"/>
+                <line x1="19" y1="4" x2="21" y2="6"/>
+                <line x1="16" y1="7" x2="18" y2="9"/>
+              </svg>
+              Token 管理
+            </a>
+            <a href="#docs" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+              </svg>
+              使用说明
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">系统</span>
+            <a href="#logs" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4,17 10,11 4,5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+              日志
+            </a>
+          </div>
+          <div class="sidebar-footer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            AegisGate Local UI
+          </div>
+        </aside>
+
+        <!-- ── Main content ── -->
+        <main class="content">
+
+          <!-- Overview -->
+          <section id="overview">
+            <div class="stat-grid">
+              <div class="stat-card">
+                <div class="stat-card-label">服务状态</div>
+                <div class="stat-card-value">
+                  <span id="status-badge">—</span>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">监听地址</div>
+                <div class="stat-card-value" id="server-text">—</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">安全级别</div>
+                <div class="stat-card-value" id="security-text">—</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">默认上游</div>
+                <div class="stat-card-value" id="upstream-text" style="font-size:0.88rem;word-break:break-all;">—</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- General settings -->
+          <section id="settings" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
+                  <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
+                  <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+                  <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>基础设置</h2>
+                <p class="panel-desc">修改后点击保存，配置将实时写入 <code>config/.env</code></p>
+              </div>
+            </div>
+            <div id="general-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-general" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                保存基础设置
+              </button>
+              <span id="general-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- Security settings -->
+          <section id="security" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  <polyline points="9,12 11,14 15,10"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>安全设置</h2>
+                <p class="panel-desc">布尔值用按钮切换：<span style="color:var(--success)">绿色</span>为开启，<span style="color:var(--error)">红色</span>为关闭</p>
+              </div>
+            </div>
+            <div id="security-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-security" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                保存安全设置
+              </button>
+              <span id="security-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- v2 proxy settings -->
+          <section id="v2" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+                  <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
+                  <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>v2 代理</h2>
+                <p class="panel-desc">请求过滤、响应过滤及 SSRF 防护等代理参数</p>
+              </div>
+            </div>
+            <div id="v2-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-v2" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                保存 v2 设置
+              </button>
+              <span id="v2-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- Token management -->
+          <section id="tokens" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="15" r="4"/>
+                  <line x1="11.8" y1="11.2" x2="21" y2="2"/>
+                  <line x1="19" y1="4" x2="21" y2="6"/>
+                  <line x1="16" y1="7" x2="18" y2="9"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Token 管理</h2>
+                <p class="panel-desc">注册上游地址与 API 密钥，获取可用于转发请求的网关 Token</p>
+              </div>
+            </div>
+
+            <div class="token-toolbar">
+              <span id="token-count" style="font-size:0.83rem;color:var(--muted);">加载中…</span>
+              <div style="display:flex;gap:8px;">
+                <button id="token-refresh" class="btn-sm-ghost" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                    <polyline points="23,4 23,10 17,10"/>
+                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                  </svg>刷新
+                </button>
+                <button id="token-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  注册 Token
+                </button>
+              </div>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead>
+                  <tr>
+                    <th>Token</th>
+                    <th>上游地址</th>
+                    <th>API 密钥</th>
+                    <th>白名单密钥</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="token-tbody">
+                  <tr><td colspan="5" class="token-table-empty">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Docs -->
+          <section id="docs" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>使用说明与文档</h2>
+                <p class="panel-desc">内置 README 与 <code>docs/</code> 目录下的 Markdown 文档</p>
+              </div>
+            </div>
+            <div class="docs-layout">
+              <div id="docs-list" class="docs-list"></div>
+              <article class="doc-viewer">
+                <div class="doc-meta">
+                  <strong id="doc-title">请选择文档</strong>
+                  <span id="doc-path">—</span>
+                </div>
+                <div id="doc-content" class="markdown-body">文档加载后将显示在这里。</div>
+              </article>
+            </div>
+          </section>
+
+          <!-- Logs / Debug -->
+          <section id="logs" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="4,17 10,11 4,5"/>
+                  <line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>日志与调试</h2>
+                <p class="panel-desc">Bootstrap 接口返回的原始 JSON 数据</p>
+              </div>
+            </div>
+            <pre id="bootstrap-output" class="console">等待加载…</pre>
+          </section>
+
+        </main>
+      </div>
+    </div>
+
+    <!-- ── Register Token Modal ── -->
+    <div id="token-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="modal-title">注册新 Token</h3>
+          <button id="modal-close" class="modal-close" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field">
+            <label for="modal-upstream">上游地址 <span style="color:var(--error)">*</span></label>
+            <input id="modal-upstream" type="text" placeholder="https://api.openai.com/v1">
+            <p class="field-hint">转发目标的 base URL，末尾无需加斜线</p>
+          </div>
+          <div class="modal-field">
+            <label for="modal-whitelist">白名单密钥（可选）</label>
+            <input id="modal-whitelist" type="text" placeholder="key1, key2, key3">
+            <p class="field-hint">逗号分隔；填写后仅这些密钥可通过此 Token 路径发起请求，留空则不限制</p>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span id="modal-error" class="modal-error"></span>
+          <button id="modal-cancel" class="btn-sm-ghost" type="button">取消</button>
+          <button id="modal-submit" class="btn-sm" type="button">注册</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/__ui__/assets/app.js"></script>
+  </body>
+</html>

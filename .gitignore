@@ -39,6 +39,7 @@ config/gw_tokens.json
 
 # Auto-generated IDE/agent files
 AGENTS.md
+*.egg-info/
 
 # Local editor/OS files
 .DS_Store

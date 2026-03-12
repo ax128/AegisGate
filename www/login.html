@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AegisGate — 管理登录</title>
+    <link rel="stylesheet" href="/__ui__/assets/app.css">
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <section class="login-card">
+        <div class="login-logo">
+          <!-- shield icon -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div class="login-brand">AegisGate</div>
+        <p class="login-subtitle">本地管理控制台</p>
+
+        <div class="login-divider"></div>
+
+        <form id="login-form" class="login-form">
+          <div>
+            <label class="field-label" for="password-input">网关密钥</label>
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+              <input
+                id="password-input"
+                type="password"
+                class="field-input"
+                autocomplete="current-password"
+                placeholder="AEGIS_GATEWAY_KEY"
+                autofocus
+              >
+            </div>
+          </div>
+          <button type="submit" class="btn-login">登 录</button>
+          <div id="login-error" class="login-error"></div>
+        </form>
+
+        <div class="login-notice">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          仅允许内网访问 · 使用 <code>AEGIS_GATEWAY_KEY</code> 作为密码 · 登录后可查看配置与文档
+        </div>
+      </section>
+    </main>
+    <script src="/__ui__/assets/login.js"></script>
+  </body>
+</html>

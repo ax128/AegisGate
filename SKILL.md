@@ -93,7 +93,7 @@ uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"agent"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<cat config/aegis_gateway.key>"}'
 ```
 
 期望返回：
@@ -179,4 +179,4 @@ docker compose up -d --build
 - 对外仅暴露业务入口，管理接口仅限内网。
 - 默认监听建议使用 `127.0.0.1`，通过反向代理做外部暴露控制。
 - 不在日志或工单中明文粘贴密钥、token、cookie、私钥、助记词。
-- 生产环境定期轮换 `gateway_key` 与上游 API key。
+- 生产环境定期轮换 `config/aegis_gateway.key`（替换文件内容后重启服务）。
