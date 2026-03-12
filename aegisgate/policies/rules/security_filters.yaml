@@ -282,6 +282,12 @@ injection_detector:
     # D("tool_uses": ...) 格式劫持
     - id: fake_assistant_tool_block
       regex: 'D\s*\(\s*["'']\s*tool_uses?\s*["'']'
+    # tool_call:functions.xxx 伪造前缀
+    - id: tool_call_prefix
+      regex: 'tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)'
+    # functions.危险命令 命名空间劫持
+    - id: functions_namespace
+      regex: 'functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b'
   typoglycemia_targets:
     - ignore
     - bypass

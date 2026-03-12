@@ -24,6 +24,34 @@ from aegisgate.util.risk_scoring import clamp01, weighted_nonlinear_score
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
 _WHITESPACE_RE = re.compile(r"\s+")
+_WORD_SPLIT_RE = re.compile(r"\S+")
+# Latin/Common/Inherited scripts are expected in normal multilingual text;
+# mixing two *different* non-Latin scripts in the same word is suspicious.
+_BENIGN_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL"})
+
+
+def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
+    """Detect words that mix characters from multiple non-Latin alphabetic scripts."""
+    hits: list[str] = []
+    for word in _WORD_SPLIT_RE.findall(text):
+        if len(word) < 4:
+            continue
+        exotic_scripts: set[str] = set()
+        for ch in word:
+            if not ch.isalpha():
+                continue
+            try:
+                name = unicodedata.name(ch, "")
+            except ValueError:
+                continue
+            if not name:
+                continue
+            script_prefix = name.split()[0]
+            if script_prefix not in _BENIGN_SCRIPT_PREFIXES:
+                exotic_scripts.add(script_prefix)
+        if len(exotic_scripts) >= min_scripts:
+            hits.append(word)
+    return hits
 
 
 def _maybe_decode_base64(token: str) -> str | None:
@@ -255,6 +283,10 @@ class PromptInjectionDetector(BaseFilter):
 
         if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
             signals["obfuscated"].add("rule_obfuscation_marker")
+
+        script_mixing_hits = _detect_script_mixing(text_raw)
+        if script_mixing_hits:
+            signals["obfuscated"].add("multi_script_mixing")
 
         decoded_texts: list[str] = []
         for idx, match in enumerate(self._base64_candidate_re.finditer(text_nfkc)):

@@ -156,6 +156,8 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "tool_call_with_spam", "regex": r"(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)"},
             {"id": "spam_with_tool_call", "regex": r"(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)"},
             {"id": "fake_assistant_tool_block", "regex": r"D\s*\(\s*[\"']tool_uses?[\"']"},
+            {"id": "tool_call_prefix", "regex": r"tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)"},
+            {"id": "functions_namespace", "regex": r"functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b"},
         ],
         "typoglycemia_targets": ["ignore", "bypass", "override", "reveal", "system", "prompt", "instructions"],
         "decoded_keywords": [
