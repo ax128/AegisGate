@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
+from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -374,6 +375,8 @@ def _redact_text(
     markers contains {kind, masked_value} for unique pattern hits (capped at _V2_MAX_MATCH_IDS).
     """
     if _should_skip_v2_field_redaction(field):
+        return text, 0, [], []
+    if looks_like_base64_blob(text):
         return text, 0, [], []
     value = text
     whitelist = set(normalize_whitelist_keys(whitelist_keys))

@@ -44,6 +44,7 @@ from aegisgate.adapters.openai_compat.upstream import (
 )
 from aegisgate.config.settings import settings
 from aegisgate.config.security_rules import load_security_rules
+from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import mask_for_log
 from aegisgate.core.audit import write_audit
 from aegisgate.core.confirmation import (
@@ -322,6 +323,8 @@ def _sanitize_text_for_upstream_with_hits(
 ) -> tuple[str, list[dict[str, Any]]]:
     if not text:
         return "", []
+    if looks_like_base64_blob(text):
+        return text, []
     if "[REDACTED:" in text:
         return _strip_system_exec_runtime_lines(text), []
 
