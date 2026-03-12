@@ -2907,6 +2907,13 @@ async def _execute_responses_stream_once(
         request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
         whitelist_keys=ctx.redaction_whitelist_keys,
     )
+    _input_items = upstream_payload.get("input")
+    _input_count = len(_input_items) if isinstance(_input_items, list) else 0
+    _payload_bytes = len(json.dumps(upstream_payload, ensure_ascii=False).encode("utf-8"))
+    logger.info(
+        "responses upstream forward request_id=%s model=%s input_items=%d payload_bytes=%d",
+        ctx.request_id, upstream_payload.get("model", "?"), _input_count, _payload_bytes,
+    )
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
@@ -2943,6 +2950,12 @@ async def _execute_responses_stream_once(
                 event_type = _extract_stream_event_type(payload_text)
                 if event_type in {"response.completed", "response.failed", "error"}:
                     saw_terminal_event = True
+                    if chunk_count <= 0:
+                        _excerpt = (payload_text[:500] + "…") if len(payload_text) > 500 else payload_text
+                        logger.warning(
+                            "responses stream terminal_event with no content request_id=%s event_type=%s excerpt=%s",
+                            ctx.request_id, event_type, _excerpt,
+                        )
 
                 chunk_text = _extract_stream_text_from_event(payload_text)
                 if chunk_text:
