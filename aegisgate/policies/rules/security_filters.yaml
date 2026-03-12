@@ -263,6 +263,25 @@ injection_detector:
       regex: '(复制|粘贴).{0,10}(终端|shell|powershell|cmd)|(按|执行).{0,10}(链接|网页|文档).{0,10}(命令|脚本)'
     - id: remote_tool_invocation_zh
       regex: '(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)'
+  tool_call_injection_patterns:
+    # 伪造 OpenAI multi_tool_use.parallel 调用（含拼写变体）
+    - id: multi_tool_use_parallel
+      regex: 'to\s*=\s*mult[i_]*[_\s]*tool[_\s]*use[\._\s]*parall'
+    # JSON 格式伪造 tool_uses / tool_use 字段
+    - id: tool_uses_json
+      regex: '[("'']\s*tool_uses?\s*[)"'']\s*[:=\[]'
+    # JSON 格式伪造 function_call(s) 字段
+    - id: function_call_json
+      regex: '[("'']\s*function_calls?\s*[)"'']\s*[:=\[]'
+    # SEO 垃圾词 + 工具调用关键词（前缀）
+    - id: tool_call_with_spam
+      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)'
+    # 工具调用关键词 + SEO 垃圾词（后缀）
+    - id: spam_with_tool_call
+      regex: '(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
+    # D("tool_uses": ...) 格式劫持
+    - id: fake_assistant_tool_block
+      regex: 'D\s*\(\s*["'']\s*tool_uses?\s*["'']'
   typoglycemia_targets:
     - ignore
     - bypass
@@ -324,6 +343,9 @@ injection_detector:
       unicode_invisible:
         bucket: anomaly
         severity: 4
+      tool_call_injection:
+        bucket: hijack
+        severity: 9       # 伪造工具调用：高危，直接拦截
       unicode_bidi:
         bucket: anomaly
         severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
@@ -334,6 +356,7 @@ injection_detector:
       - system_exfil
       - obfuscated
       - unicode_bidi
+      - tool_call_injection
     discussion_patterns:
       - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
       - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
@@ -725,6 +748,7 @@ action_map:
     indirect_injection: review
     direct: downgrade
     typoglycemia: review
+    tool_call_injection: block
     # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
   rag_poison_guard:
     ingestion_poison: block

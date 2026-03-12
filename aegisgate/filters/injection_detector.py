@@ -95,6 +95,9 @@ class PromptInjectionDetector(BaseFilter):
         self._remote_instruction_patterns = self._compile_rule_patterns(
             detector_rules.get("remote_content_instruction_patterns", [])
         )
+        self._tool_call_injection_patterns = self._compile_rule_patterns(
+            detector_rules.get("tool_call_injection_patterns", [])
+        )
 
         self._typoglycemia_targets = [str(item).lower() for item in detector_rules.get("typoglycemia_targets", [])]
         self._decoded_keywords = [str(item).lower() for item in detector_rules.get("decoded_keywords", [])]
@@ -212,6 +215,7 @@ class PromptInjectionDetector(BaseFilter):
             "remote_content": set(),
             "remote_content_instruction": set(),
             "indirect_injection": set(),
+            "tool_call_injection": set(),
         }
 
         invisible_hits = sorted({f"U+{ord(char):04X}" for char in text_nfkc if char in self._invisible_chars})
@@ -244,6 +248,10 @@ class PromptInjectionDetector(BaseFilter):
         for label, pattern in self._remote_instruction_patterns.items():
             if pattern.search(text_norm):
                 signals["remote_content_instruction"].add(label)
+
+        for label, pattern in self._tool_call_injection_patterns.items():
+            if pattern.search(text_nfkc) or pattern.search(text_norm):
+                signals["tool_call_injection"].add(label)
 
         if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
             signals["obfuscated"].add("rule_obfuscation_marker")

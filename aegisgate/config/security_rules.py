@@ -149,6 +149,14 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "copy_paste_terminal_zh", "regex": r"(复制|粘贴).{0,10}(终端|shell|powershell|cmd)|(按|执行).{0,10}(链接|网页|文档).{0,10}(命令|脚本)"},
             {"id": "remote_tool_invocation_zh", "regex": r"(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)"},
         ],
+        "tool_call_injection_patterns": [
+            {"id": "multi_tool_use_parallel", "regex": r"to\s*=\s*mult[i_]*[_\s]*tool[_\s]*use[\._\s]*parall"},
+            {"id": "tool_uses_json", "regex": r"""[("']\s*tool_uses?\s*[)"']\s*[:=\[]"""},
+            {"id": "function_call_json", "regex": r"""[("']\s*function_calls?\s*[)"']\s*[:=\[]"""},
+            {"id": "tool_call_with_spam", "regex": r"(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)"},
+            {"id": "spam_with_tool_call", "regex": r"(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)"},
+            {"id": "fake_assistant_tool_block", "regex": r"D\s*\(\s*[\"']tool_uses?[\"']"},
+        ],
         "typoglycemia_targets": ["ignore", "bypass", "override", "reveal", "system", "prompt", "instructions"],
         "decoded_keywords": [
             "ignore previous instructions",
@@ -189,12 +197,13 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "typoglycemia": {"bucket": "hijack", "severity": 4},
                 "unicode_invisible": {"bucket": "anomaly", "severity": 4},
                 "unicode_bidi": {"bucket": "anomaly", "severity": 10},
+                "tool_call_injection": {"bucket": "hijack", "severity": 9},
             },
         },
         "false_positive_mitigation": {
             "enabled": True,
             "max_risk_reduction": 0.45,
-            "non_reducible_categories": ["system_exfil", "obfuscated", "unicode_bidi"],
+            "non_reducible_categories": ["system_exfil", "obfuscated", "unicode_bidi", "tool_call_injection"],
             "discussion_patterns": [
                 r"(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)",
                 r"(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)",
@@ -448,6 +457,7 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "indirect_injection": "review",
                 "direct": "downgrade",
                 "typoglycemia": "review",
+                "tool_call_injection": "block",
             },
         "untrusted_content_guard": {
             "suspicious_untrusted": "review",
