@@ -264,30 +264,87 @@ injection_detector:
     - id: remote_tool_invocation_zh
       regex: '(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)'
   tool_call_injection_patterns:
-    # 伪造 OpenAI multi_tool_use.parallel 调用（含拼写变体）
+    # ===== OpenAI internal =====
+    # to=multi_tool_use.parallel 及拼写变体
     - id: multi_tool_use_parallel
       regex: 'to\s*=\s*mult[i_]*[_\s]*tool[_\s]*use[\._\s]*parall'
-    # JSON 格式伪造 tool_uses / tool_use 字段
+    # "tool_uses": / "tool_use": JSON 注入
     - id: tool_uses_json
       regex: '[("'']\s*tool_uses?\s*[)"'']\s*[:=\[]'
-    # JSON 格式伪造 function_call(s) 字段
+    # "function_call(s)": JSON 注入
     - id: function_call_json
       regex: '[("'']\s*function_calls?\s*[)"'']\s*[:=\[]'
-    # SEO 垃圾词 + 工具调用关键词（前缀）
-    - id: tool_call_with_spam
-      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)'
-    # 工具调用关键词 + SEO 垃圾词（后缀）
-    - id: spam_with_tool_call
-      regex: '(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
-    # D("tool_uses": ...) 格式劫持
+    # D("tool_uses":...) 序列化劫持
     - id: fake_assistant_tool_block
       regex: 'D\s*\(\s*["'']\s*tool_uses?\s*["'']'
-    # tool_call:functions.xxx 伪造前缀
-    - id: tool_call_prefix
-      regex: 'tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)'
-    # functions.危险命令 命名空间劫持
+    # recipient_name: "functions.xxx" 内部字段
+    - id: recipient_name
+      regex: 'recipient_name["'']\s*:\s*["'']functions?\.'
+    # functions.危险命令 命名空间
     - id: functions_namespace
       regex: 'functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b'
+    # tool_call:functions.xxx 前缀
+    - id: tool_call_prefix
+      regex: 'tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)'
+    # ===== Anthropic Claude XML =====
+    # <tool_call> 标签
+    - id: claude_tool_call_xml
+      regex: '<\s*tool_call\s*>'
+    # <invoke name="xxx"> 标签
+    - id: claude_invoke_xml
+      regex: '<\s*invoke\s+name\s*='
+    # <function_calls> 标签
+    - id: claude_function_calls_xml
+      regex: '<\s*function_calls?\s*>'
+    # ===== ReAct agent pattern =====
+    # Action: xxx ... Action Input: (需同时出现)
+    - id: react_action_input
+      regex: 'Action\s*:\s*\w+[\s\S]{0,60}Action\s+Input\s*:'
+    # Observation: ... Final Answer: (伪造观察结果)
+    - id: react_fake_observation
+      regex: 'Observation\s*:\s*[\s\S]{0,80}(?:Final\s+Answer|Action)\s*:'
+    # ===== Google Gemini / AWS Bedrock =====
+    # "functionCall": { (Gemini camelCase)
+    - id: gemini_function_call
+      regex: '["'']functionCall["'']\s*:\s*\{'
+    # "functionResponse": { (Gemini)
+    - id: gemini_function_response
+      regex: '["'']functionResponse["'']\s*:\s*\{'
+    # "toolUse": { (Bedrock camelCase)
+    - id: bedrock_tool_use
+      regex: '["'']toolUse["'']\s*:\s*\{'
+    # "toolResult": { (Bedrock)
+    - id: bedrock_tool_result
+      regex: '["'']toolResult["'']\s*:\s*\{'
+    # ===== vLLM / Hermes / Gorilla =====
+    # <|tool_call|> 或 <tool_call> 特殊 token
+    - id: vllm_tool_call_tag
+      regex: '<\|?\s*tool_call\s*\|?>'
+    # <<function>> Gorilla 格式
+    - id: gorilla_function_tag
+      regex: '<<\s*function\s*>>'
+    # ===== AutoGPT / OpenDevin / SWE-agent =====
+    # "command": {"name": ...} AutoGPT 格式
+    - id: autogpt_command
+      regex: '["'']command["'']\s*:\s*\{\s*["'']name["'']'
+    # "action": "run" OpenDevin 格式
+    - id: opendevin_action_run
+      regex: '["'']action["'']\s*:\s*["'']run["'']'
+    # 独立行 COMMAND (SWE-agent)
+    - id: swe_agent_command
+      regex: '^\s*COMMAND\s*$'
+    # ===== MCP JSON-RPC =====
+    # "method": "tools/call"
+    - id: mcp_tools_call
+      regex: '["'']method["'']\s*:\s*["'']tools/call["'']'
+    # "method": "resources/read"
+    - id: mcp_resources_read
+      regex: '["'']method["'']\s*:\s*["'']resources/read["'']'
+    # ===== 垃圾词组合 =====
+    - id: tool_call_with_spam
+      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)'
+    - id: spam_with_tool_call
+      regex: '(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
   typoglycemia_targets:
     - ignore
     - bypass

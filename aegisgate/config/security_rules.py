@@ -150,14 +150,39 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "remote_tool_invocation_zh", "regex": r"(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)"},
         ],
         "tool_call_injection_patterns": [
+            # --- OpenAI internal ---
             {"id": "multi_tool_use_parallel", "regex": r"to\s*=\s*mult[i_]*[_\s]*tool[_\s]*use[\._\s]*parall"},
             {"id": "tool_uses_json", "regex": r"""[("']\s*tool_uses?\s*[)"']\s*[:=\[]"""},
             {"id": "function_call_json", "regex": r"""[("']\s*function_calls?\s*[)"']\s*[:=\[]"""},
+            {"id": "fake_assistant_tool_block", "regex": r"D\s*\(\s*[\"']tool_uses?[\"']"},
+            {"id": "recipient_name", "regex": r"recipient_name[\"']\s*:\s*[\"']functions?\."},
+            {"id": "functions_namespace", "regex": r"functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b"},
+            {"id": "tool_call_prefix", "regex": r"tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)"},
+            # --- Anthropic Claude XML ---
+            {"id": "claude_tool_call_xml", "regex": r"<\s*tool_call\s*>"},
+            {"id": "claude_invoke_xml", "regex": r"<\s*invoke\s+name\s*="},
+            {"id": "claude_function_calls_xml", "regex": r"<\s*function_calls?\s*>"},
+            # --- ReAct pattern (需要 Action + Action Input 同时出现) ---
+            {"id": "react_action_input", "regex": r"Action\s*:\s*\w+[\s\S]{0,60}Action\s+Input\s*:"},
+            {"id": "react_fake_observation", "regex": r"Observation\s*:\s*[\s\S]{0,80}(?:Final\s+Answer|Action)\s*:"},
+            # --- Gemini / Bedrock camelCase ---
+            {"id": "gemini_function_call", "regex": r"[\"']functionCall[\"']\s*:\s*\{"},
+            {"id": "gemini_function_response", "regex": r"[\"']functionResponse[\"']\s*:\s*\{"},
+            {"id": "bedrock_tool_use", "regex": r"[\"']toolUse[\"']\s*:\s*\{"},
+            {"id": "bedrock_tool_result", "regex": r"[\"']toolResult[\"']\s*:\s*\{"},
+            # --- vLLM / Hermes special tokens ---
+            {"id": "vllm_tool_call_tag", "regex": r"<\|?\s*tool_call\s*\|?>"},
+            {"id": "gorilla_function_tag", "regex": r"<<\s*function\s*>>"},
+            # --- AutoGPT / OpenDevin / SWE-agent ---
+            {"id": "autogpt_command", "regex": r"[\"']command[\"']\s*:\s*\{\s*[\"']name[\"']"},
+            {"id": "opendevin_action_run", "regex": r"[\"']action[\"']\s*:\s*[\"']run[\"']"},
+            {"id": "swe_agent_command", "regex": r"^\s*COMMAND\s*$"},
+            # --- MCP JSON-RPC ---
+            {"id": "mcp_tools_call", "regex": r"[\"']method[\"']\s*:\s*[\"']tools/call[\"']"},
+            {"id": "mcp_resources_read", "regex": r"[\"']method[\"']\s*:\s*[\"']resources/read[\"']"},
+            # --- Spam + tool call combo ---
             {"id": "tool_call_with_spam", "regex": r"(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)"},
             {"id": "spam_with_tool_call", "regex": r"(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)"},
-            {"id": "fake_assistant_tool_block", "regex": r"D\s*\(\s*[\"']tool_uses?[\"']"},
-            {"id": "tool_call_prefix", "regex": r"tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)"},
-            {"id": "functions_namespace", "regex": r"functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b"},
         ],
         "typoglycemia_targets": ["ignore", "bypass", "override", "reveal", "system", "prompt", "instructions"],
         "decoded_keywords": [

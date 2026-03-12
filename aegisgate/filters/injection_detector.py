@@ -29,6 +29,22 @@ _WORD_SPLIT_RE = re.compile(r"\S+")
 # mixing two *different* non-Latin scripts in the same word is suspicious.
 _BENIGN_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL"})
 
+# 每 3 个字符插入 "-" 以变形展示，防止日志本身被利用
+_DEFORM_CHUNK_SIZE = 3
+
+
+def _deform_text(text: str) -> str:
+    """每 3 个字符插入 '-'，用于安全日志展示。"""
+    return "-".join(text[i:i + _DEFORM_CHUNK_SIZE] for i in range(0, len(text), _DEFORM_CHUNK_SIZE))
+
+
+def _extract_match_context(text: str, match: re.Match, context_chars: int = 20) -> str:
+    """提取匹配片段及前后 N 个字符，并变形展示。"""
+    start = max(0, match.start() - context_chars)
+    end = min(len(text), match.end() + context_chars)
+    excerpt = text[start:end]
+    return _deform_text(excerpt)
+
 
 def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
     """Detect words that mix characters from multiple non-Latin alphabetic scripts."""
@@ -278,8 +294,15 @@ class PromptInjectionDetector(BaseFilter):
                 signals["remote_content_instruction"].add(label)
 
         for label, pattern in self._tool_call_injection_patterns.items():
-            if pattern.search(text_nfkc) or pattern.search(text_norm):
+            match = pattern.search(text_nfkc) or pattern.search(text_norm)
+            if match:
                 signals["tool_call_injection"].add(label)
+                deformed = _extract_match_context(text_nfkc if pattern.search(text_nfkc) else text_norm, match)
+                logger.warning(
+                    "tool_call_injection_hit rule=%s excerpt=%s",
+                    label,
+                    deformed,
+                )
 
         if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
             signals["obfuscated"].add("rule_obfuscation_marker")
