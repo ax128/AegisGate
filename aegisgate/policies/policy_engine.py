@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -41,14 +42,23 @@ _builtin_policy_warned: set[str] = set()
 def _resolve_rules_dir(rules_dir: str | None) -> Path:
     raw = rules_dir or str(Path(settings.security_rules_path).parent)
     candidate = Path(raw)
-    if candidate.is_absolute():
+    if not candidate.is_absolute():
+        app_root = Path(__file__).resolve().parents[2]
+        candidates = [Path.cwd() / candidate, app_root / candidate]
+        for item in candidates:
+            if item.exists():
+                candidate = item.resolve()
+                break
+        else:
+            candidate = candidates[-1].resolve()
+    if candidate.exists() and (candidate / "default.yaml").is_file():
         return candidate
-    app_root = Path(__file__).resolve().parents[2]
-    candidates = [Path.cwd() / candidate, app_root / candidate]
-    for item in candidates:
-        if item.exists():
-            return item.resolve()
-    return candidates[-1].resolve()
+    bootstrap = os.environ.get("AEGIS_BOOTSTRAP_RULES_DIR", "").strip()
+    if bootstrap:
+        fallback = Path(bootstrap)
+        if (fallback / "default.yaml").is_file():
+            return fallback.resolve()
+    return candidate
 
 
 class PolicyEngine:

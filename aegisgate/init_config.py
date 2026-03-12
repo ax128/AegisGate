@@ -78,10 +78,26 @@ def missing_required_rules(config_dir: Path | None = None) -> list[str]:
     return missing
 
 
+def _config_dir_has_any_required_rule(config_dir: Path | None = None) -> bool:
+    rules_dir = config_dir or _config_dir()
+    return any((rules_dir / name).exists() for name in _REQUIRED_YAML)
+
+
+def _bootstrap_has_all_required_rules() -> bool:
+    """若 bootstrap 目录存在且包含全部必须 YAML，返回 True。"""
+    src = _rules_source_dir()
+    if src is None:
+        return False
+    return len(missing_required_rules(src)) == 0
+
+
 def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
     rules_dir = config_dir or _config_dir()
     missing = missing_required_rules(rules_dir)
     if missing:
+        # 仅当挂载目录完全为空时，允许用 bootstrap 目录兜底；部分缺失仍应在启动时失败。
+        if _bootstrap_has_all_required_rules() and not _config_dir_has_any_required_rule(rules_dir):
+            return
         raise RuntimeError(f"missing required security policy files in {rules_dir}: {', '.join(missing)}")
 
 

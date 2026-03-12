@@ -28,3 +28,22 @@ def test_builtin_default_policy_enables_low_false_positive_guards(tmp_path: Path
 
     assert "untrusted_content_guard" in result["enabled_filters"]
     assert "tool_call_guard" in result["enabled_filters"]
+
+
+def test_policy_engine_uses_bootstrap_dir_when_runtime_rules_dir_is_empty(tmp_path: Path, monkeypatch):
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    bootstrap = tmp_path / "bootstrap"
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    (bootstrap / "default.yaml").write_text(
+        "enabled_filters:\n  - anomaly_detector\nrisk_threshold: 0.42\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AEGIS_BOOTSTRAP_RULES_DIR", str(bootstrap))
+
+    engine = PolicyEngine(rules_dir=str(rules_dir))
+    ctx = RequestContext(request_id="p3", session_id="s1", route="/v1/chat/completions")
+    result = engine.resolve(ctx, policy_name="default")
+
+    assert engine.rules_dir == bootstrap.resolve()
+    assert "anomaly_detector" in result["enabled_filters"]

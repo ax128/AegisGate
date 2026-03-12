@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -43,11 +42,14 @@ class DailyRotatingFileHandler(logging.Handler):
         self._encoding = encoding
         self._current_date: str = ""
         self._inner: RotatingFileHandler | None = None
+        self._use_fallback = False  # 一旦文件写入失败，永久停用文件落盘
 
     def _today(self) -> str:
         return datetime.now(timezone.utc).strftime("%y/%m/%d")
 
-    def _ensure_handler(self) -> RotatingFileHandler:
+    def _ensure_handler(self) -> RotatingFileHandler | None:
+        if self._use_fallback:
+            return self._inner
         today = self._today()
         if self._inner is not None and today == self._current_date:
             return self._inner
@@ -55,21 +57,26 @@ class DailyRotatingFileHandler(logging.Handler):
         # Date changed or first call — switch file
         if self._inner is not None:
             self._inner.close()
+            self._inner = None
 
         self._current_date = today
         log_path = self._base_dir / today
         log_file = log_path.with_suffix(".log")
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-
-        self._inner = RotatingFileHandler(
-            log_file,
-            maxBytes=self._max_bytes,
-            backupCount=self._backup_count,
-            encoding=self._encoding,
-        )
-        if self.formatter:
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            self._inner = RotatingFileHandler(
+                log_file,
+                maxBytes=self._max_bytes,
+                backupCount=self._backup_count,
+                encoding=self._encoding,
+            )
+        except (OSError, PermissionError):
+            self._use_fallback = True
+            self._inner = None
+        if self.formatter and self._inner is not None:
             self._inner.setFormatter(self.formatter)
-        self._inner.setLevel(self.level)
+        if self._inner is not None:
+            self._inner.setLevel(self.level)
         return self._inner
 
     def setFormatter(self, fmt: logging.Formatter | None) -> None:  # noqa: N802
@@ -85,7 +92,14 @@ class DailyRotatingFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             handler = self._ensure_handler()
+            if handler is None:
+                return
             handler.emit(record)
+        except (OSError, PermissionError):
+            self._use_fallback = True
+            if self._inner is not None:
+                self._inner.close()
+                self._inner = None
         except Exception:
             self.handleError(record)
 

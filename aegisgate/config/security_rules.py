@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
@@ -532,14 +533,21 @@ _CACHE_RULES: dict[str, Any] | None = None
 
 def _resolve_rules_file(path: str) -> Path:
     candidate = Path(path)
-    if candidate.is_absolute():
+    if not candidate.is_absolute():
+        app_root = Path(__file__).resolve().parents[2]
+        candidates = [Path.cwd() / candidate, app_root / candidate]
+        for item in candidates:
+            if item.exists():
+                return item.resolve()
+        candidate = candidates[-1].resolve()
+    if candidate.exists():
         return candidate
-    app_root = Path(__file__).resolve().parents[2]
-    candidates = [Path.cwd() / candidate, app_root / candidate]
-    for item in candidates:
-        if item.exists():
-            return item.resolve()
-    return candidates[-1].resolve()
+    bootstrap = os.environ.get("AEGIS_BOOTSTRAP_RULES_DIR", "").strip()
+    if bootstrap:
+        fallback = Path(bootstrap) / "security_filters.yaml"
+        if fallback.exists():
+            return fallback.resolve()
+    return candidate
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
