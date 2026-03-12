@@ -2956,10 +2956,14 @@ async def _execute_responses_stream_once(
                 if event_type in {"response.completed", "response.failed", "error"}:
                     saw_terminal_event = True
                     if chunk_count <= 0:
+                        # Reasoning-only or function-call-only responses produce no
+                        # text deltas — this is normal for agentic tool-call loops.
+                        _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
+                        _log_fn = logger.debug if (event_type == "response.completed" and _has_non_text_output) else logger.warning
                         _excerpt = (payload_text[:500] + "…") if len(payload_text) > 500 else payload_text
-                        logger.warning(
-                            "responses stream terminal_event with no content request_id=%s event_type=%s excerpt=%s",
-                            ctx.request_id, event_type, _excerpt,
+                        _log_fn(
+                            "responses stream terminal_event with no text_delta request_id=%s event_type=%s non_text_output=%s excerpt=%s",
+                            ctx.request_id, event_type, _has_non_text_output, _excerpt,
                         )
 
                 chunk_text = _extract_stream_text_from_event(payload_text)
@@ -3139,8 +3143,10 @@ async def _execute_responses_stream_once(
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
                 if saw_terminal_event:
-                    logger.warning(
-                        "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true terminal_event=true",
+                    # response.completed with function_call/reasoning output is
+                    # normal for agentic loops — log at debug, not warning.
+                    logger.debug(
+                        "responses stream inject_done after terminal_event request_id=%s chunk_count=%s cached_chars=%s",
                         ctx.request_id,
                         chunk_count,
                         len(stream_window),
