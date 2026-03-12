@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import ipaddress
 import os
 import re
 import secrets
+import tempfile
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 from threading import Lock
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from aegisgate.adapters.openai_compat.router import (
     clear_pending_confirmations_on_startup,
@@ -31,6 +35,7 @@ from aegisgate.core.hot_reload import HotReloader, build_watcher
 from aegisgate.core.gw_tokens import (
     find_token as gw_tokens_find_token,
     get as gw_tokens_get,
+    list_tokens as gw_tokens_list,
     load as gw_tokens_load,
     register as gw_tokens_register,
     unregister as gw_tokens_unregister,
@@ -216,6 +221,26 @@ if settings.enable_v2_proxy:
     app.include_router(v2_proxy_router)
 if settings.enable_relay_endpoint:
     app.include_router(relay_router, prefix="/relay")
+_WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
+_UI_ASSETS_DIR = (_WWW_DIR / "assets").resolve()
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_README_PATH = (_PROJECT_ROOT / "README.md").resolve()
+# docs/ 目录为本地私有文档，不在 UI 中展示，也不上传 git。
+# 根目录下这些文件属于本地内部文件，同样不在 UI 中展示。
+_EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
+    {
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "PRODUCTION_READINESS_TEST_REPORT.md",
+        "OPEN_SOURCE_CHECKLIST.md",
+        "PR_DESCRIPTION_2026-02-26-security-hardening.md",
+    }
+)
+_ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
+_UI_SESSION_COOKIE = "aegis_ui_session"
+_UI_LOGIN_RATE_LIMITER = _AdminRateLimiter(max_per_minute=settings.local_ui_login_rate_limit_per_minute)
+if _UI_ASSETS_DIR.is_dir():
+    app.mount("/__ui__/assets", StaticFiles(directory=str(_UI_ASSETS_DIR)), name="ui-assets")
 _nonce_cache = build_nonce_cache()
 _admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -412,6 +437,338 @@ def _verify_admin_gateway_key(body: dict) -> bool:
     return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
+def _is_passthrough_read_path(path: str) -> bool:
+    return path == "/__ui__" or path.startswith("/__ui__/")
+
+
+def _is_public_ui_path(path: str) -> bool:
+    return path in {
+        "/__ui__/login",
+        "/__ui__/health",
+        "/__ui__/api/login",
+    } or path.startswith("/__ui__/assets/")
+
+
+def _apply_ui_security_headers(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    return response
+
+
+def _ui_client_fingerprint(request: Request) -> str:
+    client_ip = _real_client_ip(request)
+    user_agent = (request.headers.get("user-agent") or "").strip()[:200]
+    raw = f"{client_ip}|{user_agent}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _ui_session_signature(issued_at: int, fingerprint: str) -> str:
+    secret = _ensure_gateway_key().encode("utf-8")
+    payload = f"ui:{issued_at}:{fingerprint}".encode("utf-8")
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+def _create_ui_session_token(request: Request) -> str:
+    issued_at = int(time.time())
+    fingerprint = _ui_client_fingerprint(request)
+    return f"{issued_at}.{_ui_session_signature(issued_at, fingerprint)}"
+
+
+def _ui_csrf_token(session_token: str) -> str:
+    secret = _ensure_gateway_key().encode("utf-8")
+    return hmac.new(secret, f"csrf:{session_token}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _is_valid_ui_session(token: str, request: Request) -> bool:
+    value = (token or "").strip()
+    if not value or "." not in value:
+        return False
+    issued_at_str, signature = value.split(".", 1)
+    try:
+        issued_at = int(issued_at_str)
+    except ValueError:
+        return False
+    if issued_at <= 0:
+        return False
+    if time.time() - issued_at > settings.local_ui_session_ttl_seconds:
+        return False
+    expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request))
+    return hmac.compare_digest(signature, expected)
+
+
+def _is_ui_authenticated(request: Request) -> bool:
+    return _is_valid_ui_session(request.cookies.get(_UI_SESSION_COOKIE, ""), request)
+
+
+def _verify_ui_csrf(request: Request) -> bool:
+    session_token = request.cookies.get(_UI_SESSION_COOKIE, "")
+    if not _is_valid_ui_session(session_token, request):
+        return False
+    presented = (request.headers.get("x-aegis-ui-csrf") or "").strip()
+    if not presented:
+        return False
+    expected = _ui_csrf_token(session_token)
+    return hmac.compare_digest(presented, expected)
+
+
+def _docs_catalog() -> list[dict[str, str]]:
+    """返回 UI 文档目录：README.md 置顶，其次是根目录中允许展示的 .md 文件。
+    docs/ 子目录为本地私有文档，不纳入展示范围。
+    """
+    docs: list[dict[str, str]] = []
+    if _README_PATH.is_file():
+        docs.append({"id": "README.md", "title": "README", "path": "README.md"})
+    for doc_path in sorted(_PROJECT_ROOT.glob("*.md")):
+        if doc_path.name in _EXCLUDED_ROOT_DOCS:
+            continue
+        if doc_path.resolve() == _README_PATH:
+            continue  # 已在首位添加
+        docs.append(
+            {
+                "id": doc_path.name,
+                "title": doc_path.stem.replace("-", " ").replace("_", " "),
+                "path": doc_path.name,
+            }
+        )
+    return docs
+
+
+def _resolve_doc_path(doc_id: str) -> Path | None:
+    safe_id = Path(doc_id).name
+    if safe_id != doc_id:
+        return None
+    if safe_id in _EXCLUDED_ROOT_DOCS:
+        return None
+    candidate = (_PROJECT_ROOT / safe_id).resolve()
+    # 只允许读取项目根目录下的 .md 文件，不允许遍历子目录
+    if candidate.is_file() and candidate.suffix == ".md" and candidate.parent == _PROJECT_ROOT:
+        return candidate
+    return None
+
+
+_UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
+    {
+        "env": "AEGIS_HOST",
+        "field": "host",
+        "label": "Host",
+        "type": "string",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_PORT",
+        "field": "port",
+        "label": "Port",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_UPSTREAM_BASE_URL",
+        "field": "upstream_base_url",
+        "label": "Upstream Base URL",
+        "type": "string",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_LOG_LEVEL",
+        "field": "log_level",
+        "label": "Log Level",
+        "type": "enum",
+        "section": "general",
+        "options": ["debug", "info", "warning", "error"],
+    },
+    {
+        "env": "AEGIS_STORAGE_BACKEND",
+        "field": "storage_backend",
+        "label": "Storage Backend",
+        "type": "enum",
+        "section": "general",
+        "options": ["sqlite", "redis", "postgres"],
+    },
+    {
+        "env": "AEGIS_SECURITY_LEVEL",
+        "field": "security_level",
+        "label": "Security Level",
+        "type": "enum",
+        "section": "security",
+        "options": ["low", "medium", "high"],
+    },
+    {
+        "env": "AEGIS_MAX_REQUEST_BODY_BYTES",
+        "field": "max_request_body_bytes",
+        "label": "Max Request Body Bytes",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK",
+        "field": "require_confirmation_on_block",
+        "label": "Require Confirmation On Block",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_STRICT_COMMAND_BLOCK_ENABLED",
+        "field": "strict_command_block_enabled",
+        "label": "Strict Command Block",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENFORCE_LOOPBACK_ONLY",
+        "field": "enforce_loopback_only",
+        "label": "Loopback Only",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_SEMANTIC_MODULE",
+        "field": "enable_semantic_module",
+        "label": "Semantic Module",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_V2_PROXY",
+        "field": "enable_v2_proxy",
+        "label": "Enable v2 Proxy",
+        "type": "bool",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_ENABLE_REQUEST_REDACTION",
+        "field": "v2_enable_request_redaction",
+        "label": "v2 Request Redaction",
+        "type": "bool",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER",
+        "field": "v2_enable_response_command_filter",
+        "label": "v2 Response Filter",
+        "type": "bool",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY",
+        "field": "v2_response_filter_obvious_only",
+        "label": "v2 Obvious Only",
+        "type": "bool",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_BLOCK_INTERNAL_TARGETS",
+        "field": "v2_block_internal_targets",
+        "label": "v2 Block Internal Targets",
+        "type": "bool",
+        "section": "v2",
+    },
+)
+
+
+def _ui_config_field_map() -> dict[str, dict[str, object]]:
+    return {str(item["field"]): dict(item) for item in _UI_CONFIG_FIELDS}
+
+
+def _field_default(field_name: str) -> object:
+    field_info = settings.__class__.model_fields[field_name]
+    return field_info.default
+
+
+def _serialize_env_value(kind: str, value: object) -> str:
+    if kind == "bool":
+        return "true" if bool(value) else "false"
+    return str(value)
+
+
+def _parse_bool_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _coerce_config_value(meta: dict[str, object], raw_value: object) -> object:
+    kind = str(meta["type"])
+    if kind == "bool":
+        return _parse_bool_value(raw_value)
+    if kind == "int":
+        try:
+            return int(str(raw_value).strip())
+        except ValueError as exc:
+            raise ValueError(f"invalid integer for {meta['field']}") from exc
+    value = str(raw_value or "").strip()
+    if kind == "enum":
+        raw_options = meta.get("options")
+        options = {str(item) for item in raw_options} if isinstance(raw_options, list) else set()
+        if value not in options:
+            raise ValueError(f"invalid option for {meta['field']}")
+    return value
+
+
+def _read_env_lines() -> list[str]:
+    if not _ENV_PATH.exists():
+        return []
+    return _ENV_PATH.read_text(encoding="utf-8").splitlines()
+
+
+def _write_env_updates(updates: dict[str, str]) -> None:
+    existing_lines = _read_env_lines()
+    consumed: set[str] = set()
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            new_lines.append(line)
+            continue
+        key, _, _value = line.partition("=")
+        key = key.strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}")
+            consumed.add(key)
+        else:
+            new_lines.append(line)
+    if new_lines and new_lines[-1].strip():
+        new_lines.append("")
+    for key in updates:
+        if key not in consumed:
+            new_lines.append(f"{key}={updates[key]}")
+    _ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(_ENV_PATH.parent)) as tmp:
+        tmp.write("\n".join(new_lines).rstrip() + "\n")
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(_ENV_PATH)
+
+
+def _ui_config_payload() -> dict[str, object]:
+    items: list[dict[str, object]] = []
+    for meta in _UI_CONFIG_FIELDS:
+        field_name = str(meta["field"])
+        current_value = getattr(settings, field_name)
+        default_value = _field_default(field_name)
+        items.append(
+            {
+                **meta,
+                "value": current_value,
+                "default": default_value,
+            }
+        )
+    return {"items": items}
+
+
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary = {
@@ -422,6 +779,37 @@ async def security_boundary_middleware(request: Request, call_next):
         "max_request_body_bytes": settings.max_request_body_bytes,
     }
     request.state.security_boundary = boundary
+
+    if request.url.path.startswith("/__ui__"):
+        client_ip = _real_client_ip(request)
+        if not _is_internal_ip(client_ip):
+            boundary["rejected_reason"] = "local_ui_network_restricted"
+            logger.warning("boundary reject local ui host=%s path=%s", client_ip, request.url.path)
+            return _apply_ui_security_headers(_blocked_response(
+                status_code=403,
+                reason="local_ui_network_restricted",
+                detail="local ui only allowed from internal network",
+            ))
+        if request.url.path == "/__ui__/api/login" and request.method.upper() == "POST":
+            if not _UI_LOGIN_RATE_LIMITER.is_allowed(client_ip):
+                boundary["rejected_reason"] = "ui_login_rate_limited"
+                return _apply_ui_security_headers(
+                    JSONResponse(status_code=429, content={"error": "ui_login_rate_limited", "detail": "too many login attempts"})
+                )
+        if _is_public_ui_path(request.url.path):
+            response = await call_next(request)
+            return _apply_ui_security_headers(response)
+        if not _is_ui_authenticated(request):
+            if request.url.path.startswith("/__ui__/api/"):
+                return _apply_ui_security_headers(JSONResponse(status_code=401, content={"error": "ui_auth_required"}))
+            return _apply_ui_security_headers(RedirectResponse(url="/__ui__/login", status_code=303))
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/__ui__/api/"):
+            if request.url.path != "/__ui__/api/login" and not _verify_ui_csrf(request):
+                return _apply_ui_security_headers(
+                    JSONResponse(status_code=403, content={"error": "ui_csrf_invalid", "detail": "missing or invalid csrf token"})
+                )
+        response = await call_next(request)
+        return _apply_ui_security_headers(response)
 
     # Passthrough: only safe read-only methods (GET/HEAD) on info endpoints.
     # POST/PUT/DELETE to these paths still go through the full security boundary.
@@ -930,6 +1318,213 @@ async def gw_unregister(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 _BOOT_TIME = time.time()
+
+
+def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
+    session_token = request.cookies.get(_UI_SESSION_COOKIE, "") if request is not None else ""
+    return {
+        "app_name": settings.app_name,
+        "status": "ok",
+        "uptime_seconds": int(time.time() - _BOOT_TIME),
+        "server": {
+            "host": settings.host,
+            "port": settings.port,
+        },
+        "upstream_base_url": (settings.upstream_base_url or "").strip(),
+        "security": {
+            "level": settings.security_level,
+            "confirmation_on_block": settings.require_confirmation_on_block,
+            "strict_command_block": settings.strict_command_block_enabled,
+        },
+        "v2": {
+            "enabled": settings.enable_v2_proxy,
+            "request_redaction": settings.v2_enable_request_redaction,
+            "response_filter": settings.v2_enable_response_command_filter,
+        },
+        "ui": {
+            "session_ttl_seconds": settings.local_ui_session_ttl_seconds,
+            "csrf_token": _ui_csrf_token(session_token) if session_token else "",
+        },
+        "docs": _docs_catalog(),
+        "config_sections": {
+            "general": "基础设置",
+            "security": "安全设置",
+            "v2": "v2 代理",
+        },
+    }
+
+
+@app.get("/__ui__/login")
+def local_ui_login_page() -> Response:
+    login_path = (_WWW_DIR / "login.html").resolve()
+    if not login_path.is_file():
+        return PlainTextResponse("local ui login assets not found", status_code=404)
+    return FileResponse(login_path, media_type="text/html; charset=utf-8")
+
+
+@app.get("/__ui__")
+def local_ui_index() -> Response:
+    index_path = (_WWW_DIR / "index.html").resolve()
+    if not index_path.is_file():
+        return PlainTextResponse("local ui assets not found", status_code=404)
+    return FileResponse(index_path, media_type="text/html; charset=utf-8")
+
+
+@app.get("/__ui__/health")
+def local_ui_health() -> dict[str, object]:
+    return {"status": "ok", "ui": True, "uptime_seconds": int(time.time() - _BOOT_TIME)}
+
+
+@app.get("/__ui__/api/bootstrap")
+def local_ui_bootstrap(request: Request) -> dict[str, object]:
+    return _ui_bootstrap_payload(request)
+
+
+@app.get("/__ui__/api/docs")
+def local_ui_docs_list() -> dict[str, object]:
+    return {"items": _docs_catalog()}
+
+
+@app.get("/__ui__/api/config")
+def local_ui_config() -> dict[str, object]:
+    return _ui_config_payload()
+
+
+@app.post("/__ui__/api/config")
+async def local_ui_update_config(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    raw_values = body.get("values")
+    if not isinstance(raw_values, dict):
+        return JSONResponse(status_code=400, content={"error": "invalid_values"})
+
+    field_map = _ui_config_field_map()
+    env_updates: dict[str, str] = {}
+    updated_fields: dict[str, object] = {}
+    for field_name, raw_value in raw_values.items():
+        meta = field_map.get(str(field_name))
+        if meta is None:
+            return JSONResponse(status_code=400, content={"error": "invalid_field", "detail": str(field_name)})
+        try:
+            coerced = _coerce_config_value(meta, raw_value)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": "invalid_field_value", "detail": str(exc)})
+        env_updates[str(meta["env"])] = _serialize_env_value(str(meta["type"]), coerced)
+        updated_fields[str(field_name)] = coerced
+
+    _write_env_updates(env_updates)
+    from aegisgate.core.hot_reload import reload_settings
+
+    reload_settings()
+    return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
+
+
+@app.get("/__ui__/api/docs/{doc_id}")
+def local_ui_doc_content(doc_id: str) -> JSONResponse:
+    doc_path = _resolve_doc_path(doc_id)
+    if doc_path is None:
+        return JSONResponse(status_code=404, content={"error": "doc_not_found"})
+    return JSONResponse(
+        content={
+            "id": doc_id,
+            "title": doc_path.stem.replace("-", " "),
+            "content": doc_path.read_text(encoding="utf-8"),
+            "path": doc_path.name,
+        }
+    )
+
+
+@app.post("/__ui__/api/login")
+async def local_ui_login(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    password = _string_field(body.get("password"))
+    gateway_key = _ensure_gateway_key()
+    if not password or not hmac.compare_digest(password.encode("utf-8"), gateway_key.encode("utf-8")):
+        return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
+    response = JSONResponse(content={"ok": True})
+    response.set_cookie(
+        key=_UI_SESSION_COOKIE,
+        value=_create_ui_session_token(request),
+        max_age=settings.local_ui_session_ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.local_ui_secure_cookie,
+    )
+    return response
+
+
+@app.post("/__ui__/api/logout")
+def local_ui_logout() -> JSONResponse:
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(_UI_SESSION_COOKIE)
+    return response
+
+
+@app.get("/__ui__/api/tokens")
+def local_ui_tokens_list() -> JSONResponse:
+    """列出所有已注册 Token（隐藏 gateway_key 明文）。"""
+    raw = gw_tokens_list()
+    items = []
+    for token, m in raw.items():
+        gk = m.get("gateway_key") or ""
+        items.append(
+            {
+                "token": token,
+                "upstream_base": m.get("upstream_base", ""),
+                "gateway_key_hint": (gk[:6] + "…" + gk[-3:]) if len(gk) > 9 else ("*" * len(gk) if gk else ""),
+                "whitelist_keys": m.get("whitelist_key") or [],
+            }
+        )
+    return JSONResponse(content={"items": items})
+
+
+@app.post("/__ui__/api/tokens")
+async def local_ui_tokens_register(request: Request) -> JSONResponse:
+    """通过 UI 注册新 Token。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    upstream_base = _string_field(body.get("upstream_base"))
+    gateway_key = _string_field(body.get("gateway_key"))
+    if not upstream_base or not gateway_key:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "upstream_base 和 gateway_key 均为必填"},
+        )
+    upstream_normalized = upstream_base.rstrip("/").lower()
+    if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"},
+        )
+    raw_whitelist = body.get("whitelist_key")
+    whitelist = normalize_whitelist_keys(raw_whitelist) if raw_whitelist is not None else []
+    try:
+        token, already = gw_tokens_register(upstream_base.rstrip("/"), gateway_key, whitelist)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
+    return JSONResponse(
+        status_code=200 if already else 201,
+        content={"ok": True, "token": token, "already_registered": already, "base_url": base_url},
+    )
+
+
+@app.delete("/__ui__/api/tokens/{token}")
+def local_ui_tokens_delete(token: str) -> JSONResponse:
+    """注销指定 Token。"""
+    token = token.strip()
+    if not token:
+        return JSONResponse(status_code=400, content={"error": "missing_token"})
+    if gw_tokens_unregister(token):
+        return JSONResponse(content={"ok": True})
+    return JSONResponse(status_code=404, content={"error": "token_not_found"})
 
 
 @app.get("/health")
