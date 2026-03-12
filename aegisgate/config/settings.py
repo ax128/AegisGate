@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     max_pending_payload_bytes: int = 100_000
     max_response_length: int = 500_000
     gateway_key_header: str = "gateway-key"
-    gateway_key: str = ""  # Required; empty triggers auto-generation on first startup
+    gateway_key: str = ""  # Loaded from config/aegis_gateway.key at startup
     tenant_id_header: str = "x-tenant-id"
     confirmation_ttl_seconds: int = 600
     confirmation_executing_timeout_seconds: int = 120
@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     # Trusted reverse-proxy IPs (comma-separated); only these may set X-Forwarded-For.
     # Empty = trust direct client IP only (safest default).
     trusted_proxy_ips: str = ""
+    local_ui_session_ttl_seconds: int = 43_200
+    local_ui_login_rate_limit_per_minute: int = 10
+    local_ui_secure_cookie: bool = False
     # Block internal/private IPs as v2 target URL (SSRF protection)
     v2_block_internal_targets: bool = True
 

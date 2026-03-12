@@ -26,9 +26,10 @@ docker-compose-me.yml
 # Caddy config (local per-deployment)
 Caddyfile
 
-# Encryption keys (NEVER commit)
+# Encryption keys and token mappings (NEVER commit)
 config/aegis_fernet.key
 config/aegis_gateway.key
+config/gw_tokens.json
 *.key
 
 # Local config secrets

@@ -92,15 +92,32 @@ class HotReloader:
 # Reload actions
 # ---------------------------------------------------------------------------
 
+# Fields that must NOT be changed at runtime via hot-reload.
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset({
+    "gateway_key",
+    "enforce_loopback_only",
+    "security_level",
+    "enable_request_hmac_auth",
+    "request_hmac_secret",
+    "v2_block_internal_targets",
+    "trusted_proxy_ips",
+})
+
+
 def reload_settings() -> None:
-    """Reload .env into the global settings singleton."""
+    """Reload .env into the global settings singleton.
+
+    Security-critical fields in ``_IMMUTABLE_FIELDS`` are pinned at startup
+    and cannot be changed via hot-reload.
+    """
     from aegisgate.config.feature_flags import refresh_feature_flags
     from aegisgate.config.settings import Settings, settings
 
     try:
         fresh = Settings()
-        # Copy all field values from the fresh instance to the singleton.
         for field_name in fresh.model_fields:
+            if field_name in _IMMUTABLE_FIELDS:
+                continue
             setattr(settings, field_name, getattr(fresh, field_name))
         refresh_feature_flags()
         logger.info("hot_reload settings reloaded from environment / .env")

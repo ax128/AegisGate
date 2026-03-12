@@ -1211,15 +1211,27 @@ async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
     return func(*args, **kwargs)
 
 
+def _run_request_pipeline_sync(req: Any, ctx: RequestContext) -> Any:
+    """Run request pipeline in pool thread (threading.local binds to THIS thread)."""
+    return _get_pipeline().run_request(req, ctx)
+
+
+def _run_response_pipeline_sync(resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+    """Run response pipeline in pool thread (threading.local binds to THIS thread)."""
+    return _get_pipeline().run_response(resp, ctx)
+
+
 async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContext) -> Any:
     # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+    # _get_pipeline() is called inside the pool thread so that threading.local()
+    # correctly isolates filter instances per pool thread (not per event-loop thread).
     # asyncio.wait_for lets us enforce a hard timeout as a safety net.
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
-        return await asyncio.to_thread(pipeline.run_request, req, ctx)
+        return await asyncio.to_thread(_run_request_pipeline_sync, req, ctx)
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(pipeline.run_request, req, ctx),
+            asyncio.to_thread(_run_request_pipeline_sync, req, ctx),
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
@@ -1241,13 +1253,15 @@ async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContex
 
 async def _run_response_pipeline(pipeline: Pipeline, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
     # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+    # _get_pipeline() is called inside the pool thread so that threading.local()
+    # correctly isolates filter instances per pool thread (not per event-loop thread).
     # asyncio.wait_for lets us enforce a hard timeout as a safety net.
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
-        return await asyncio.to_thread(pipeline.run_response, resp, ctx)
+        return await asyncio.to_thread(_run_response_pipeline_sync, resp, ctx)
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(pipeline.run_response, resp, ctx),
+            asyncio.to_thread(_run_response_pipeline_sync, resp, ctx),
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:

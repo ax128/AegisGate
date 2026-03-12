@@ -59,28 +59,36 @@ _confirmation_cache_task: ConfirmationCacheTask | None = None
 _hot_reloader: HotReloader | None = None
 
 # ---------------------------------------------------------------------------
-# Gateway key auto-generation
+# Gateway key  (file-based, consistent with proxy token and Fernet key)
 # ---------------------------------------------------------------------------
-_GENERATED_KEY_FILE = "aegis_gateway.key"
+_GATEWAY_KEY_FILE = "aegis_gateway.key"
+
+
+_gateway_key_cached: str | None = None
 
 
 def _ensure_gateway_key() -> str:
-    """Return the effective gateway_key; auto-generate if empty."""
-    key = (settings.gateway_key or "").strip()
-    if key:
-        return key
+    """Return the gateway key from config/aegis_gateway.key (auto-created on first run)."""
+    global _gateway_key_cached
 
-    # Try loading persisted auto-generated key
-    from pathlib import Path
-    key_path = (Path.cwd() / "config" / _GENERATED_KEY_FILE).resolve()
+    # If settings.gateway_key was set externally (e.g. tests / monkeypatch), honour it.
+    current = (settings.gateway_key or "").strip()
+    if current and current != _gateway_key_cached:
+        _gateway_key_cached = current
+        return current
+    if _gateway_key_cached:
+        return _gateway_key_cached
+
+    key_path = (Path.cwd() / "config" / _GATEWAY_KEY_FILE).resolve()
     if key_path.is_file():
         stored = key_path.read_text(encoding="utf-8").strip()
         if stored:
             settings.gateway_key = stored
+            _gateway_key_cached = stored
             logger.info("gateway_key loaded from %s", key_path)
             return stored
 
-    # Generate new key
+    # Auto-generate and persist (first run)
     new_key = secrets.token_urlsafe(32)
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(new_key, encoding="utf-8")
@@ -89,11 +97,8 @@ def _ensure_gateway_key() -> str:
     except OSError:
         pass
     settings.gateway_key = new_key
-    logger.warning(
-        "gateway_key was empty — auto-generated and saved to %s. "
-        "Set AEGIS_GATEWAY_KEY env var to use your own key.",
-        key_path,
-    )
+    _gateway_key_cached = new_key
+    logger.info("gateway_key auto-generated and saved to %s", key_path)
     return new_key
 
 
@@ -166,7 +171,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.error("init_config on startup failed: %s", exc)
         raise
 
-    _ensure_gateway_key()
+    _ensure_gateway_key()  # loads / auto-generates config/aegis_gateway.key
     _ensure_proxy_token()
 
     # Log key config so operators can verify the right compose overlay is active.
@@ -342,7 +347,7 @@ class GWTokenRewriteMiddleware:
             return
 
         new_path = f"/{version}/{rest}" if rest else f"/{version}"
-        logger.info("gw_token_rewrite path=%s -> %s token=%s", path, new_path, token)
+        logger.info("gw_token_rewrite path=%s -> %s token=%s…", path, new_path, token[:6])
 
         ub = mapping["upstream_base"]
         gk = mapping["gateway_key"]
@@ -1485,18 +1490,18 @@ def local_ui_tokens_list() -> JSONResponse:
 
 @app.post("/__ui__/api/tokens")
 async def local_ui_tokens_register(request: Request) -> JSONResponse:
-    """通过 UI 注册新 Token。"""
+    """通过 UI 注册新 Token。UI 已通过 Session 认证，gateway_key 由服务端自动取用。"""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     upstream_base = _string_field(body.get("upstream_base"))
-    gateway_key = _string_field(body.get("gateway_key"))
-    if not upstream_base or not gateway_key:
+    if not upstream_base:
         return JSONResponse(
             status_code=400,
-            content={"error": "missing_params", "detail": "upstream_base 和 gateway_key 均为必填"},
+            content={"error": "missing_params", "detail": "upstream_base 为必填"},
         )
+    gateway_key = _ensure_gateway_key()
     upstream_normalized = upstream_base.rstrip("/").lower()
     if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
         return JSONResponse(

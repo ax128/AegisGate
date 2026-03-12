@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -58,7 +60,7 @@ async def relay_generate(payload: dict, request: Request):
         return JSONResponse(status_code=400, content={"error": "invalid_parameters", "detail": "missing upstream base header"})
     if not settings.gateway_key:
         return JSONResponse(status_code=500, content={"error": "gateway_misconfigured"})
-    if gateway_key != settings.gateway_key:
+    if not hmac.compare_digest(gateway_key.encode("utf-8"), settings.gateway_key.encode("utf-8")):
         return JSONResponse(status_code=401, content={"error": "gateway_auth_failed"})
 
     mapped_payload = _relay_to_chat_payload(payload)
