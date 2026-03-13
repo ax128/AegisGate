@@ -15,6 +15,7 @@ COPY config/.env.example /app/config/.env.example
 COPY aegisgate/policies/rules /app/bootstrap/rules
 
 COPY aegisgate/models /app/aegisgate/models
+COPY www /app/www
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir ".[semantic]" \
