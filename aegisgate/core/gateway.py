@@ -1531,7 +1531,7 @@ def local_ui_logout() -> JSONResponse:
 
 @app.get("/__ui__/api/tokens")
 def local_ui_tokens_list() -> JSONResponse:
-    """列出所有已注册 Token（隐藏 gateway_key 明文）。"""
+    """列出所有已注册 Token（隐藏 gateway_key 明文）。whitelist_keys 为脱敏豁免字段名列表。"""
     raw = gw_tokens_list()
     items = []
     for token, m in raw.items():

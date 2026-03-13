@@ -252,7 +252,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>Token 管理</h2>
-                <p class="panel-desc">注册上游地址与 API 密钥，获取可用于转发请求的网关 Token</p>
+                <p class="panel-desc">注册上游地址与网关密钥，获取可用于转发请求的网关 Token；脱敏豁免字段中的值将跳过脱敏直接转发</p>
               </div>
             </div>
 
@@ -281,7 +281,7 @@
                     <th>Token（路由令牌）</th>
                     <th>上游地址</th>
                     <th>网关密钥</th>
-                    <th>白名单</th>
+                    <th>脱敏豁免字段</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -368,9 +368,9 @@
             <p class="field-hint">客户端访问此 Token 路径时须提供的认证密钥，对应服务端 AEGIS_GATEWAY_KEY</p>
           </div>
           <div class="modal-field">
-            <label for="modal-whitelist">白名单密钥（可选）</label>
-            <input id="modal-whitelist" type="text" placeholder="key1, key2, key3">
-            <p class="field-hint">逗号分隔；填写后仅这些密钥可通过此 Token 路径发起请求，留空则不限制</p>
+            <label for="modal-whitelist">脱敏豁免字段（可选）</label>
+            <input id="modal-whitelist" type="text" placeholder="api_key, secret, token">
+            <p class="field-hint">逗号分隔的<strong>字段名</strong>；请求体中 <code>field=value</code> / <code>field:value</code> / <code>"field":"value"</code> 形式的值将<strong>跳过脱敏</strong>，直接原样转发上游。留空则所有字段均参与脱敏。</p>
           </div>
         </div>
         <div class="modal-foot">

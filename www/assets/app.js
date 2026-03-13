@@ -373,7 +373,9 @@ async function loadTokens() {
     items.forEach((item) => {
       const tr = document.createElement("tr");
       const wlCount = Array.isArray(item.whitelist_keys) ? item.whitelist_keys.length : 0;
-      const wlTitle = wlCount ? item.whitelist_keys.join(", ") : "无限制";
+      const wlTitle = wlCount
+        ? `脱敏豁免字段: ${item.whitelist_keys.join(", ")}`
+        : "未设置豁免，所有字段均参与脱敏";
       tr.innerHTML = `
         <td>
           <button class="token-code" title="点击复制完整 Token" data-token="${escapeHtml(item.token)}">
