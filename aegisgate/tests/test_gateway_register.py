@@ -4,6 +4,7 @@ import pytest
 from starlette.requests import Request
 
 from aegisgate.core import gateway
+from aegisgate.core import gateway_network
 
 
 @pytest.fixture(autouse=True)
@@ -64,8 +65,8 @@ async def test_gw_register_base_url_uses_forwarded_headers(monkeypatch):
     monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
     # 127.0.0.1 must be a trusted proxy for forwarded headers to be honoured.
     monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "127.0.0.1")
-    monkeypatch.setattr(gateway, "_trusted_proxy_exact", None)
-    monkeypatch.setattr(gateway, "_trusted_proxy_networks", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
     request = _build_request(
         "/__gw__/register",
         {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent"},

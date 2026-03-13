@@ -1,25 +1,26 @@
-"""FastAPI app entry."""
+"""FastAPI app entry — assembly module.
+
+This file imports from sub-modules and wires the application together.
+The actual logic lives in:
+- gateway_keys.py     — key & proxy token management
+- gateway_network.py  — trusted proxy, loopback, internal IP checks
+- gateway_auth.py     — UI session, CSRF, admin auth, blocked response
+- gateway_ui_config.py — config field data, docs catalog, env helpers
+- gateway_ui_routes.py — UI / keys / rules / compose endpoints
+"""
 
 from __future__ import annotations
 
-import asyncio
 import hmac
-import hashlib
-import ipaddress
-import os
 import re
-import secrets
-import signal
-import tempfile
 import time
-import yaml
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from aegisgate.adapters.openai_compat.router import (
@@ -35,6 +36,64 @@ from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
 from aegisgate.core.hot_reload import HotReloader, build_watcher
+
+# --- Re-exports from sub-modules (backward compatibility) ---
+from aegisgate.core.gateway_keys import (  # noqa: F401
+    _DEFAULT_ADMIN_PASSWORD,
+    _GATEWAY_KEY_FILE,
+    _PROXY_TOKEN_FILE,
+    _PROXY_TOKEN_HEADER,
+    _ensure_gateway_key,
+    _ensure_proxy_token,
+    _gateway_key_cached,
+    _is_admin_initialized,
+    _mark_admin_initialized,
+    get_proxy_token_value,
+)
+from aegisgate.core.gateway_network import (  # noqa: F401
+    _is_internal_ip,
+    _is_loopback_ip,
+    _is_trusted_proxy,
+    _parse_trusted_proxy_ips,
+    _real_client_ip,
+)
+import aegisgate.core.gateway_network as _gw_net  # noqa: F401 — used by tests
+from aegisgate.core.gateway_auth import (  # noqa: F401
+    _UI_SESSION_COOKIE,
+    _apply_ui_security_headers,
+    _blocked_response,
+    _create_ui_session_token,
+    _is_passthrough_read_path,
+    _is_public_ui_path,
+    _is_ui_authenticated,
+    _is_valid_ui_session,
+    _public_base_url,
+    _sanitize_public_host,
+    _string_field,
+    _ui_client_fingerprint,
+    _ui_csrf_token,
+    _ui_session_signature,
+    _verify_admin_gateway_key,
+    _verify_ui_csrf,
+)
+from aegisgate.core.gateway_ui_config import (  # noqa: F401
+    _coerce_config_value,
+    _docs_catalog,
+    _field_default,
+    _parse_bool_value,
+    _read_env_lines,
+    _resolve_doc_path,
+    _serialize_env_value,
+    _ui_config_field_map,
+    _ui_config_payload,
+    _write_env_updates,
+    _UI_CONFIG_FIELDS,
+)
+from aegisgate.core.gateway_ui_routes import (  # noqa: F401
+    register_ui_routes,
+    _ui_bootstrap_payload,
+)
+
 from aegisgate.core.gw_tokens import (
     find_token as gw_tokens_find_token,
     get as gw_tokens_get,
@@ -63,139 +122,6 @@ _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
 _confirmation_cache_task: ConfirmationCacheTask | None = None
 _hot_reloader: HotReloader | None = None
 
-# ---------------------------------------------------------------------------
-# Gateway key  (file-based, consistent with proxy token and Fernet key)
-# ---------------------------------------------------------------------------
-_GATEWAY_KEY_FILE = "aegis_gateway.key"
-
-_ADMIN_INIT_MARKER_FILE = ".admin_initialized"
-_DEFAULT_ADMIN_PASSWORD = "admin123"
-
-
-def _is_admin_initialized() -> bool:
-    """Return True if the admin UI has been accessed at least once."""
-    for candidate in (
-        (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve(),
-        Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE,
-    ):
-        if candidate.is_file():
-            return True
-    return False
-
-
-def _mark_admin_initialized() -> None:
-    """Create the admin init marker file so default password is no longer valid."""
-    marker = (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve()
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    except OSError:
-        try:
-            fallback = Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            fallback.touch()
-        except OSError:
-            pass
-
-
-_gateway_key_cached: str | None = None
-
-
-def _ensure_gateway_key() -> str:
-    """Return the gateway key from config/aegis_gateway.key (auto-created on first run)."""
-    global _gateway_key_cached
-
-    # If settings.gateway_key was set externally (e.g. tests / monkeypatch), honour it.
-    current = (settings.gateway_key or "").strip()
-    if current and current != _gateway_key_cached:
-        _gateway_key_cached = current
-        return current
-    if _gateway_key_cached:
-        return _gateway_key_cached
-
-    key_path = (Path.cwd() / "config" / _GATEWAY_KEY_FILE).resolve()
-    fallback_key_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
-    for candidate in (key_path, fallback_key_path):
-        if candidate.is_file():
-            stored = candidate.read_text(encoding="utf-8").strip()
-            if stored:
-                settings.gateway_key = stored
-                _gateway_key_cached = stored
-                logger.info("gateway_key loaded from %s", candidate)
-                return stored
-
-    # Auto-generate and persist (first run)
-    new_key = secrets.token_urlsafe(32)
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        key_path.write_text(new_key, encoding="utf-8")
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            pass
-        logger.info("gateway_key auto-generated and saved to %s", key_path)
-    except PermissionError:
-        fallback_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
-        fallback_path.parent.mkdir(parents=True, exist_ok=True)
-        fallback_path.write_text(new_key, encoding="utf-8")
-        try:
-            os.chmod(fallback_path, 0o600)
-        except OSError:
-            pass
-        logger.warning(
-            "gateway_key: could not write %s, saved to fallback %s", key_path, fallback_path
-        )
-    settings.gateway_key = new_key
-    _gateway_key_cached = new_key
-    return new_key
-
-
-# ---------------------------------------------------------------------------
-# Internal proxy token auto-generation (Caddy ↔ AegisGate auto-pairing)
-# ---------------------------------------------------------------------------
-_PROXY_TOKEN_FILE = "aegis_proxy_token.key"
-_PROXY_TOKEN_HEADER = "x-aegis-proxy-token"
-_proxy_token_value: str = ""
-
-
-def _ensure_proxy_token() -> str:
-    """Auto-generate an internal proxy token for Caddy ↔ AegisGate trust."""
-    global _proxy_token_value
-    from pathlib import Path
-
-    key_path = (Path.cwd() / "config" / _PROXY_TOKEN_FILE).resolve()
-    fallback_token_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
-    for candidate in (key_path, fallback_token_path):
-        if candidate.is_file():
-            stored = candidate.read_text(encoding="utf-8").strip()
-            if stored:
-                _proxy_token_value = stored
-                logger.info("proxy_token loaded from %s", candidate)
-                return stored
-
-    new_token = secrets.token_urlsafe(32)
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        key_path.write_text(new_token, encoding="utf-8")
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            pass
-        logger.info("proxy_token auto-generated and saved to %s", key_path)
-    except PermissionError:
-        fallback_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
-        fallback_path.parent.mkdir(parents=True, exist_ok=True)
-        fallback_path.write_text(new_token, encoding="utf-8")
-        try:
-            os.chmod(fallback_path, 0o600)
-        except OSError:
-            pass
-        logger.warning(
-            "proxy_token: could not write %s, saved to fallback %s", key_path, fallback_path
-        )
-    _proxy_token_value = new_token
-    return new_token
-
 
 # ---------------------------------------------------------------------------
 # Simple in-memory rate limiter for admin endpoints
@@ -211,7 +137,6 @@ class _AdminRateLimiter:
         cutoff = now - 60.0
         with self._lock:
             bucket = self._buckets[client_ip]
-            # Prune old entries
             self._buckets[client_ip] = [t for t in bucket if t > cutoff]
             if len(self._buckets[client_ip]) >= self._max:
                 return False
@@ -233,11 +158,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.error("init_config on startup failed: %s", exc)
         raise
 
-    _ensure_gateway_key()  # loads / auto-generates config/aegis_gateway.key
+    _ensure_gateway_key()
     _ensure_proxy_token()
-    _ensure_fernet_key()   # loads / auto-generates config/aegis_fernet.key
+    _ensure_fernet_key()
 
-    # Log key config so operators can verify the right compose overlay is active.
     upstream = (settings.upstream_base_url or "").strip()
     logger.info(
         "gateway config: upstream=%s security_level=%s enforce_loopback=%s v2_proxy=%s",
@@ -263,7 +187,6 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
         await _confirmation_cache_task.start()
 
-    # Start hot-reload file watcher
     if _hot_reloader is None:
         _hot_reloader = build_watcher()
         await _hot_reloader.start()
@@ -292,20 +215,6 @@ if settings.enable_relay_endpoint:
 _WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
 _UI_ASSETS_DIR = (_WWW_DIR / "assets").resolve()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_README_PATH = (_PROJECT_ROOT / "README.md").resolve()
-# docs/ 目录为本地私有文档，不在 UI 中展示，也不上传 git。
-# 根目录下这些文件属于本地内部文件，同样不在 UI 中展示。
-_EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
-    {
-        "AGENTS.md",
-        "CHANGELOG.md",
-        "PRODUCTION_READINESS_TEST_REPORT.md",
-        "OPEN_SOURCE_CHECKLIST.md",
-        "PR_DESCRIPTION_2026-02-26-security-hardening.md",
-    }
-)
-_ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
-_UI_SESSION_COOKIE = "aegis_ui_session"
 _UI_LOGIN_RATE_LIMITER = _AdminRateLimiter(max_per_minute=settings.local_ui_login_rate_limit_per_minute)
 if _UI_ASSETS_DIR.is_dir():
     app.mount("/__ui__/assets", StaticFiles(directory=str(_UI_ASSETS_DIR)), name="ui-assets")
@@ -313,76 +222,14 @@ _nonce_cache = build_nonce_cache()
 _admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
-# Paths that bypass security boundary and go directly to route handlers.
 _PASSTHROUGH_PATHS = frozenset({"/", "/health", "/robots.txt", "/favicon.ico"})
 
+
 # ---------------------------------------------------------------------------
-# Trusted proxy handling
+# GWTokenRewriteMiddleware
 # ---------------------------------------------------------------------------
-_trusted_proxy_exact: set[str] | None = None
-_trusted_proxy_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
-
-
-def _parse_trusted_proxy_ips() -> None:
-    """Parse AEGIS_TRUSTED_PROXY_IPS into exact IPs and CIDR networks."""
-    global _trusted_proxy_exact, _trusted_proxy_networks
-    exact: set[str] = set()
-    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    raw = (settings.trusted_proxy_ips or "").strip()
-    for token in raw.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        if "/" in token:
-            try:
-                networks.append(ipaddress.ip_network(token, strict=False))
-            except ValueError:
-                logger.warning("trusted_proxy_ips: invalid CIDR %s, skipped", token)
-        else:
-            exact.add(token)
-    _trusted_proxy_exact = exact
-    _trusted_proxy_networks = networks
-
-
-def _is_trusted_proxy(ip_str: str) -> bool:
-    """Check if an IP is in the trusted proxy list (exact match or CIDR)."""
-    global _trusted_proxy_exact, _trusted_proxy_networks
-    if _trusted_proxy_exact is None:
-        _parse_trusted_proxy_ips()
-    assert _trusted_proxy_exact is not None and _trusted_proxy_networks is not None
-    if not _trusted_proxy_exact and not _trusted_proxy_networks:
-        return False
-    if ip_str in _trusted_proxy_exact:
-        return True
-    if _trusted_proxy_networks:
-        try:
-            addr = ipaddress.ip_address(ip_str)
-            return any(addr in net for net in _trusted_proxy_networks)
-        except ValueError:
-            pass
-    return False
-
-
-def _real_client_ip(request: Request) -> str:
-    """
-    Determine the real client IP.
-    Only trust X-Forwarded-For when the direct connection comes from a trusted proxy.
-    """
-    direct_ip = (request.client.host if request.client else "").strip()
-    if not _is_trusted_proxy(direct_ip):
-        # Not from trusted proxy — use direct connection IP (ignore XFF).
-        return direct_ip
-    # From trusted proxy — take the leftmost (original client) IP from XFF.
-    xff = (request.headers.get("x-forwarded-for") or "").strip()
-    if xff:
-        return xff.split(",", 1)[0].strip()
-    return direct_ip
-
-
 class GWTokenRewriteMiddleware:
-    """
-    在路由匹配前重写 token 路径，避免 /v1/__gw__/t/{token}/... 被 generic 路由误接管。
-    """
+    """在路由匹配前重写 token 路径。"""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -426,7 +273,6 @@ class GWTokenRewriteMiddleware:
         new_scope["aegis_redaction_whitelist_keys"] = wk
 
         headers = list(new_scope.get("headers") or [])
-        # token 访问时移除客户端携带的网关内部头，避免冲突。
         ub_name = settings.upstream_base_header.encode("latin-1")
         gk_name = settings.gateway_key_header.encode("latin-1")
         rk_name = b"x-aegis-redaction-whitelist"
@@ -439,718 +285,9 @@ class GWTokenRewriteMiddleware:
         await self.app(new_scope, receive, send)
 
 
-def _blocked_response(status_code: int, reason: str, detail: str | None = None) -> JSONResponse:
-    # Sanitize detail: never expose internal exception info to client.
-    safe_detail = reason
-    if detail:
-        safe = detail.strip()
-        # Only use detail if it doesn't look like an internal traceback/exception.
-        if not any(marker in safe for marker in ("Traceback", "File ", "line ", "Error:", "Exception:")):
-            safe_detail = safe
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "error": {
-                "message": safe_detail,
-                "type": "aegisgate_error",
-                "code": reason,
-            },
-            "error_code": reason,
-            "detail": safe_detail,
-            "aegisgate": {
-                "action": "block",
-                "risk_score": 1.0,
-                "reasons": [reason],
-            },
-        },
-    )
-
-
-def _is_loopback_ip(host: str) -> bool:
-    if not host:
-        return False
-    if host in _LOOPBACK_HOSTS:
-        return True
-    normalized = host
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    try:
-        ip = ipaddress.ip_address(normalized)
-    except ValueError:
-        return False
-    return ip.is_loopback
-
-
-def _is_internal_ip(host: str) -> bool:
-    if not host:
-        return False
-    if host in _LOOPBACK_HOSTS:
-        return True
-    normalized = host
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    try:
-        ip = ipaddress.ip_address(normalized)
-    except ValueError:
-        return False
-    return ip.is_loopback or ip.is_private or ip.is_link_local
-
-
-def _verify_admin_gateway_key(body: dict) -> bool:
-    """Constant-time comparison of gateway_key from request body against configured key."""
-    provided = str(body.get("gateway_key") or "").strip()
-    expected = (settings.gateway_key or "").strip()
-    if not provided or not expected:
-        return False
-    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
-
-
-def _is_passthrough_read_path(path: str) -> bool:
-    return path == "/__ui__" or path.startswith("/__ui__/")
-
-
-def _is_public_ui_path(path: str) -> bool:
-    return path in {
-        "/__ui__/login",
-        "/__ui__/health",
-        "/__ui__/api/login",
-    } or path.startswith("/__ui__/assets/")
-
-
-def _apply_ui_security_headers(response: Response) -> Response:
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self'; "
-        "style-src 'self'; "
-        "img-src 'self' data:; "
-        "font-src 'self'; "
-        "connect-src 'self'; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'"
-    )
-    return response
-
-
-def _ui_client_fingerprint(request: Request) -> str:
-    client_ip = _real_client_ip(request)
-    user_agent = (request.headers.get("user-agent") or "").strip()[:200]
-    raw = f"{client_ip}|{user_agent}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
-
-def _ui_session_signature(issued_at: int, fingerprint: str) -> str:
-    secret = _ensure_gateway_key().encode("utf-8")
-    payload = f"ui:{issued_at}:{fingerprint}".encode("utf-8")
-    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
-
-
-def _create_ui_session_token(request: Request) -> str:
-    issued_at = int(time.time())
-    fingerprint = _ui_client_fingerprint(request)
-    return f"{issued_at}.{_ui_session_signature(issued_at, fingerprint)}"
-
-
-def _ui_csrf_token(session_token: str) -> str:
-    secret = _ensure_gateway_key().encode("utf-8")
-    return hmac.new(secret, f"csrf:{session_token}".encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _is_valid_ui_session(token: str, request: Request) -> bool:
-    value = (token or "").strip()
-    if not value or "." not in value:
-        return False
-    issued_at_str, signature = value.split(".", 1)
-    try:
-        issued_at = int(issued_at_str)
-    except ValueError:
-        return False
-    if issued_at <= 0:
-        return False
-    if time.time() - issued_at > settings.local_ui_session_ttl_seconds:
-        return False
-    expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request))
-    return hmac.compare_digest(signature, expected)
-
-
-def _is_ui_authenticated(request: Request) -> bool:
-    return _is_valid_ui_session(request.cookies.get(_UI_SESSION_COOKIE, ""), request)
-
-
-def _verify_ui_csrf(request: Request) -> bool:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "")
-    if not _is_valid_ui_session(session_token, request):
-        return False
-    presented = (request.headers.get("x-aegis-ui-csrf") or "").strip()
-    if not presented:
-        return False
-    expected = _ui_csrf_token(session_token)
-    return hmac.compare_digest(presented, expected)
-
-
-_DOC_FRIENDLY_TITLES: dict[str, str] = {
-    "README.md": "README",
-    "WEBUI-QUICKSTART.md": "Web UI 快速上手",
-    "CLIPROXY-QUICKSTART.md": "CLI Proxy 快速上手",
-    "SUB2API-QUICKSTART.md": "Sub2API 快速上手",
-    "AICLIENT2API-QUICKSTART.md": "AI Client→API 快速上手",
-    "OTHER_TERMINAL_CLIENTS_USAGE.md": "其他终端客户端用法",
-    "OPENCLAW_INJECT_PROXY_FETCH.md": "OpenClaw 注入代理",
-    "SKILL.md": "Skill 功能说明",
-}
-# 控制文档在侧边栏的展示顺序，未列出的按文件名字母序追加
-_DOC_ORDER: tuple[str, ...] = (
-    "README.md",
-    "WEBUI-QUICKSTART.md",
-    "CLIPROXY-QUICKSTART.md",
-    "SUB2API-QUICKSTART.md",
-    "AICLIENT2API-QUICKSTART.md",
-    "OTHER_TERMINAL_CLIENTS_USAGE.md",
-    "OPENCLAW_INJECT_PROXY_FETCH.md",
-    "SKILL.md",
-)
-
-
-def _docs_catalog() -> list[dict[str, str]]:
-    """返回 UI 文档目录：按 _DOC_ORDER 排序，仅包含实际存在的文件。
-    docs/ 子目录为本地私有文档，不纳入展示范围。
-    """
-    available: set[str] = {
-        p.name for p in _PROJECT_ROOT.glob("*.md")
-        if p.name not in _EXCLUDED_ROOT_DOCS
-    }
-    docs: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for name in _DOC_ORDER:
-        if name in available:
-            docs.append({
-                "id": name,
-                "title": _DOC_FRIENDLY_TITLES.get(name, name.replace("-", " ").replace("_", " ").rstrip(".md")),
-                "path": name,
-            })
-            seen.add(name)
-    for name in sorted(available - seen):
-        docs.append({
-            "id": name,
-            "title": _DOC_FRIENDLY_TITLES.get(name, name.replace("-", " ").replace("_", " ")),
-            "path": name,
-        })
-    return docs
-
-
-def _resolve_doc_path(doc_id: str) -> Path | None:
-    safe_id = Path(doc_id).name
-    if safe_id != doc_id:
-        return None
-    if safe_id in _EXCLUDED_ROOT_DOCS:
-        return None
-    candidate = (_PROJECT_ROOT / safe_id).resolve()
-    # 只允许读取项目根目录下的 .md 文件，不允许遍历子目录
-    if candidate.is_file() and candidate.suffix == ".md" and candidate.parent == _PROJECT_ROOT:
-        return candidate
-    return None
-
-
-_UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
-    # ---- general ----
-    {
-        "env": "AEGIS_HOST",
-        "field": "host",
-        "label": "监听 Host",
-        "type": "string",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_PORT",
-        "field": "port",
-        "label": "监听端口",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_UPSTREAM_BASE_URL",
-        "field": "upstream_base_url",
-        "label": "直连上游地址",
-        "type": "string",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_LOG_LEVEL",
-        "field": "log_level",
-        "label": "日志级别",
-        "type": "enum",
-        "section": "general",
-        "options": ["debug", "info", "warning", "error"],
-    },
-    {
-        "env": "AEGIS_LOG_FULL_REQUEST_BODY",
-        "field": "log_full_request_body",
-        "label": "打印完整请求体",
-        "type": "bool",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_STORAGE_BACKEND",
-        "field": "storage_backend",
-        "label": "存储后端",
-        "type": "enum",
-        "section": "general",
-        "options": ["sqlite", "redis", "postgres"],
-    },
-    {
-        "env": "AEGIS_SQLITE_DB_PATH",
-        "field": "sqlite_db_path",
-        "label": "SQLite 路径",
-        "type": "string",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_REDIS_URL",
-        "field": "redis_url",
-        "label": "Redis URL",
-        "type": "string",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_UPSTREAM_TIMEOUT_SECONDS",
-        "field": "upstream_timeout_seconds",
-        "label": "上游超时（秒）",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_UPSTREAM_MAX_CONNECTIONS",
-        "field": "upstream_max_connections",
-        "label": "最大并发连接数",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS",
-        "field": "upstream_max_keepalive_connections",
-        "label": "Keepalive 连接池",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_ENABLE_THREAD_OFFLOAD",
-        "field": "enable_thread_offload",
-        "label": "线程池卸载",
-        "type": "bool",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_FILTER_PIPELINE_TIMEOUT_S",
-        "field": "filter_pipeline_timeout_s",
-        "label": "过滤管道超时（秒）",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_MAX_REQUEST_BODY_BYTES",
-        "field": "max_request_body_bytes",
-        "label": "最大请求体（字节）",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_MAX_MESSAGES_COUNT",
-        "field": "max_messages_count",
-        "label": "最大消息条数",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE",
-        "field": "max_content_length_per_message",
-        "label": "单条消息最大字符",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_MAX_PENDING_PAYLOAD_BYTES",
-        "field": "max_pending_payload_bytes",
-        "label": "Pending 最大字节",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_MAX_RESPONSE_LENGTH",
-        "field": "max_response_length",
-        "label": "最大响应字符",
-        "type": "int",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_AUDIT_LOG_PATH",
-        "field": "audit_log_path",
-        "label": "审计日志路径",
-        "type": "string",
-        "section": "general",
-    },
-    {
-        "env": "AEGIS_TRUSTED_PROXY_IPS",
-        "field": "trusted_proxy_ips",
-        "label": "信任代理 IP（逗号分隔）",
-        "type": "string",
-        "section": "general",
-    },
-    # ---- security ----
-    {
-        "env": "AEGIS_SECURITY_LEVEL",
-        "field": "security_level",
-        "label": "安全档位",
-        "type": "enum",
-        "section": "security",
-        "options": ["low", "medium", "high"],
-    },
-    {
-        "env": "AEGIS_DEFAULT_POLICY",
-        "field": "default_policy",
-        "label": "默认策略",
-        "type": "enum",
-        "section": "security",
-        "options": ["default", "permissive", "strict"],
-    },
-    {
-        "env": "AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK",
-        "field": "require_confirmation_on_block",
-        "label": "拦截需确认放行",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_STRICT_COMMAND_BLOCK_ENABLED",
-        "field": "strict_command_block_enabled",
-        "label": "强制命令拦截",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_CONFIRMATION_TTL_SECONDS",
-        "field": "confirmation_ttl_seconds",
-        "label": "确认超时（秒）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_CONFIRMATION_EXECUTING_TIMEOUT_SECONDS",
-        "field": "confirmation_executing_timeout_seconds",
-        "label": "执行等待超时（秒）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW",
-        "field": "confirmation_show_hit_preview",
-        "label": "确认文案显示命中片段",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_PENDING_DATA_TTL_SECONDS",
-        "field": "pending_data_ttl_seconds",
-        "label": "Pending 数据保留（秒）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_RISK_SCORE_THRESHOLD",
-        "field": "risk_score_threshold",
-        "label": "风险评分阈值（0-1）",
-        "type": "string",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION",
-        "field": "request_pipeline_timeout_action",
-        "label": "请求管道超时动作",
-        "type": "enum",
-        "section": "security",
-        "options": ["block", "pass"],
-    },
-    {
-        "env": "AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE",
-        "field": "admin_rate_limit_per_minute",
-        "label": "管理接口限流（次/分）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENFORCE_LOOPBACK_ONLY",
-        "field": "enforce_loopback_only",
-        "label": "仅环回地址",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_SEMANTIC_MODULE",
-        "field": "enable_semantic_module",
-        "label": "语义模块",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_SEMANTIC_GRAY_LOW",
-        "field": "semantic_gray_low",
-        "label": "语义低风险阈值",
-        "type": "string",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_SEMANTIC_GRAY_HIGH",
-        "field": "semantic_gray_high",
-        "label": "语义高风险阈值",
-        "type": "string",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_SEMANTIC_TIMEOUT_MS",
-        "field": "semantic_timeout_ms",
-        "label": "语义超时（ms）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_SEMANTIC_CACHE_TTL_SECONDS",
-        "field": "semantic_cache_ttl_seconds",
-        "label": "语义缓存 TTL（秒）",
-        "type": "int",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_SEMANTIC_SERVICE_URL",
-        "field": "semantic_service_url",
-        "label": "语义服务外部 URL",
-        "type": "string",
-        "section": "security",
-    },
-    # feature flags
-    {
-        "env": "AEGIS_ENABLE_REDACTION",
-        "field": "enable_redaction",
-        "label": "PII 脱敏",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_RESTORATION",
-        "field": "enable_restoration",
-        "label": "脱敏还原",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_INJECTION_DETECTOR",
-        "field": "enable_injection_detector",
-        "label": "注入检测",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_PRIVILEGE_GUARD",
-        "field": "enable_privilege_guard",
-        "label": "权限提升防护",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_ANOMALY_DETECTOR",
-        "field": "enable_anomaly_detector",
-        "label": "异常检测",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_REQUEST_SANITIZER",
-        "field": "enable_request_sanitizer",
-        "label": "请求净化",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_OUTPUT_SANITIZER",
-        "field": "enable_output_sanitizer",
-        "label": "输出净化",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_POST_RESTORE_GUARD",
-        "field": "enable_post_restore_guard",
-        "label": "还原后检测",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_UNTRUSTED_CONTENT_GUARD",
-        "field": "enable_untrusted_content_guard",
-        "label": "不可信内容防护",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_TOOL_CALL_GUARD",
-        "field": "enable_tool_call_guard",
-        "label": "工具调用防护",
-        "type": "bool",
-        "section": "security",
-    },
-    {
-        "env": "AEGIS_ENABLE_RAG_POISON_GUARD",
-        "field": "enable_rag_poison_guard",
-        "label": "RAG 投毒防护",
-        "type": "bool",
-        "section": "security",
-    },
-    # ---- v2 proxy ----
-    {
-        "env": "AEGIS_ENABLE_V2_PROXY",
-        "field": "enable_v2_proxy",
-        "label": "启用 v2 代理",
-        "type": "bool",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_ENABLE_REQUEST_REDACTION",
-        "field": "v2_enable_request_redaction",
-        "label": "v2 请求脱敏",
-        "type": "bool",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER",
-        "field": "v2_enable_response_command_filter",
-        "label": "v2 响应指令过滤",
-        "type": "bool",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY",
-        "field": "v2_response_filter_obvious_only",
-        "label": "v2 最小误拦模式",
-        "type": "bool",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_BLOCK_INTERNAL_TARGETS",
-        "field": "v2_block_internal_targets",
-        "label": "v2 SSRF 防护",
-        "type": "bool",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS",
-        "field": "v2_response_filter_bypass_hosts",
-        "label": "v2 过滤豁免域名",
-        "type": "string",
-        "section": "v2",
-    },
-    {
-        "env": "AEGIS_V2_RESPONSE_FILTER_MAX_CHARS",
-        "field": "v2_response_filter_max_chars",
-        "label": "v2 响应最大扫描字符",
-        "type": "int",
-        "section": "v2",
-    },
-)
-
-
-def _ui_config_field_map() -> dict[str, dict[str, object]]:
-    return {str(item["field"]): dict(item) for item in _UI_CONFIG_FIELDS}
-
-
-def _field_default(field_name: str) -> object:
-    field_info = settings.__class__.model_fields[field_name]
-    return field_info.default
-
-
-def _serialize_env_value(kind: str, value: object) -> str:
-    if kind == "bool":
-        return "true" if bool(value) else "false"
-    return str(value)
-
-
-def _parse_bool_value(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    normalized = str(value or "").strip().lower()
-    return normalized in {"1", "true", "yes", "on"}
-
-
-def _coerce_config_value(meta: dict[str, object], raw_value: object) -> object:
-    kind = str(meta["type"])
-    if kind == "bool":
-        return _parse_bool_value(raw_value)
-    if kind == "int":
-        try:
-            return int(str(raw_value).strip())
-        except ValueError as exc:
-            raise ValueError(f"invalid integer for {meta['field']}") from exc
-    value = str(raw_value or "").strip()
-    if kind == "enum":
-        raw_options = meta.get("options")
-        options = {str(item) for item in raw_options} if isinstance(raw_options, list) else set()
-        if value not in options:
-            raise ValueError(f"invalid option for {meta['field']}")
-    return value
-
-
-def _read_env_lines() -> list[str]:
-    if not _ENV_PATH.exists():
-        return []
-    return _ENV_PATH.read_text(encoding="utf-8").splitlines()
-
-
-def _write_env_updates(updates: dict[str, str]) -> None:
-    existing_lines = _read_env_lines()
-    consumed: set[str] = set()
-    new_lines: list[str] = []
-    for line in existing_lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            new_lines.append(line)
-            continue
-        key, _, _value = line.partition("=")
-        key = key.strip()
-        if key in updates:
-            new_lines.append(f"{key}={updates[key]}")
-            consumed.add(key)
-        else:
-            new_lines.append(line)
-    if new_lines and new_lines[-1].strip():
-        new_lines.append("")
-    for key in updates:
-        if key not in consumed:
-            new_lines.append(f"{key}={updates[key]}")
-    _ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(_ENV_PATH.parent)) as tmp:
-        tmp.write("\n".join(new_lines).rstrip() + "\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(_ENV_PATH)
-
-
-def _ui_config_payload() -> dict[str, object]:
-    items: list[dict[str, object]] = []
-    for meta in _UI_CONFIG_FIELDS:
-        field_name = str(meta["field"])
-        current_value = getattr(settings, field_name)
-        default_value = _field_default(field_name)
-        items.append(
-            {
-                **meta,
-                "value": current_value,
-                "default": default_value,
-            }
-        )
-    return {"items": items}
-
-
+# ---------------------------------------------------------------------------
+# Security boundary middleware
+# ---------------------------------------------------------------------------
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary = {
@@ -1184,6 +321,7 @@ async def security_boundary_middleware(request: Request, call_next):
         if not _is_ui_authenticated(request):
             if request.url.path.startswith("/__ui__/api/"):
                 return _apply_ui_security_headers(JSONResponse(status_code=401, content={"error": "ui_auth_required"}))
+            from fastapi.responses import RedirectResponse
             return _apply_ui_security_headers(RedirectResponse(url="/__ui__/login", status_code=303))
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/__ui__/api/"):
             if request.url.path != "/__ui__/api/login" and not _verify_ui_csrf(request):
@@ -1193,25 +331,18 @@ async def security_boundary_middleware(request: Request, call_next):
         response = await call_next(request)
         return _apply_ui_security_headers(response)
 
-    # Passthrough: only safe read-only methods (GET/HEAD) on info endpoints.
-    # POST/PUT/DELETE to these paths still go through the full security boundary.
     if request.url.path in _PASSTHROUGH_PATHS and request.method.upper() in {"GET", "HEAD"}:
         return await call_next(request)
 
     logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
-    # --- Admin endpoint protection ---
     if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
         client_ip = _real_client_ip(request)
-
-        # Rate limiting
         if not _admin_rate_limiter.is_allowed(client_ip):
             await request.body()
             boundary["rejected_reason"] = "admin_rate_limited"
             logger.warning("boundary reject admin rate limit host=%s path=%s", client_ip, request.url.path)
             return _blocked_response(status_code=429, reason="admin_rate_limited", detail="too many requests")
-
-        # Network restriction: require loopback or internal IP
         if not _is_internal_ip(client_ip):
             await request.body()
             boundary["rejected_reason"] = "admin_endpoint_network_restricted"
@@ -1229,12 +360,10 @@ async def security_boundary_middleware(request: Request, call_next):
     protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
     protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
 
-    # --- Internal proxy token: Caddy ↔ AegisGate auto-pairing ---
-    # If the request carries a valid X-Aegis-Proxy-Token, authenticate it
-    # with the default upstream automatically (no token path needed).
     if not bool(request.scope.get("aegis_token_authenticated")) and (protected_v1 or protected_v2):
         proxy_token = (request.headers.get(_PROXY_TOKEN_HEADER) or "").strip()
-        if proxy_token and _proxy_token_value and hmac.compare_digest(proxy_token, _proxy_token_value):
+        proxy_token_value = get_proxy_token_value()
+        if proxy_token and proxy_token_value and hmac.compare_digest(proxy_token, proxy_token_value):
             default_base = (settings.upstream_base_url or "").strip()
             if default_base:
                 request.scope["aegis_upstream_base"] = default_base
@@ -1242,9 +371,6 @@ async def security_boundary_middleware(request: Request, call_next):
                 boundary["auth_verified"] = True
 
     if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
-        # 若配置了默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://cli-proxy-api:8317/v1），
-        # 则 v1 可直接转发到该上游，无需 token 注册。
-        # CLIProxyAPI 自行负责 API key 校验。
         default_base = (settings.upstream_base_url or "").strip()
         if default_base:
             request.scope["aegis_upstream_base"] = default_base
@@ -1365,7 +491,7 @@ async def security_boundary_middleware(request: Request, call_next):
         return _blocked_response(
             status_code=500,
             reason="gateway_internal_error",
-            detail="an internal error occurred",  # Never expose exc details
+            detail="an internal error occurred",
         )
     if boundary.get("auth_verified"):
         response.headers["x-aegis-auth-verified"] = "true"
@@ -1378,7 +504,10 @@ async def security_boundary_middleware(request: Request, call_next):
     return response
 
 
-# 注册时禁止使用的示例/占位 upstream_base，避免用户未替换就提交
+# ---------------------------------------------------------------------------
+# Admin API endpoints (register / add / remove / lookup / unregister)
+# ---------------------------------------------------------------------------
+
 _FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
     u.rstrip("/").lower()
     for u in (
@@ -1386,41 +515,6 @@ _FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
         "http://your-upstream.example.com/v1",
     )
 )
-
-
-def _sanitize_public_host(raw_host: str) -> str:
-    host = (raw_host or "").strip()
-    if not host:
-        return f"127.0.0.1:{settings.port}"
-    if re.search(r"[^A-Za-z0-9.\-:\[\]]", host):
-        return f"127.0.0.1:{settings.port}"
-    lowered = host.lower()
-    if lowered in {"0.0.0.0", "::", "[::]"}:
-        return f"127.0.0.1:{settings.port}"
-    if lowered.startswith("0.0.0.0:"):
-        return f"127.0.0.1:{host.split(':', 1)[1]}"
-    if lowered.startswith("[::]:"):
-        return f"127.0.0.1:{host.split(':', 1)[1]}"
-    return host
-
-
-def _public_base_url(request: Request) -> str:
-    # Only trust forwarded headers from trusted proxies.
-    direct_ip = (request.client.host if request.client else "").strip()
-    if _is_trusted_proxy(direct_ip):
-        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-        forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
-    else:
-        forwarded_proto = ""
-        forwarded_host = ""
-    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme or "http"
-    host_header = (request.headers.get("host") or "").strip()
-    host = _sanitize_public_host(forwarded_host or host_header or f"{settings.host}:{settings.port}")
-    return f"{scheme}://{host}"
-
-
-def _string_field(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _normalize_required_whitelist_list(value: object) -> list[str] | None:
@@ -1445,53 +539,34 @@ async def gw_register(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "upstream_base and gateway_key required"},
         )
-
-    # Authenticate: gateway_key must match the configured key.
     if not _verify_admin_gateway_key(body):
         logger.warning("register rejected: gateway_key mismatch")
         return JSONResponse(
             status_code=403,
             content={"error": "gateway_key_invalid", "detail": "gateway_key does not match the configured key"},
         )
-
     upstream_normalized = upstream_base.rstrip("/").lower()
     if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "example_upstream_forbidden",
-                "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再注册。",
-            },
+            content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再注册。"},
         )
     upstream_base_normalized = upstream_base.rstrip("/")
     if whitelist_present:
-        token, already_registered = gw_tokens_register(
-            upstream_base_normalized,
-            gateway_key,
-            requested_whitelist,
-        )
+        token, already_registered = gw_tokens_register(upstream_base_normalized, gateway_key, requested_whitelist)
     else:
-        token, already_registered = gw_tokens_register(
-            upstream_base_normalized,
-            gateway_key,
-        )
+        token, already_registered = gw_tokens_register(upstream_base_normalized, gateway_key)
     stored = gw_tokens_get(token) or {}
-    effective_whitelist = (
-        normalize_whitelist_keys(stored.get("whitelist_key"))
-        if stored
-        else (requested_whitelist or [])
-    )
+    effective_whitelist = normalize_whitelist_keys(stored.get("whitelist_key")) if stored else (requested_whitelist or [])
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     if already_registered:
-        return JSONResponse(
-            content={
-                "already_registered": True,
-                "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
-                "token": token,
-                "baseUrl": base_url,
-                "whitelist_key": effective_whitelist,
-            },
-        )
+        return JSONResponse(content={
+            "already_registered": True,
+            "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
+            "token": token,
+            "baseUrl": base_url,
+            "whitelist_key": effective_whitelist,
+        })
     return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": effective_whitelist})
 
 
@@ -1510,7 +585,6 @@ async def gw_add(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
         )
-    # Authenticate: gateway_key must match the configured key.
     if not _verify_admin_gateway_key(body):
         return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     upstream_base_input = _string_field(body.get("upstream_base"))
@@ -1519,55 +593,31 @@ async def gw_add(request: Request) -> JSONResponse:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     mapped_gateway_key = _string_field(mapping.get("gateway_key"))
     if mapped_gateway_key != gateway_key:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
-        )
+        return JSONResponse(status_code=403, content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"})
     current_upstream_base = _string_field(mapping.get("upstream_base")).rstrip("/")
     next_upstream_base = current_upstream_base
     if upstream_base_input:
         normalized_upstream = upstream_base_input.rstrip("/")
         normalized_lower = normalized_upstream.lower()
         if normalized_lower in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "example_upstream_forbidden",
-                    "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再更新。",
-                },
-            )
+            return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再更新。"})
         existing = gw_tokens_find_token(normalized_upstream, gateway_key)
         if existing is not None and existing != token:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "upstream_pair_conflict", "detail": "target upstream_base + gateway_key already bound"},
-            )
+            return JSONResponse(status_code=409, content={"error": "upstream_pair_conflict", "detail": "target upstream_base + gateway_key already bound"})
         next_upstream_base = normalized_upstream
-
     current = normalize_whitelist_keys(mapping.get("whitelist_key"))
     current_set = set(current)
     added = [k for k in whitelist_add if k not in current_set]
     next_whitelist = current + added
-    updated = gw_tokens_update(
-        token,
-        upstream_base=next_upstream_base,
-        gateway_key=gateway_key,
-        whitelist_key=next_whitelist,
-    )
+    updated = gw_tokens_update(token, upstream_base=next_upstream_base, gateway_key=gateway_key, whitelist_key=next_whitelist)
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
-    return JSONResponse(
-        content={
-            "token": token,
-            "gateway_key": gateway_key,
-            "upstream_base": next_upstream_base,
-            "baseUrl": base_url,
-            "whitelist_key": normalize_whitelist_keys(latest),
-            "added": added,
-        }
-    )
+    return JSONResponse(content={
+        "token": token, "gateway_key": gateway_key, "upstream_base": next_upstream_base,
+        "baseUrl": base_url, "whitelist_key": normalize_whitelist_keys(latest), "added": added,
+    })
 
 
 @app.post("/__gw__/remove")
@@ -1585,7 +635,6 @@ async def gw_remove(request: Request) -> JSONResponse:
             status_code=400,
             content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
         )
-    # Authenticate
     if not _verify_admin_gateway_key(body):
         return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     mapping = gw_tokens_get(token)
@@ -1593,39 +642,26 @@ async def gw_remove(request: Request) -> JSONResponse:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     mapped_gateway_key = _string_field(mapping.get("gateway_key"))
     if mapped_gateway_key != gateway_key:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
-        )
+        return JSONResponse(status_code=403, content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"})
     upstream_base = _string_field(mapping.get("upstream_base")).rstrip("/")
     current = normalize_whitelist_keys(mapping.get("whitelist_key"))
     remove_set = set(whitelist_remove)
     removed = [k for k in current if k in remove_set]
     next_whitelist = [k for k in current if k not in remove_set]
-    updated = gw_tokens_update(
-        token,
-        upstream_base=upstream_base,
-        gateway_key=gateway_key,
-        whitelist_key=next_whitelist,
-    )
+    updated = gw_tokens_update(token, upstream_base=upstream_base, gateway_key=gateway_key, whitelist_key=next_whitelist)
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
-    return JSONResponse(
-        content={
-            "token": token,
-            "gateway_key": gateway_key,
-            "baseUrl": base_url,
-            "whitelist_key": normalize_whitelist_keys(latest),
-            "removed": removed,
-        }
-    )
+    return JSONResponse(content={
+        "token": token, "gateway_key": gateway_key, "baseUrl": base_url,
+        "whitelist_key": normalize_whitelist_keys(latest), "removed": removed,
+    })
 
 
 @app.post("/__gw__/lookup")
 async def gw_lookup(request: Request) -> JSONResponse:
-    """根据 upstream_base + gateway_key 查询已注册的 token，避免忘记。不存在返回 404。"""
+    """根据 upstream_base + gateway_key 查询已注册的 token。"""
     try:
         body = await request.json()
     except Exception:
@@ -1633,31 +669,15 @@ async def gw_lookup(request: Request) -> JSONResponse:
     upstream_base = _string_field(body.get("upstream_base"))
     gateway_key = _string_field(body.get("gateway_key"))
     if not upstream_base or not gateway_key:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "missing_params", "detail": "upstream_base and gateway_key required"},
-        )
-    # Authenticate
+        return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "upstream_base and gateway_key required"})
     if not _verify_admin_gateway_key(body):
         return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     upstream_normalized = upstream_base.rstrip("/").lower()
     if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "example_upstream_forbidden",
-                "detail": "upstream_base 不能使用文档中的示例地址。",
-            },
-        )
+        return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址。"})
     token = gw_tokens_find_token(upstream_base, gateway_key)
     if token is None:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error": "not_found",
-                "detail": "该 upstream_base + gateway_key 未注册，请先调用 /__gw__/register 注册。",
-            },
-        )
+        return JSONResponse(status_code=404, content={"error": "not_found", "detail": "该 upstream_base + gateway_key 未注册，请先调用 /__gw__/register 注册。"})
     base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
     mapping = gw_tokens_get(token) or {}
     whitelist_key = normalize_whitelist_keys(mapping.get("whitelist_key"))
@@ -1666,7 +686,7 @@ async def gw_lookup(request: Request) -> JSONResponse:
 
 @app.post("/__gw__/unregister")
 async def gw_unregister(request: Request) -> JSONResponse:
-    """删除 token 映射：body 传 token，删除后写回 config。"""
+    """删除 token 映射。"""
     try:
         body = await request.json()
     except Exception:
@@ -1674,11 +694,7 @@ async def gw_unregister(request: Request) -> JSONResponse:
     token = _string_field(body.get("token"))
     gateway_key = _string_field(body.get("gateway_key"))
     if not token or not gateway_key:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "missing_params", "detail": "token and gateway_key required"},
-        )
-    # Authenticate
+        return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "token and gateway_key required"})
     if not _verify_admin_gateway_key(body):
         return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
     mapping = gw_tokens_get(token)
@@ -1686,638 +702,34 @@ async def gw_unregister(request: Request) -> JSONResponse:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     mapped_gateway_key = _string_field(mapping.get("gateway_key"))
     if mapped_gateway_key != gateway_key:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"},
-        )
+        return JSONResponse(status_code=403, content={"error": "gateway_key_mismatch", "detail": "token and gateway_key not matched"})
     if gw_tokens_unregister(token):
         return JSONResponse(content={"ok": True, "message": "token removed"})
     return JSONResponse(status_code=404, content={"error": "token_not_found"})
 
 
 # ---------------------------------------------------------------------------
-# Info / health / liveness endpoints
+# Register UI routes
 # ---------------------------------------------------------------------------
-
-_BOOT_TIME = time.time()
-
-
-def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "") if request is not None else ""
-    return {
-        "app_name": settings.app_name,
-        "status": "ok",
-        "uptime_seconds": int(time.time() - _BOOT_TIME),
-        "server": {
-            "host": settings.host,
-            "port": settings.port,
-        },
-        "upstream_base_url": (settings.upstream_base_url or "").strip(),
-        "security": {
-            "level": settings.security_level,
-            "confirmation_on_block": settings.require_confirmation_on_block,
-            "strict_command_block": settings.strict_command_block_enabled,
-        },
-        "v2": {
-            "enabled": settings.enable_v2_proxy,
-            "request_redaction": settings.v2_enable_request_redaction,
-            "response_filter": settings.v2_enable_response_command_filter,
-        },
-        "ui": {
-            "session_ttl_seconds": settings.local_ui_session_ttl_seconds,
-            "csrf_token": _ui_csrf_token(session_token) if session_token else "",
-        },
-        "docs": _docs_catalog(),
-        "config_sections": {
-            "general": "基础设置",
-            "security": "安全设置",
-            "v2": "v2 代理",
-        },
-    }
+register_ui_routes(app)
 
 
-@app.get("/__ui__/login")
-def local_ui_login_page() -> Response:
-    login_path = (_WWW_DIR / "login.html").resolve()
-    if not login_path.is_file():
-        return PlainTextResponse("local ui login assets not found", status_code=404)
-    return FileResponse(login_path, media_type="text/html; charset=utf-8")
-
-
-@app.get("/__ui__")
-def local_ui_index() -> Response:
-    index_path = (_WWW_DIR / "index.html").resolve()
-    if not index_path.is_file():
-        return PlainTextResponse("local ui assets not found", status_code=404)
-    return FileResponse(index_path, media_type="text/html; charset=utf-8")
-
-
-@app.get("/__ui__/health")
-def local_ui_health() -> dict[str, object]:
-    return {"status": "ok", "ui": True, "uptime_seconds": int(time.time() - _BOOT_TIME)}
-
-
-@app.get("/__ui__/api/bootstrap")
+# Backward-compat aliases for functions that tests call directly.
 def local_ui_bootstrap(request: Request) -> dict[str, object]:
     return _ui_bootstrap_payload(request)
 
 
-@app.get("/__ui__/api/docs")
-def local_ui_docs_list() -> dict[str, object]:
-    return {"items": _docs_catalog()}
-
-
-@app.get("/__ui__/api/config")
-def local_ui_config() -> dict[str, object]:
-    return _ui_config_payload()
-
-
-@app.post("/__ui__/api/config")
-async def local_ui_update_config(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    raw_values = body.get("values")
-    if not isinstance(raw_values, dict):
-        return JSONResponse(status_code=400, content={"error": "invalid_values"})
-
-    field_map = _ui_config_field_map()
-    env_updates: dict[str, str] = {}
-    updated_fields: dict[str, object] = {}
-    for field_name, raw_value in raw_values.items():
-        meta = field_map.get(str(field_name))
-        if meta is None:
-            return JSONResponse(status_code=400, content={"error": "invalid_field", "detail": str(field_name)})
-        try:
-            coerced = _coerce_config_value(meta, raw_value)
-        except ValueError as exc:
-            return JSONResponse(status_code=400, content={"error": "invalid_field_value", "detail": str(exc)})
-        env_updates[str(meta["env"])] = _serialize_env_value(str(meta["type"]), coerced)
-        updated_fields[str(field_name)] = coerced
-
-    _write_env_updates(env_updates)
-    from aegisgate.core.hot_reload import reload_settings
-
-    reload_settings()
-    return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
-
-
-@app.get("/__ui__/api/docs/{doc_id}")
-def local_ui_doc_content(doc_id: str) -> JSONResponse:
-    doc_path = _resolve_doc_path(doc_id)
-    if doc_path is None:
-        return JSONResponse(status_code=404, content={"error": "doc_not_found"})
-    return JSONResponse(
-        content={
-            "id": doc_id,
-            "title": doc_path.stem.replace("-", " "),
-            "content": doc_path.read_text(encoding="utf-8"),
-            "path": doc_path.name,
-        }
-    )
-
-
-@app.post("/__ui__/api/login")
-async def local_ui_login(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    password = _string_field(body.get("password"))
-    gateway_key = _ensure_gateway_key()
-    # Allow default password "admin123" only before the first successful login
-    default_ok = (not _is_admin_initialized()) and password == _DEFAULT_ADMIN_PASSWORD
-    key_ok = bool(password) and hmac.compare_digest(password.encode("utf-8"), gateway_key.encode("utf-8"))
-    if not (default_ok or key_ok):
-        return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
-    _mark_admin_initialized()
-    response = JSONResponse(content={"ok": True})
-    response.set_cookie(
-        key=_UI_SESSION_COOKIE,
-        value=_create_ui_session_token(request),
-        max_age=settings.local_ui_session_ttl_seconds,
-        httponly=True,
-        samesite="lax",
-        secure=settings.local_ui_secure_cookie,
-    )
-    return response
-
-
-@app.post("/__ui__/api/logout")
-def local_ui_logout() -> JSONResponse:
-    response = JSONResponse(content={"ok": True})
-    response.delete_cookie(_UI_SESSION_COOKIE)
-    return response
-
-
-@app.get("/__ui__/api/tokens")
-def local_ui_tokens_list() -> JSONResponse:
-    """列出所有已注册 Token（隐藏 gateway_key 明文）。whitelist_keys 为脱敏豁免字段名列表。"""
-    raw = gw_tokens_list()
-    items = []
-    for token, m in raw.items():
-        gk = m.get("gateway_key") or ""
-        items.append(
-            {
-                "token": token,
-                "upstream_base": m.get("upstream_base", ""),
-                "gateway_key_hint": (gk[:6] + "…" + gk[-3:]) if len(gk) > 9 else ("*" * len(gk) if gk else ""),
-                "whitelist_keys": m.get("whitelist_key") or [],
-            }
-        )
-    return JSONResponse(content={"items": items})
-
-
-@app.post("/__ui__/api/tokens")
-async def local_ui_tokens_register(request: Request) -> JSONResponse:
-    """通过 UI 注册新 Token。UI 已通过 Session 认证，gateway_key 由服务端自动取用。"""
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    upstream_base = _string_field(body.get("upstream_base"))
-    if not upstream_base:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "missing_params", "detail": "upstream_base 为必填"},
-        )
-    gateway_key = _ensure_gateway_key()
-    upstream_normalized = upstream_base.rstrip("/").lower()
-    if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"},
-        )
-    raw_whitelist = body.get("whitelist_key")
-    whitelist = normalize_whitelist_keys(raw_whitelist) if raw_whitelist is not None else []
-    try:
-        token, already = gw_tokens_register(upstream_base.rstrip("/"), gateway_key, whitelist)
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
-    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
-    return JSONResponse(
-        status_code=200 if already else 201,
-        content={"ok": True, "token": token, "already_registered": already, "base_url": base_url},
-    )
-
-
-@app.patch("/__ui__/api/tokens/{token}")
-async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
-    """更新指定 Token 的字段（upstream_base / gateway_key / whitelist_key / new_token）。"""
-    token = token.strip()
-    if not token:
-        return JSONResponse(status_code=400, content={"error": "missing_token"})
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    kwargs: dict = {}
-    new_token_val: str | None = None
-    if "upstream_base" in body:
-        upstream_base = _string_field(body["upstream_base"])
-        if not upstream_base:
-            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "upstream_base 不能为空"})
-        upstream_normalized = upstream_base.rstrip("/").lower()
-        if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
-            return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
-        kwargs["upstream_base"] = upstream_base.rstrip("/")
-    if "gateway_key" in body:
-        gk = _string_field(body["gateway_key"])
-        if not gk:
-            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "gateway_key 不能为空"})
-        kwargs["gateway_key"] = gk
-    if "whitelist_key" in body:
-        kwargs["whitelist_key"] = body["whitelist_key"]
-    if "new_token" in body:
-        new_token_val = _string_field(body["new_token"])
-        if not new_token_val:
-            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "new_token 不能为空"})
-    if not kwargs and new_token_val is None:
-        return JSONResponse(status_code=400, content={"error": "no_fields", "detail": "未提供任何可更新字段"})
-    active_token = new_token_val if (new_token_val and new_token_val != token) else token
-    try:
-        updated = gw_tokens_update_and_rename(
-            token,
-            new_token=new_token_val if new_token_val != token else None,
-            **kwargs,
-        )
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
-    if not updated:
-        return JSONResponse(status_code=404, content={"error": "token_not_found"})
-    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{active_token}"
-    return JSONResponse(content={"ok": True, "token": active_token, "base_url": base_url})
-
-
-@app.delete("/__ui__/api/tokens/{token}")
-def local_ui_tokens_delete(token: str) -> JSONResponse:
-    """注销指定 Token。"""
-    token = token.strip()
-    if not token:
-        return JSONResponse(status_code=400, content={"error": "missing_token"})
-    if gw_tokens_unregister(token):
-        return JSONResponse(content={"ok": True})
-    return JSONResponse(status_code=404, content={"error": "token_not_found"})
-
+def local_ui_index() -> Response:
+    index_path = (_WWW_DIR / "index.html").resolve()
+    if not index_path.is_file():
+        return PlainTextResponse("local ui assets not found", status_code=404)
+    from fastapi.responses import FileResponse
+    return FileResponse(index_path, media_type="text/html; charset=utf-8")
 
 # ---------------------------------------------------------------------------
-# Key management (Feature 3)
+# Info / health / liveness endpoints
 # ---------------------------------------------------------------------------
-
-_KEY_FILES: dict[str, str] = {
-    "gateway": "aegis_gateway.key",
-    "proxy_token": "aegis_proxy_token.key",
-    "fernet": "aegis_fernet.key",
-}
-
-
-def _key_path(key_type: str) -> Path:
-    return (Path.cwd() / "config" / _KEY_FILES[key_type]).resolve()
-
-
-def _key_fallback_path(key_type: str) -> Path:
-    return Path("/tmp/aegisgate") / _KEY_FILES[key_type]
-
-
-def _read_key_file(key_type: str) -> str | None:
-    for candidate in (_key_path(key_type), _key_fallback_path(key_type)):
-        if candidate.is_file():
-            v = candidate.read_text(encoding="utf-8").strip()
-            if v:
-                return v
-    return None
-
-
-def _write_key_file(key_type: str, value: str) -> None:
-    primary = _key_path(key_type)
-    try:
-        primary.parent.mkdir(parents=True, exist_ok=True)
-        primary.write_text(value, encoding="utf-8")
-        try:
-            os.chmod(primary, 0o600)
-        except OSError:
-            pass
-    except PermissionError:
-        fallback = _key_fallback_path(key_type)
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        fallback.write_text(value, encoding="utf-8")
-        try:
-            os.chmod(fallback, 0o600)
-        except OSError:
-            pass
-
-
-@app.get("/__ui__/api/keys")
-def local_ui_keys_list() -> JSONResponse:
-    """列出三个密钥文件的状态（不返回明文）。"""
-    result = []
-    for key_type, filename in _KEY_FILES.items():
-        primary = _key_path(key_type)
-        fallback = _key_fallback_path(key_type)
-        exists = primary.is_file() or fallback.is_file()
-        active_path = str(primary) if primary.is_file() else (str(fallback) if fallback.is_file() else str(primary))
-        result.append({"type": key_type, "filename": filename, "exists": exists, "path": active_path})
-    return JSONResponse(content={"items": result})
-
-
-@app.get("/__ui__/api/keys/{key_type}")
-def local_ui_key_get(key_type: str) -> JSONResponse:
-    """返回指定密钥的当前值（明文，仅管理员可访问）。"""
-    if key_type not in _KEY_FILES:
-        return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
-    value = _read_key_file(key_type)
-    if value is None:
-        return JSONResponse(status_code=404, content={"error": "key_not_found"})
-    return JSONResponse(content={"ok": True, "type": key_type, "value": value})
-
-
-@app.post("/__ui__/api/keys/{key_type}/rotate")
-def local_ui_key_rotate(key_type: str) -> JSONResponse:
-    """重新生成指定密钥并写入文件；对 gateway 密钥同步更新运行时缓存。"""
-    global _gateway_key_cached
-    if key_type not in _KEY_FILES:
-        return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
-    if key_type == "fernet":
-        from cryptography.fernet import Fernet
-        from aegisgate.storage import crypto as _crypto_mod
-        new_key = Fernet.generate_key().decode("utf-8")
-        _write_key_file(key_type, new_key)
-        # Reset fernet instance so next use picks up new key
-        _crypto_mod._fernet_instance = None
-        return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
-    new_key = secrets.token_urlsafe(32)
-    _write_key_file(key_type, new_key)
-    if key_type == "gateway":
-        _gateway_key_cached = new_key
-        settings.gateway_key = new_key
-    return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
-
-
-# ---------------------------------------------------------------------------
-# Security rules YAML CRUD (Feature 1)
-# ---------------------------------------------------------------------------
-
-_RULES_SECTIONS: dict[str, list[str]] = {
-    "pii_patterns": ["redaction", "pii_patterns"],
-    "tool_injection": ["injection_detector", "tool_call_injection_patterns"],
-    "command_patterns": ["anomaly_detector", "command_patterns"],
-    "direct_patterns": ["injection_detector", "direct_patterns"],
-}
-
-_RULES_SECTION_LABELS: dict[str, str] = {
-    "pii_patterns": "PII 脱敏规则",
-    "tool_injection": "工具调用注入规则",
-    "command_patterns": "异常命令规则",
-    "direct_patterns": "直接注入规则",
-}
-
-
-def _resolve_rules_file() -> Path:
-    p = Path(settings.security_rules_path)
-    if not p.is_absolute():
-        p = Path.cwd() / p
-    return p.resolve()
-
-
-def _load_rules_yaml() -> dict:
-    path = _resolve_rules_file()
-    if not path.is_file():
-        return {}
-    with path.open(encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def _save_rules_yaml(data: dict) -> None:
-    path = _resolve_rules_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
-        yaml.dump(data, tmp, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
-    # Trigger hot reload
-    try:
-        from aegisgate.core.hot_reload import reload_security_rules
-        reload_security_rules()
-    except Exception:
-        pass
-
-
-def _get_section_list(data: dict, section_key: str) -> list:
-    keys = _RULES_SECTIONS[section_key]
-    node = data
-    for k in keys:
-        if not isinstance(node, dict):
-            return []
-        node = node.get(k) or []
-    return node if isinstance(node, list) else []
-
-
-def _set_section_list(data: dict, section_key: str, items: list) -> None:
-    keys = _RULES_SECTIONS[section_key]
-    node = data
-    for k in keys[:-1]:
-        if k not in node:
-            node[k] = {}
-        node = node[k]
-    node[keys[-1]] = items
-
-
-@app.get("/__ui__/api/rules")
-def local_ui_rules_sections() -> JSONResponse:
-    """返回可编辑规则章节列表。"""
-    sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
-    return JSONResponse(content={"sections": sections})
-
-
-@app.get("/__ui__/api/rules/{section}")
-def local_ui_rules_get(section: str) -> JSONResponse:
-    """返回指定章节的规则列表。"""
-    if section not in _RULES_SECTIONS:
-        return JSONResponse(status_code=404, content={"error": "unknown_section"})
-    data = _load_rules_yaml()
-    items = _get_section_list(data, section)
-    return JSONResponse(content={"section": section, "items": items})
-
-
-@app.post("/__ui__/api/rules/{section}")
-async def local_ui_rules_add(section: str, request: Request) -> JSONResponse:
-    """向指定章节追加一条规则。body: {id, regex} or {id, patterns:[...]}"""
-    if section not in _RULES_SECTIONS:
-        return JSONResponse(status_code=404, content={"error": "unknown_section"})
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    rule_id = _string_field(body.get("id"))
-    if not rule_id:
-        return JSONResponse(status_code=400, content={"error": "missing_id"})
-    data = _load_rules_yaml()
-    items = _get_section_list(data, section)
-    if any(str(item.get("id", "")) == rule_id for item in items):
-        return JSONResponse(status_code=409, content={"error": "id_exists", "detail": f"规则 id '{rule_id}' 已存在"})
-    new_item: dict = {"id": rule_id}
-    if "regex" in body:
-        new_item["regex"] = str(body["regex"])
-    if "kind" in body:
-        new_item["kind"] = str(body["kind"])
-    if "patterns" in body and isinstance(body["patterns"], list):
-        new_item["patterns"] = body["patterns"]
-    items.append(new_item)
-    _set_section_list(data, section, items)
-    _save_rules_yaml(data)
-    return JSONResponse(status_code=201, content={"ok": True, "item": new_item})
-
-
-@app.patch("/__ui__/api/rules/{section}/{rule_id}")
-async def local_ui_rules_update(section: str, rule_id: str, request: Request) -> JSONResponse:
-    """更新指定规则的字段（regex / kind / patterns）。"""
-    if section not in _RULES_SECTIONS:
-        return JSONResponse(status_code=404, content={"error": "unknown_section"})
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    data = _load_rules_yaml()
-    items = _get_section_list(data, section)
-    for item in items:
-        if str(item.get("id", "")) == rule_id:
-            if "regex" in body:
-                item["regex"] = str(body["regex"])
-            if "kind" in body:
-                item["kind"] = str(body["kind"])
-            if "patterns" in body and isinstance(body["patterns"], list):
-                item["patterns"] = body["patterns"]
-            _set_section_list(data, section, items)
-            _save_rules_yaml(data)
-            return JSONResponse(content={"ok": True, "item": item})
-    return JSONResponse(status_code=404, content={"error": "rule_not_found"})
-
-
-@app.delete("/__ui__/api/rules/{section}/{rule_id}")
-def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
-    """从指定章节删除一条规则。"""
-    if section not in _RULES_SECTIONS:
-        return JSONResponse(status_code=404, content={"error": "unknown_section"})
-    data = _load_rules_yaml()
-    items = _get_section_list(data, section)
-    new_items = [item for item in items if str(item.get("id", "")) != rule_id]
-    if len(new_items) == len(items):
-        return JSONResponse(status_code=404, content={"error": "rule_not_found"})
-    _set_section_list(data, section, new_items)
-    _save_rules_yaml(data)
-    return JSONResponse(content={"ok": True})
-
-
-@app.get("/__ui__/api/rules_action_map")
-def local_ui_action_map_get() -> JSONResponse:
-    """返回 action_map 配置。"""
-    data = _load_rules_yaml()
-    return JSONResponse(content={"action_map": data.get("action_map") or {}})
-
-
-@app.patch("/__ui__/api/rules_action_map")
-async def local_ui_action_map_update(request: Request) -> JSONResponse:
-    """更新 action_map 中的动作值（block/review/sanitize/pass）。body: {category: {threat: action}}"""
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    allowed_actions = {"block", "review", "sanitize", "pass"}
-    data = _load_rules_yaml()
-    action_map = data.get("action_map") or {}
-    for category, threats in body.items():
-        if not isinstance(threats, dict):
-            continue
-        if category not in action_map:
-            action_map[category] = {}
-        for threat, action in threats.items():
-            if str(action) not in allowed_actions:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "invalid_action", "detail": f"'{action}' 不是有效动作"},
-                )
-            action_map[category][threat] = str(action)
-    data["action_map"] = action_map
-    _save_rules_yaml(data)
-    return JSONResponse(content={"ok": True, "action_map": action_map})
-
-
-# ---------------------------------------------------------------------------
-# Docker compose file editor (Feature 4)
-# ---------------------------------------------------------------------------
-
-_COMPOSE_FILES_ALLOWED = frozenset({
-    "docker-compose.yml",
-    "docker-compose.cliproxy.yml",
-    "docker-compose.aiclient2api.yml",
-    "docker-compose.sub2api.yml",
-})
-
-
-def _compose_file_path(filename: str) -> Path:
-    return (Path.cwd() / filename).resolve()
-
-
-@app.get("/__ui__/api/compose")
-def local_ui_compose_list() -> JSONResponse:
-    """列出可编辑的 docker-compose 文件。"""
-    items = []
-    for name in sorted(_COMPOSE_FILES_ALLOWED):
-        path = _compose_file_path(name)
-        items.append({"filename": name, "exists": path.is_file(), "path": str(path)})
-    return JSONResponse(content={"items": items})
-
-
-@app.get("/__ui__/api/compose/{filename:path}")
-def local_ui_compose_get(filename: str) -> JSONResponse:
-    """读取 docker-compose 文件内容。"""
-    if filename not in _COMPOSE_FILES_ALLOWED:
-        return JSONResponse(status_code=404, content={"error": "not_allowed"})
-    path = _compose_file_path(filename)
-    if not path.is_file():
-        return JSONResponse(status_code=404, content={"error": "file_not_found"})
-    return JSONResponse(content={"filename": filename, "content": path.read_text(encoding="utf-8")})
-
-
-@app.put("/__ui__/api/compose/{filename:path}")
-async def local_ui_compose_put(filename: str, request: Request) -> JSONResponse:
-    """更新 docker-compose 文件内容（需通过 YAML 语法校验）。"""
-    if filename not in _COMPOSE_FILES_ALLOWED:
-        return JSONResponse(status_code=404, content={"error": "not_allowed"})
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid_json"})
-    content = body.get("content", "")
-    if not isinstance(content, str):
-        return JSONResponse(status_code=400, content={"error": "content_must_be_string"})
-    try:
-        yaml.safe_load(content)
-    except yaml.YAMLError as exc:
-        return JSONResponse(status_code=400, content={"error": "invalid_yaml", "detail": str(exc)})
-    path = _compose_file_path(filename)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
-    return JSONResponse(content={"ok": True, "filename": filename})
-
-
-# ---------------------------------------------------------------------------
-# Gateway restart (Feature 4)
-# ---------------------------------------------------------------------------
-
-@app.post("/__ui__/api/restart")
-async def local_ui_restart(request: Request) -> JSONResponse:
-    """向自身发送 SIGTERM 触发重启（需 Docker restart: unless-stopped 或 systemd 守护）。"""
-    async def _do_restart() -> None:
-        await asyncio.sleep(1.5)
-        os.kill(os.getpid(), signal.SIGTERM)
-
-    import asyncio as _asyncio
-    _asyncio.ensure_future(_do_restart())
-    return JSONResponse(content={"ok": True, "message": "gateway will restart in ~1.5s"})
+_BOOT_TIME = time.time()
 
 
 @app.get("/health")

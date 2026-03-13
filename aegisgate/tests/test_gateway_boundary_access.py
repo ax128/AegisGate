@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from aegisgate.core import gateway
+from aegisgate.core import gateway_network
 
 
 def _build_request(
@@ -164,8 +165,8 @@ async def test_boundary_blocks_xff_public_when_trusted_proxy(monkeypatch):
     monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "172.18.0.4")
     monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
     # Reset the cached trusted proxy sets so the new setting takes effect.
-    monkeypatch.setattr(gateway, "_trusted_proxy_exact", None)
-    monkeypatch.setattr(gateway, "_trusted_proxy_networks", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
     request = _build_request(
         "/__gw__/register",
         client_host="172.18.0.4",

@@ -68,7 +68,7 @@ class ToolCallGuard(BaseFilter):
     def _as_text(value: object) -> str:
         try:
             return json.dumps(value, ensure_ascii=False)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return str(value)
 
     @staticmethod
@@ -97,7 +97,7 @@ class ToolCallGuard(BaseFilter):
             if stripped.startswith("{") or stripped.startswith("["):
                 try:
                     arguments = json.loads(stripped)
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     arguments = stripped
 
         if not tool_name and arguments in ({}, "", None):

@@ -1,0 +1,146 @@
+"""Gateway key and proxy token file management."""
+
+from __future__ import annotations
+
+import os
+import secrets
+from pathlib import Path
+
+from aegisgate.config.settings import settings
+from aegisgate.util.logger import logger
+
+# ---------------------------------------------------------------------------
+# Gateway key  (file-based)
+# ---------------------------------------------------------------------------
+_GATEWAY_KEY_FILE = "aegis_gateway.key"
+
+_ADMIN_INIT_MARKER_FILE = ".admin_initialized"
+_DEFAULT_ADMIN_PASSWORD = "admin123"
+
+_gateway_key_cached: str | None = None
+
+
+def _is_admin_initialized() -> bool:
+    """Return True if the admin UI has been accessed at least once."""
+    for candidate in (
+        (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve(),
+        Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE,
+    ):
+        if candidate.is_file():
+            return True
+    return False
+
+
+def _mark_admin_initialized() -> None:
+    """Create the admin init marker file so default password is no longer valid."""
+    marker = (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        try:
+            fallback = Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            fallback.touch()
+        except OSError:
+            pass
+
+
+def _ensure_gateway_key() -> str:
+    """Return the gateway key from config/aegis_gateway.key (auto-created on first run)."""
+    global _gateway_key_cached
+
+    # If settings.gateway_key was set externally (e.g. tests / monkeypatch), honour it.
+    current = (settings.gateway_key or "").strip()
+    if current and current != _gateway_key_cached:
+        _gateway_key_cached = current
+        return current
+    if _gateway_key_cached:
+        return _gateway_key_cached
+
+    key_path = (Path.cwd() / "config" / _GATEWAY_KEY_FILE).resolve()
+    fallback_key_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
+    for candidate in (key_path, fallback_key_path):
+        if candidate.is_file():
+            stored = candidate.read_text(encoding="utf-8").strip()
+            if stored:
+                settings.gateway_key = stored
+                _gateway_key_cached = stored
+                logger.info("gateway_key loaded from %s", candidate)
+                return stored
+
+    # Auto-generate and persist (first run)
+    new_key = secrets.token_urlsafe(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key_path.write_text(new_key, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        logger.info("gateway_key auto-generated and saved to %s", key_path)
+    except PermissionError:
+        fallback_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(new_key, encoding="utf-8")
+        try:
+            os.chmod(fallback_path, 0o600)
+        except OSError:
+            pass
+        logger.warning(
+            "gateway_key: could not write %s, saved to fallback %s", key_path, fallback_path
+        )
+    settings.gateway_key = new_key
+    _gateway_key_cached = new_key
+    return new_key
+
+
+# ---------------------------------------------------------------------------
+# Internal proxy token auto-generation (Caddy ↔ AegisGate auto-pairing)
+# ---------------------------------------------------------------------------
+_PROXY_TOKEN_FILE = "aegis_proxy_token.key"
+_PROXY_TOKEN_HEADER = "x-aegis-proxy-token"
+_proxy_token_value: str = ""
+
+
+def _ensure_proxy_token() -> str:
+    """Auto-generate an internal proxy token for Caddy ↔ AegisGate trust."""
+    global _proxy_token_value
+
+    key_path = (Path.cwd() / "config" / _PROXY_TOKEN_FILE).resolve()
+    fallback_token_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
+    for candidate in (key_path, fallback_token_path):
+        if candidate.is_file():
+            stored = candidate.read_text(encoding="utf-8").strip()
+            if stored:
+                _proxy_token_value = stored
+                logger.info("proxy_token loaded from %s", candidate)
+                return stored
+
+    new_token = secrets.token_urlsafe(32)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key_path.write_text(new_token, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        logger.info("proxy_token auto-generated and saved to %s", key_path)
+    except PermissionError:
+        fallback_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(new_token, encoding="utf-8")
+        try:
+            os.chmod(fallback_path, 0o600)
+        except OSError:
+            pass
+        logger.warning(
+            "proxy_token: could not write %s, saved to fallback %s", key_path, fallback_path
+        )
+    _proxy_token_value = new_token
+    return new_token
+
+
+def get_proxy_token_value() -> str:
+    """Return the current proxy token value."""
+    return _proxy_token_value

@@ -74,7 +74,7 @@ def _maybe_decode_base64(token: str) -> str | None:
     try:
         raw = base64.b64decode(token, validate=True)
         decoded = raw.decode("utf-8", errors="ignore")
-    except Exception:
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return None
 
     if not decoded:
@@ -93,7 +93,7 @@ def _maybe_decode_hex(token: str) -> str | None:
     try:
         raw = binascii.unhexlify(token)
         decoded = raw.decode("utf-8", errors="ignore")
-    except Exception:
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return None
     if not decoded:
         return None

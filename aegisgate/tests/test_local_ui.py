@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from aegisgate.core import gateway
+from aegisgate.core import gateway_ui_config
 
 
 def _build_request(
@@ -88,7 +89,7 @@ def test_local_ui_bootstrap_returns_expected_fields():
         headers={"cookie": f"{gateway._UI_SESSION_COOKIE}=token", "user-agent": "pytest"},
     )
     payload = gateway.local_ui_bootstrap(request)
-    assert payload["status"] == "ok"
+    assert payload["status"] == "running"
     assert payload["app_name"] == gateway.settings.app_name
     assert "server" in payload
     assert "security" in payload
@@ -177,7 +178,7 @@ def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(gateway, "_is_internal_ip", lambda host: host in {"127.0.0.1", "testclient"})
     env_path = tmp_path / ".env"
     env_path.write_text("AEGIS_LOG_LEVEL=info\nAEGIS_SECURITY_LEVEL=medium\n", encoding="utf-8")
-    monkeypatch.setattr(gateway, "_ENV_PATH", env_path)
+    monkeypatch.setattr(gateway_ui_config, "_ENV_PATH", env_path)
 
     reloaded = {"called": False}
 
