@@ -976,7 +976,8 @@ async function saveComposeFile() {
     const notFound = document.getElementById("compose-not-found");
     if (notFound) notFound.classList.add("hidden");
   } catch (err) {
-    setStatus("compose-save-status", `失败: ${err.message}`, true);
+    const msg = err.message.startsWith("invalid_yaml") ? `YAML 格式错误: ${err.message}` : `保存失败: ${err.message}`;
+    setStatus("compose-save-status", msg, true);
   }
 }
 

@@ -615,13 +615,14 @@ def register_ui_routes(app: FastAPI) -> None:
         "docker-compose.sub2api.yml",
     })
 
-    # Compose files are stored under config/compose/ — a subdirectory of the
-    # volume-mounted config dir so they persist across container restarts and
-    # are accessible to the user on the host at ./config/compose/<filename>.
-    _COMPOSE_DIR = Path.cwd() / "config" / "compose"
-
     def _compose_file_path(filename: str) -> Path:
-        return (_COMPOSE_DIR / filename).resolve()
+        # AEGIS_COMPOSE_DIR: explicit mount path (e.g. /app/project pointing to host project root).
+        # Empty → default to config/compose/ (volume-mounted, host-accessible).
+        if settings.compose_dir:
+            base = Path(settings.compose_dir)
+        else:
+            base = Path.cwd() / "config" / "compose"
+        return (base / filename).resolve()
 
     @app.get("/__ui__/api/compose")
     def local_ui_compose_list() -> JSONResponse:

@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # 默认上游：设置后可直接请求 /v1/... 与 /v2/...，无需走 /v1/__gw__/t/{token}/... 注册流程（如对接 cli-proxy-api:8317）
     upstream_base_url: str = ""
     upstream_whitelist_url_list: str = ""
+    # 编辑器读写 docker-compose 文件的目录。空字符串 = 默认使用 config/compose/
+    compose_dir: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
     sqlite_db_path: str = "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
     redis_url: str = "redis://127.0.0.1:6379/0"
