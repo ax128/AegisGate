@@ -115,6 +115,7 @@ class Settings(BaseSettings):
     enable_untrusted_content_guard: bool = True
     enable_tool_call_guard: bool = True
     enable_rag_poison_guard: bool = True
+    enable_exact_value_redaction: bool = True
 
     risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     # Request pipeline timeout action: "block" (safe default) or "pass" (legacy)

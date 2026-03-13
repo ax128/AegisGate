@@ -1,4 +1,5 @@
 enabled_filters:
+  - exact_value_redaction
   - redaction
   - untrusted_content_guard
   - request_sanitizer

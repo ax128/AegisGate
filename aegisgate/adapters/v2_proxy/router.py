@@ -18,6 +18,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.redact_values import replace_exact_values
 from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
@@ -484,22 +485,34 @@ def _sanitize_request_body(
     if not body or not _looks_textual_content_type(content_type):
         return body, 0, [], []
 
+    # Exact-value redaction runs first (highest priority).
+    ev_count = 0
+    if settings.enable_exact_value_redaction:
+        text = body.decode("utf-8", errors="replace")
+        replaced, ev_count = replace_exact_values(text)
+        if ev_count > 0:
+            body = replaced.encode("utf-8")
+
     if "json" in content_type.lower():
         try:
             raw = body.decode("utf-8")
             parsed = json.loads(raw)
             sanitized, count, hits, markers = _sanitize_json_value(parsed, whitelist_keys=whitelist_keys)
-            if count <= 0:
+            total = ev_count + count
+            if total <= 0:
                 return body, 0, [], []
-            return json.dumps(sanitized, ensure_ascii=False).encode("utf-8"), count, hits, markers
+            out_body = json.dumps(sanitized, ensure_ascii=False).encode("utf-8") if count > 0 else body
+            return out_body, total, hits, markers
         except Exception:
             pass
 
     text = body.decode("utf-8", errors="replace")
     sanitized, count, hits, markers = _redact_text(text, whitelist_keys=whitelist_keys)
-    if count <= 0:
+    total = ev_count + count
+    if total <= 0:
         return body, 0, [], []
-    return sanitized.encode("utf-8"), count, hits, markers
+    out_body = sanitized.encode("utf-8") if count > 0 else body
+    return out_body, total, hits, markers
 
 
 
@@ -754,6 +767,11 @@ async def _proxy_v2_streaming(
                 if is_sse:
                     detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
                     saw_done = saw_done or detected
+                if settings.enable_exact_value_redaction:
+                    chunk_text = chunk.decode("utf-8", errors="replace")
+                    replaced, ev_count = replace_exact_values(chunk_text)
+                    if ev_count > 0:
+                        chunk = replaced.encode("utf-8")
                 yield chunk
             if not upstream_exhausted:
                 async for chunk in upstream_response.aiter_bytes():
@@ -762,6 +780,11 @@ async def _proxy_v2_streaming(
                     if is_sse:
                         detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
                         saw_done = saw_done or detected
+                    if settings.enable_exact_value_redaction:
+                        chunk_text = chunk.decode("utf-8", errors="replace")
+                        replaced, ev_count = replace_exact_values(chunk_text)
+                        if ev_count > 0:
+                            chunk = replaced.encode("utf-8")
                     yield chunk
         except httpx.HTTPError as exc:
             detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
@@ -928,6 +951,14 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     response_headers = _build_client_response_headers(upstream_response.headers)
     response_body = upstream_response.content
     response_content_type = upstream_response.headers.get("content-type", "")
+
+    # Exact-value redaction on non-streaming response body.
+    if settings.enable_exact_value_redaction and response_body and _looks_textual_content_type(response_content_type):
+        text = response_body.decode("utf-8", errors="replace")
+        replaced, ev_count = replace_exact_values(text)
+        if ev_count > 0:
+            response_body = replaced.encode("utf-8")
+
     response_filter_bypassed = _should_bypass_v2_response_filter(target_url)
     if response_filter_bypassed:
         logger.info(

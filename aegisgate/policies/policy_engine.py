@@ -20,6 +20,7 @@ from aegisgate.util.logger import logger
 # 当策略文件不存在（如 config 挂载为空）时使用的内置默认，与 default.yaml 一致
 _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
+        "exact_value_redaction",
         "redaction",
         "untrusted_content_guard",
         "request_sanitizer",
@@ -110,11 +111,14 @@ class PolicyEngine:
             "untrusted_content_guard": feature_flags.untrusted_content_guard,
             "tool_call_guard": feature_flags.tool_call_guard,
             "rag_poison_guard": feature_flags.rag_poison_guard,
+            "exact_value_redaction": feature_flags.exact_value_redaction,
         }
         enabled = {item for item in configured if global_flags.get(item, False)}
         # Redaction is mandatory baseline protection and is not downgraded by security level.
         if feature_flags.redaction:
             enabled.add("redaction")
+        if feature_flags.exact_value_redaction:
+            enabled.add("exact_value_redaction")
         raw_threshold = float(data.get("risk_threshold", 0.85))
         security_level = normalize_security_level()
         threshold = apply_threshold(raw_threshold, level=security_level)

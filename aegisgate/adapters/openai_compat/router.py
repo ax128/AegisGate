@@ -82,6 +82,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.core.semantic import SemanticServiceClient
 from aegisgate.core.pipeline import Pipeline
+from aegisgate.filters.exact_value_redaction import ExactValueRedactionFilter
 from aegisgate.filters.anomaly_detector import AnomalyDetector
 from aegisgate.filters.injection_detector import PromptInjectionDetector
 from aegisgate.filters.post_restore_guard import PostRestoreGuard
@@ -147,12 +148,14 @@ _pipeline_local = threading.local()
 
 def _build_pipeline() -> Pipeline:
     request_filters = [
+        ExactValueRedactionFilter(),
         RedactionFilter(store),
         UntrustedContentGuard(),
         RequestSanitizer(),
         RagPoisonGuard(),
     ]
     response_filters = [
+        ExactValueRedactionFilter(),
         AnomalyDetector(),
         PromptInjectionDetector(),
         RagPoisonGuard(),

@@ -19,6 +19,7 @@ class FeatureFlags:
     untrusted_content_guard: bool = settings.enable_untrusted_content_guard
     tool_call_guard: bool = settings.enable_tool_call_guard
     rag_poison_guard: bool = settings.enable_rag_poison_guard
+    exact_value_redaction: bool = settings.enable_exact_value_redaction
 
 
 feature_flags = FeatureFlags()
@@ -37,3 +38,4 @@ def refresh_feature_flags() -> None:
     feature_flags.untrusted_content_guard = settings.enable_untrusted_content_guard
     feature_flags.tool_call_guard = settings.enable_tool_call_guard
     feature_flags.rag_poison_guard = settings.enable_rag_poison_guard
+    feature_flags.exact_value_redaction = settings.enable_exact_value_redaction

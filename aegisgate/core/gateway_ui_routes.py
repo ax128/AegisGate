@@ -524,6 +524,67 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "action_map": action_map})
 
     # ------------------------------------------------------------------
+    # Exact-value redaction management
+    # ------------------------------------------------------------------
+
+    _REDACT_VALUES_DESCRIPTION = (
+        "精确值脱敏：配置的字符串若出现在请求/响应体中会被自动替换为 [REDACTED:EXACT_VALUE]。"
+        "最少 10 个字符，适合保护 API Key、密钥等敏感数据。V1/V2 均适用。"
+    )
+
+    def _mask_value(val: str) -> str:
+        if len(val) <= 10:
+            return val[:2] + "*" * (len(val) - 2)
+        return val[:4] + "****" + val[-3:]
+
+    @app.get("/__ui__/api/redact_values")
+    def local_ui_redact_values_list() -> JSONResponse:
+        from aegisgate.config.redact_values import load_redact_values
+
+        values = load_redact_values()
+        items = [{"masked": _mask_value(v), "length": len(v)} for v in values]
+        return JSONResponse(content={
+            "items": items,
+            "count": len(items),
+            "description": _REDACT_VALUES_DESCRIPTION,
+        })
+
+    @app.post("/__ui__/api/redact_values")
+    async def local_ui_redact_values_add(request: Request) -> JSONResponse:
+        from aegisgate.config.redact_values import load_redact_values, save_redact_values
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+        value = body.get("value", "")
+        if not isinstance(value, str) or not value.strip():
+            return JSONResponse(status_code=400, content={"error": "value_required"})
+        value = value.strip()
+        if len(value) < 10:
+            return JSONResponse(status_code=400, content={"error": "value_too_short", "detail": "至少 10 个字符"})
+        values = load_redact_values()
+        if value in values:
+            return JSONResponse(status_code=409, content={"error": "duplicate", "detail": "该值已存在"})
+        values.append(value)
+        try:
+            save_redact_values(values)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": "validation_error", "detail": str(exc)})
+        return JSONResponse(content={"ok": True, "count": len(values)})
+
+    @app.delete("/__ui__/api/redact_values/{index}")
+    def local_ui_redact_values_delete(index: int) -> JSONResponse:
+        from aegisgate.config.redact_values import load_redact_values, save_redact_values
+
+        values = load_redact_values()
+        if index < 0 or index >= len(values):
+            return JSONResponse(status_code=404, content={"error": "index_out_of_range"})
+        values.pop(index)
+        save_redact_values(values)
+        return JSONResponse(content={"ok": True, "count": len(values)})
+
+    # ------------------------------------------------------------------
     # Docker compose file editor
     # ------------------------------------------------------------------
 
