@@ -172,7 +172,7 @@ function createBoolButton(item) {
   button.textContent = item.value ? "已开启" : "已关闭";
   button.addEventListener("click", () => {
     const next = !item.value;
-    item.value = next;
+    updateFieldValue(item.field, next);  // update configState clone, not original item
     button.className = `bool-button ${next ? "on" : "off"}`;
     button.textContent = next ? "已开启" : "已关闭";
   });
