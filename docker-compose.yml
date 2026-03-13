@@ -38,6 +38,7 @@ services:
     volumes:
       - ./logs:/app/logs:rw
       - ./config:/app/aegisgate/policies/rules:rw
+      - ./config:/app/config:rw
     tmpfs:
       - /tmp
     restart: unless-stopped
