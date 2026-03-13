@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from aegisgate import init_config
@@ -74,3 +76,25 @@ def test_assert_security_bootstrap_ready_raises_when_rules_dir_partially_populat
 
     with pytest.raises(RuntimeError):
         init_config.assert_security_bootstrap_ready(rules_dir)
+
+
+def test_ensure_runtime_storage_paths_fallbacks_to_tmp(monkeypatch, tmp_path):
+    fallback_dir = tmp_path / "runtime"
+    monkeypatch.setattr(init_config, "_RUNTIME_FALLBACK_DIR", fallback_dir)
+    monkeypatch.setattr(init_config.settings, "storage_backend", "sqlite")
+    monkeypatch.setattr(init_config.settings, "sqlite_db_path", "/not-writable/aegisgate.db")
+    monkeypatch.setattr(init_config.settings, "audit_log_path", "/not-writable/audit.jsonl")
+
+    def fake_sqlite_probe(path):
+        return Path(path) == fallback_dir / "aegisgate.db"
+
+    def fake_append_probe(path):
+        return Path(path) == fallback_dir / "audit.jsonl"
+
+    monkeypatch.setattr(init_config, "_can_use_sqlite_path", fake_sqlite_probe)
+    monkeypatch.setattr(init_config, "_can_append_file", fake_append_probe)
+
+    init_config.ensure_runtime_storage_paths()
+
+    assert init_config.settings.sqlite_db_path == str(fallback_dir / "aegisgate.db")
+    assert init_config.settings.audit_log_path == str(fallback_dir / "audit.jsonl")

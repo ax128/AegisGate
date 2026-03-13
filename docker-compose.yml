@@ -36,6 +36,8 @@ services:
       AEGIS_BOOTSTRAP_RULES_DIR: "/app/bootstrap/rules"
       AEGIS_SECURITY_RULES_PATH: "/app/aegisgate/policies/rules/security_filters.yaml"
     volumes:
-      - ./logs:/app/logs
-      - ./config:/app/aegisgate/policies/rules
+      - ./logs:/app/logs:rw
+      - ./config:/app/aegisgate/policies/rules:rw
+    tmpfs:
+      - /tmp
     restart: unless-stopped

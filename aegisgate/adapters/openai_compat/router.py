@@ -77,6 +77,7 @@ from aegisgate.filters.tool_call_guard import ToolCallGuard
 from aegisgate.filters.untrusted_content_guard import UntrustedContentGuard
 from aegisgate.policies.policy_engine import PolicyEngine
 from aegisgate.storage import create_store
+from aegisgate.init_config import ensure_runtime_storage_paths
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import (
@@ -87,6 +88,7 @@ from aegisgate.util.redaction_whitelist import (
 
 
 router = APIRouter()
+ensure_runtime_storage_paths()
 store = create_store()
 policy_engine = PolicyEngine()
 semantic_service_client = SemanticServiceClient(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 from aegisgate.config.settings import settings
@@ -25,6 +26,7 @@ _APP_ROOT_DIR = Path(__file__).resolve().parent.parent
 _BOOTSTRAP_RULES_DIR = _APP_ROOT_DIR / "bootstrap" / "rules"
 # 内置 .env 示例名
 _ENV_EXAMPLE = ".env.example"
+_RUNTIME_FALLBACK_DIR = Path("/tmp") / "aegisgate"
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -161,9 +163,75 @@ def ensure_config_dir() -> None:
             logger.debug("init_config: no .env.example found, skip creating .env")
 
 
+def _can_append_file(path: Path) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _can_use_sqlite_path(path: Path) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path, timeout=1.0) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS __aegisgate_write_probe__(id INTEGER)")
+            conn.execute("DROP TABLE IF EXISTS __aegisgate_write_probe__")
+            conn.commit()
+        return True
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def ensure_runtime_storage_paths() -> None:
+    """Ensure runtime-write paths are usable; fallback to /tmp when needed."""
+    fallback_dir = _RUNTIME_FALLBACK_DIR
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+
+    backend = (settings.storage_backend or "sqlite").strip().lower()
+    if backend in {"", "sqlite"}:
+        configured_db = Path(settings.sqlite_db_path)
+        if not _can_use_sqlite_path(configured_db):
+            fallback_db = fallback_dir / "aegisgate.db"
+            if not _can_use_sqlite_path(fallback_db):
+                raise RuntimeError(
+                    "sqlite storage path is not writable and fallback also failed: "
+                    f"configured={configured_db} fallback={fallback_db}"
+                )
+            settings.sqlite_db_path = str(fallback_db)
+            logger.warning(
+                "init_config: sqlite path not writable, switched to fallback configured=%s fallback=%s",
+                configured_db,
+                fallback_db,
+            )
+
+    audit_path = (settings.audit_log_path or "").strip()
+    if audit_path:
+        configured_audit = Path(audit_path)
+        if not _can_append_file(configured_audit):
+            fallback_audit = fallback_dir / "audit.jsonl"
+            if _can_append_file(fallback_audit):
+                settings.audit_log_path = str(fallback_audit)
+                logger.warning(
+                    "init_config: audit path not writable, switched to fallback configured=%s fallback=%s",
+                    configured_audit,
+                    fallback_audit,
+                )
+            else:
+                settings.audit_log_path = ""
+                logger.warning(
+                    "init_config: audit path not writable and fallback failed, disable audit file configured=%s fallback=%s",
+                    configured_audit,
+                    fallback_audit,
+                )
+
+
 def main() -> None:
     """命令行或 one-off 容器执行时调用。"""
     ensure_config_dir()
+    ensure_runtime_storage_paths()
     strict = os.environ.get("AEGIS_INIT_STRICT", "true").strip().lower() not in {"0", "false", "no", "off"}
     if strict:
         assert_security_bootstrap_ready()
