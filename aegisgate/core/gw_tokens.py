@@ -178,6 +178,20 @@ def update(token: str, *, upstream_base: str | None = None, gateway_key: str | N
         return True
 
 
+def rename(old_token: str, new_token: str) -> bool:
+    """将 old_token 重命名为 new_token，映射内容不变。new_token 已存在则抛 ValueError。"""
+    with _lock:
+        mapping = _tokens.get(old_token)
+        if mapping is None:
+            return False
+        if new_token in _tokens:
+            raise ValueError(f"token already exists: {new_token}")
+        _tokens[new_token] = mapping
+        del _tokens[old_token]
+        _save()
+        return True
+
+
 def list_tokens() -> dict[str, dict[str, Any]]:
     """返回当前所有 token 映射（副本）。"""
     with _lock:

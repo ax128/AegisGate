@@ -443,10 +443,12 @@ function openTokenModal() {
   if (!modal) return;
   document.getElementById("modal-edit-token").value = "";
   document.getElementById("modal-title").textContent = "注册新 Token";
+  document.getElementById("modal-token-input").value = "";
   document.getElementById("modal-upstream").value = "";
   document.getElementById("modal-gateway-key").value = "";
   document.getElementById("modal-whitelist").value = "";
   document.getElementById("modal-error").textContent = "";
+  document.getElementById("modal-token-field").classList.add("hidden");
   document.getElementById("modal-gateway-key-field").classList.add("hidden");
   document.getElementById("modal-submit").textContent = "注册";
   modal.classList.remove("hidden");
@@ -458,10 +460,12 @@ function openEditModal(item) {
   if (!modal) return;
   document.getElementById("modal-edit-token").value = item.token;
   document.getElementById("modal-title").textContent = "编辑 Token";
+  document.getElementById("modal-token-input").value = item.token;
   document.getElementById("modal-upstream").value = item.upstream_base || "";
   document.getElementById("modal-gateway-key").value = "";
   document.getElementById("modal-whitelist").value = (item.whitelist_keys || []).join(", ");
   document.getElementById("modal-error").textContent = "";
+  document.getElementById("modal-token-field").classList.remove("hidden");
   document.getElementById("modal-gateway-key-field").classList.remove("hidden");
   document.getElementById("modal-submit").textContent = "保存";
   modal.classList.remove("hidden");
@@ -476,6 +480,7 @@ function closeTokenModal() {
 async function submitTokenModal() {
   const errorEl = document.getElementById("modal-error");
   const editToken = document.getElementById("modal-edit-token").value.trim();
+  const newTokenInput = document.getElementById("modal-token-input").value.trim();
   const upstream = document.getElementById("modal-upstream").value.trim();
   const gatewayKey = document.getElementById("modal-gateway-key").value.trim();
   const whitelist = document.getElementById("modal-whitelist").value.trim();
@@ -490,16 +495,20 @@ async function submitTokenModal() {
     // PATCH mode
     const body = { upstream_base: upstream, whitelist_key: whitelistArr };
     if (gatewayKey) body.gateway_key = gatewayKey;
+    if (newTokenInput && newTokenInput !== editToken) body.new_token = newTokenInput;
     submitBtn.disabled = true;
     submitBtn.textContent = "保存中…";
     try {
-      await fetchJson(`/__ui__/api/tokens/${encodeURIComponent(editToken)}`, {
+      const data = await fetchJson(`/__ui__/api/tokens/${encodeURIComponent(editToken)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
         body: JSON.stringify(body),
       });
       closeTokenModal();
       loadTokens();
+      if (body.new_token) {
+        alert(`Token 已更新\n\n新 Base URL:\n${data.base_url}\n\n请同步更新客户端配置。`);
+      }
     } catch (err) {
       errorEl.textContent = err.message;
     } finally {

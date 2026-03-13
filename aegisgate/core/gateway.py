@@ -38,6 +38,7 @@ from aegisgate.core.gw_tokens import (
     list_tokens as gw_tokens_list,
     load as gw_tokens_load,
     register as gw_tokens_register,
+    rename as gw_tokens_rename,
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
 )
@@ -1581,7 +1582,7 @@ async def local_ui_tokens_register(request: Request) -> JSONResponse:
 
 @app.patch("/__ui__/api/tokens/{token}")
 async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
-    """更新指定 Token 的字段（upstream_base / gateway_key / whitelist_key）。"""
+    """更新指定 Token 的字段（upstream_base / gateway_key / whitelist_key / new_token）。"""
     token = token.strip()
     if not token:
         return JSONResponse(status_code=400, content={"error": "missing_token"})
@@ -1590,6 +1591,7 @@ async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     kwargs: dict = {}
+    new_token_val: str | None = None
     if "upstream_base" in body:
         upstream_base = _string_field(body["upstream_base"])
         if not upstream_base:
@@ -1605,15 +1607,26 @@ async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
         kwargs["gateway_key"] = gk
     if "whitelist_key" in body:
         kwargs["whitelist_key"] = body["whitelist_key"]
-    if not kwargs:
+    if "new_token" in body:
+        new_token_val = _string_field(body["new_token"])
+        if not new_token_val:
+            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "new_token 不能为空"})
+    if not kwargs and new_token_val is None:
         return JSONResponse(status_code=400, content={"error": "no_fields", "detail": "未提供任何可更新字段"})
     try:
-        updated = gw_tokens_update(token, **kwargs)
+        if kwargs:
+            updated = gw_tokens_update(token, **kwargs)
+            if not updated:
+                return JSONResponse(status_code=404, content={"error": "token_not_found"})
+        if new_token_val and new_token_val != token:
+            renamed = gw_tokens_rename(token, new_token_val)
+            if not renamed:
+                return JSONResponse(status_code=404, content={"error": "token_not_found"})
+            token = new_token_val
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
-    if not updated:
-        return JSONResponse(status_code=404, content={"error": "token_not_found"})
-    return JSONResponse(content={"ok": True})
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
+    return JSONResponse(content={"ok": True, "token": token, "base_url": base_url})
 
 
 @app.delete("/__ui__/api/tokens/{token}")

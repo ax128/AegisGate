@@ -278,10 +278,10 @@
               <table class="token-table">
                 <thead>
                   <tr>
-                    <th>Token</th>
+                    <th>Token（路由令牌）</th>
                     <th>上游地址</th>
-                    <th>API 密钥</th>
-                    <th>白名单密钥</th>
+                    <th>网关密钥</th>
+                    <th>白名单</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -352,15 +352,20 @@
           </button>
         </div>
         <div class="modal-body">
+          <div class="modal-field hidden" id="modal-token-field">
+            <label for="modal-token-input">Token（路由令牌）</label>
+            <input id="modal-token-input" type="text" placeholder="更改后客户端 base_url 需同步更新">
+            <p class="field-hint">URL 路径中的路由标识符；更改后旧 base_url 立即失效，请同步更新客户端配置</p>
+          </div>
           <div class="modal-field">
             <label for="modal-upstream">上游地址 <span style="color:var(--error)">*</span></label>
             <input id="modal-upstream" type="text" placeholder="https://api.openai.com/v1">
             <p class="field-hint">转发目标的 base URL，末尾无需加斜线</p>
           </div>
           <div class="modal-field hidden" id="modal-gateway-key-field">
-            <label for="modal-gateway-key">API 密钥</label>
+            <label for="modal-gateway-key">网关密钥（AEGIS_GATEWAY_KEY）</label>
             <input id="modal-gateway-key" type="password" placeholder="留空保持不变，重新输入以更改">
-            <p class="field-hint">转发请求到上游时使用的 API Key（Bearer Token）</p>
+            <p class="field-hint">客户端访问此 Token 路径时须提供的认证密钥，对应服务端 AEGIS_GATEWAY_KEY</p>
           </div>
           <div class="modal-field">
             <label for="modal-whitelist">白名单密钥（可选）</label>
