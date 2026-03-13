@@ -937,16 +937,21 @@ function bindKeysUI() {
 
 let currentComposeFile = "docker-compose.yml";
 
+let _composeLoadSeq = 0;
+
 async function loadComposeFile(filename) {
   currentComposeFile = filename;
+  const seq = ++_composeLoadSeq;
   const editor = document.getElementById("compose-editor");
   const notFound = document.getElementById("compose-not-found");
-  if (editor) editor.value = "加载中…";
+  if (editor) editor.value = "";
+  if (notFound) notFound.classList.add("hidden");
   try {
     const data = await fetchJson(`/__ui__/api/compose/${encodeURIComponent(filename)}`);
+    if (seq !== _composeLoadSeq) return;  // superseded by a newer click
     if (editor) editor.value = data.content || "";
-    if (notFound) notFound.classList.add("hidden");
   } catch (err) {
+    if (seq !== _composeLoadSeq) return;
     if (err.message.includes("file_not_found") || err.message.includes("404")) {
       if (editor) editor.value = "";
       if (notFound) notFound.classList.remove("hidden");
