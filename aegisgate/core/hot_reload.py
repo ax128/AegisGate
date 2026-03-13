@@ -125,6 +125,9 @@ def reload_settings() -> None:
         # fallback that was applied at startup when /app/logs is not writable.
         from aegisgate.init_config import ensure_runtime_storage_paths
         ensure_runtime_storage_paths()
+        # Apply new log level immediately so callers see the change at once.
+        from aegisgate.util.logger import apply_log_level
+        apply_log_level(settings.log_level)
         logger.info("hot_reload settings reloaded from environment / .env")
     except Exception:
         logger.exception("hot_reload settings reload failed")

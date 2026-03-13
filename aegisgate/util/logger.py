@@ -148,6 +148,14 @@ def _build_logger() -> logging.Logger:
 logger = _build_logger()
 
 
+def apply_log_level(level: str) -> None:
+    """Update the live log level on all aegisgate handlers (hot-reload support)."""
+    resolved = _normalize_level(level)
+    logger.setLevel(resolved)
+    for handler in logger.handlers:
+        handler.setLevel(resolved)
+
+
 def get_logger(name: str) -> logging.Logger:
     """Return a child logger under aegisgate namespace."""
 
