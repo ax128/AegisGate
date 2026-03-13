@@ -38,9 +38,9 @@ from aegisgate.core.gw_tokens import (
     list_tokens as gw_tokens_list,
     load as gw_tokens_load,
     register as gw_tokens_register,
-    rename as gw_tokens_rename,
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
+    update_and_rename as gw_tokens_update_and_rename,
 )
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.storage.crypto import ensure_key as _ensure_fernet_key
@@ -1613,20 +1613,19 @@ async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
             return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "new_token 不能为空"})
     if not kwargs and new_token_val is None:
         return JSONResponse(status_code=400, content={"error": "no_fields", "detail": "未提供任何可更新字段"})
+    active_token = new_token_val if (new_token_val and new_token_val != token) else token
     try:
-        if kwargs:
-            updated = gw_tokens_update(token, **kwargs)
-            if not updated:
-                return JSONResponse(status_code=404, content={"error": "token_not_found"})
-        if new_token_val and new_token_val != token:
-            renamed = gw_tokens_rename(token, new_token_val)
-            if not renamed:
-                return JSONResponse(status_code=404, content={"error": "token_not_found"})
-            token = new_token_val
+        updated = gw_tokens_update_and_rename(
+            token,
+            new_token=new_token_val if new_token_val != token else None,
+            **kwargs,
+        )
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
-    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
-    return JSONResponse(content={"ok": True, "token": token, "base_url": base_url})
+    if not updated:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    base_url = f"{_public_base_url(request)}/v1/__gw__/t/{active_token}"
+    return JSONResponse(content={"ok": True, "token": active_token, "base_url": base_url})
 
 
 @app.delete("/__ui__/api/tokens/{token}")

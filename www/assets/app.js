@@ -480,16 +480,17 @@ function closeTokenModal() {
 async function submitTokenModal() {
   const errorEl = document.getElementById("modal-error");
   const editToken = document.getElementById("modal-edit-token").value.trim();
+  const isEdit = !!editToken;
   const newTokenInput = document.getElementById("modal-token-input").value.trim();
   const upstream = document.getElementById("modal-upstream").value.trim();
-  const gatewayKey = document.getElementById("modal-gateway-key").value.trim();
+  // Only read gatewayKey in edit mode; field is hidden (and irrelevant) during register
+  const gatewayKey = isEdit ? document.getElementById("modal-gateway-key").value.trim() : "";
   const whitelist = document.getElementById("modal-whitelist").value.trim();
   const whitelistArr = whitelist ? whitelist.split(",").map((s) => s.trim()).filter(Boolean) : [];
   errorEl.textContent = "";
   if (!upstream) { errorEl.textContent = "请填写上游地址"; return; }
 
   const submitBtn = document.getElementById("modal-submit");
-  const isEdit = !!editToken;
 
   if (isEdit) {
     // PATCH mode

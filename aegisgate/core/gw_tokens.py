@@ -178,16 +178,43 @@ def update(token: str, *, upstream_base: str | None = None, gateway_key: str | N
         return True
 
 
-def rename(old_token: str, new_token: str) -> bool:
-    """将 old_token 重命名为 new_token，映射内容不变。new_token 已存在则抛 ValueError。"""
+def update_and_rename(
+    token: str,
+    *,
+    upstream_base: str | None = None,
+    gateway_key: str | None = None,
+    whitelist_key: Any = None,
+    new_token: str | None = None,
+) -> bool:
+    """在单一锁内同时更新映射字段并可选地重命名 token，保证原子性。
+    token 不存在返回 False；new_token 已存在或字段非法抛 ValueError。
+    """
     with _lock:
-        mapping = _tokens.get(old_token)
+        mapping = _tokens.get(token)
         if mapping is None:
             return False
-        if new_token in _tokens:
-            raise ValueError(f"token already exists: {new_token}")
-        _tokens[new_token] = mapping
-        del _tokens[old_token]
+        next_mapping = dict(mapping)
+        if upstream_base is not None:
+            normalized_upstream = _normalize_upstream(upstream_base)
+            if not normalized_upstream:
+                raise ValueError("upstream_base required")
+            next_mapping["upstream_base"] = normalized_upstream
+        if gateway_key is not None:
+            normalized_gk = (gateway_key or "").strip()
+            if not normalized_gk:
+                raise ValueError("gateway_key required")
+            next_mapping["gateway_key"] = normalized_gk
+        if whitelist_key is not None:
+            next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
+        active_token = token
+        if new_token and new_token != token:
+            if new_token in _tokens:
+                raise ValueError(f"token already exists: {new_token}")
+            _tokens[new_token] = next_mapping
+            del _tokens[token]
+            active_token = new_token
+        else:
+            _tokens[token] = next_mapping
         _save()
         return True
 

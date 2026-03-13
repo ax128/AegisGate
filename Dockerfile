@@ -8,8 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml README.md /app/
-# 快速上手与使用说明文档，供内置 UI 文档页展示
-COPY *-QUICKSTART.md OTHER_TERMINAL_CLIENTS_USAGE.md OPENCLAW_INJECT_PROXY_FETCH.md SKILL.md /app/
+# 根目录所有 Markdown 文档，供内置 UI 文档页展示（_EXCLUDED_ROOT_DOCS 控制哪些不展示）
+COPY *.md /app/
 COPY aegisgate /app/aegisgate
 # 首次启动时 init_config 会从本路径复制 .env 与策略 YAML 到挂载目录（若缺失）
 COPY config/.env.example /app/config/.env.example

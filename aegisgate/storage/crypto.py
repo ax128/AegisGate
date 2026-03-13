@@ -63,7 +63,13 @@ def _load_or_generate_key() -> bytes:
         except OSError:
             pass
         logger.warning(
-            "crypto: could not write %s, saved to fallback %s", primary_path, fallback_path
+            "crypto: could not write %s, saved to fallback %s — "
+            "WARNING: /tmp is ephemeral; key will be lost on container restart, "
+            "causing previously encrypted data to become unrecoverable. "
+            "Fix: ensure %s is writable (check Docker volume mount permissions).",
+            primary_path,
+            fallback_path,
+            primary_path.parent,
         )
     return key
 
