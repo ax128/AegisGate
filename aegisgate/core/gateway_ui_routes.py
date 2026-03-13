@@ -29,10 +29,11 @@ from aegisgate.core.gateway_auth import (
 )
 from aegisgate.core.gateway_keys import (
     _DEFAULT_ADMIN_PASSWORD,
+    _FORBIDDEN_UPSTREAM_BASE_EXAMPLES,
     _ensure_gateway_key,
     _is_admin_initialized,
     _mark_admin_initialized,
-    _gateway_key_cached,
+    _normalize_required_whitelist_list,
 )
 from aegisgate.core.gateway_ui_config import (
     _coerce_config_value,
@@ -58,22 +59,6 @@ import hmac
 
 _WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_BOOT_TIME = time.time()
-
-# 注册时禁止使用的示例/占位 upstream_base
-_FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
-    u.rstrip("/").lower()
-    for u in (
-        "https://your-upstream.example.com/v1",
-        "http://your-upstream.example.com/v1",
-    )
-)
-
-
-def _normalize_required_whitelist_list(value: object) -> list[str] | None:
-    if not isinstance(value, list):
-        return None
-    return normalize_whitelist_keys(value)
 
 
 def register_ui_routes(app: FastAPI) -> None:
@@ -99,6 +84,7 @@ def register_ui_routes(app: FastAPI) -> None:
 
     @app.get("/__ui__/health")
     def local_ui_health() -> dict[str, object]:
+        from aegisgate.core.gateway import _BOOT_TIME
         return {"status": "ok", "ui": True, "uptime_seconds": int(time.time() - _BOOT_TIME)}
 
     # ------------------------------------------------------------------
@@ -607,12 +593,18 @@ def register_ui_routes(app: FastAPI) -> None:
 # Helpers used by register_ui_routes closures
 # ---------------------------------------------------------------------------
 
+def _get_boot_time() -> float:
+    """Late import to avoid circular dependency with gateway.py."""
+    from aegisgate.core.gateway import _BOOT_TIME
+    return _BOOT_TIME
+
+
 def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
     session_token = request.cookies.get(_UI_SESSION_COOKIE, "") if request is not None else ""
     return {
         "app_name": settings.app_name,
         "status": "running",
-        "uptime_seconds": int(time.time() - _BOOT_TIME),
+        "uptime_seconds": int(time.time() - _get_boot_time()),
         "server": {"host": settings.host, "port": settings.port},
         "upstream_base_url": (settings.upstream_base_url or "").strip(),
         "security": {

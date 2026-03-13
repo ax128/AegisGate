@@ -40,6 +40,7 @@ from aegisgate.core.hot_reload import HotReloader, build_watcher
 # --- Re-exports from sub-modules (backward compatibility) ---
 from aegisgate.core.gateway_keys import (  # noqa: F401
     _DEFAULT_ADMIN_PASSWORD,
+    _FORBIDDEN_UPSTREAM_BASE_EXAMPLES,
     _GATEWAY_KEY_FILE,
     _PROXY_TOKEN_FILE,
     _PROXY_TOKEN_HEADER,
@@ -48,9 +49,11 @@ from aegisgate.core.gateway_keys import (  # noqa: F401
     _gateway_key_cached,
     _is_admin_initialized,
     _mark_admin_initialized,
+    _normalize_required_whitelist_list,
     get_proxy_token_value,
 )
 from aegisgate.core.gateway_network import (  # noqa: F401
+    _LOOPBACK_HOSTS,
     _is_internal_ip,
     _is_loopback_ip,
     _is_trusted_proxy,
@@ -136,6 +139,11 @@ class _AdminRateLimiter:
         now = time.monotonic()
         cutoff = now - 60.0
         with self._lock:
+            # Periodically evict stale buckets to prevent unbounded memory growth
+            if len(self._buckets) > 10000:
+                self._buckets = defaultdict(list, {
+                    k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
+                })
             bucket = self._buckets[client_ip]
             self._buckets[client_ip] = [t for t in bucket if t > cutoff]
             if len(self._buckets[client_ip]) >= self._max:
@@ -220,7 +228,6 @@ if _UI_ASSETS_DIR.is_dir():
     app.mount("/__ui__/assets", StaticFiles(directory=str(_UI_ASSETS_DIR)), name="ui-assets")
 _nonce_cache = build_nonce_cache()
 _admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
 _PASSTHROUGH_PATHS = frozenset({"/", "/health", "/robots.txt", "/favicon.ico"})
 
@@ -507,21 +514,6 @@ async def security_boundary_middleware(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # Admin API endpoints (register / add / remove / lookup / unregister)
 # ---------------------------------------------------------------------------
-
-_FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
-    u.rstrip("/").lower()
-    for u in (
-        "https://your-upstream.example.com/v1",
-        "http://your-upstream.example.com/v1",
-    )
-)
-
-
-def _normalize_required_whitelist_list(value: object) -> list[str] | None:
-    if not isinstance(value, list):
-        return None
-    return normalize_whitelist_keys(value)
-
 
 @app.post("/__gw__/register")
 async def gw_register(request: Request) -> JSONResponse:

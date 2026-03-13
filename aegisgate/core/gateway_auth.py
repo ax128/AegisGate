@@ -157,7 +157,7 @@ def _sanitize_public_host(raw_host: str) -> str:
     if lowered.startswith("0.0.0.0:"):
         return f"127.0.0.1:{host.split(':', 1)[1]}"
     if lowered.startswith("[::]:"):
-        return f"127.0.0.1:{host.split(':', 1)[1]}"
+        return f"127.0.0.1:{host.rsplit(':', 1)[1]}"
     return host
 
 

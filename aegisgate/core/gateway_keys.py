@@ -8,6 +8,7 @@ from pathlib import Path
 
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
 # ---------------------------------------------------------------------------
 # Gateway key  (file-based)
@@ -144,3 +145,21 @@ def _ensure_proxy_token() -> str:
 def get_proxy_token_value() -> str:
     """Return the current proxy token value."""
     return _proxy_token_value
+
+
+# ---------------------------------------------------------------------------
+# Shared validation constants (used by gateway.py and gateway_ui_routes.py)
+# ---------------------------------------------------------------------------
+_FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
+    u.rstrip("/").lower()
+    for u in (
+        "https://your-upstream.example.com/v1",
+        "http://your-upstream.example.com/v1",
+    )
+)
+
+
+def _normalize_required_whitelist_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return normalize_whitelist_keys(value)

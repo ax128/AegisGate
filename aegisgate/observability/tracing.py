@@ -45,8 +45,12 @@ def init_tracing(service_name: str = "aegisgate") -> None:
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
         logger.info("tracing initialized with OTLP exporter")
     except ImportError:
-        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-        logger.info("tracing initialized with console exporter (install opentelemetry-exporter-otlp for production)")
+        import os
+        if os.environ.get("AEGIS_OTEL_CONSOLE_EXPORTER", "").lower() in ("1", "true", "yes"):
+            provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+            logger.info("tracing initialized with console exporter (install opentelemetry-exporter-otlp for production)")
+        else:
+            logger.warning("OTLP exporter not installed, tracing spans will be discarded; set AEGIS_OTEL_CONSOLE_EXPORTER=true to use console exporter")
 
     _otel_trace.set_tracer_provider(provider)
 
