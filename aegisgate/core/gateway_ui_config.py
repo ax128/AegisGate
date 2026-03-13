@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from aegisgate.config.settings import settings
+from aegisgate.util.logger import logger
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
@@ -221,6 +222,7 @@ def _write_env_updates(updates: dict[str, str]) -> None:
             tmp_path = Path(tmp.name)
         tmp_path.replace(_ENV_PATH)
     except OSError as exc:
+        logger.error("config env write failed path=%s error=%s", _ENV_PATH, exc)
         raise RuntimeError(f"无法写入 {_ENV_PATH}: {exc}") from exc
 
 
