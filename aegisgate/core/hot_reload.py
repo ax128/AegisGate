@@ -120,6 +120,11 @@ def reload_settings() -> None:
                 continue
             setattr(settings, field_name, getattr(fresh, field_name))
         refresh_feature_flags()
+        # Re-check writable paths: reload may have reset audit_log_path /
+        # sqlite_db_path back to the configured default, losing the runtime
+        # fallback that was applied at startup when /app/logs is not writable.
+        from aegisgate.init_config import ensure_runtime_storage_paths
+        ensure_runtime_storage_paths()
         logger.info("hot_reload settings reloaded from environment / .env")
     except Exception:
         logger.exception("hot_reload settings reload failed")
