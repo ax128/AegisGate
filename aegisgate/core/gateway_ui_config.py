@@ -124,6 +124,7 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     {"env": "AEGIS_SEMANTIC_TIMEOUT_MS", "field": "semantic_timeout_ms", "label": "语义超时（ms）", "type": "int", "section": "security"},
     {"env": "AEGIS_SEMANTIC_CACHE_TTL_SECONDS", "field": "semantic_cache_ttl_seconds", "label": "语义缓存 TTL（秒）", "type": "int", "section": "security"},
     {"env": "AEGIS_SEMANTIC_SERVICE_URL", "field": "semantic_service_url", "label": "语义服务外部 URL", "type": "string", "section": "security"},
+    {"env": "AEGIS_ENABLE_EXACT_VALUE_REDACTION", "field": "enable_exact_value_redaction", "label": "精确值脱敏", "type": "bool", "section": "security"},
     {"env": "AEGIS_ENABLE_REDACTION", "field": "enable_redaction", "label": "PII 脱敏", "type": "bool", "section": "security"},
     {"env": "AEGIS_ENABLE_RESTORATION", "field": "enable_restoration", "label": "脱敏还原", "type": "bool", "section": "security"},
     {"env": "AEGIS_ENABLE_INJECTION_DETECTOR", "field": "enable_injection_detector", "label": "注入检测", "type": "bool", "section": "security"},
