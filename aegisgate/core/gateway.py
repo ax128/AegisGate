@@ -560,25 +560,53 @@ def _verify_ui_csrf(request: Request) -> bool:
     return hmac.compare_digest(presented, expected)
 
 
+_DOC_FRIENDLY_TITLES: dict[str, str] = {
+    "README.md": "README",
+    "WEBUI-QUICKSTART.md": "Web UI 快速上手",
+    "CLIPROXY-QUICKSTART.md": "CLI Proxy 快速上手",
+    "SUB2API-QUICKSTART.md": "Sub2API 快速上手",
+    "AICLIENT2API-QUICKSTART.md": "AI Client→API 快速上手",
+    "OTHER_TERMINAL_CLIENTS_USAGE.md": "其他终端客户端用法",
+    "OPENCLAW_INJECT_PROXY_FETCH.md": "OpenClaw 注入代理",
+    "SKILL.md": "Skill 功能说明",
+}
+# 控制文档在侧边栏的展示顺序，未列出的按文件名字母序追加
+_DOC_ORDER: tuple[str, ...] = (
+    "README.md",
+    "WEBUI-QUICKSTART.md",
+    "CLIPROXY-QUICKSTART.md",
+    "SUB2API-QUICKSTART.md",
+    "AICLIENT2API-QUICKSTART.md",
+    "OTHER_TERMINAL_CLIENTS_USAGE.md",
+    "OPENCLAW_INJECT_PROXY_FETCH.md",
+    "SKILL.md",
+)
+
+
 def _docs_catalog() -> list[dict[str, str]]:
-    """返回 UI 文档目录：README.md 置顶，其次是根目录中允许展示的 .md 文件。
+    """返回 UI 文档目录：按 _DOC_ORDER 排序，仅包含实际存在的文件。
     docs/ 子目录为本地私有文档，不纳入展示范围。
     """
+    available: set[str] = {
+        p.name for p in _PROJECT_ROOT.glob("*.md")
+        if p.name not in _EXCLUDED_ROOT_DOCS
+    }
     docs: list[dict[str, str]] = []
-    if _README_PATH.is_file():
-        docs.append({"id": "README.md", "title": "README", "path": "README.md"})
-    for doc_path in sorted(_PROJECT_ROOT.glob("*.md")):
-        if doc_path.name in _EXCLUDED_ROOT_DOCS:
-            continue
-        if doc_path.resolve() == _README_PATH:
-            continue  # 已在首位添加
-        docs.append(
-            {
-                "id": doc_path.name,
-                "title": doc_path.stem.replace("-", " ").replace("_", " "),
-                "path": doc_path.name,
-            }
-        )
+    seen: set[str] = set()
+    for name in _DOC_ORDER:
+        if name in available:
+            docs.append({
+                "id": name,
+                "title": _DOC_FRIENDLY_TITLES.get(name, name.replace("-", " ").replace("_", " ").rstrip(".md")),
+                "path": name,
+            })
+            seen.add(name)
+    for name in sorted(available - seen):
+        docs.append({
+            "id": name,
+            "title": _DOC_FRIENDLY_TITLES.get(name, name.replace("-", " ").replace("_", " ")),
+            "path": name,
+        })
     return docs
 
 
