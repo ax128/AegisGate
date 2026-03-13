@@ -648,10 +648,14 @@ def register_ui_routes(app: FastAPI) -> None:
         except yaml.YAMLError as exc:
             return JSONResponse(status_code=400, content={"error": "invalid_yaml", "detail": str(exc)})
         path = _compose_file_path(filename)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        tmp_path.replace(path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
+                tmp.write(content)
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(path)
+        except OSError as exc:
+            return JSONResponse(status_code=500, content={"error": "write_failed", "detail": str(exc)})
         return JSONResponse(content={"ok": True, "filename": filename})
 
     # ------------------------------------------------------------------
