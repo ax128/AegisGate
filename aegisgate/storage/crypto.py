@@ -16,6 +16,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from aegisgate.util.logger import logger
 
 _fernet_instance: Fernet | None = None
+_FERNET_KEY_FILE = "aegis_fernet.key"
+_FERNET_FALLBACK_DIR = Path("/tmp/aegisgate")
 
 
 def _config_dir() -> Path:
@@ -33,22 +35,36 @@ def _load_or_generate_key() -> bytes:
     if env_key:
         return env_key.encode("utf-8")
 
-    # 2. Try persistent key file
-    key_path = _config_dir() / "aegis_fernet.key"
-    if key_path.is_file():
-        raw = key_path.read_text(encoding="utf-8").strip()
-        if raw:
-            return raw.encode("utf-8")
+    # 2. Try persistent key file (primary then fallback)
+    primary_path = _config_dir() / _FERNET_KEY_FILE
+    fallback_path = _FERNET_FALLBACK_DIR / _FERNET_KEY_FILE
+    for candidate in (primary_path, fallback_path):
+        if candidate.is_file():
+            raw = candidate.read_text(encoding="utf-8").strip()
+            if raw:
+                logger.info("crypto: loaded Fernet key from %s", candidate)
+                return raw.encode("utf-8")
 
     # 3. Auto-generate
     key = Fernet.generate_key()
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.write_text(key.decode("utf-8"), encoding="utf-8")
+    primary_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(key_path, 0o600)
-    except OSError:
-        pass
-    logger.info("crypto: generated new Fernet key at %s", key_path)
+        primary_path.write_text(key.decode("utf-8"), encoding="utf-8")
+        try:
+            os.chmod(primary_path, 0o600)
+        except OSError:
+            pass
+        logger.info("crypto: generated new Fernet key at %s", primary_path)
+    except PermissionError:
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(key.decode("utf-8"), encoding="utf-8")
+        try:
+            os.chmod(fallback_path, 0o600)
+        except OSError:
+            pass
+        logger.warning(
+            "crypto: could not write %s, saved to fallback %s", primary_path, fallback_path
+        )
     return key
 
 
@@ -57,6 +73,11 @@ def _get_fernet() -> Fernet:
     if _fernet_instance is None:
         _fernet_instance = Fernet(_load_or_generate_key())
     return _fernet_instance
+
+
+def ensure_key() -> None:
+    """Eagerly load or generate the Fernet key. Call at startup to surface errors early."""
+    _get_fernet()
 
 
 def encrypt_mapping(mapping: dict[str, str]) -> str:

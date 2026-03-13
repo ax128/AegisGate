@@ -42,6 +42,7 @@ from aegisgate.core.gw_tokens import (
     update as gw_tokens_update,
 )
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
+from aegisgate.storage.crypto import ensure_key as _ensure_fernet_key
 from aegisgate.core.security_boundary import (
     build_nonce_cache,
     build_signature_payload,
@@ -80,25 +81,39 @@ def _ensure_gateway_key() -> str:
         return _gateway_key_cached
 
     key_path = (Path.cwd() / "config" / _GATEWAY_KEY_FILE).resolve()
-    if key_path.is_file():
-        stored = key_path.read_text(encoding="utf-8").strip()
-        if stored:
-            settings.gateway_key = stored
-            _gateway_key_cached = stored
-            logger.info("gateway_key loaded from %s", key_path)
-            return stored
+    fallback_key_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
+    for candidate in (key_path, fallback_key_path):
+        if candidate.is_file():
+            stored = candidate.read_text(encoding="utf-8").strip()
+            if stored:
+                settings.gateway_key = stored
+                _gateway_key_cached = stored
+                logger.info("gateway_key loaded from %s", candidate)
+                return stored
 
     # Auto-generate and persist (first run)
     new_key = secrets.token_urlsafe(32)
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.write_text(new_key, encoding="utf-8")
     try:
-        os.chmod(key_path, 0o600)
-    except OSError:
-        pass
+        key_path.write_text(new_key, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        logger.info("gateway_key auto-generated and saved to %s", key_path)
+    except PermissionError:
+        fallback_path = Path("/tmp/aegisgate") / _GATEWAY_KEY_FILE
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(new_key, encoding="utf-8")
+        try:
+            os.chmod(fallback_path, 0o600)
+        except OSError:
+            pass
+        logger.warning(
+            "gateway_key: could not write %s, saved to fallback %s", key_path, fallback_path
+        )
     settings.gateway_key = new_key
     _gateway_key_cached = new_key
-    logger.info("gateway_key auto-generated and saved to %s", key_path)
     return new_key
 
 
@@ -116,22 +131,36 @@ def _ensure_proxy_token() -> str:
     from pathlib import Path
 
     key_path = (Path.cwd() / "config" / _PROXY_TOKEN_FILE).resolve()
-    if key_path.is_file():
-        stored = key_path.read_text(encoding="utf-8").strip()
-        if stored:
-            _proxy_token_value = stored
-            logger.info("proxy_token loaded from %s", key_path)
-            return stored
+    fallback_token_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
+    for candidate in (key_path, fallback_token_path):
+        if candidate.is_file():
+            stored = candidate.read_text(encoding="utf-8").strip()
+            if stored:
+                _proxy_token_value = stored
+                logger.info("proxy_token loaded from %s", candidate)
+                return stored
 
     new_token = secrets.token_urlsafe(32)
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.write_text(new_token, encoding="utf-8")
     try:
-        os.chmod(key_path, 0o600)
-    except OSError:
-        pass
+        key_path.write_text(new_token, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        logger.info("proxy_token auto-generated and saved to %s", key_path)
+    except PermissionError:
+        fallback_path = Path("/tmp/aegisgate") / _PROXY_TOKEN_FILE
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(new_token, encoding="utf-8")
+        try:
+            os.chmod(fallback_path, 0o600)
+        except OSError:
+            pass
+        logger.warning(
+            "proxy_token: could not write %s, saved to fallback %s", key_path, fallback_path
+        )
     _proxy_token_value = new_token
-    logger.info("proxy_token auto-generated and saved to %s", key_path)
     return new_token
 
 
@@ -173,6 +202,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     _ensure_gateway_key()  # loads / auto-generates config/aegis_gateway.key
     _ensure_proxy_token()
+    _ensure_fernet_key()   # loads / auto-generates config/aegis_fernet.key
 
     # Log key config so operators can verify the right compose overlay is active.
     upstream = (settings.upstream_base_url or "").strip()

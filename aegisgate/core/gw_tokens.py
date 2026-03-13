@@ -59,12 +59,15 @@ def _save() -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {_GW_TOKENS_KEY: dict(_tokens)}
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    logger.debug("gw_tokens saved path=%s count=%d", path, len(_tokens))
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        logger.debug("gw_tokens saved path=%s count=%d", path, len(_tokens))
+    except OSError as exc:
+        logger.warning("gw_tokens: could not persist to %s: %s (in-memory state intact)", path, exc)
 
 
 def get(token: str) -> dict[str, Any] | None:
