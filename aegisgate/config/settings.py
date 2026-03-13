@@ -24,13 +24,13 @@ class Settings(BaseSettings):
     enable_relay_endpoint: bool = False
 
     upstream_timeout_seconds: float = 600.0
-    upstream_max_connections: int = 100
-    upstream_max_keepalive_connections: int = 20
+    upstream_max_connections: int = 300
+    upstream_max_keepalive_connections: int = 100
     enable_thread_offload: bool = True
     # 过滤管道（request/response pipeline）最大允许执行时间（秒）。
     # 超时后该请求被拒绝（response: block，request: pass-through），event loop 不再被阻塞。
     # 设为 0 表示不限制（不推荐生产使用）。
-    filter_pipeline_timeout_s: float = 30.0
+    filter_pipeline_timeout_s: float = 90.0
     upstream_base_header: str = "x-upstream-base"
     # 默认上游：设置后可直接请求 /v1/... 与 /v2/...，无需走 /v1/__gw__/t/{token}/... 注册流程（如对接 cli-proxy-api:8317）
     upstream_base_url: str = ""
@@ -43,11 +43,11 @@ class Settings(BaseSettings):
     redis_pending_scan_max_entries: int = 0  # <=0 表示不限制扫描数量，避免高并发会话漏检较早 pending
     postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"
     postgres_schema: str = "public"
-    max_request_body_bytes: int = 2_000_000
-    max_messages_count: int = 100
-    max_content_length_per_message: int = 50_000
-    max_pending_payload_bytes: int = 100_000
-    max_response_length: int = 500_000
+    max_request_body_bytes: int = 12_000_000
+    max_messages_count: int = 300
+    max_content_length_per_message: int = 250_000
+    max_pending_payload_bytes: int = 1_200_000
+    max_response_length: int = 2_000_000
     gateway_key_header: str = "gateway-key"
     gateway_key: str = ""  # Loaded from config/aegis_gateway.key at startup
     tenant_id_header: str = "x-tenant-id"
