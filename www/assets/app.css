@@ -577,6 +577,25 @@ select:focus {
 .btn-danger-sm svg { width: 12px; height: 12px; }
 .btn-danger-sm:hover { background: rgba(177, 52, 40, 0.15); }
 
+.btn-edit-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(123, 75, 42, 0.07);
+  border: 1px solid rgba(123, 75, 42, 0.2);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s;
+  margin-right: 6px;
+}
+.btn-edit-sm svg { width: 12px; height: 12px; }
+.btn-edit-sm:hover { background: rgba(123, 75, 42, 0.15); }
+
 .token-table-wrap {
   overflow-x: auto;
   border-radius: var(--radius);

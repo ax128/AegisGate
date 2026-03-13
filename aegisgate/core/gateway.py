@@ -1551,6 +1551,43 @@ async def local_ui_tokens_register(request: Request) -> JSONResponse:
     )
 
 
+@app.patch("/__ui__/api/tokens/{token}")
+async def local_ui_tokens_update(token: str, request: Request) -> JSONResponse:
+    """更新指定 Token 的字段（upstream_base / gateway_key / whitelist_key）。"""
+    token = token.strip()
+    if not token:
+        return JSONResponse(status_code=400, content={"error": "missing_token"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    kwargs: dict = {}
+    if "upstream_base" in body:
+        upstream_base = _string_field(body["upstream_base"])
+        if not upstream_base:
+            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "upstream_base 不能为空"})
+        upstream_normalized = upstream_base.rstrip("/").lower()
+        if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
+            return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
+        kwargs["upstream_base"] = upstream_base.rstrip("/")
+    if "gateway_key" in body:
+        gk = _string_field(body["gateway_key"])
+        if not gk:
+            return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "gateway_key 不能为空"})
+        kwargs["gateway_key"] = gk
+    if "whitelist_key" in body:
+        kwargs["whitelist_key"] = body["whitelist_key"]
+    if not kwargs:
+        return JSONResponse(status_code=400, content={"error": "no_fields", "detail": "未提供任何可更新字段"})
+    try:
+        updated = gw_tokens_update(token, **kwargs)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
+    if not updated:
+        return JSONResponse(status_code=404, content={"error": "token_not_found"})
+    return JSONResponse(content={"ok": True})
+
+
 @app.delete("/__ui__/api/tokens/{token}")
 def local_ui_tokens_delete(token: str) -> JSONResponse:
     """注销指定 Token。"""

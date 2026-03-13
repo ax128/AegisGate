@@ -383,7 +383,14 @@ async function loadTokens() {
         <td><div class="token-upstream" title="${escapeHtml(item.upstream_base)}">${escapeHtml(item.upstream_base)}</div></td>
         <td><span class="token-key-hint">${escapeHtml(item.gateway_key_hint || "—")}</span></td>
         <td><span class="token-wl-count" title="${escapeHtml(wlTitle)}">${wlCount || "∞"}</span></td>
-        <td>
+        <td style="white-space:nowrap;">
+          <button class="btn-edit-sm" data-edit-token="${escapeHtml(item.token)}" data-edit-upstream="${escapeHtml(item.upstream_base)}" data-edit-whitelist="${escapeHtml((item.whitelist_keys||[]).join(', '))}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            编辑
+          </button>
           <button class="btn-danger-sm" data-del-token="${escapeHtml(item.token)}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
@@ -399,6 +406,15 @@ async function loadTokens() {
           e.currentTarget.textContent = "已复制!";
           setTimeout(() => { e.currentTarget.textContent = tokenDisplay(t); }, 1500);
         }).catch(() => {});
+      });
+      // Edit token
+      tr.querySelector(".btn-edit-sm").addEventListener("click", (e) => {
+        const btn = e.currentTarget;
+        openEditModal({
+          token: btn.dataset.editToken,
+          upstream_base: btn.dataset.editUpstream,
+          whitelist_keys: btn.dataset.editWhitelist ? btn.dataset.editWhitelist.split(",").map(s => s.trim()).filter(Boolean) : [],
+        });
       });
       // Delete token
       tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
@@ -425,9 +441,29 @@ async function loadTokens() {
 function openTokenModal() {
   const modal = document.getElementById("token-modal");
   if (!modal) return;
+  document.getElementById("modal-edit-token").value = "";
+  document.getElementById("modal-title").textContent = "注册新 Token";
   document.getElementById("modal-upstream").value = "";
+  document.getElementById("modal-gateway-key").value = "";
   document.getElementById("modal-whitelist").value = "";
   document.getElementById("modal-error").textContent = "";
+  document.getElementById("modal-gateway-key-field").classList.add("hidden");
+  document.getElementById("modal-submit").textContent = "注册";
+  modal.classList.remove("hidden");
+  document.getElementById("modal-upstream").focus();
+}
+
+function openEditModal(item) {
+  const modal = document.getElementById("token-modal");
+  if (!modal) return;
+  document.getElementById("modal-edit-token").value = item.token;
+  document.getElementById("modal-title").textContent = "编辑 Token";
+  document.getElementById("modal-upstream").value = item.upstream_base || "";
+  document.getElementById("modal-gateway-key").value = "";
+  document.getElementById("modal-whitelist").value = (item.whitelist_keys || []).join(", ");
+  document.getElementById("modal-error").textContent = "";
+  document.getElementById("modal-gateway-key-field").classList.remove("hidden");
+  document.getElementById("modal-submit").textContent = "保存";
   modal.classList.remove("hidden");
   document.getElementById("modal-upstream").focus();
 }
@@ -439,36 +475,61 @@ function closeTokenModal() {
 
 async function submitTokenModal() {
   const errorEl = document.getElementById("modal-error");
+  const editToken = document.getElementById("modal-edit-token").value.trim();
   const upstream = document.getElementById("modal-upstream").value.trim();
+  const gatewayKey = document.getElementById("modal-gateway-key").value.trim();
   const whitelist = document.getElementById("modal-whitelist").value.trim();
+  const whitelistArr = whitelist ? whitelist.split(",").map((s) => s.trim()).filter(Boolean) : [];
   errorEl.textContent = "";
   if (!upstream) { errorEl.textContent = "请填写上游地址"; return; }
 
-  const body = { upstream_base: upstream };
-  if (whitelist) {
-    body.whitelist_key = whitelist.split(",").map((s) => s.trim()).filter(Boolean);
-  }
   const submitBtn = document.getElementById("modal-submit");
-  submitBtn.disabled = true;
-  submitBtn.textContent = "注册中…";
-  try {
-    const data = await fetchJson("/__ui__/api/tokens", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
-      body: JSON.stringify(body),
-    });
-    closeTokenModal();
-    loadTokens();
-    if (data.already_registered) {
-      alert(`Token 已存在（复用）：${data.token}\n\nBase URL:\n${data.base_url}`);
-    } else {
-      alert(`注册成功！\n\nToken: ${data.token}\nBase URL:\n${data.base_url}\n\n请妥善保存，Base URL 可直接作为 OpenAI 兼容 API 的 base_url 使用。`);
+  const isEdit = !!editToken;
+
+  if (isEdit) {
+    // PATCH mode
+    const body = { upstream_base: upstream, whitelist_key: whitelistArr };
+    if (gatewayKey) body.gateway_key = gatewayKey;
+    submitBtn.disabled = true;
+    submitBtn.textContent = "保存中…";
+    try {
+      await fetchJson(`/__ui__/api/tokens/${encodeURIComponent(editToken)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify(body),
+      });
+      closeTokenModal();
+      loadTokens();
+    } catch (err) {
+      errorEl.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "保存";
     }
-  } catch (err) {
-    errorEl.textContent = err.message;
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "注册";
+  } else {
+    // POST mode (register)
+    const body = { upstream_base: upstream, whitelist_key: whitelistArr };
+    submitBtn.disabled = true;
+    submitBtn.textContent = "注册中…";
+    try {
+      const data = await fetchJson("/__ui__/api/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify(body),
+      });
+      closeTokenModal();
+      loadTokens();
+      if (data.already_registered) {
+        alert(`Token 已存在（复用）：${data.token}\n\nBase URL:\n${data.base_url}`);
+      } else {
+        alert(`注册成功！\n\nToken: ${data.token}\nBase URL:\n${data.base_url}\n\n请妥善保存，Base URL 可直接作为 OpenAI 兼容 API 的 base_url 使用。`);
+      }
+    } catch (err) {
+      errorEl.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "注册";
+    }
   }
 }
 
