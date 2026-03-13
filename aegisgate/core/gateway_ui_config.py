@@ -214,11 +214,14 @@ def _write_env_updates(updates: dict[str, str]) -> None:
     for key in updates:
         if key not in consumed:
             new_lines.append(f"{key}={updates[key]}")
-    _ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(_ENV_PATH.parent)) as tmp:
-        tmp.write("\n".join(new_lines).rstrip() + "\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(_ENV_PATH)
+    try:
+        _ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(_ENV_PATH.parent)) as tmp:
+            tmp.write("\n".join(new_lines).rstrip() + "\n")
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(_ENV_PATH)
+    except OSError as exc:
+        raise RuntimeError(f"无法写入 {_ENV_PATH}: {exc}") from exc
 
 
 def _ui_config_payload() -> dict[str, object]:

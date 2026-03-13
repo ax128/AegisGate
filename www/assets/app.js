@@ -961,12 +961,13 @@ async function saveComposeFile() {
   const content = editor ? editor.value : "";
   setStatus("compose-save-status", "保存中…");
   try {
-    await fetchJson(`/__ui__/api/compose/${encodeURIComponent(currentComposeFile)}`, {
+    const saved = await fetchJson(`/__ui__/api/compose/${encodeURIComponent(currentComposeFile)}`, {
       method: "PUT",
       headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
       body: JSON.stringify({content}),
     });
-    setStatus("compose-save-status", "已保存");
+    const pathHint = saved.save_path ? `（${saved.save_path}）` : "";
+    setStatus("compose-save-status", `已保存 ${pathHint}`);
     const notFound = document.getElementById("compose-not-found");
     if (notFound) notFound.classList.add("hidden");
   } catch (err) {

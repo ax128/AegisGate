@@ -125,7 +125,10 @@ def register_ui_routes(app: FastAPI) -> None:
                 return JSONResponse(status_code=400, content={"error": "invalid_field_value", "detail": str(exc)})
             env_updates[str(meta["env"])] = _serialize_env_value(str(meta["type"]), coerced)
             updated_fields[str(field_name)] = coerced
-        _write_env_updates(env_updates)
+        try:
+            _write_env_updates(env_updates)
+        except RuntimeError as exc:
+            return JSONResponse(status_code=500, content={"error": "env_write_failed", "detail": str(exc)})
         from aegisgate.core.hot_reload import reload_settings
         reload_settings()
         return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
@@ -612,8 +615,13 @@ def register_ui_routes(app: FastAPI) -> None:
         "docker-compose.sub2api.yml",
     })
 
+    # Compose files are stored under config/compose/ — a subdirectory of the
+    # volume-mounted config dir so they persist across container restarts and
+    # are accessible to the user on the host at ./config/compose/<filename>.
+    _COMPOSE_DIR = Path.cwd() / "config" / "compose"
+
     def _compose_file_path(filename: str) -> Path:
-        return (Path.cwd() / filename).resolve()
+        return (_COMPOSE_DIR / filename).resolve()
 
     @app.get("/__ui__/api/compose")
     def local_ui_compose_list() -> JSONResponse:
@@ -656,7 +664,7 @@ def register_ui_routes(app: FastAPI) -> None:
             tmp_path.replace(path)
         except OSError as exc:
             return JSONResponse(status_code=500, content={"error": "write_failed", "detail": str(exc)})
-        return JSONResponse(content={"ok": True, "filename": filename})
+        return JSONResponse(content={"ok": True, "filename": filename, "save_path": str(path)})
 
     # ------------------------------------------------------------------
     # Gateway restart
