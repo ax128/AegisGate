@@ -5,7 +5,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AEGIS_", extra="ignore")
+    # env_file priority (lowest → highest): .env < config/.env < os.environ
+    # config/.env is written by the UI; os.environ wins for Docker -e flags.
+    model_config = SettingsConfigDict(
+        env_prefix="AEGIS_",
+        extra="ignore",
+        env_file=[".env", "config/.env"],
+        env_file_encoding="utf-8",
+    )
 
     app_name: str = "AegisGate"
     env: str = "dev"
