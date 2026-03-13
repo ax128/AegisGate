@@ -337,7 +337,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "type": key_type, "value": value})
 
     @app.post("/__ui__/api/keys/{key_type}/rotate")
-    def local_ui_key_rotate(key_type: str) -> JSONResponse:
+    def local_ui_key_rotate(key_type: str, request: Request) -> JSONResponse:
         if key_type not in _KEY_FILES:
             return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
         if key_type == "fernet":
@@ -353,6 +353,23 @@ def register_ui_routes(app: FastAPI) -> None:
             import aegisgate.core.gateway_keys as _keys_mod
             _keys_mod._gateway_key_cached = new_key
             settings.gateway_key = new_key
+            # Re-issue session so the user stays authenticated after key rotation.
+            # The old session was signed with the old key and would immediately 401.
+            new_session = _create_ui_session_token(request)
+            new_csrf = _ui_csrf_token(new_session)
+            response = JSONResponse(content={
+                "ok": True, "type": key_type, "value": new_key,
+                "csrf_token": new_csrf,
+            })
+            response.set_cookie(
+                key=_UI_SESSION_COOKIE,
+                value=new_session,
+                max_age=settings.local_ui_session_ttl_seconds,
+                httponly=True,
+                samesite="lax",
+                secure=settings.local_ui_secure_cookie,
+            )
+            return response
         return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
 
     # ------------------------------------------------------------------

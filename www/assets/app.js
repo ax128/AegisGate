@@ -890,7 +890,10 @@ async function rotateKey(keyType) {
       method: "POST",
       headers: {"x-aegis-ui-csrf": uiCsrfToken},
     });
-    loadKeys();
+    // Gateway key rotation invalidates the old session; server re-issues a new
+    // session cookie and returns a fresh CSRF token — update it immediately so
+    // subsequent requests (including loadKeys on modal close) don't get 401.
+    if (data.csrf_token) uiCsrfToken = data.csrf_token;
     const modal = document.getElementById("key-modal");
     const titleEl = document.getElementById("key-modal-title");
     const valueEl = document.getElementById("key-modal-value");
@@ -916,8 +919,9 @@ function bindKeysUI() {
   const cancelBtn = document.getElementById("key-modal-cancel");
   const copyBtn = document.getElementById("key-modal-copy");
   const modal = document.getElementById("key-modal");
-  if (closeBtn) closeBtn.addEventListener("click", () => modal && modal.classList.add("hidden"));
-  if (cancelBtn) cancelBtn.addEventListener("click", () => modal && modal.classList.add("hidden"));
+  function closeKeyModal() { if (modal) { modal.classList.add("hidden"); loadKeys(); } }
+  if (closeBtn) closeBtn.addEventListener("click", closeKeyModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeKeyModal);
   if (copyBtn) copyBtn.addEventListener("click", () => {
     const val = document.getElementById("key-modal-value").textContent;
     navigator.clipboard.writeText(val).then(() => {
@@ -925,7 +929,7 @@ function bindKeysUI() {
       setTimeout(() => { copyBtn.textContent = "复制"; }, 1500);
     }).catch(() => {});
   });
-  if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.add("hidden"); });
+  if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) closeKeyModal(); });
   loadKeys();
 }
 
