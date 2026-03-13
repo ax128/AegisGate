@@ -613,3 +613,397 @@ loadBootstrap().catch((error) => {
   updateHeaderStatus("error");
   showDocError(error);
 });
+
+// ─── Security Rules ───────────────────────────
+
+let currentRulesSection = "pii_patterns";
+let actionMapState = {};
+
+async function loadRules(section) {
+  if (section === "action_map") {
+    await loadActionMap();
+    return;
+  }
+  const tbody = document.getElementById("rules-tbody");
+  const countEl = document.getElementById("rules-count");
+  const thead = document.getElementById("rules-thead");
+  const tableEl = document.getElementById("rules-table");
+  const actionMapPanel = document.getElementById("action-map-panel");
+  const addBtn = document.getElementById("rules-add");
+  if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
+  if (tableEl) tableEl.classList.remove("hidden");
+  if (actionMapPanel) actionMapPanel.classList.add("hidden");
+  if (addBtn) addBtn.classList.remove("hidden");
+
+  const showKind = section === "command_patterns";
+  if (thead) {
+    thead.innerHTML = showKind
+      ? `<tr><th>ID</th><th>Regex</th><th>类型</th><th>操作</th></tr>`
+      : `<tr><th>ID</th><th>Regex</th><th>操作</th></tr>`;
+  }
+  try {
+    const data = await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (countEl) countEl.textContent = `共 ${items.length} 条规则`;
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="${showKind ? 4 : 3}" class="token-table-empty">暂无规则，点击「添加规则」新增。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = "";
+    items.forEach((item) => {
+      const tr = document.createElement("tr");
+      const idCell = `<td><code style="font-size:0.82rem;">${escapeHtml(item.id || "")}</code></td>`;
+      const regexCell = `<td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(item.regex || "")}"><code style="font-size:0.79rem;">${escapeHtml(item.regex || "")}</code></td>`;
+      const kindCell = showKind ? `<td><span style="font-size:0.8rem;color:var(--muted);">${escapeHtml(item.kind || "")}</span></td>` : "";
+      const actionCell = `<td style="white-space:nowrap;">
+        <button class="btn-edit-sm" data-rule-id="${escapeHtml(item.id)}" data-rule-regex="${escapeHtml(item.regex || "")}" data-rule-kind="${escapeHtml(item.kind || "")}">编辑</button>
+        <button class="btn-danger-sm" data-del-rule-id="${escapeHtml(item.id)}">删除</button>
+      </td>`;
+      tr.innerHTML = idCell + regexCell + kindCell + actionCell;
+      tr.querySelector(".btn-edit-sm").addEventListener("click", (e) => {
+        const btn = e.currentTarget;
+        openRuleModal(section, {id: btn.dataset.ruleId, regex: btn.dataset.ruleRegex, kind: btn.dataset.ruleKind});
+      });
+      tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
+        const ruleId = e.currentTarget.dataset.delRuleId;
+        if (!confirm(`确认删除规则 "${ruleId}"？`)) return;
+        try {
+          await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(ruleId)}`, {
+            method: "DELETE",
+            headers: {"x-aegis-ui-csrf": uiCsrfToken},
+          });
+          loadRules(section);
+        } catch (err) {
+          alert(`删除失败: ${err.message}`);
+        }
+      });
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    if (countEl) countEl.textContent = "加载失败";
+  }
+}
+
+async function loadActionMap() {
+  const tableEl = document.getElementById("rules-table");
+  const actionMapPanel = document.getElementById("action-map-panel");
+  const addBtn = document.getElementById("rules-add");
+  const countEl = document.getElementById("rules-count");
+  const grid = document.getElementById("action-map-grid");
+
+  if (tableEl) tableEl.classList.add("hidden");
+  if (actionMapPanel) actionMapPanel.classList.remove("hidden");
+  if (addBtn) addBtn.classList.add("hidden");
+  if (countEl) countEl.textContent = "";
+
+  try {
+    const data = await fetchJson("/__ui__/api/rules_action_map");
+    const actionMap = data.action_map || {};
+    actionMapState = JSON.parse(JSON.stringify(actionMap));
+    if (!grid) return;
+    grid.innerHTML = "";
+    const VALID_ACTIONS = ["block", "review", "sanitize", "pass"];
+    Object.entries(actionMap).forEach(([category, threats]) => {
+      const header = document.createElement("div");
+      header.className = "field-card wide";
+      header.innerHTML = `<div class="meta"><strong style="color:var(--accent);">${escapeHtml(category)}</strong></div>`;
+      grid.appendChild(header);
+      if (typeof threats === "object" && threats !== null) {
+        Object.entries(threats).forEach(([threat, action]) => {
+          const card = document.createElement("div");
+          card.className = "field-card";
+          const sel = document.createElement("select");
+          sel.className = "action-map-select";
+          VALID_ACTIONS.forEach((a) => {
+            const opt = document.createElement("option");
+            opt.value = a; opt.textContent = a;
+            if (a === action) opt.selected = true;
+            sel.appendChild(opt);
+          });
+          sel.addEventListener("change", () => {
+            if (!actionMapState[category]) actionMapState[category] = {};
+            actionMapState[category][threat] = sel.value;
+          });
+          card.innerHTML = `<div class="meta"><strong>${escapeHtml(threat)}</strong><span class="default">${escapeHtml(category)}</span></div>`;
+          card.appendChild(sel);
+          grid.appendChild(card);
+        });
+      }
+    });
+  } catch (err) {
+    if (grid) grid.innerHTML = `<p style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function openRuleModal(section, item) {
+  const modal = document.getElementById("rule-modal");
+  if (!modal) return;
+  document.getElementById("rule-modal-section").value = section;
+  document.getElementById("rule-modal-edit-id").value = item ? (item.id || "") : "";
+  document.getElementById("rule-modal-title").textContent = item ? "编辑规则" : "添加规则";
+  document.getElementById("rule-modal-id").value = item ? (item.id || "") : "";
+  document.getElementById("rule-modal-id").disabled = !!item;
+  document.getElementById("rule-modal-regex").value = item ? (item.regex || "") : "";
+  document.getElementById("rule-modal-kind").value = item ? (item.kind || "") : "";
+  document.getElementById("rule-modal-error").textContent = "";
+  document.getElementById("rule-modal-submit").textContent = item ? "保存" : "添加";
+  const showKind = section === "command_patterns";
+  const kindField = document.getElementById("rule-modal-kind-field");
+  if (kindField) kindField.style.display = showKind ? "" : "none";
+  modal.classList.remove("hidden");
+  document.getElementById("rule-modal-id").focus();
+}
+
+function closeRuleModal() {
+  const modal = document.getElementById("rule-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function submitRuleModal() {
+  const section = document.getElementById("rule-modal-section").value;
+  const editId = document.getElementById("rule-modal-edit-id").value.trim();
+  const isEdit = !!editId;
+  const ruleId = document.getElementById("rule-modal-id").value.trim();
+  const regex = document.getElementById("rule-modal-regex").value.trim();
+  const kind = document.getElementById("rule-modal-kind").value.trim();
+  const errEl = document.getElementById("rule-modal-error");
+  errEl.textContent = "";
+  if (!ruleId) { errEl.textContent = "请填写规则 ID"; return; }
+  if (!regex && section !== "direct_patterns") { errEl.textContent = "请填写正则表达式"; return; }
+  const body = {id: ruleId, regex};
+  if (kind) body.kind = kind;
+  const submitBtn = document.getElementById("rule-modal-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "保存中…";
+  try {
+    if (isEdit) {
+      await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(editId)}`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
+        body: JSON.stringify({regex, kind: kind || undefined}),
+      });
+    } else {
+      await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
+        body: JSON.stringify(body),
+      });
+    }
+    closeRuleModal();
+    loadRules(section);
+  } catch (err) {
+    errEl.textContent = err.message;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isEdit ? "保存" : "添加";
+  }
+}
+
+function bindRulesUI() {
+  document.querySelectorAll(".rules-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".rules-tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      currentRulesSection = tab.dataset.rulesSection;
+      loadRules(currentRulesSection);
+    });
+  });
+  const addBtn = document.getElementById("rules-add");
+  if (addBtn) addBtn.addEventListener("click", () => openRuleModal(currentRulesSection, null));
+
+  const closeBtn = document.getElementById("rule-modal-close");
+  const cancelBtn = document.getElementById("rule-modal-cancel");
+  const submitBtn = document.getElementById("rule-modal-submit");
+  if (closeBtn) closeBtn.addEventListener("click", closeRuleModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeRuleModal);
+  if (submitBtn) submitBtn.addEventListener("click", submitRuleModal);
+
+  const saveActionMap = document.getElementById("save-action-map");
+  if (saveActionMap) saveActionMap.addEventListener("click", async () => {
+    setStatus("action-map-status", "保存中…");
+    try {
+      await fetchJson("/__ui__/api/rules_action_map", {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
+        body: JSON.stringify(actionMapState),
+      });
+      setStatus("action-map-status", "已保存");
+    } catch (err) {
+      setStatus("action-map-status", `失败: ${err.message}`, true);
+    }
+  });
+
+  const ruleModal = document.getElementById("rule-modal");
+  if (ruleModal) {
+    ruleModal.addEventListener("click", (e) => { if (e.target === ruleModal) closeRuleModal(); });
+    ruleModal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeRuleModal();
+      if (e.key === "Enter" && !e.shiftKey) { const btn = document.getElementById("rule-modal-submit"); if (btn && !btn.disabled) submitRuleModal(); }
+    });
+  }
+  // Load default section
+  loadRules("pii_patterns");
+}
+
+// ─── Key Management ───────────────────────────
+
+async function loadKeys() {
+  try {
+    const data = await fetchJson("/__ui__/api/keys");
+    const items = Array.isArray(data.items) ? data.items : [];
+    items.forEach((item) => {
+      const statusEl = document.getElementById(`key-status-${item.type}`);
+      if (statusEl) {
+        statusEl.textContent = item.exists ? "✓ 已生成" : "✗ 未找到";
+        statusEl.style.color = item.exists ? "var(--success)" : "var(--error)";
+      }
+    });
+  } catch (_err) {}
+}
+
+async function viewKey(keyType) {
+  try {
+    const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
+    const modal = document.getElementById("key-modal");
+    const titleEl = document.getElementById("key-modal-title");
+    const valueEl = document.getElementById("key-modal-value");
+    if (!modal) return;
+    const labels = {gateway: "网关密钥", proxy_token: "代理令牌", fernet: "Fernet 加密密钥"};
+    if (titleEl) titleEl.textContent = labels[keyType] || keyType;
+    if (valueEl) valueEl.textContent = data.value || "";
+    modal.classList.remove("hidden");
+  } catch (err) {
+    alert(`查看失败: ${err.message}`);
+  }
+}
+
+async function rotateKey(keyType) {
+  const warnings = {
+    fernet: "⚠️ 更换 Fernet 密钥后，历史脱敏映射将永久无法解密（可能影响上下文还原）。\n\n确认更换？",
+    gateway: "更换网关密钥后，已注册的 Token 路由仍有效，但旧的 AEGIS_GATEWAY_KEY 将失效，需更新客户端配置。\n\n确认更换？",
+    proxy_token: "更换代理令牌后 Caddy ↔ AegisGate 自动配对将失效，需重启服务重新配对。\n\n确认更换？",
+  };
+  if (!confirm(warnings[keyType] || "确认更换密钥？")) return;
+  try {
+    const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}/rotate`, {
+      method: "POST",
+      headers: {"x-aegis-ui-csrf": uiCsrfToken},
+    });
+    loadKeys();
+    const modal = document.getElementById("key-modal");
+    const titleEl = document.getElementById("key-modal-title");
+    const valueEl = document.getElementById("key-modal-value");
+    const labels = {gateway: "网关密钥（新）", proxy_token: "代理令牌（新）", fernet: "Fernet 密钥（新）"};
+    if (modal && titleEl && valueEl) {
+      titleEl.textContent = labels[keyType] || "新密钥";
+      valueEl.textContent = data.value || "";
+      modal.classList.remove("hidden");
+    }
+  } catch (err) {
+    alert(`更换失败: ${err.message}`);
+  }
+}
+
+function bindKeysUI() {
+  document.querySelectorAll("[data-key-view]").forEach((btn) => {
+    btn.addEventListener("click", () => viewKey(btn.dataset.keyView));
+  });
+  document.querySelectorAll("[data-key-rotate]").forEach((btn) => {
+    btn.addEventListener("click", () => rotateKey(btn.dataset.keyRotate));
+  });
+  const closeBtn = document.getElementById("key-modal-close");
+  const cancelBtn = document.getElementById("key-modal-cancel");
+  const copyBtn = document.getElementById("key-modal-copy");
+  const modal = document.getElementById("key-modal");
+  if (closeBtn) closeBtn.addEventListener("click", () => modal && modal.classList.add("hidden"));
+  if (cancelBtn) cancelBtn.addEventListener("click", () => modal && modal.classList.add("hidden"));
+  if (copyBtn) copyBtn.addEventListener("click", () => {
+    const val = document.getElementById("key-modal-value").textContent;
+    navigator.clipboard.writeText(val).then(() => {
+      copyBtn.textContent = "已复制!";
+      setTimeout(() => { copyBtn.textContent = "复制"; }, 1500);
+    }).catch(() => {});
+  });
+  if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.add("hidden"); });
+  loadKeys();
+}
+
+// ─── Docker Compose Editor ────────────────────
+
+let currentComposeFile = "docker-compose.yml";
+
+async function loadComposeFile(filename) {
+  currentComposeFile = filename;
+  const editor = document.getElementById("compose-editor");
+  const notFound = document.getElementById("compose-not-found");
+  if (editor) editor.value = "加载中…";
+  try {
+    const data = await fetchJson(`/__ui__/api/compose/${encodeURIComponent(filename)}`);
+    if (editor) editor.value = data.content || "";
+    if (notFound) notFound.classList.add("hidden");
+  } catch (err) {
+    if (err.message.includes("file_not_found") || err.message.includes("404")) {
+      if (editor) editor.value = "";
+      if (notFound) notFound.classList.remove("hidden");
+    } else {
+      if (editor) editor.value = `# 加载失败: ${err.message}`;
+    }
+  }
+}
+
+async function saveComposeFile() {
+  const editor = document.getElementById("compose-editor");
+  const content = editor ? editor.value : "";
+  setStatus("compose-save-status", "保存中…");
+  try {
+    await fetchJson(`/__ui__/api/compose/${encodeURIComponent(currentComposeFile)}`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
+      body: JSON.stringify({content}),
+    });
+    setStatus("compose-save-status", "已保存");
+    const notFound = document.getElementById("compose-not-found");
+    if (notFound) notFound.classList.add("hidden");
+  } catch (err) {
+    setStatus("compose-save-status", `失败: ${err.message}`, true);
+  }
+}
+
+async function restartGateway() {
+  if (!confirm("确认重启网关进程？\n\n- Docker 部署（restart: unless-stopped）：进程退出后自动重启\n- 本地运行：需由 systemd/pm2 等守护进程管理重启")) return;
+  setStatus("restart-status", "重启中…");
+  try {
+    await fetchJson("/__ui__/api/restart", {
+      method: "POST",
+      headers: {"x-aegis-ui-csrf": uiCsrfToken},
+    });
+    setStatus("restart-status", "重启指令已发送，约 2 秒后生效");
+    setTimeout(() => { window.location.href = "/__ui__/login"; }, 4000);
+  } catch (err) {
+    // Expected: connection may drop as server restarts
+    setStatus("restart-status", "重启中，请稍候…");
+    setTimeout(() => { window.location.href = "/__ui__/login"; }, 4000);
+  }
+}
+
+function bindComposeUI() {
+  document.querySelectorAll(".compose-file-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".compose-file-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadComposeFile(btn.dataset.composeFile);
+    });
+  });
+  const saveBtn = document.getElementById("save-compose");
+  if (saveBtn) saveBtn.addEventListener("click", saveComposeFile);
+  const restartBtn = document.getElementById("restart-gateway");
+  if (restartBtn) restartBtn.addEventListener("click", restartGateway);
+  loadComposeFile("docker-compose.yml");
+}
+
+// ─── Init new UI modules ─────────────────────
+
+bindRulesUI();
+bindKeysUI();
+bindComposeUI();

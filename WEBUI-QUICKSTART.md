@@ -47,9 +47,12 @@ uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
 ## 3. 登录方式
 
 - 登录入口：`http://127.0.0.1:18080/__ui__/login`
-- 登录密码：`config/aegis_gateway.key` 文件内容
+- **首次登录密码**：`admin123`（仅限第一次登录有效，之后自动失效）
+- **后续登录密码**：`config/aegis_gateway.key` 文件内容
 
-查看网关密钥：
+> **安全提示**：`admin123` 是一次性默认密码，仅在从未登录过的全新部署中有效。首次成功登录后系统会写入初始化标记，后续登录必须使用真实的网关密钥。
+
+查看网关密钥（首次登录后可在 UI「密钥管理」页查看/更换）：
 
 ```bash
 cat config/aegis_gateway.key
@@ -58,10 +61,13 @@ cat config/aegis_gateway.key
 ## 4. UI 能力
 
 - 查看服务状态、监听地址、安全级别、默认上游
-- 编辑基础设置、安全设置和部分 v2 代理配置
-- 查看当前 Token 列表并执行注册
-- 阅读仓库根目录下的说明文档
-- 查看日志信息并触发热重载
+- 编辑**所有**运行参数（基础设置、安全设置、v2 代理、功能开关、限流阈值等）
+- 安全过滤规则增删改查（PII 规则、工具注入规则、命令规则、动作映射）
+- Token 管理：注册/编辑/删除/重命名
+- 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
+- Docker Compose 配置文件在线编辑
+- 一键重启网关（SIGTERM，配合 Docker `restart: unless-stopped` 自动恢复）
+- 阅读仓库内嵌 Markdown 文档
 
 ## 5. 安全说明
 

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import hashlib
 import ipaddress
 import os
 import re
 import secrets
+import signal
 import tempfile
 import time
+import yaml
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -64,6 +67,35 @@ _hot_reloader: HotReloader | None = None
 # Gateway key  (file-based, consistent with proxy token and Fernet key)
 # ---------------------------------------------------------------------------
 _GATEWAY_KEY_FILE = "aegis_gateway.key"
+
+_ADMIN_INIT_MARKER_FILE = ".admin_initialized"
+_DEFAULT_ADMIN_PASSWORD = "admin123"
+
+
+def _is_admin_initialized() -> bool:
+    """Return True if the admin UI has been accessed at least once."""
+    for candidate in (
+        (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve(),
+        Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE,
+    ):
+        if candidate.is_file():
+            return True
+    return False
+
+
+def _mark_admin_initialized() -> None:
+    """Create the admin init marker file so default password is no longer valid."""
+    marker = (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        try:
+            fallback = Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            fallback.touch()
+        except OSError:
+            pass
 
 
 _gateway_key_cached: str | None = None
@@ -625,119 +657,405 @@ def _resolve_doc_path(doc_id: str) -> Path | None:
 
 
 _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
+    # ---- general ----
     {
         "env": "AEGIS_HOST",
         "field": "host",
-        "label": "Host",
+        "label": "监听 Host",
         "type": "string",
         "section": "general",
     },
     {
         "env": "AEGIS_PORT",
         "field": "port",
-        "label": "Port",
+        "label": "监听端口",
         "type": "int",
         "section": "general",
     },
     {
         "env": "AEGIS_UPSTREAM_BASE_URL",
         "field": "upstream_base_url",
-        "label": "Upstream Base URL",
+        "label": "直连上游地址",
         "type": "string",
         "section": "general",
     },
     {
         "env": "AEGIS_LOG_LEVEL",
         "field": "log_level",
-        "label": "Log Level",
+        "label": "日志级别",
         "type": "enum",
         "section": "general",
         "options": ["debug", "info", "warning", "error"],
     },
     {
+        "env": "AEGIS_LOG_FULL_REQUEST_BODY",
+        "field": "log_full_request_body",
+        "label": "打印完整请求体",
+        "type": "bool",
+        "section": "general",
+    },
+    {
         "env": "AEGIS_STORAGE_BACKEND",
         "field": "storage_backend",
-        "label": "Storage Backend",
+        "label": "存储后端",
         "type": "enum",
         "section": "general",
         "options": ["sqlite", "redis", "postgres"],
     },
     {
+        "env": "AEGIS_SQLITE_DB_PATH",
+        "field": "sqlite_db_path",
+        "label": "SQLite 路径",
+        "type": "string",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_REDIS_URL",
+        "field": "redis_url",
+        "label": "Redis URL",
+        "type": "string",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_UPSTREAM_TIMEOUT_SECONDS",
+        "field": "upstream_timeout_seconds",
+        "label": "上游超时（秒）",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_UPSTREAM_MAX_CONNECTIONS",
+        "field": "upstream_max_connections",
+        "label": "最大并发连接数",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS",
+        "field": "upstream_max_keepalive_connections",
+        "label": "Keepalive 连接池",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_ENABLE_THREAD_OFFLOAD",
+        "field": "enable_thread_offload",
+        "label": "线程池卸载",
+        "type": "bool",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_FILTER_PIPELINE_TIMEOUT_S",
+        "field": "filter_pipeline_timeout_s",
+        "label": "过滤管道超时（秒）",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_MAX_REQUEST_BODY_BYTES",
+        "field": "max_request_body_bytes",
+        "label": "最大请求体（字节）",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_MAX_MESSAGES_COUNT",
+        "field": "max_messages_count",
+        "label": "最大消息条数",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE",
+        "field": "max_content_length_per_message",
+        "label": "单条消息最大字符",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_MAX_PENDING_PAYLOAD_BYTES",
+        "field": "max_pending_payload_bytes",
+        "label": "Pending 最大字节",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_MAX_RESPONSE_LENGTH",
+        "field": "max_response_length",
+        "label": "最大响应字符",
+        "type": "int",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_AUDIT_LOG_PATH",
+        "field": "audit_log_path",
+        "label": "审计日志路径",
+        "type": "string",
+        "section": "general",
+    },
+    {
+        "env": "AEGIS_TRUSTED_PROXY_IPS",
+        "field": "trusted_proxy_ips",
+        "label": "信任代理 IP（逗号分隔）",
+        "type": "string",
+        "section": "general",
+    },
+    # ---- security ----
+    {
         "env": "AEGIS_SECURITY_LEVEL",
         "field": "security_level",
-        "label": "Security Level",
+        "label": "安全档位",
         "type": "enum",
         "section": "security",
         "options": ["low", "medium", "high"],
     },
     {
-        "env": "AEGIS_MAX_REQUEST_BODY_BYTES",
-        "field": "max_request_body_bytes",
-        "label": "Max Request Body Bytes",
-        "type": "int",
+        "env": "AEGIS_DEFAULT_POLICY",
+        "field": "default_policy",
+        "label": "默认策略",
+        "type": "enum",
         "section": "security",
+        "options": ["default", "permissive", "strict"],
     },
     {
         "env": "AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK",
         "field": "require_confirmation_on_block",
-        "label": "Require Confirmation On Block",
+        "label": "拦截需确认放行",
         "type": "bool",
         "section": "security",
     },
     {
         "env": "AEGIS_STRICT_COMMAND_BLOCK_ENABLED",
         "field": "strict_command_block_enabled",
-        "label": "Strict Command Block",
+        "label": "强制命令拦截",
         "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_CONFIRMATION_TTL_SECONDS",
+        "field": "confirmation_ttl_seconds",
+        "label": "确认超时（秒）",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_CONFIRMATION_EXECUTING_TIMEOUT_SECONDS",
+        "field": "confirmation_executing_timeout_seconds",
+        "label": "执行等待超时（秒）",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW",
+        "field": "confirmation_show_hit_preview",
+        "label": "确认文案显示命中片段",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_PENDING_DATA_TTL_SECONDS",
+        "field": "pending_data_ttl_seconds",
+        "label": "Pending 数据保留（秒）",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_RISK_SCORE_THRESHOLD",
+        "field": "risk_score_threshold",
+        "label": "风险评分阈值（0-1）",
+        "type": "string",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION",
+        "field": "request_pipeline_timeout_action",
+        "label": "请求管道超时动作",
+        "type": "enum",
+        "section": "security",
+        "options": ["block", "pass"],
+    },
+    {
+        "env": "AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE",
+        "field": "admin_rate_limit_per_minute",
+        "label": "管理接口限流（次/分）",
+        "type": "int",
         "section": "security",
     },
     {
         "env": "AEGIS_ENFORCE_LOOPBACK_ONLY",
         "field": "enforce_loopback_only",
-        "label": "Loopback Only",
+        "label": "仅环回地址",
         "type": "bool",
         "section": "security",
     },
     {
         "env": "AEGIS_ENABLE_SEMANTIC_MODULE",
         "field": "enable_semantic_module",
-        "label": "Semantic Module",
+        "label": "语义模块",
         "type": "bool",
         "section": "security",
     },
     {
+        "env": "AEGIS_SEMANTIC_GRAY_LOW",
+        "field": "semantic_gray_low",
+        "label": "语义低风险阈值",
+        "type": "string",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_SEMANTIC_GRAY_HIGH",
+        "field": "semantic_gray_high",
+        "label": "语义高风险阈值",
+        "type": "string",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_SEMANTIC_TIMEOUT_MS",
+        "field": "semantic_timeout_ms",
+        "label": "语义超时（ms）",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_SEMANTIC_CACHE_TTL_SECONDS",
+        "field": "semantic_cache_ttl_seconds",
+        "label": "语义缓存 TTL（秒）",
+        "type": "int",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_SEMANTIC_SERVICE_URL",
+        "field": "semantic_service_url",
+        "label": "语义服务外部 URL",
+        "type": "string",
+        "section": "security",
+    },
+    # feature flags
+    {
+        "env": "AEGIS_ENABLE_REDACTION",
+        "field": "enable_redaction",
+        "label": "PII 脱敏",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_RESTORATION",
+        "field": "enable_restoration",
+        "label": "脱敏还原",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_INJECTION_DETECTOR",
+        "field": "enable_injection_detector",
+        "label": "注入检测",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_PRIVILEGE_GUARD",
+        "field": "enable_privilege_guard",
+        "label": "权限提升防护",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_ANOMALY_DETECTOR",
+        "field": "enable_anomaly_detector",
+        "label": "异常检测",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_REQUEST_SANITIZER",
+        "field": "enable_request_sanitizer",
+        "label": "请求净化",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_OUTPUT_SANITIZER",
+        "field": "enable_output_sanitizer",
+        "label": "输出净化",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_POST_RESTORE_GUARD",
+        "field": "enable_post_restore_guard",
+        "label": "还原后检测",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_UNTRUSTED_CONTENT_GUARD",
+        "field": "enable_untrusted_content_guard",
+        "label": "不可信内容防护",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_TOOL_CALL_GUARD",
+        "field": "enable_tool_call_guard",
+        "label": "工具调用防护",
+        "type": "bool",
+        "section": "security",
+    },
+    {
+        "env": "AEGIS_ENABLE_RAG_POISON_GUARD",
+        "field": "enable_rag_poison_guard",
+        "label": "RAG 投毒防护",
+        "type": "bool",
+        "section": "security",
+    },
+    # ---- v2 proxy ----
+    {
         "env": "AEGIS_ENABLE_V2_PROXY",
         "field": "enable_v2_proxy",
-        "label": "Enable v2 Proxy",
+        "label": "启用 v2 代理",
         "type": "bool",
         "section": "v2",
     },
     {
         "env": "AEGIS_V2_ENABLE_REQUEST_REDACTION",
         "field": "v2_enable_request_redaction",
-        "label": "v2 Request Redaction",
+        "label": "v2 请求脱敏",
         "type": "bool",
         "section": "v2",
     },
     {
         "env": "AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER",
         "field": "v2_enable_response_command_filter",
-        "label": "v2 Response Filter",
+        "label": "v2 响应指令过滤",
         "type": "bool",
         "section": "v2",
     },
     {
         "env": "AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY",
         "field": "v2_response_filter_obvious_only",
-        "label": "v2 Obvious Only",
+        "label": "v2 最小误拦模式",
         "type": "bool",
         "section": "v2",
     },
     {
         "env": "AEGIS_V2_BLOCK_INTERNAL_TARGETS",
         "field": "v2_block_internal_targets",
-        "label": "v2 Block Internal Targets",
+        "label": "v2 SSRF 防护",
         "type": "bool",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS",
+        "field": "v2_response_filter_bypass_hosts",
+        "label": "v2 过滤豁免域名",
+        "type": "string",
+        "section": "v2",
+    },
+    {
+        "env": "AEGIS_V2_RESPONSE_FILTER_MAX_CHARS",
+        "field": "v2_response_filter_max_chars",
+        "label": "v2 响应最大扫描字符",
+        "type": "int",
         "section": "v2",
     },
 )
@@ -1508,8 +1826,12 @@ async def local_ui_login(request: Request) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     password = _string_field(body.get("password"))
     gateway_key = _ensure_gateway_key()
-    if not password or not hmac.compare_digest(password.encode("utf-8"), gateway_key.encode("utf-8")):
+    # Allow default password "admin123" only before the first successful login
+    default_ok = (not _is_admin_initialized()) and password == _DEFAULT_ADMIN_PASSWORD
+    key_ok = bool(password) and hmac.compare_digest(password.encode("utf-8"), gateway_key.encode("utf-8"))
+    if not (default_ok or key_ok):
         return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
+    _mark_admin_initialized()
     response = JSONResponse(content={"ok": True})
     response.set_cookie(
         key=_UI_SESSION_COOKIE,
@@ -1637,6 +1959,365 @@ def local_ui_tokens_delete(token: str) -> JSONResponse:
     if gw_tokens_unregister(token):
         return JSONResponse(content={"ok": True})
     return JSONResponse(status_code=404, content={"error": "token_not_found"})
+
+
+# ---------------------------------------------------------------------------
+# Key management (Feature 3)
+# ---------------------------------------------------------------------------
+
+_KEY_FILES: dict[str, str] = {
+    "gateway": "aegis_gateway.key",
+    "proxy_token": "aegis_proxy_token.key",
+    "fernet": "aegis_fernet.key",
+}
+
+
+def _key_path(key_type: str) -> Path:
+    return (Path.cwd() / "config" / _KEY_FILES[key_type]).resolve()
+
+
+def _key_fallback_path(key_type: str) -> Path:
+    return Path("/tmp/aegisgate") / _KEY_FILES[key_type]
+
+
+def _read_key_file(key_type: str) -> str | None:
+    for candidate in (_key_path(key_type), _key_fallback_path(key_type)):
+        if candidate.is_file():
+            v = candidate.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    return None
+
+
+def _write_key_file(key_type: str, value: str) -> None:
+    primary = _key_path(key_type)
+    try:
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        primary.write_text(value, encoding="utf-8")
+        try:
+            os.chmod(primary, 0o600)
+        except OSError:
+            pass
+    except PermissionError:
+        fallback = _key_fallback_path(key_type)
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        fallback.write_text(value, encoding="utf-8")
+        try:
+            os.chmod(fallback, 0o600)
+        except OSError:
+            pass
+
+
+@app.get("/__ui__/api/keys")
+def local_ui_keys_list() -> JSONResponse:
+    """列出三个密钥文件的状态（不返回明文）。"""
+    result = []
+    for key_type, filename in _KEY_FILES.items():
+        primary = _key_path(key_type)
+        fallback = _key_fallback_path(key_type)
+        exists = primary.is_file() or fallback.is_file()
+        active_path = str(primary) if primary.is_file() else (str(fallback) if fallback.is_file() else str(primary))
+        result.append({"type": key_type, "filename": filename, "exists": exists, "path": active_path})
+    return JSONResponse(content={"items": result})
+
+
+@app.get("/__ui__/api/keys/{key_type}")
+def local_ui_key_get(key_type: str) -> JSONResponse:
+    """返回指定密钥的当前值（明文，仅管理员可访问）。"""
+    if key_type not in _KEY_FILES:
+        return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
+    value = _read_key_file(key_type)
+    if value is None:
+        return JSONResponse(status_code=404, content={"error": "key_not_found"})
+    return JSONResponse(content={"ok": True, "type": key_type, "value": value})
+
+
+@app.post("/__ui__/api/keys/{key_type}/rotate")
+def local_ui_key_rotate(key_type: str) -> JSONResponse:
+    """重新生成指定密钥并写入文件；对 gateway 密钥同步更新运行时缓存。"""
+    global _gateway_key_cached
+    if key_type not in _KEY_FILES:
+        return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
+    if key_type == "fernet":
+        from cryptography.fernet import Fernet
+        from aegisgate.storage import crypto as _crypto_mod
+        new_key = Fernet.generate_key().decode("utf-8")
+        _write_key_file(key_type, new_key)
+        # Reset fernet instance so next use picks up new key
+        _crypto_mod._fernet_instance = None
+        return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
+    new_key = secrets.token_urlsafe(32)
+    _write_key_file(key_type, new_key)
+    if key_type == "gateway":
+        _gateway_key_cached = new_key
+        settings.gateway_key = new_key
+    return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
+
+
+# ---------------------------------------------------------------------------
+# Security rules YAML CRUD (Feature 1)
+# ---------------------------------------------------------------------------
+
+_RULES_SECTIONS: dict[str, list[str]] = {
+    "pii_patterns": ["redaction", "pii_patterns"],
+    "tool_injection": ["injection_detector", "tool_call_injection_patterns"],
+    "command_patterns": ["anomaly_detector", "command_patterns"],
+    "direct_patterns": ["injection_detector", "direct_patterns"],
+}
+
+_RULES_SECTION_LABELS: dict[str, str] = {
+    "pii_patterns": "PII 脱敏规则",
+    "tool_injection": "工具调用注入规则",
+    "command_patterns": "异常命令规则",
+    "direct_patterns": "直接注入规则",
+}
+
+
+def _resolve_rules_file() -> Path:
+    p = Path(settings.security_rules_path)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p.resolve()
+
+
+def _load_rules_yaml() -> dict:
+    path = _resolve_rules_file()
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _save_rules_yaml(data: dict) -> None:
+    path = _resolve_rules_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
+        yaml.dump(data, tmp, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+    # Trigger hot reload
+    try:
+        from aegisgate.core.hot_reload import reload_security_rules
+        reload_security_rules()
+    except Exception:
+        pass
+
+
+def _get_section_list(data: dict, section_key: str) -> list:
+    keys = _RULES_SECTIONS[section_key]
+    node = data
+    for k in keys:
+        if not isinstance(node, dict):
+            return []
+        node = node.get(k) or []
+    return node if isinstance(node, list) else []
+
+
+def _set_section_list(data: dict, section_key: str, items: list) -> None:
+    keys = _RULES_SECTIONS[section_key]
+    node = data
+    for k in keys[:-1]:
+        if k not in node:
+            node[k] = {}
+        node = node[k]
+    node[keys[-1]] = items
+
+
+@app.get("/__ui__/api/rules")
+def local_ui_rules_sections() -> JSONResponse:
+    """返回可编辑规则章节列表。"""
+    sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
+    return JSONResponse(content={"sections": sections})
+
+
+@app.get("/__ui__/api/rules/{section}")
+def local_ui_rules_get(section: str) -> JSONResponse:
+    """返回指定章节的规则列表。"""
+    if section not in _RULES_SECTIONS:
+        return JSONResponse(status_code=404, content={"error": "unknown_section"})
+    data = _load_rules_yaml()
+    items = _get_section_list(data, section)
+    return JSONResponse(content={"section": section, "items": items})
+
+
+@app.post("/__ui__/api/rules/{section}")
+async def local_ui_rules_add(section: str, request: Request) -> JSONResponse:
+    """向指定章节追加一条规则。body: {id, regex} or {id, patterns:[...]}"""
+    if section not in _RULES_SECTIONS:
+        return JSONResponse(status_code=404, content={"error": "unknown_section"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    rule_id = _string_field(body.get("id"))
+    if not rule_id:
+        return JSONResponse(status_code=400, content={"error": "missing_id"})
+    data = _load_rules_yaml()
+    items = _get_section_list(data, section)
+    if any(str(item.get("id", "")) == rule_id for item in items):
+        return JSONResponse(status_code=409, content={"error": "id_exists", "detail": f"规则 id '{rule_id}' 已存在"})
+    new_item: dict = {"id": rule_id}
+    if "regex" in body:
+        new_item["regex"] = str(body["regex"])
+    if "kind" in body:
+        new_item["kind"] = str(body["kind"])
+    if "patterns" in body and isinstance(body["patterns"], list):
+        new_item["patterns"] = body["patterns"]
+    items.append(new_item)
+    _set_section_list(data, section, items)
+    _save_rules_yaml(data)
+    return JSONResponse(status_code=201, content={"ok": True, "item": new_item})
+
+
+@app.patch("/__ui__/api/rules/{section}/{rule_id}")
+async def local_ui_rules_update(section: str, rule_id: str, request: Request) -> JSONResponse:
+    """更新指定规则的字段（regex / kind / patterns）。"""
+    if section not in _RULES_SECTIONS:
+        return JSONResponse(status_code=404, content={"error": "unknown_section"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    data = _load_rules_yaml()
+    items = _get_section_list(data, section)
+    for item in items:
+        if str(item.get("id", "")) == rule_id:
+            if "regex" in body:
+                item["regex"] = str(body["regex"])
+            if "kind" in body:
+                item["kind"] = str(body["kind"])
+            if "patterns" in body and isinstance(body["patterns"], list):
+                item["patterns"] = body["patterns"]
+            _set_section_list(data, section, items)
+            _save_rules_yaml(data)
+            return JSONResponse(content={"ok": True, "item": item})
+    return JSONResponse(status_code=404, content={"error": "rule_not_found"})
+
+
+@app.delete("/__ui__/api/rules/{section}/{rule_id}")
+def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
+    """从指定章节删除一条规则。"""
+    if section not in _RULES_SECTIONS:
+        return JSONResponse(status_code=404, content={"error": "unknown_section"})
+    data = _load_rules_yaml()
+    items = _get_section_list(data, section)
+    new_items = [item for item in items if str(item.get("id", "")) != rule_id]
+    if len(new_items) == len(items):
+        return JSONResponse(status_code=404, content={"error": "rule_not_found"})
+    _set_section_list(data, section, new_items)
+    _save_rules_yaml(data)
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/__ui__/api/rules_action_map")
+def local_ui_action_map_get() -> JSONResponse:
+    """返回 action_map 配置。"""
+    data = _load_rules_yaml()
+    return JSONResponse(content={"action_map": data.get("action_map") or {}})
+
+
+@app.patch("/__ui__/api/rules_action_map")
+async def local_ui_action_map_update(request: Request) -> JSONResponse:
+    """更新 action_map 中的动作值（block/review/sanitize/pass）。body: {category: {threat: action}}"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    allowed_actions = {"block", "review", "sanitize", "pass"}
+    data = _load_rules_yaml()
+    action_map = data.get("action_map") or {}
+    for category, threats in body.items():
+        if not isinstance(threats, dict):
+            continue
+        if category not in action_map:
+            action_map[category] = {}
+        for threat, action in threats.items():
+            if str(action) not in allowed_actions:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid_action", "detail": f"'{action}' 不是有效动作"},
+                )
+            action_map[category][threat] = str(action)
+    data["action_map"] = action_map
+    _save_rules_yaml(data)
+    return JSONResponse(content={"ok": True, "action_map": action_map})
+
+
+# ---------------------------------------------------------------------------
+# Docker compose file editor (Feature 4)
+# ---------------------------------------------------------------------------
+
+_COMPOSE_FILES_ALLOWED = frozenset({
+    "docker-compose.yml",
+    "docker-compose.cliproxy.yml",
+    "docker-compose.aiclient2api.yml",
+    "docker-compose.sub2api.yml",
+})
+
+
+def _compose_file_path(filename: str) -> Path:
+    return (Path.cwd() / filename).resolve()
+
+
+@app.get("/__ui__/api/compose")
+def local_ui_compose_list() -> JSONResponse:
+    """列出可编辑的 docker-compose 文件。"""
+    items = []
+    for name in sorted(_COMPOSE_FILES_ALLOWED):
+        path = _compose_file_path(name)
+        items.append({"filename": name, "exists": path.is_file(), "path": str(path)})
+    return JSONResponse(content={"items": items})
+
+
+@app.get("/__ui__/api/compose/{filename:path}")
+def local_ui_compose_get(filename: str) -> JSONResponse:
+    """读取 docker-compose 文件内容。"""
+    if filename not in _COMPOSE_FILES_ALLOWED:
+        return JSONResponse(status_code=404, content={"error": "not_allowed"})
+    path = _compose_file_path(filename)
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "file_not_found"})
+    return JSONResponse(content={"filename": filename, "content": path.read_text(encoding="utf-8")})
+
+
+@app.put("/__ui__/api/compose/{filename:path}")
+async def local_ui_compose_put(filename: str, request: Request) -> JSONResponse:
+    """更新 docker-compose 文件内容（需通过 YAML 语法校验）。"""
+    if filename not in _COMPOSE_FILES_ALLOWED:
+        return JSONResponse(status_code=404, content={"error": "not_allowed"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    content = body.get("content", "")
+    if not isinstance(content, str):
+        return JSONResponse(status_code=400, content={"error": "content_must_be_string"})
+    try:
+        yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        return JSONResponse(status_code=400, content={"error": "invalid_yaml", "detail": str(exc)})
+    path = _compose_file_path(filename)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+    return JSONResponse(content={"ok": True, "filename": filename})
+
+
+# ---------------------------------------------------------------------------
+# Gateway restart (Feature 4)
+# ---------------------------------------------------------------------------
+
+@app.post("/__ui__/api/restart")
+async def local_ui_restart(request: Request) -> JSONResponse:
+    """向自身发送 SIGTERM 触发重启（需 Docker restart: unless-stopped 或 systemd 守护）。"""
+    async def _do_restart() -> None:
+        await asyncio.sleep(1.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    import asyncio as _asyncio
+    _asyncio.ensure_future(_do_restart())
+    return JSONResponse(content={"ok": True, "message": "gateway will restart in ~1.5s"})
 
 
 @app.get("/health")

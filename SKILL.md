@@ -1,13 +1,20 @@
 # AegisGate Agent Skill
 
-本技能文档给 Agent 直接使用，目标是：在一台新机器上完成 AegisGate 的安装、启动、注册 token、以及客户端接入配置。
+本技能文档给 Agent 直接使用，目标是：在一台新机器上完成 AegisGate 的安装、启动、注册 token 或配置直连上游、以及客户端接入配置。
 
 ## 0) 先读项目要点（必须）
 
 - AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/阻断/确认放行；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
-- 当前只支持 **Token 路由**（v1 和 v2 共用同一组 token）：
-  - `v1`（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
-  - `v2`（通用 HTTP 代理）：`http://<host>:18080/v2/__gw__/t/<TOKEN>`，须携带 `x-target-url: <完整目标URL>` 请求头
+- **两种路由模式**（可同时启用）：
+  - **Token 路由**（推荐多租户场景）：每个 token 绑定独立的上游地址和网关密钥。
+    - v1（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
+    - v2（通用 HTTP 代理）：`http://<host>:18080/v2/__gw__/t/<TOKEN>`，须携带 `x-target-url: <完整目标URL>` 请求头
+  - **直连上游**（单用户/Agent 快速接入）：设置 `AEGIS_UPSTREAM_BASE_URL=<上游地址>` 后，直接请求 `/v1/...` 或 `/v2/...`，无需注册 token。
+- **脱敏豁免字段（whitelist_key）**：注册 token 时可指定逗号分隔的字段名列表（如 `api_key,secret,token`）。请求体中这些字段的值**不做 PII 脱敏**，直接透传到上游。适用于需要原始凭证通过的场景。支持以下匹配模式：
+  - JSON：`"field":"value"` 或 `"field": "value"`
+  - 等号赋值：`field=value`
+  - 冒号赋值：`field:value`
+  - URL 查询参数：`?field=value`
 - 管理接口（`/__gw__/register|lookup|unregister|add|remove`）应只允许内网/管理机访问。
 
 ## 1) 环境检查
@@ -86,14 +93,17 @@ python -m pip install -e .
 uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
 ```
 
-## 6) 注册上游并生成 token（必须）
+## 6) 接入方式选择
 
-> 注册接口应从管理机/内网访问。
+### 6.1 Token 路由（多租户，推荐）
+
+注册上游并生成 token：
 
 ```bash
+# gateway_key 从 cat config/aegis_gateway.key 获取
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<cat config/aegis_gateway.key>"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>"}'
 ```
 
 期望返回：
@@ -105,7 +115,34 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 }
 ```
 
-## 7) 验证 token 路由调用
+注册时可附带脱敏豁免字段（如 `api_key` 字段值不做脱敏）：
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/register \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>","whitelist_key":"api_key,secret"}'
+```
+
+### 6.2 直连上游（单用户/Agent 快速接入）
+
+在 `config/.env` 中设置：
+
+```env
+AEGIS_UPSTREAM_BASE_URL=https://your-upstream.example.com/v1
+```
+
+重启后直接请求 `/v1/...`，无需注册 token：
+
+```bash
+curl -X POST http://127.0.0.1:18080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
+  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+```
+
+## 7) 验证调用
+
+### Token 路由
 
 ```bash
 curl -X POST "http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/responses" \
@@ -114,7 +151,18 @@ curl -X POST "http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/responses" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
 
+### 直连上游
+
+```bash
+curl -X POST "http://127.0.0.1:18080/v1/responses" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
+  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+```
+
 ## 8) 客户端配置模板（Agent/CLI）
+
+### Token 路由
 
 ```yaml
 provider: openai_compatible
@@ -123,9 +171,18 @@ api_key: <UPSTREAM_API_KEY>
 model: gpt-4.1-mini
 ```
 
+### 直连上游
+
+```yaml
+provider: openai_compatible
+base_url: http://127.0.0.1:18080/v1
+api_key: <UPSTREAM_API_KEY>
+model: gpt-4.1-mini
+```
+
 说明：
-- `base_url` 使用 token 路由。
 - 若客户端默认流式输出，网关会处理 `[DONE]` 断流恢复。
+- 直连模式下不需要 `base_url` 携带 token 路径段。
 
 ## 9) 常用管理命令
 
@@ -143,6 +200,13 @@ curl -X POST http://127.0.0.1:18080/__gw__/lookup \
 curl -X POST http://127.0.0.1:18080/__gw__/unregister \
   -H "Content-Type: application/json" \
   -d '{"token":"<TOKEN>"}'
+```
+
+查看所有 token（需要网关密钥）：
+
+```bash
+curl http://127.0.0.1:18080/__ui__/api/tokens \
+  -H "X-Gateway-Key: <AEGIS_GATEWAY_KEY>"
 ```
 
 查看日志：
@@ -166,13 +230,13 @@ docker compose up -d --build
 
 ## 10) 故障排查顺序（Agent 执行顺序）
 
-1. `health` 是否正常。  
-2. 是否使用 token 路由（路径里有 `/v1/__gw__/t/<TOKEN>/...`）。  
-3. token 是否存在（`/__gw__/lookup`）。  
-4. 上游地址与 API key 是否正确。  
-5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、确认放行、阻断原因。  
-6. 若遇到高风险确认，用户必须发送完整指令：  
-   - `yes cfm-<id>--act-<token>` 或 `no cfm-<id>--act-<token>`。
+1. `health` 是否正常（`curl http://127.0.0.1:18080/health`）。
+2. 确认使用哪种路由模式：token 路由（路径含 `/v1/__gw__/t/<TOKEN>/...`）或直连上游（`AEGIS_UPSTREAM_BASE_URL` 是否已设置）。
+3. Token 路由：token 是否存在（`/__gw__/lookup`）；上游地址与 API key 是否正确。
+4. 直连模式：`.env` 中 `AEGIS_UPSTREAM_BASE_URL` 是否正确，是否已重启。
+5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、确认放行、阻断原因。
+6. 若遇到高风险确认（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`），用户必须发送完整指令：
+   - `yes cfm-<id>--act-<token>` 或 `no cfm-<id>--act-<token>`
 
 ## 11) 安全基线（必须遵守）
 
@@ -180,3 +244,4 @@ docker compose up -d --build
 - 默认监听建议使用 `127.0.0.1`，通过反向代理做外部暴露控制。
 - 不在日志或工单中明文粘贴密钥、token、cookie、私钥、助记词。
 - 生产环境定期轮换 `config/aegis_gateway.key`（替换文件内容后重启服务）。
+- `whitelist_key` 字段只填真正需要豁免脱敏的字段名，最小化敏感数据明文透传范围。

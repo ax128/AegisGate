@@ -1141,3 +1141,150 @@ body.login-page {
   .stat-grid { grid-template-columns: 1fr; }
   .header-status { display: none; }
 }
+
+/* ── Security Rules ── */
+.rules-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.rules-tab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.83rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.rules-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.rules-tab:hover:not(.active) {
+  background: var(--surface2);
+  color: var(--text);
+}
+.rules-panel { }
+.rules-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.action-map-select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+/* ── Key Management ── */
+.keys-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 4px;
+}
+.key-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.key-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.key-card-file {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.key-card-status {
+  font-size: 0.82rem;
+}
+.key-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.btn-danger-soft {
+  background: rgba(239,68,68,0.12);
+  color: var(--error);
+  border: 1px solid rgba(239,68,68,0.25);
+}
+.btn-danger-soft:hover {
+  background: rgba(239,68,68,0.22);
+}
+
+/* ── Docker Compose Editor ── */
+.compose-selector {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.compose-file-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.compose-file-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.compose-file-btn:hover:not(.active) {
+  background: var(--surface2);
+  color: var(--text);
+}
+.compose-editor {
+  width: 100%;
+  min-height: 380px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  resize: vertical;
+  box-sizing: border-box;
+  outline: none;
+}
+.compose-editor:focus {
+  border-color: var(--accent);
+}
+.btn-restart {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-radius: 7px;
+  border: none;
+  background: #f59e0b;
+  color: #fff;
+  font-size: 0.87rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-restart:hover {
+  background: #d97706;
+}
