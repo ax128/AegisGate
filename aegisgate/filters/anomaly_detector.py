@@ -20,8 +20,11 @@ from aegisgate.util.risk_scoring import points_to_score, weighted_nonlinear_scor
 class AnomalyDetector(BaseFilter):
     name = "anomaly_detector"
 
+    _MAX_LOGGED = 512
+
     def __init__(self) -> None:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": [], "risk_model": {}}
+        self._logged_response_ids: set[str] = set()
 
         rules = load_security_rules().get(self.name, {})
         repetition_rules = rules.get("repetition", {})
@@ -251,11 +254,15 @@ class AnomalyDetector(BaseFilter):
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": [], "risk_model": {}}
         self._process_text(resp.output_text, ctx, phase="response")
         if self._report.get("hit"):
-            logger.debug(
-                "anomaly detected on response request_id=%s signals=%s",
-                ctx.request_id,
-                self._report.get("signals", []),
-            )
+            if ctx.request_id not in self._logged_response_ids:
+                if len(self._logged_response_ids) >= self._MAX_LOGGED:
+                    self._logged_response_ids.clear()
+                self._logged_response_ids.add(ctx.request_id)
+                logger.debug(
+                    "anomaly detected on response request_id=%s signals=%s",
+                    ctx.request_id,
+                    self._report.get("signals", []),
+                )
         return resp
 
     def report(self) -> dict:

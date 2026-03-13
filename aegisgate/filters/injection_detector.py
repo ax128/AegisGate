@@ -113,8 +113,11 @@ def _is_typoglycemia_variant(word: str, target: str) -> bool:
 class PromptInjectionDetector(BaseFilter):
     name = "injection_detector"
 
+    _MAX_LOGGED = 512  # prevent unbounded growth across many requests
+
     def __init__(self) -> None:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": {}, "risk_model": {}}
+        self._logged_response_ids: set[str] = set()
 
         rules = load_security_rules()
         detector_rules = rules.get("injection_detector", {})
@@ -498,11 +501,15 @@ class PromptInjectionDetector(BaseFilter):
                 "risk_model": risk_model,
                 "diagnostics": diagnostics,
             }
-            logger.debug(
-                "injection-like response detected request_id=%s categories=%s",
-                ctx.request_id,
-                sorted(signals.keys()),
-            )
+            if ctx.request_id not in self._logged_response_ids:
+                if len(self._logged_response_ids) >= self._MAX_LOGGED:
+                    self._logged_response_ids.clear()
+                self._logged_response_ids.add(ctx.request_id)
+                logger.debug(
+                    "injection-like response detected request_id=%s categories=%s",
+                    ctx.request_id,
+                    sorted(signals.keys()),
+                )
 
         return resp
 
