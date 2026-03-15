@@ -6,16 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **[Critical] 过滤器 sanitize 管道未真正修改响应文本**
+  - `PostRestoreGuard`：sanitize 模式下计算了 masked 文本，但未回写 `resp.output_text`，导致恢复后的密钥/token 原样泄露。
+  - `OutputSanitizer`：sanitize 模式下计算了 cleaned 文本，但未回写 `resp.output_text`，导致危险 markup/URI/命令片段原样返回。
+  - 已修复：两个过滤器现在在 sanitize 路径正确回写处理后的文本。
+
+- **[Critical] 确认放行后释放未经任何 sanitize 的原文**
+  - 用户确认放行（`yes cfm-xxx`）后，网关重新执行请求但直接恢复上游原文，绕过了所有过滤器的 sanitize 结果。
+  - 已修复：确认放行路径现在对 block/sanitize 级响应做 hit-fragment 变形后再返回（纵深防御）。
+
+- **disposition="sanitize" 错误触发确认流程**
+  - `_needs_confirmation()` 将 `sanitize` 与 `block` 等同处理，导致已就地清洗完成的响应仍需用户确认。
+  - 已修复：仅 `block` 触发确认流程，`sanitize` 直接返回修改后的响应。
+
+- **generic proxy 路径 sanitize 结果丢失**
+  - generic proxy 在 `sanitize` disposition 时跳过了过滤器已处理的文本，返回未修改的上游原文。
+  - 已修复：新增 `disposition == "sanitize"` 提前返回分支。
+
 ### Added
 
 - **可配置拦截行为：`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK`**
   - 默认 `false`：拦截时直接将危险片段±20 字符上下文做 chunked-hyphen 变形后返回，无需等待 yes/no 确认放行
   - 设为 `true`：走原有确认流程（缓存 pending → 返回确认模板 → 等待用户 yes/no 放行指令）
   - 覆盖所有拦截路径：chat/responses × streaming/non-streaming × request-side/response-side + generic proxy
-  - 新增 `_sanitize_hit_fragments()`、`_build_sanitized_warning_note()` 辅助函数
+  - 新增 `_sanitize_hit_fragments()` 辅助函数
 
 - **极度危险指令完全移除（分级变形策略）**
-  - 匹配约 45 条高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `（危险指令已移除）`，原文**不会出现在返回中**
+  - 匹配约 45 条高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `【AegisGate已处理危险疑似片段】`，原文**不会出现在返回中**
   - 一般危险片段仍使用 chunked-hyphen 分词变形
   - 模式来源：`anomaly_detector.command_patterns` + `sanitizer.force_block_command_patterns` + `privilege_guard.blocked_patterns` + 硬编码高危 shell 命令（13 条）
 

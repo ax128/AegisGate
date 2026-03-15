@@ -180,18 +180,18 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 ### 1.5 命中后的处理方式（怎么处理）
 
 1. `allow`：直接透传结果。
-2. `sanitize`：替换敏感片段或可疑片段后返回。
-3. `block`：立即拒绝并返回统一错误结构（v2 默认为 `403`）。
-4. `confirmation`（仅 v1，需 `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`）：返回确认模板，用户需发送绑定确认指令 `yes/no cfm-...--act-...` 再继续。
+2. `sanitize`：过滤器就地替换敏感/可疑片段后直接返回，无需用户确认。
+3. `block`：高风险拦截。`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true` 时返回确认模板等待 `yes/no cfm-...--act-...`；`false` 时对危险片段做 hit-fragment 变形后直接返回。
+4. `confirmation`（仅 v1，需 `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`）：返回确认模板，用户确认放行后响应仍会经过 hit-fragment 变形（纵深防御）。
 
-默认行为（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=false`）：拦截时不走确认流程，危险片段±20 字符上下文直接变形后返回，附带 `⚠ [AegisGate]` 警告。
+默认行为（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=false`）：拦截时不走确认流程，危险片段±20 字符上下文直接变形后返回。过滤器级别的 `sanitize`（如危险标签/URI/命令替换）直接就地生效，无需确认。
 
 补充：
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
 - `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
 
 **分级变形策略**：
-- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `（危险指令已移除）`，**原文不会出现在返回中**。
+- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
