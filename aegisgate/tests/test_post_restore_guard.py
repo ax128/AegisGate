@@ -21,8 +21,8 @@ def test_post_restore_guard_masks_restored_secret_on_lure():
 
     out = plugin.process_response(resp, ctx)
 
-    assert "[REDACTED:restored-secret]" in out.output_text
     assert "sk-abcDEF1234567890" not in out.output_text
+    assert "[REDACTED:restored-secret]" in out.output_text
     assert ctx.response_disposition == "sanitize"
     assert "response_post_restore_masked" in ctx.disposition_reasons
 

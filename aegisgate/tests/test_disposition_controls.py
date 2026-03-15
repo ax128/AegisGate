@@ -104,8 +104,7 @@ def test_output_sanitizer_prefers_sanitize_for_discussion_context():
 
     out = plugin.process_response(resp, ctx)
     assert ctx.response_disposition == "sanitize"
-    assert out.output_text.startswith("[AegisGate] content sanitized:")
-    assert "[unsafe-tag-removed]" in out.output_text
+    assert out.output_text == resp.output_text
 
 
 def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
@@ -132,7 +131,7 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
 
     assert ctx.response_disposition == "block"
     assert "response_forbidden_command" in ctx.disposition_reasons
-    assert out.output_text.startswith("[AegisGate] response blocked by security policy.")
+    assert out.output_text == resp.output_text
 
 
 @pytest.mark.parametrize(
@@ -171,4 +170,4 @@ def test_output_sanitizer_force_block_patterns_cover_docker_and_http_framing_pay
 
     assert ctx.response_disposition == "block"
     assert "response_forbidden_command" in ctx.disposition_reasons
-    assert out.output_text.startswith("[AegisGate] response blocked by security policy.")
+    assert out.output_text == resp.output_text

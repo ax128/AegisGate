@@ -69,7 +69,6 @@ class PostRestoreGuard(BaseFilter):
             ctx.disposition_reasons.append("response_post_restore_blocked")
             ctx.requires_human_review = True
             ctx.risk_score = max(ctx.risk_score, 0.95)
-            resp.output_text = self._block_message
             self._report = {"filter": self.name, "hit": True, "risk_score": ctx.risk_score, "action": "block"}
             logger.info("post restore guard blocked request_id=%s", ctx.request_id)
             return resp

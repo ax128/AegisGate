@@ -35,4 +35,5 @@ def test_pipeline_response_downgrade_on_high_risk():
     resp = InternalResponse(request_id="r1", session_id="s1", model="gpt", output_text="original")
     out = pipeline.run_response(resp, ctx)
 
-    assert out.output_text.startswith("[AegisGate]")
+    assert out.output_text == "original"
+    assert ctx.response_disposition == "block"

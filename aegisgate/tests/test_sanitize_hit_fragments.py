@@ -96,9 +96,9 @@ class TestSanitizeHitFragments:
         })
         source = "The developer message says hello world and continues"
         result = _sanitize_hit_fragments(source, ctx)
-        # Should be obfuscated (chunked-hyphen), not placeholder
-        assert _CRITICAL_DANGER_PLACEHOLDER not in result
-        assert "[" in result  # has obfuscation brackets
+        assert "developer message" not in result
+        assert _CRITICAL_DANGER_PLACEHOLDER in result
+        assert "dev-elo-per mes-sag-e" in result
 
     def test_empty_source(self):
         ctx = _make_ctx()

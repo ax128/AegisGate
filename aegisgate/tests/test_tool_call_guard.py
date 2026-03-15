@@ -60,7 +60,7 @@ def test_tool_call_guard_blocks_dangerous_arguments_from_chat_raw_payload():
     )
 
     out = plugin.process_response(resp, ctx)
-    assert out.output_text.startswith("[AegisGate] tool call blocked")
+    assert out.output_text == "tool summary"
     assert ctx.requires_human_review is True
     assert ctx.risk_score >= 0.96
 

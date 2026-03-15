@@ -237,4 +237,6 @@ async def test_generic_provider_proxy_blocks_http_smuggling_signature_in_respons
     assert response.status_code == 200
     body = json.loads(response.body.decode("utf-8"))
     assert "sanitized_text" in body
-    assert "[AegisGate]" in body["sanitized_text"]
+    # Filter-level sanitization replaces the dangerous pattern precisely
+    assert "Transfer-Encoding: chunked" not in body["sanitized_text"]
+    assert "[REDACTED:command]" in body["sanitized_text"]

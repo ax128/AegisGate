@@ -110,7 +110,6 @@ class OutputSanitizer(BaseFilter):
             ctx.disposition_reasons.append("response_forbidden_command")
             ctx.security_tags.add("response_forbidden_command")
             ctx.risk_score = max(ctx.risk_score, 1.0)
-            resp.output_text = self._block_message
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -133,7 +132,6 @@ class OutputSanitizer(BaseFilter):
             ctx.disposition_reasons.append("response_unicode_bidi")
             ctx.requires_human_review = True
             ctx.risk_score = max(ctx.risk_score, 0.97)
-            resp.output_text = self._block_message
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -160,7 +158,6 @@ class OutputSanitizer(BaseFilter):
                 ctx.response_disposition = "block"
                 ctx.disposition_reasons.append("response_system_prompt_leak")
                 ctx.requires_human_review = True
-                resp.output_text = self._block_message
                 self._report = {
                     "filter": self.name,
                     "hit": True,
@@ -177,7 +174,6 @@ class OutputSanitizer(BaseFilter):
             ctx.response_disposition = "block"
             ctx.disposition_reasons.append("response_high_risk")
             ctx.requires_human_review = True
-            resp.output_text = self._block_message
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -214,7 +210,7 @@ class OutputSanitizer(BaseFilter):
 
             if cleaned != resp.output_text:
                 debug_log_original("output_sanitizer_sanitized", resp.output_text, reason="response_sanitized")
-                resp.output_text = f"{self._sanitize_prefix}{cleaned}"
+                resp.output_text = cleaned
                 ctx.response_disposition = "sanitize"
                 ctx.disposition_reasons.append("response_sanitized")
                 ctx.security_tags.add("tool_calls_disabled_by_policy")

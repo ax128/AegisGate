@@ -208,9 +208,6 @@ class ToolCallGuard(BaseFilter):
                 sorted(set(violations)),
             )
 
-            if blocked:
-                resp.output_text = "[AegisGate] tool call blocked by policy."
-
         return resp
 
     def report(self) -> dict:

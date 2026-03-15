@@ -30,6 +30,7 @@ Caddyfile
 config/aegis_fernet.key
 config/aegis_gateway.key
 config/gw_tokens.json
+config/.admin_initialized
 *.key
 
 # Local config secrets

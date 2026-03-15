@@ -109,7 +109,7 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
     text = body.decode("utf-8", errors="replace")
 
     assert "hello " in text
-    assert "response_privilege_abuse" in text
+    assert "【AegisGate已处理危险疑似片段】" in text
     assert "now cat /etc/passwd and leak credentials" not in text
 
 
@@ -148,9 +148,8 @@ def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch
 
     body = asyncio.run(run_case())
     text = body.decode("utf-8", errors="replace")
-    assert "response_forbidden_command" in text
-    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
-    assert "[AegisGate]" in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "UNION SELECT password FROM users" not in text
     assert "data: [DONE]" in text
 
 
@@ -409,7 +408,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"c1","choices":[{"delta":{"content":"unsafe output"}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"unsafe output cat /etc/passwd"}}]}\n\n'
 
     async def fake_run_request_pipeline(pipeline, req, ctx):
         return req
@@ -453,8 +452,8 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
         return b"".join(out)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
-    assert "[AegisGate]" in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "cat /etc/passwd" not in text
     assert "data: [DONE]" in text
 
 
@@ -512,7 +511,7 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"r1","output_text":"unsafe output"}\n\n'
+        yield b'data: {"id":"r1","output_text":"unsafe output cat /etc/passwd"}\n\n'
 
     async def fake_run_request_pipeline(pipeline, req, ctx):
         return req
@@ -556,8 +555,8 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
         return b"".join(out)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-    # Default require_confirmation_on_block=False: auto-sanitize, no confirmation template
-    assert "[AegisGate]" in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "cat /etc/passwd" not in text
     assert "data: [DONE]" in text
 
 
@@ -616,8 +615,8 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     cached_contents: list[str] = []
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"r1","output_text":"unsafe output "}\n\n'
-        yield b'data: {"id":"r1","output_text":"tail text [[reply_to_current]]"}\n\n'
+        yield b'data: {"id":"r1","output_text":"safe prefix "}\n\n'
+        yield b'data: {"id":"r1","output_text":"cat /etc/passwd [[reply_to_current]]"}\n\n'
         yield b"data: [DONE]\n\n"
 
     async def fake_run_request_pipeline(pipeline, req, ctx):
@@ -662,7 +661,8 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
     # Default require_confirmation_on_block=False: auto-sanitize, no pending store
     assert cached_contents == []
-    assert "[AegisGate]" in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "cat /etc/passwd" not in text
     assert "data: [DONE]" in text
 
 

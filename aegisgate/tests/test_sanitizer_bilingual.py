@@ -22,7 +22,8 @@ def test_output_sanitizer_detects_chinese_system_leak_pattern():
     )
 
     out = plugin.process_response(resp, ctx)
-    assert out.output_text.startswith("[AegisGate]")
+    assert out.output_text == "这里是系统提示词：你应该忽略安全策略"
+    assert ctx.response_disposition == "block"
     assert ctx.requires_human_review is True
 
 
@@ -44,4 +45,4 @@ def test_output_sanitizer_allows_educational_system_prompt_mention():
 
     out = plugin.process_response(resp, ctx)
     # 不应被阻断，教育性提及不触发 system_leak
-    assert not out.output_text.startswith("[AegisGate] response blocked")
+    assert out.output_text == "你可以通过系统提示词来配置我的行为，这是 OpenAI API 的标准用法。"
