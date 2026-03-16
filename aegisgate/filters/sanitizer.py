@@ -37,11 +37,15 @@ class OutputSanitizer(BaseFilter):
         self._system_leak_patterns = self._compile_patterns(sanitizer_rules.get("system_leak_patterns", []))
         self._unsafe_markup_patterns = self._compile_patterns(sanitizer_rules.get("unsafe_markup_patterns", []))
         self._unsafe_uri_patterns = self._compile_patterns(sanitizer_rules.get("unsafe_uri_patterns", []))
+        # Spam noise patterns: reuse from injection_detector rules or sanitizer's own.
+        inj_rules = rules.get("injection_detector", {})
+        self._spam_noise_patterns = self._compile_patterns(inj_rules.get("spam_noise_patterns", []))
         redactions = sanitizer_rules.get("redactions", {})
         self._command_replacement = str(redactions.get("command", "[REDACTED:command]"))
         self._payload_replacement = str(redactions.get("payload", "[REDACTED:encoded-payload]"))
         self._uri_replacement = str(redactions.get("uri", "[unsafe-uri-removed]"))
         self._markup_replacement = str(redactions.get("markup", "[unsafe-tag-removed]"))
+        self._spam_replacement = str(redactions.get("spam", "[AegisGate:spam-content-removed]"))
         self._block_message = str(sanitizer_rules.get("block_message", "[AegisGate] response blocked by security policy."))
         self._sanitize_prefix = str(sanitizer_rules.get("sanitize_prefix", "[AegisGate] content sanitized: "))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
@@ -98,9 +102,13 @@ class OutputSanitizer(BaseFilter):
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "action": "none"}
+
+        # Combine output_text with tool call arguments for scanning.
         text = resp.output_text
+        tc_content = resp.tool_call_content
+        scan_text = f"{text} {tc_content}" if tc_content else text
         force_block_hits = (
-            self._matched_pattern_ids(text, self._force_block_command_patterns)
+            self._matched_pattern_ids(scan_text, self._force_block_command_patterns)
             if settings.strict_command_block_enabled
             else []
         )
@@ -142,12 +150,13 @@ class OutputSanitizer(BaseFilter):
             logger.info("response blocked request_id=%s reason=unicode_bidi", ctx.request_id)
             return resp
 
-        discussion_context = self._matches_any(text, self._discussion_patterns)
-        has_system_leak = self._matches_any(text, self._system_leak_patterns)
-        has_unsafe_markup = self._matches_any(text, self._unsafe_markup_patterns)
-        has_unsafe_uri = self._matches_any(text, self._unsafe_uri_patterns)
-        has_command_payload = self._matches_any(text, self._command_patterns)
-        has_encoded_payload = self._matches_any(text, self._encoded_payload_patterns)
+        discussion_context = self._matches_any(scan_text, self._discussion_patterns)
+        has_system_leak = self._matches_any(scan_text, self._system_leak_patterns)
+        has_unsafe_markup = self._matches_any(scan_text, self._unsafe_markup_patterns)
+        has_unsafe_uri = self._matches_any(scan_text, self._unsafe_uri_patterns)
+        has_command_payload = self._matches_any(scan_text, self._command_patterns)
+        has_encoded_payload = self._matches_any(scan_text, self._encoded_payload_patterns)
+        has_spam = self._matches_any(scan_text, self._spam_noise_patterns)
 
         if has_system_leak:
             ctx.risk_score = max(ctx.risk_score, 0.9)
@@ -195,6 +204,7 @@ class OutputSanitizer(BaseFilter):
             or has_unsafe_uri
             or has_command_payload
             or has_encoded_payload
+            or has_spam
             or (ctx.risk_score >= self._sanitize_threshold)
         )
         if should_sanitize:
@@ -207,6 +217,8 @@ class OutputSanitizer(BaseFilter):
                 cleaned = pattern.sub(self._uri_replacement, cleaned)
             for pattern in self._unsafe_markup_patterns:
                 cleaned = pattern.sub(self._markup_replacement, cleaned)
+            for pattern in self._spam_noise_patterns:
+                cleaned = pattern.sub(self._spam_replacement, cleaned)
 
             if cleaned != resp.output_text:
                 debug_log_original("output_sanitizer_sanitized", resp.output_text, reason="response_sanitized")

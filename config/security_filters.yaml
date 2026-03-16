@@ -342,9 +342,24 @@ injection_detector:
       regex: '["'']method["'']\s*:\s*["'']resources/read["'']'
     # ===== 垃圾词组合 =====
     - id: tool_call_with_spam
-      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)'
+      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,60}(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.)'
     - id: spam_with_tool_call
-      regex: '(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
+      regex: '(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.).{0,60}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
+    # --- to=functions.xxx 格式伪造 ---
+    - id: to_eq_functions
+      regex: 'to\s*=\s*functions?\.\s*\w+'
+  # ===== 垃圾内容噪声检测（独立信号） =====
+  spam_noise_patterns:
+    - id: gambling_zh
+      regex: '(?:彩神争霸|大发快三|北京赛车|重庆时时彩|天天中彩票|天天爱彩票|腾讯分分彩|大发时时彩|大发彩票|六合彩|大发快|香港赛马会|福利彩票天天|天天乐彩票|全民彩票|彩票平台注册|彩票平台开户|彩票娱乐注册)'
+    - id: porn_zh
+      regex: '(?:毛片|无码|一级特黄|一本道|久久精品|久久综合|男人天堂|做爰片|黄色录像|高清无码|免费视频观看|AV不卡免费|夫妻性生活|中文字幕无码)'
+    - id: spam_platform
+      regex: '(?:菲律宾申博|娱乐平台注册|娱乐平台招商|娱乐平台开户|棋牌游戏官网|娱乐官方网站|娱乐彩票注册|娱乐平台主管)'
+  # 同一消息内命中 >=2 个不同 spam 类别时触发
+  spam_noise_min_distinct_hits: 2
+  # 同一消息内出现 >=3 种非常见 Unicode 脚本族时触发混淆信号
+  message_script_diversity_threshold: 3
   typoglycemia_targets:
     - ignore
     - bypass
@@ -409,6 +424,9 @@ injection_detector:
       tool_call_injection:
         bucket: hijack
         severity: 9       # 伪造工具调用：高危，直接拦截
+      spam_noise:
+        bucket: hijack
+        severity: 7        # 垃圾内容噪声：高危，与 tool injection 组合时强制拦截
       unicode_bidi:
         bucket: anomaly
         severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
@@ -420,6 +438,7 @@ injection_detector:
       - obfuscated
       - unicode_bidi
       - tool_call_injection
+      - spam_noise
     discussion_patterns:
       - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
       - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
@@ -732,6 +751,7 @@ sanitizer:
     payload: '[REDACTED:encoded-payload]'
     uri: '[unsafe-uri-removed]'
     markup: '[unsafe-tag-removed]'
+    spam: '[AegisGate:spam-content-removed]'
   block_message: '[AegisGate] response blocked by security policy.'
   sanitize_prefix: '[AegisGate] content sanitized: '
   # 仅在 LLM 明确「泄露」系统提示词时拦截；普通提及（如解释 AI 原理）不触发
@@ -814,6 +834,7 @@ action_map:
     direct: downgrade
     typoglycemia: review
     tool_call_injection: block
+    spam_noise: block
     # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
   rag_poison_guard:
     ingestion_poison: block

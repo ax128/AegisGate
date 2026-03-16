@@ -182,9 +182,18 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "mcp_tools_call", "regex": r"[\"']method[\"']\s*:\s*[\"']tools/call[\"']"},
             {"id": "mcp_resources_read", "regex": r"[\"']method[\"']\s*:\s*[\"']resources/read[\"']"},
             # --- Spam + tool call combo ---
-            {"id": "tool_call_with_spam", "regex": r"(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)"},
-            {"id": "spam_with_tool_call", "regex": r"(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)"},
+            {"id": "tool_call_with_spam", "regex": r"(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,60}(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.)"},
+            {"id": "spam_with_tool_call", "regex": r"(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.).{0,60}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)"},
+            # --- to=functions.xxx with surrounding noise ---
+            {"id": "to_eq_functions", "regex": r"to\s*=\s*functions?\.\s*\w+"},
         ],
+        "spam_noise_patterns": [
+            {"id": "gambling_zh", "regex": r"(?:彩神争霸|大发快三|北京赛车|重庆时时彩|天天中彩票|天天爱彩票|腾讯分分彩|大发时时彩|大发彩票|六合彩|大发快|香港赛马会|福利彩票天天|天天乐彩票|全民彩票|彩票平台注册|彩票平台开户|彩票娱乐注册)"},
+            {"id": "porn_zh", "regex": r"(?:毛片|无码|一级特黄|一本道|久久精品|久久综合|男人天堂|做爰片|黄色录像|高清无码|免费视频观看|AV不卡免费|夫妻性生活|中文字幕无码)"},
+            {"id": "spam_platform", "regex": r"(?:菲律宾申博|娱乐平台注册|娱乐平台招商|娱乐平台开户|棋牌游戏官网|娱乐官方网站|娱乐彩票注册|娱乐平台主管)"},
+        ],
+        "spam_noise_min_distinct_hits": 2,
+        "message_script_diversity_threshold": 3,
         "typoglycemia_targets": ["ignore", "bypass", "override", "reveal", "system", "prompt", "instructions"],
         "decoded_keywords": [
             "ignore previous instructions",
@@ -226,12 +235,13 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "unicode_invisible": {"bucket": "anomaly", "severity": 4},
                 "unicode_bidi": {"bucket": "anomaly", "severity": 10},
                 "tool_call_injection": {"bucket": "hijack", "severity": 9},
+                "spam_noise": {"bucket": "hijack", "severity": 7},
             },
         },
         "false_positive_mitigation": {
             "enabled": True,
             "max_risk_reduction": 0.45,
-            "non_reducible_categories": ["system_exfil", "obfuscated", "unicode_bidi", "tool_call_injection"],
+            "non_reducible_categories": ["system_exfil", "obfuscated", "unicode_bidi", "tool_call_injection", "spam_noise"],
             "discussion_patterns": [
                 r"(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)",
                 r"(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)",
@@ -491,6 +501,7 @@ _DEFAULT_RULES: dict[str, Any] = {
                 "direct": "downgrade",
                 "typoglycemia": "review",
                 "tool_call_injection": "block",
+                "spam_noise": "block",
             },
         "untrusted_content_guard": {
             "suspicious_untrusted": "review",

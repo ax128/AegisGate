@@ -28,6 +28,8 @@ _WORD_SPLIT_RE = re.compile(r"\S+")
 # Latin/Common/Inherited scripts are expected in normal multilingual text;
 # mixing two *different* non-Latin scripts in the same word is suspicious.
 _BENIGN_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL"})
+# For message-level script diversity: scripts that are expected in normal text.
+_COMMON_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL", "FULLWIDTH"})
 
 # 每 3 个字符插入 "-" 以变形展示，防止日志本身被利用
 _DEFORM_CHUNK_SIZE = 3
@@ -68,6 +70,30 @@ def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
         if len(exotic_scripts) >= min_scripts:
             hits.append(word)
     return hits
+
+
+def _detect_message_script_diversity(text: str) -> set[str]:
+    """Detect unusual script diversity at message level.
+
+    Returns the set of uncommon script prefixes found.  When the message
+    contains characters from 3+ distinct non-common scripts (e.g. Armenian +
+    Gujarati + Georgian in a single message), this is a strong noise-injection
+    signal even if each *word* uses only one script.
+    """
+    exotic_scripts: set[str] = set()
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        try:
+            name = unicodedata.name(ch, "")
+        except ValueError:
+            continue
+        if not name:
+            continue
+        script_prefix = name.split()[0]
+        if script_prefix not in _COMMON_SCRIPT_PREFIXES:
+            exotic_scripts.add(script_prefix)
+    return exotic_scripts
 
 
 def _maybe_decode_base64(token: str) -> str | None:
@@ -145,6 +171,10 @@ class PromptInjectionDetector(BaseFilter):
         self._tool_call_injection_patterns = self._compile_rule_patterns(
             detector_rules.get("tool_call_injection_patterns", [])
         )
+
+        self._spam_noise_patterns = self._compile_rule_patterns(detector_rules.get("spam_noise_patterns", []))
+        self._spam_noise_min_hits = max(1, int(detector_rules.get("spam_noise_min_distinct_hits", 2)))
+        self._msg_script_diversity_threshold = max(2, int(detector_rules.get("message_script_diversity_threshold", 3)))
 
         self._typoglycemia_targets = [str(item).lower() for item in detector_rules.get("typoglycemia_targets", [])]
         self._decoded_keywords = [str(item).lower() for item in detector_rules.get("decoded_keywords", [])]
@@ -307,6 +337,21 @@ class PromptInjectionDetector(BaseFilter):
                     deformed,
                 )
 
+        # --- Spam noise detection ---
+        spam_hits: set[str] = set()
+        for label, pattern in self._spam_noise_patterns.items():
+            if pattern.search(text_nfkc) or pattern.search(text_norm):
+                spam_hits.add(label)
+        if len(spam_hits) >= self._spam_noise_min_hits:
+            signals["spam_noise"] = spam_hits
+
+        # --- Message-level script diversity ---
+        exotic_scripts = _detect_message_script_diversity(text_raw)
+        if len(exotic_scripts) >= self._msg_script_diversity_threshold:
+            signals.setdefault("obfuscated", set()).add(
+                f"message_script_diversity({len(exotic_scripts)}:{','.join(sorted(exotic_scripts)[:5])})"
+            )
+
         if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
             signals["obfuscated"].add("rule_obfuscation_marker")
 
@@ -468,7 +513,24 @@ class PromptInjectionDetector(BaseFilter):
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": {}, "risk_model": {}}
+
+        # Scan both output_text and structured tool call arguments.
+        merged_signals: dict[str, set[str]] = {}
         signals, diagnostics = self._scan_text(resp.output_text)
+        self._merge_signals(merged_signals, signals)
+
+        tc_content = resp.tool_call_content
+        if tc_content:
+            tc_signals, tc_diag = self._scan_text(tc_content)
+            self._merge_signals(merged_signals, tc_signals)
+            diagnostics["text_raw_len"] = int(diagnostics["text_raw_len"]) + int(tc_diag["text_raw_len"])
+            diagnostics["text_norm_len"] = int(diagnostics["text_norm_len"]) + int(tc_diag["text_norm_len"])
+            diagnostics["unicode_invisible_count"] = int(diagnostics["unicode_invisible_count"]) + int(tc_diag["unicode_invisible_count"])
+            diagnostics["unicode_bidi_count"] = int(diagnostics["unicode_bidi_count"]) + int(tc_diag["unicode_bidi_count"])
+            if tc_diag.get("discussion_context"):
+                diagnostics["discussion_context"] = True
+
+        signals = self._finalize_signals(merged_signals)
         if signals:
             risk_model = self._score_signals(signals)
             risk_score = float(risk_model["score"])
