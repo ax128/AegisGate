@@ -39,25 +39,34 @@ class InternalResponse(BaseModel):
         parts: list[str] = []
 
         # OpenAI format: choices[].message.tool_calls[].function.arguments
-        for choice in self.raw.get("choices", []):
+        for choice in self.raw.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
             msg = choice.get("message") or choice.get("delta") or {}
+            if not isinstance(msg, dict):
+                continue
             for tc in msg.get("tool_calls") or []:
-                func = tc.get("function", {})
+                if not isinstance(tc, dict):
+                    continue
+                func = tc.get("function") or {}
+                if not isinstance(func, dict):
+                    continue
                 name = func.get("name", "")
                 args = func.get("arguments", "")
                 if name:
-                    parts.append(name)
+                    parts.append(str(name))
                 if args:
                     parts.append(str(args))
 
         # Anthropic Claude format: content[].input when type=tool_use
         for block in self.raw.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name", "")
-                inp = block.get("input", {})
-                if name:
-                    parts.append(name)
-                if inp:
-                    parts.append(str(inp))
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name", "")
+            inp = block.get("input", {})
+            if name:
+                parts.append(str(name))
+            if inp:
+                parts.append(str(inp))
 
         return " ".join(parts)
