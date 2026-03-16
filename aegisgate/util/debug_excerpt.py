@@ -1,6 +1,8 @@
 """
-调试用原文摘要：拦截/脱敏/block 处记录「原文」时统一截断，只展示重要部分。
-仅在 AEGIS_LOG_LEVEL=debug 时由调用方打 DEBUG 日志；本模块只提供截断与格式化。
+日志摘要工具：拦截/脱敏/block 处记录内容时统一截断，只展示重要部分。
+
+- debug_log_original: DEBUG 级别，记录原文摘要
+- info_log_sanitized: INFO 级别，记录处理后（遮挡/分割）的内容摘要
 
 环境变量（可选）：
 - AEGIS_DEBUG_EXCERPT_MAX_LEN: 覆盖默认截断长度。设为 0 表示不截断，打印完整内容（日志会很长）。
@@ -56,3 +58,35 @@ def debug_log_original(
         logger.debug("%s original_excerpt request_id=see_context reason=%s excerpt=%s", label, reason, excerpt)
     else:
         logger.debug("%s original_excerpt request_id=see_context excerpt=%s", label, excerpt)
+
+
+# 处理后内容日志默认截断长度（比原文短，因为已遮挡过的内容更安全）
+DEFAULT_SANITIZED_EXCERPT_MAX_LEN = 800
+
+
+def info_log_sanitized(
+    label: str,
+    sanitized_text: str,
+    *,
+    request_id: str = "",
+    reason: str | None = None,
+    max_len: int = DEFAULT_SANITIZED_EXCERPT_MAX_LEN,
+) -> None:
+    """
+    INFO 级别日志：记录处理后（遮挡/分割）的内容摘要。
+    用于审计追踪，确认网关确实对危险内容进行了处理。
+    """
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    env_max = os.environ.get("AEGIS_DEBUG_EXCERPT_MAX_LEN")
+    if env_max is not None:
+        try:
+            max_len = int(env_max)
+        except ValueError:
+            pass
+    excerpt = excerpt_for_debug(sanitized_text, max_len=max_len)
+    rid = request_id or "see_context"
+    if reason:
+        logger.info("%s sanitized_output request_id=%s reason=%s output=%s", label, rid, reason, excerpt)
+    else:
+        logger.info("%s sanitized_output request_id=%s output=%s", label, rid, excerpt)

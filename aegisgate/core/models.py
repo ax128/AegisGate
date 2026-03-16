@@ -41,7 +41,7 @@ class InternalResponse(BaseModel):
         # OpenAI format: choices[].message.tool_calls[].function.arguments
         for choice in self.raw.get("choices", []):
             msg = choice.get("message") or choice.get("delta") or {}
-            for tc in msg.get("tool_calls", []):
+            for tc in msg.get("tool_calls") or []:
                 func = tc.get("function", {})
                 name = func.get("name", "")
                 args = func.get("arguments", "")
@@ -51,7 +51,7 @@ class InternalResponse(BaseModel):
                     parts.append(str(args))
 
         # Anthropic Claude format: content[].input when type=tool_use
-        for block in self.raw.get("content", []):
+        for block in self.raw.get("content") or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "")
                 inp = block.get("input", {})

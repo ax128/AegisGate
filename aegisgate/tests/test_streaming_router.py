@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncGenerator
 
+import pytest
+
 from aegisgate.adapters.openai_compat.router import (
     _UPSTREAM_EOF_RECOVERY_NOTICE,
     _execute_chat_stream_once,
@@ -457,6 +459,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
     assert "data: [DONE]" in text
 
 
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 def test_chat_stream_returns_confirmation_chunk_when_require_confirmation_enabled(monkeypatch):
     """When require_confirmation_on_block=True, the old confirmation flow kicks in."""
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
@@ -560,6 +563,7 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
     assert "data: [DONE]" in text
 
 
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 def test_responses_stream_returns_confirmation_chunk_when_require_confirmation_enabled(monkeypatch):
     """When require_confirmation_on_block=True, the old confirmation flow kicks in."""
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
@@ -666,6 +670,7 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     assert "data: [DONE]" in text
 
 
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 def test_responses_stream_block_drains_and_caches_when_require_confirmation_enabled(monkeypatch):
     """When require_confirmation_on_block=True, drain caches full text and stores pending."""
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)

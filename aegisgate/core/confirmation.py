@@ -1,4 +1,10 @@
-"""Confirmation workflow helpers."""
+"""Confirmation workflow helpers.
+
+NOTE: The yes/no approval flow has been removed. All dangerous content is now
+automatically sanitized (redacted or split with ---). The confirmation template
+is informational only — it tells the user what was detected and how the content
+was processed, but does NOT offer a release/approve option.
+"""
 
 from __future__ import annotations
 
@@ -10,22 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-YES_WORDS = {
-    "yes",
-    "y",
-    "ok",
-    "okay",
-    "confirm",
-    "proceed",
-    "continue",
-    "是",
-    "是的",
-    "确认",
-    "同意",
-    "继续",
-    "执行",
-    "好的",
-}
+# YES_WORDS is intentionally empty — approval is no longer supported.
+YES_WORDS: set[str] = set()
 
 NO_WORDS = {
     "no",
@@ -85,26 +77,23 @@ def parse_confirmation_decision(text: str) -> ConfirmationDecision:
 
 
 def confirmation_template(confirm_id: str, reason: str, summary: str, action_token: str = "") -> str:
-    confirm_bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
-    action_line_cn = f"动作摘要码：{action_token}\n" if action_token else ""
-    action_line_en = f"Action Bind Token: {action_token}\n" if action_token else ""
+    """Informational-only template. No yes/no approval options."""
     return (
+        f"⚠️ [AegisGate] 安全拦截通知\n"
+        f"---\n"
         f"拦截原因：{reason}\n"
-        f"可疑简述：{summary}\n\n"
-        "⚠️ 安全确认（高风险操作）\n"
-        "根据上述原因，本次请求已被网关暂停执行。请确认后再决定是否放行。\n\n"
-        "请单独发送以下可复制消息之一（不要附加其它内容）：\n\n"
-        f"放行（复制这一行）：yes {confirm_bind}\n\n"
-        f"取消（复制这一行）：no {confirm_bind}\n\n"
-        f"确认编号：{confirm_id}\n"
-        f"{action_line_cn}"
-        "（请不要提供密码、密钥、token、cookie 等敏感信息。）\n\n"
-        "⚠️ Safety Confirmation (High-Risk Action)\n"
-        "For the reason above, this request has been paused by the gateway. Confirm to approve or cancel.\n\n"
-        "Send ONLY one standalone copy-ready line below:\n\n"
-        f"Approve (copy this line): yes {confirm_bind}\n\n"
-        f"Cancel (copy this line): no {confirm_bind}\n\n"
-        f"Confirmation ID: {confirm_id}\n"
-        f"{action_line_en}"
-        "(Do not provide passwords, API keys, tokens, or cookies.)"
+        f"可疑简述：{summary}\n"
+        f"处理方式：危险片段已自动遮挡/分割，不支持放行\n"
+        f"事件编号：{confirm_id}\n"
+        f"---\n"
+        f"危险内容已被自动处理（遮挡或以 --- 分割）。如需查看完整原文，请联系安全管理员。\n\n"
+        f"⚠️ [AegisGate] Security Interception Notice\n"
+        f"---\n"
+        f"Reason: {reason}\n"
+        f"Summary: {summary}\n"
+        f"Action: Dangerous fragments auto-redacted/split — approval is not available\n"
+        f"Event ID: {confirm_id}\n"
+        f"---\n"
+        f"Dangerous content has been automatically processed (redacted or split with ---). "
+        f"Contact your security administrator to review the original content."
     )

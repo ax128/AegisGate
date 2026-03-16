@@ -158,6 +158,7 @@ async def test_responses_stream_non_confirmation_replaces_dangerous_function_cal
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_confirmation_mode_keeps_yes_no_flow_for_responses(monkeypatch):
     async def fake_forward_json(url, payload, headers):
         return 200, {

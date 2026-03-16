@@ -376,6 +376,7 @@ async def test_chat_message_with_stale_confirm_id_but_without_explicit_command_i
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_chat_pending_payload_omitted_returns_visible_confirmation_message(monkeypatch):
     confirm_id = "cfm-f43e7cbb7ca0"
     reason = "高风险响应"
@@ -476,6 +477,7 @@ async def test_chat_confirmation_route_mismatch_is_forwarded(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_chat_confirmation_already_processed_returns_visible_message(monkeypatch):
     confirm_id = "cfm-processed0"
     reason = "高风险响应"
@@ -754,6 +756,7 @@ async def test_chat_wrong_confirm_id_is_forwarded(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_chat_confirmation_tail_yes_overrides_template_ambiguity(monkeypatch):
     confirm_id = "cfm-1234abcdefff"
     reason = "高风险响应"
@@ -817,6 +820,7 @@ def test_extract_decision_before_confirm_id_ignores_gateway_template_prefix():
     assert openai_router._extract_decision_before_confirm_id(text, confirm_id) == "unknown"
 
 
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 def test_resolve_pending_decision_uses_id_context_when_base_ambiguous():
     confirm_id = "cfm-40ca0cacd5d5"
     noisy = (
@@ -831,6 +835,7 @@ def test_resolve_pending_decision_uses_id_context_when_base_ambiguous():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_chat_confirmation_yes_releases_cached_response_payload(monkeypatch):
     confirm_id = "cfm-cachechat001"
     reason = "高风险响应"
@@ -949,6 +954,7 @@ async def test_chat_confirmation_no_deletes_pending_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_chat_confirmation_yes_replays_cached_stream_text_as_sse_when_stream_true(monkeypatch):
     confirm_id = "cfm-cachechat002"
     reason = "高风险响应"
@@ -1007,6 +1013,7 @@ async def test_chat_confirmation_yes_replays_cached_stream_text_as_sse_when_stre
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatch):
     confirm_id = "cfm-cacheresp001"
     reason = "高风险响应"
@@ -1066,6 +1073,7 @@ async def test_responses_confirmation_yes_releases_cached_stream_text(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_responses_confirmation_yes_replays_cached_stream_text_as_sse_when_stream_true(monkeypatch):
     confirm_id = "cfm-cacheresp002"
     reason = "高风险响应"
@@ -1125,6 +1133,7 @@ async def test_responses_confirmation_yes_replays_cached_stream_text_as_sse_when
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="yes/no approval flow removed — all dangerous content auto-sanitized")
 async def test_responses_confirmation_yes_replays_fallback_message_when_cached_stream_text_empty(monkeypatch):
     confirm_id = "cfm-cacheresp-empty"
     reason = "高风险响应"

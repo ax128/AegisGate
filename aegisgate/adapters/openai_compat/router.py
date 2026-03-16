@@ -97,7 +97,7 @@ from aegisgate.filters.untrusted_content_guard import UntrustedContentGuard
 from aegisgate.policies.policy_engine import PolicyEngine
 from aegisgate.storage import create_store
 from aegisgate.init_config import ensure_runtime_storage_paths
-from aegisgate.util.debug_excerpt import debug_log_original
+from aegisgate.util.debug_excerpt import debug_log_original, info_log_sanitized
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
@@ -1016,6 +1016,15 @@ def _needs_confirmation(ctx: RequestContext) -> bool:
     if ctx.requires_human_review:
         return True
     return any(tag.startswith("response_") for tag in ctx.security_tags)
+
+
+def _confirmation_approval_enabled() -> bool:
+    """Whether the yes/no approval flow is enabled.
+
+    Always returns False — the approval flow has been removed.
+    All dangerous content is now auto-sanitized (redacted or split with ---).
+    """
+    return False
 
 
 def _confirmation_reason_and_summary(
@@ -2548,7 +2557,7 @@ async def _execute_chat_stream_once(
             source_text=request_user_text,
         )
 
-        if not settings.require_confirmation_on_block:
+        if not _confirmation_approval_enabled():
             block_text = f"[AegisGate] {reason}: {summary}"
             ctx.enforcement_actions.append("auto_block:no_confirmation")
 
@@ -2685,7 +2694,7 @@ async def _execute_chat_stream_once(
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
 
-                        if settings.require_confirmation_on_block:
+                        if _confirmation_approval_enabled():
                             reason, summary = _confirmation_reason_and_summary(ctx, source_text=stream_window)
                             confirm_id = make_confirm_id()
                             now_ts = int(time.time())
@@ -2775,8 +2784,10 @@ async def _execute_chat_stream_once(
 
                 yield line
 
-            if blocked_reason and not settings.require_confirmation_on_block:
+            if blocked_reason and not _confirmation_approval_enabled():
                 logger.info("chat stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
+                sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
+                info_log_sanitized("chat_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
                 while pending_lines:
                     yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
                 yield _stream_done_sse_chunk()
@@ -2917,7 +2928,7 @@ async def _execute_responses_stream_once(
             source_text=request_user_text,
         )
 
-        if not settings.require_confirmation_on_block:
+        if not _confirmation_approval_enabled():
             block_text = f"[AegisGate] {reason}: {summary}"
             ctx.enforcement_actions.append("auto_block:no_confirmation")
 
@@ -3086,7 +3097,7 @@ async def _execute_responses_stream_once(
                             ctx.disposition_reasons.append(blocked_reason)
 
                         # Only prepare confirmation metadata when confirmation flow is enabled.
-                        if settings.require_confirmation_on_block:
+                        if _confirmation_approval_enabled():
                             blocked_confirmation_reason, blocked_confirmation_summary = _confirmation_reason_and_summary(
                                 ctx,
                                 source_text=stream_window,
@@ -3120,7 +3131,7 @@ async def _execute_responses_stream_once(
 
                         stream_end_reason = (
                             "policy_confirmation_draining_upstream"
-                            if settings.require_confirmation_on_block
+                            if _confirmation_approval_enabled()
                             else "policy_auto_sanitize_buffered"
                         )
 
@@ -3134,10 +3145,12 @@ async def _execute_responses_stream_once(
 
                 yield line
             if blocked_reason:
-                if not settings.require_confirmation_on_block:
+                if not _confirmation_approval_enabled():
                     ctx.response_disposition = "sanitize"
                     ctx.enforcement_actions.append("auto_sanitize:stream_buffered_patch")
                     logger.info("responses stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
+                    sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
+                    info_log_sanitized("responses_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
                     while pending_lines:
                         yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
                     yield _stream_done_sse_chunk()
@@ -3381,7 +3394,7 @@ async def _execute_chat_once(
                 source_text=request_user_text,
             )
 
-            if not settings.require_confirmation_on_block:
+            if not _confirmation_approval_enabled():
                 # Direct block notice without confirmation flow.
                 block_text = f"[AegisGate] {reason}: {summary}"
                 block_resp = InternalResponse(
@@ -3392,6 +3405,7 @@ async def _execute_chat_once(
                 _attach_security_metadata(block_resp, ctx, boundary=boundary)
                 _write_audit_event(ctx, boundary=boundary)
                 logger.info("chat completion request blocked (no confirmation) request_id=%s", ctx.request_id)
+                info_log_sanitized("chat_completion_request_blocked", block_text, request_id=ctx.request_id, reason=block_reason)
                 return to_chat_response(block_resp)
 
             confirm_id = make_confirm_id()
@@ -3497,11 +3511,12 @@ async def _execute_chat_once(
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
 
-        if not settings.require_confirmation_on_block:
+        if not _confirmation_approval_enabled():
             final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info("chat completion auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            info_log_sanitized("chat_completion_sanitized", final_resp.output_text, request_id=ctx.request_id, reason=resp_reason)
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             _write_audit_event(ctx, boundary=boundary)
             return _render_non_confirmation_chat_response(upstream_body, final_resp, ctx)
@@ -3659,7 +3674,7 @@ async def _execute_responses_once(
                 source_text=request_user_text,
             )
 
-            if not settings.require_confirmation_on_block:
+            if not _confirmation_approval_enabled():
                 block_text = f"[AegisGate] {reason}: {summary}"
                 block_resp = InternalResponse(
                     request_id=req.request_id, session_id=req.session_id,
@@ -3777,11 +3792,12 @@ async def _execute_responses_once(
         resp_reason = ctx.disposition_reasons[0] if ctx.disposition_reasons else "response_high_risk"
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
 
-        if not settings.require_confirmation_on_block:
+        if not _confirmation_approval_enabled():
             final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info("responses endpoint auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            info_log_sanitized("responses_endpoint_sanitized", final_resp.output_text, request_id=ctx.request_id, reason=resp_reason)
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             _write_audit_event(ctx, boundary=boundary)
             return _render_non_confirmation_responses_output(upstream_body, final_resp, ctx)
@@ -3989,10 +4005,11 @@ async def _execute_generic_stream_once(
                             ctx.response_disposition = "block"
                             if block_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(block_reason)
-                            if not settings.require_confirmation_on_block:
+                            if not _confirmation_approval_enabled():
                                 ctx.enforcement_actions.append("stream:auto_sanitize")
                                 sanitized_response = _build_sanitized_full_response(ctx, source_text=stream_window)
                                 logger.info("generic stream auto-sanitized request_id=%s reason=%s", ctx.request_id, block_reason)
+                                info_log_sanitized("generic_stream_sanitized", sanitized_response, request_id=ctx.request_id, reason=block_reason)
                                 yield _stream_confirmation_sse_chunk(ctx, model, request_path, sanitized_response, None)
                                 yield _stream_done_sse_chunk()
                                 return
@@ -4169,11 +4186,12 @@ async def _execute_generic_once(
         )
 
     if _needs_confirmation(ctx):
-        if not settings.require_confirmation_on_block:
+        if not _confirmation_approval_enabled():
             sanitized_text = _build_sanitized_full_response(ctx, source_text=capped_upstream_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info("generic proxy auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            info_log_sanitized("generic_proxy_sanitized", sanitized_text, request_id=ctx.request_id)
             _write_audit_event(ctx, boundary=boundary)
             return _passthrough_any_response(
                 {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
@@ -4352,13 +4370,30 @@ async def chat_completions(payload: dict, request: Request):
             return to_chat_response(canceled_resp)
 
         elif decision_value == "yes":
+            # Approval flow disabled — always reject with informational message.
             logger.info(
-                "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                "confirmation approve rejected (disabled) request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
                 confirm_id,
             )
+            return to_chat_response(InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=(
+                    f"⚠️ [AegisGate] 放行功能已禁用\n---\n"
+                    f"确认编号：{confirm_id}\n"
+                    f"所有危险内容已自动遮挡/分割处理，不支持手动放行。\n"
+                    f"如需查看完整原文，请联系安全管理员。\n\n"
+                    f"⚠️ [AegisGate] Approval Disabled\n---\n"
+                    f"Event ID: {confirm_id}\n"
+                    f"All dangerous content has been auto-redacted/split. Manual approval is not available."
+                ),
+            ))
+
+            # --- Legacy approval code below (unreachable) ---
             locked = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
@@ -4810,13 +4845,30 @@ async def responses(payload: dict, request: Request):
             return to_responses_output(canceled_resp)
 
         elif decision_value == "yes":
+            # Approval flow disabled — always reject with informational message.
             logger.info(
-                "confirmation approve request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
+                "confirmation approve rejected (disabled) request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
                 req_preview.session_id,
                 tenant_id,
                 confirm_id,
             )
+            return to_responses_output(InternalResponse(
+                request_id=req_preview.request_id,
+                session_id=req_preview.session_id,
+                model=req_preview.model,
+                output_text=(
+                    f"⚠️ [AegisGate] 放行功能已禁用\n---\n"
+                    f"确认编号：{confirm_id}\n"
+                    f"所有危险内容已自动遮挡/分割处理，不支持手动放行。\n"
+                    f"如需查看完整原文，请联系安全管理员。\n\n"
+                    f"⚠️ [AegisGate] Approval Disabled\n---\n"
+                    f"Event ID: {confirm_id}\n"
+                    f"All dangerous content has been auto-redacted/split. Manual approval is not available."
+                ),
+            ))
+
+            # --- Legacy approval code below (unreachable) ---
             locked = await _try_transition_pending_status(
                 confirm_id=confirm_id,
                 expected_status="pending",
