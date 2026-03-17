@@ -1,0 +1,21 @@
+{
+  "_说明": "多上游 Token 预配置模板。编辑后保存为 gw_tokens.json，重启网关自动加载。",
+  "_格式": "每个 key 是自定义 token 名称，客户端通过 /v1/__gw__/t/<token>/... 访问对应上游。",
+  "tokens": {
+    "sub2api": {
+      "upstream_base": "http://sub2api:8080/v1",
+      "gateway_key": "sub2api管理后台分配的API-Key",
+      "whitelist_key": []
+    },
+    "aiclient": {
+      "upstream_base": "http://aiclient2api:3000/v1",
+      "gateway_key": "aiclient管理后台分配的API-Key",
+      "whitelist_key": []
+    },
+    "my-openai": {
+      "upstream_base": "https://api.openai.com/v1",
+      "gateway_key": "sk-xxxxxxxx",
+      "whitelist_key": []
+    }
+  }
+}

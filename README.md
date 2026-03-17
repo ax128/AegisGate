@@ -63,6 +63,51 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 
 详细接入步骤见 **[AICLIENT2API-QUICKSTART.md](AICLIENT2API-QUICKSTART.md)**
 
+### 多平台共存（推荐）
+
+当同时使用多个上游（如 CLIProxyAPI + Sub2API + AIClient-2-API）时，**建议所有上游走 Token 路由**，只需两步：
+
+**第 1 步：编辑 `config/gw_tokens.json`**（参考 `config/gw_tokens.json.example`）
+
+```json
+{
+  "tokens": {
+    "cliproxy": {
+      "upstream_base": "http://cli-proxy-api:8317/v1",
+      "gateway_key": "你的API-Key",
+      "whitelist_key": []
+    },
+    "sub2api": {
+      "upstream_base": "http://sub2api:8080/v1",
+      "gateway_key": "sub2api的API-Key",
+      "whitelist_key": []
+    },
+    "aiclient": {
+      "upstream_base": "http://aiclient2api:3000/v1",
+      "gateway_key": "aiclient的API-Key",
+      "whitelist_key": []
+    }
+  }
+}
+```
+
+**第 2 步：叠加 compose 启动**
+
+```bash
+docker compose -f docker-compose.yml \
+  -f docker-compose.cliproxy.yml \
+  -f docker-compose.sub2api.yml \
+  -f docker-compose.aiclient2api.yml \
+  up -d --build
+```
+
+客户端按 token 访问各上游：
+- CLIProxyAPI：`http://<host>:18080/v1/__gw__/t/cliproxy/chat/completions`
+- Sub2API：`http://<host>:18080/v1/__gw__/t/sub2api/chat/completions`
+- AIClient-2-API：`http://<host>:18080/v1/__gw__/t/aiclient/chat/completions`
+
+> token 名称可自定义（如 `my-gpt`、`claude-proxy`），支持字母数字和 `-_`。无需 curl 注册，编辑 JSON 文件 + 重启即生效。
+
 ## Agent Skill
 
 给 Agent 直接执行的安装与接入手册：

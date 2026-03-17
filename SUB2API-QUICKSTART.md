@@ -71,27 +71,32 @@ docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml -f docker-co
 
 首次启动后 Sub2API 自动初始化数据库、创建管理员账号。
 
-## 3. 注册 Token（模式 B 必须）
+## 3. 配置 Token（模式 B 必须）
 
-与其他上游共存时，需为 Sub2API 注册一个 Token：
+与其他上游共存时，在 `config/gw_tokens.json` 中添加 Sub2API 的 token（无需 curl，编辑文件即可）：
 
-```bash
-curl -X POST http://127.0.0.1:18080/__gw__/register \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat config/aegis_gateway.key)" \
-  -d '{
-    "upstream_base": "http://sub2api:8080/v1",
-    "api_key": "<sub2api管理后台分配的API Key>"
-  }'
+```json
+{
+  "tokens": {
+    "sub2api": {
+      "upstream_base": "http://sub2api:8080/v1",
+      "gateway_key": "<sub2api管理后台分配的API Key>",
+      "whitelist_key": []
+    }
+  }
+}
 ```
 
-返回示例：
-```json
-{"token": "QQTPXuEa", "upstream_base": "http://sub2api:8080/v1"}
+> 如果文件中已有其他 token，在 `tokens` 对象中追加即可。参考 `config/gw_tokens.json.example`。
+
+重启网关后生效：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml -f docker-compose.sub2api.yml restart aegisgate
 ```
 
 客户端使用方式：
-- **Base URL**：`http://<host>:18080/v1/__gw__/t/QQTPXuEa`
+- **Base URL**：`http://<host>:18080/v1/__gw__/t/sub2api`
 - **API Key**：Sub2API 管理后台分配的 API Key
 
 ## 4. 客户端配置
