@@ -1,5 +1,7 @@
 # AIClient-2-API 经网关中转 — 3 步接入
 
+> **前置条件**：请先阅读 [AIClient-2-API 官方文档](https://github.com/justlovemaki/AIClient-2-API) 了解其配置与使用方式，再按以下步骤接入 AegisGate。
+
 让 [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) 请求先经 AegisGate 安检再转发，**不改 AIClient-2-API 代码**，**客户端零改动**。
 
 ## 请求链路

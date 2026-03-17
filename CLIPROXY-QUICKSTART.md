@@ -1,5 +1,7 @@
 # CLIProxyAPI 经网关中转 — 3 步接入
 
+> **前置条件**：请先阅读 [CLIProxyAPI 官方文档](https://github.com/router-for-me/CLIProxyAPI) 了解其配置与使用方式，再按以下步骤接入 AegisGate。
+
 让现有 CLIProxyAPI 请求先经 AegisGate 安检再转发，**不改 CLIProxyAPI 代码**，**客户端零改动**（仍用原 base URL 和 API Key）。
 
 ## 请求链路
