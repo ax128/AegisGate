@@ -1,111 +1,35 @@
-# CLIProxyAPI 经网关中转 — 3 步接入
+# CLIProxyAPI 接入 AegisGate
 
-> **前置条件**：请先阅读 [CLIProxyAPI 官方文档](https://github.com/router-for-me/CLIProxyAPI) 了解其配置与使用方式，再按以下步骤接入 AegisGate。
+> **前置条件**：请先按 [CLIProxyAPI 官方文档](https://github.com/router-for-me/CLIProxyAPI) 完成安装和配置，确认 CLIProxyAPI 本身可用（默认端口 8317）。
 
-让现有 CLIProxyAPI 请求先经 AegisGate 安检再转发，**不改 CLIProxyAPI 代码**，**客户端零改动**（仍用原 base URL 和 API Key）。
+## 接入方式
 
-## 请求链路
-
-```
-客户端 → https://api.example.com/v1/... → Caddy → AegisGate(安检) → cli-proxy-api:8317
-```
-
-## 两种部署模式
-
-| 模式 | 命令 | 说明 |
-|------|------|------|
-| **基础模式** | `docker compose up -d --build` | 仅 AegisGate，不启用 CLIProxyAPI / Caddy |
-| **ProxyAPI 模式** | `docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build` | AegisGate + CLIProxyAPI + Caddy 完整栈 |
-
-## 1. 克隆 CLIProxyAPI 到 AegisGate 目录下
-
-```bash
-cd ~/AegisGate
-git clone https://github.com/router-for-me/CLIProxyAPI.git
-```
-
-目录结构：
+CLIProxyAPI 独立运行，AegisGate 独立运行。客户端 Base URL 指向网关即可：
 
 ```
-AegisGate/
-  CLIProxyAPI/          # git clone 的 API 项目（内容由 CLIProxyAPI 自身管理）
-    config.yaml         # CLIProxyAPI 配置（首次需从 config.example.yaml 复制）
-    config.example.yaml
-    auths/              # OAuth 认证文件（CLIProxyAPI 登录后自动生成）
-    logs/               # CLIProxyAPI 日志
-    Dockerfile          # 用于 docker build
-    ...
-  Caddyfile             # Caddy 反代配置（在 AegisGate 根目录）
-  docker-compose.yml    # 基础模式
-  docker-compose.cliproxy.yml  # ProxyAPI 叠加栈
+客户端 → AegisGate:18080 → CLIProxyAPI:8317
 ```
 
-初始化配置：
+### 方式 1：端口路由（推荐，多上游共存）
 
-```bash
-cp CLIProxyAPI/config.example.yaml CLIProxyAPI/config.yaml
-# 编辑 CLIProxyAPI/config.yaml 配置你的 API Keys 等参数
+客户端 Base URL 改为：
+```
+http://<网关地址>:18080/v1/__gw__/t/8317
 ```
 
-## 2. 启动
+网关自动转发到 `localhost:8317/v1`，客户端的 `Authorization` 头直接透传。
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
+### 方式 2：直连上游（单上游）
+
+在网关 `config/.env` 中设置：
+```
+AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1
 ```
 
-compose 已把网关上游设为 `http://cli-proxy-api:8317/v1`，API 请求会默认走网关再转 CLIProxyAPI。
+客户端 Base URL：`http://<网关地址>:18080/v1`
 
-CLIProxyAPI 从本地源码构建 Docker 镜像，无需拉取远程镜像。
+### 方式 3：Caddy 对外暴露
 
-首次启动后，网关密钥保存在 `config/aegis_gateway.key`（自动生成，chmod 600）：
+参见 [README.md 中的 Caddy 反代配置](README.md#caddy-反代配置对公网暴露时)。
 
-```bash
-# 查看网关密钥（注册 Token 和 UI 登录均需此值）
-cat config/aegis_gateway.key
-```
-
-## 3. 客户端
-
-**无需改任何配置**。继续使用：
-
-- **Base URL**：`https://api.example.com/v1`（或你的域名）
-- **API Key**：CLIProxyAPI 的 `config.yaml` 里配置的 `api-keys` 之一
-
-管理后台仍直连：`https://panel.example.com/management.html`（不经网关）。
-
-## 4. 更新 CLIProxyAPI
-
-```bash
-git -C ./CLIProxyAPI pull
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
-```
-
-## 5. CLIProxyAPI 登录认证
-
-```bash
-# Claude 登录
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI -no-browser --claude-login
-
-# Gemini 登录
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI -no-browser --login
-```
-
-## 6. 流式与长上下文（已内置）
-
-compose 已预置以下能力：
-- 流式传输：Caddy `flush_interval -1`，SSE 不缓冲，网关保留断流 `[DONE]` 恢复。
-- 长上下文：提高请求体/消息条数/单条消息/响应长度上限。
-- 高负载稳定性：开启 `AEGIS_ENABLE_THREAD_OFFLOAD=true`，避免过滤管道阻塞 event loop。
-
-如需更高阈值，可在 `docker-compose.cliproxy.yml`（`aegisgate.environment`）继续上调这些环境变量：
-`AEGIS_MAX_REQUEST_BODY_BYTES`、`AEGIS_MAX_MESSAGES_COUNT`、`AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE`、`AEGIS_MAX_RESPONSE_LENGTH`、`AEGIS_FILTER_PIPELINE_TIMEOUT_S`。
-
----
-
-## 可选：多上游 / Token 模式
-
-需要多套上游或按 token 区分时，仍可使用 `/__gw__/register` 与 `/v1/__gw__/t/{token}/...`；未配置默认上游时，`/v1` 与 `/v2` 都会要求走 token 路径。
-
-注意：
-- CLIProxy 叠加栈使用的 `Caddyfile` 默认会对公网域名阻断 `/__gw__/*`。请通过 `http://127.0.0.1:18080`（本机）或内网管理入口调用注册接口。
-- `v2` 通用代理始终建议走 token 路径：`/v2/__gw__/t/{token}/...`，并在 Header 里携带 `x-target-url`。
+管理后台建议单独域名直连 CLIProxyAPI，不经网关。

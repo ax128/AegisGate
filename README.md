@@ -7,91 +7,111 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、自动遮挡/分割危险内容。
 
-## 上游代理支持
+## 上游接入
 
 本地 Web 控制台使用说明见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)。
 
-AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
+AegisGate 是独立的安全代理层，**不管理上游服务的部署**。上游服务按各自官方文档独立安装运行，然后把客户端 Base URL 指向网关即可。
 
-### 接入模式
+### 已验证的上游
 
-| 模式 | 适用场景 | 说明 |
-|------|---------|------|
-| **Caddy 对外模式** | 需要对公网提供服务 | 通过对应的 `docker-compose.*.yml` 叠加启动，Caddy 提供自动 TLS、域名绑定、管理端点阻断 |
-| **Token 内网模式** | 不对外开放，仅内部使用 | 仅启动基础 `docker-compose.yml`，通过 `/__gw__/register` 注册 token，客户端使用 `/v1/__gw__/t/<token>/...` 路径访问（推荐） |
+| 上游 | 官方文档 | 默认端口 |
+|------|---------|---------|
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | OAuth 多账号 LLM 代理（Claude/Gemini/OpenAI） | 8317 |
+| [Sub2API](https://github.com/Wei-Shaw/sub2api) | AI API 订阅管理平台（Claude/Gemini/Antigravity） | 8080 |
+| [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) | 多源 AI 客户端代理（Gemini CLI/Codex/Kiro/Grok） | 3000 |
+| 任意 OpenAI 兼容 API | — | — |
 
-> **不对外开放中转服务时**，建议使用 Token 模式：无需 Caddy，无需域名，注册 token 绑定上游 URL 即可。详见下方「Token 路径」章节。
+> 请先按上游官方文档完成安装和配置，确认上游本身可用后再接入网关。
 
-### CLIProxyAPI
+### 接入方式
 
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — 基于 OAuth 的多账号 LLM 代理，支持 Claude / Gemini / OpenAI。
-
-```
-客户端 → Caddy (TLS) → AegisGate (安检/过滤) → CLIProxyAPI → LLM API
-```
-
-- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build`
-- **内网 Token 模式**：启动基础栈 + CLIProxyAPI，注册 token 绑定 `http://cli-proxy-api:8317/v1`
-
-详细接入步骤见 **[CLIPROXY-QUICKSTART.md](CLIPROXY-QUICKSTART.md)**
-
-### Sub2API
-
-[Sub2API](https://github.com/Wei-Shaw/sub2api) — AI API 订阅管理平台，支持 Claude / Gemini / Antigravity / OpenAI 兼容。
+**网关默认开启本地端口自动路由**（`AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`），token 即端口号：
 
 ```
-客户端 → Caddy (TLS) → AegisGate (安检/过滤) → Sub2API → Claude / Gemini / OpenAI
+客户端 → AegisGate /v1/__gw__/t/{端口号}/... → localhost:{端口号}/v1/...
 ```
 
-- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build`
-- **内网 Token 模式**：启动基础栈 + Sub2API，注册 token 绑定 `http://sub2api:8080/v1`
-- 使用官方镜像 `weishaw/sub2api:latest`，内置 PostgreSQL + Redis
+| 场景 | 客户端 Base URL | 说明 |
+|------|----------------|------|
+| CLIProxyAPI 走网关 | `http://<host>:18080/v1/__gw__/t/8317` | 自动转发到 localhost:8317 |
+| Sub2API 走网关 | `http://<host>:18080/v1/__gw__/t/8080` | 自动转发到 localhost:8080 |
+| AIClient-2-API 走网关 | `http://<host>:18080/v1/__gw__/t/3000` | 自动转发到 localhost:3000 |
+| 单上游直连 | `http://<host>:18080/v1` | 设置 `AEGIS_UPSTREAM_BASE_URL` |
 
-详细接入步骤见 **[SUB2API-QUICKSTART.md](SUB2API-QUICKSTART.md)**
+客户端自带的 `Authorization: Bearer <key>` 直接透传到上游。**无需注册 token、无需编辑 JSON、无需额外配置**。
 
-### AIClient-2-API
-
-[AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) — 多源 AI 客户端代理，支持 Gemini CLI / Antigravity / Qwen Code / Kiro / Grok / Codex，统一为 OpenAI 兼容接口。
-
-```
-客户端 → Caddy (TLS) → AegisGate (安检/过滤) → AIClient-2-API → LLM API
-```
-
-- **对外部署**：`docker compose -f docker-compose.yml -f docker-compose.aiclient2api.yml up -d --build`
-- **内网 Token 模式**：启动基础栈 + AIClient-2-API，注册 token 绑定 `http://aiclient2api:3000/v1`
-- 使用官方镜像 `justlikemaki/aiclient-2-api:latest`，Web UI 管理账号池
-
-详细接入步骤见 **[AICLIENT2API-QUICKSTART.md](AICLIENT2API-QUICKSTART.md)**
-
-### 多平台共存（推荐）
-
-当同时使用多个上游时，**token 即端口号**，零配置自动路由：
-
-```
-/v1/__gw__/t/{端口号}/...  →  http://host.docker.internal:{端口号}/v1/...
-```
-
-| 上游 | 端口 | 客户端 Base URL |
-|------|------|----------------|
-| CLIProxyAPI | 8317 | `http://<host>:18080/v1/__gw__/t/8317` |
-| Sub2API | 8080 | `http://<host>:18080/v1/__gw__/t/8080` |
-| AIClient-2-API | 3000 | `http://<host>:18080/v1/__gw__/t/3000` |
-
-只需叠加 compose 启动，客户端填对应端口号即可：
-
-```bash
-docker compose -f docker-compose.yml \
-  -f docker-compose.cliproxy.yml \
-  -f docker-compose.sub2api.yml \
-  -f docker-compose.aiclient2api.yml \
-  up -d --build
-```
-
-> **原理**：`AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`（默认开启）时，纯数字 token（1024-65535）自动映射到本地端口。客户端自带的 `Authorization` 头直接透传给上游，无需在网关配置 API Key。
+> **裸机部署**时改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
 >
-> **自定义 host**：裸机部署时可改为 `AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`。
+> Docker 环境默认使用 `host.docker.internal`（compose 已配置 `extra_hosts`）。
 
-#### 高级：命名 Token
+### Caddy 反代配置（对公网暴露时）
+
+如需通过域名 + TLS 对外提供服务，在 AegisGate 前加一层 Caddy：
+
+```
+客户端 → https://api.example.com → Caddy (TLS) → AegisGate:18080 → 上游
+```
+
+**Caddyfile 示例**：
+
+```caddy
+# API 域名：所有请求经 AegisGate 安检
+api.example.com {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        -Server
+    }
+
+    # 阻断管理端点，不对公网暴露
+    @gw_admin path /__gw__ /__gw__/*
+    respond @gw_admin "forbidden" 403
+
+    # 拦截扫描器探测路径
+    @scanner_probe {
+        path /assets/* /static/* /js/* /css/* /images/* /fonts/*
+        path /robots.txt /favicon.ico /.env /wp-login.php /wp-admin/*
+        path /.git/* /.svn/* /phpmyadmin/* /admin/* /cgi-bin/*
+    }
+    respond @scanner_probe 404
+
+    # 仅放行 API 路径
+    @not_api not path /v1/* /v2/*
+    respond @not_api 404
+
+    reverse_proxy aegisgate:18080 {
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+        flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
+    }
+}
+
+# 上游管理后台（可选）：直连上游，不经网关
+# panel.example.com {
+#     reverse_proxy localhost:8080 {    # Sub2API 后台
+#         flush_interval -1
+#         transport http {
+#             response_header_timeout 660s
+#         }
+#     }
+# }
+```
+
+关键配置说明：
+- `flush_interval -1`：SSE 流式传输不缓冲，必须设置
+- `response_header_timeout 660s`：长时间推理请求不超时
+- `@gw_admin respond 403`：管理接口不对公网暴露
+- 管理后台（Sub2API/CLIProxyAPI 的 Web UI）建议单独域名直连上游，不经网关
+
+### 高级：命名 Token
 
 如需自定义 token 名称或绑定固定 API Key，可编辑 `config/gw_tokens.json`（参考 `config/gw_tokens.json.example`）：
 
@@ -99,8 +119,8 @@ docker compose -f docker-compose.yml \
 {
   "tokens": {
     "my-claude": {
-      "upstream_base": "http://sub2api:8080/v1",
-      "gateway_key": "sub2api的API-Key",
+      "upstream_base": "http://localhost:8080/v1",
+      "gateway_key": "固定的API-Key",
       "whitelist_key": []
     }
   }
