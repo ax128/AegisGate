@@ -1,56 +1,35 @@
-# Sub2API 代理栈（按需启用）：
-# 1) 启动命令：
-#    docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build
-# 2) 关闭命令：
-#    docker compose -f docker-compose.yml -f docker-compose.sub2api.yml down
+# Sub2API 附加栈（与 CLIProxyAPI 等其他上游共存）：
 #
-# 链路：
-#   api.example.com -> Caddy -> AegisGate -> sub2api:8080
+# 使用方式（叠加到已有 compose 配置）：
+#   docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml -f docker-compose.sub2api.yml up -d --build
+#
+# 单独使用（Sub2API 作为唯一上游）：
+#   docker compose -f docker-compose.yml -f docker-compose.sub2api.yml up -d --build
+#   此时需在 .env 中设置 AEGIS_UPSTREAM_BASE_URL=http://sub2api:8080/v1
+#
+# 与其他上游共存时：
+#   Sub2API 通过 Token 路由接入，不覆盖 AEGIS_UPSTREAM_BASE_URL。
+#   启动后注册 token：
+#     curl -X POST http://127.0.0.1:18080/__gw__/register \
+#       -H "Content-Type: application/json" \
+#       -d '{"upstream_base":"http://sub2api:8080/v1","api_key":"<sub2api的apikey>"}'
+#   返回的 token 用于请求路径：/v1/__gw__/t/<TOKEN>/chat/completions
+#
+# 链路（Token 路由模式）：
+#   客户端 → AegisGate /v1/__gw__/t/<TOKEN>/... → sub2api:8080
+#
+# 链路（直连模式，单独使用时）：
+#   客户端 → Caddy → AegisGate → sub2api:8080
 
 services:
   aegisgate:
-    environment:
-      # Sub2API 上游（带 /v1，保证 /v1/messages 等路径兼容）
-      AEGIS_UPSTREAM_BASE_URL: "http://sub2api:8080/v1"
-      # Caddy 容器 IP 作为可信代理，使 X-Forwarded-For/Host/Proto 被正确识别。
-      # 支持 CIDR：172.16.0.0/12 覆盖 Docker 默认网段；也可设为具体 IP。
-      AEGIS_TRUSTED_PROXY_IPS: "${AEGIS_TRUSTED_PROXY_IPS:-172.16.0.0/12}"
-      # 大流量/长上下文/流式传输建议参数
-      AEGIS_ENABLE_THREAD_OFFLOAD: "true"
-      AEGIS_FILTER_PIPELINE_TIMEOUT_S: "90"
-      AEGIS_UPSTREAM_TIMEOUT_SECONDS: "600"
-      AEGIS_UPSTREAM_MAX_CONNECTIONS: "300"
-      AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS: "100"
-      AEGIS_MAX_REQUEST_BODY_BYTES: "12000000"
-      AEGIS_MAX_MESSAGES_COUNT: "300"
-      AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE: "250000"
-      AEGIS_MAX_PENDING_PAYLOAD_BYTES: "1200000"
-      AEGIS_MAX_RESPONSE_LENGTH: "2000000"
     depends_on:
       sub2api:
         condition: service_healthy
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: aegisgate-caddy
-    entrypoint: ["/bin/sh", "/scripts/caddy-entrypoint.sh"]
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - ./scripts/caddy-entrypoint.sh:/scripts/caddy-entrypoint.sh:ro
-      - ./config:/config:ro
-      - ./www:/srv/www
-      - caddy_data:/data
-      - caddy_config:/caddy_config
-    restart: unless-stopped
-    depends_on:
-      - aegisgate
-      - sub2api
-
   # ---------------------------------------------------------------------------
   # Sub2API：使用官方镜像
+  # 官方文档：https://github.com/Wei-Shaw/sub2api
   # 更新：docker compose -f ... pull sub2api && docker compose -f ... up -d
   # ---------------------------------------------------------------------------
   sub2api:
@@ -164,8 +143,6 @@ services:
       start_period: 5s
 
 volumes:
-  caddy_data:
-  caddy_config:
   sub2api_data:
   sub2api_postgres_data:
   sub2api_redis_data:
