@@ -11,7 +11,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 
 本地 Web 控制台使用说明见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)。
 
-AegisGate 是独立的安全代理层，**不管理上游服务的部署**。上游服务按各自官方文档独立安装运行，然后把客户端 Base URL 指向网关即可。
+AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。上游按各自官方文档独立安装运行，客户端请求时经网关即可。
 
 ### 已验证的上游
 
@@ -24,39 +24,68 @@ AegisGate 是独立的安全代理层，**不管理上游服务的部署**。上
 
 > 请先按上游官方文档完成安装和配置，确认上游本身可用后再接入网关。
 
-### 接入方式
+### 场景一：同机部署（网关与上游在同一台服务器）
 
-**网关默认开启本地端口自动路由**（`AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`），token 即端口号：
-
-```
-客户端 → AegisGate /v1/__gw__/t/{端口号}/... → localhost:{端口号}/v1/...
-```
-
-| 场景 | 客户端 Base URL | 说明 |
-|------|----------------|------|
-| CLIProxyAPI 走网关 | `http://<host>:18080/v1/__gw__/t/8317` | 自动转发到 localhost:8317 |
-| Sub2API 走网关 | `http://<host>:18080/v1/__gw__/t/8080` | 自动转发到 localhost:8080 |
-| AIClient-2-API 走网关 | `http://<host>:18080/v1/__gw__/t/3000` | 自动转发到 localhost:3000 |
-| 单上游直连 | `http://<host>:18080/v1` | 设置 `AEGIS_UPSTREAM_BASE_URL` |
-
-客户端自带的 `Authorization: Bearer <key>` 直接透传到上游。**无需注册 token、无需编辑 JSON、无需额外配置**。
-
-> **裸机部署**时改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
->
-> Docker 环境默认使用 `host.docker.internal`（compose 已配置 `extra_hosts`）。
-
-### Caddy 反代配置（对公网暴露时）
-
-如需通过域名 + TLS 对外提供服务，在 AegisGate 前加一层 Caddy：
+网关默认开启**本地端口自动路由**，客户端 Base URL 带上端口号即可，零配置：
 
 ```
-客户端 → https://api.example.com → Caddy (TLS) → AegisGate:18080 → 上游
+客户端 → http://<网关IP>:18080/v1/__gw__/t/{端口号}/... → localhost:{端口号}/v1/...
+```
+
+| 上游 | 客户端 Base URL |
+|------|----------------|
+| CLIProxyAPI | `http://<网关IP>:18080/v1/__gw__/t/8317` |
+| Sub2API | `http://<网关IP>:18080/v1/__gw__/t/8080` |
+| AIClient-2-API | `http://<网关IP>:18080/v1/__gw__/t/3000` |
+| 自建 OpenAI 兼容 | `http://<网关IP>:18080/v1/__gw__/t/{你的端口}` |
+
+- 客户端的 `Authorization: Bearer <key>` 直接透传到上游
+- 多个上游可同时使用，互不冲突
+- **无需注册 token、无需编辑配置、无需重启网关**
+
+> Docker 环境默认通过 `host.docker.internal` 访问宿主机端口（compose 已配置）。
+> 裸机部署改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
+
+### 场景二：远程上游（网关与上游不在同一台服务器）
+
+上游在远程时，端口路由不可用，需通过 `/__gw__/register` 注册 token 绑定远程地址：
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/register \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat config/aegis_gateway.key)" \
+  -d '{"upstream_base":"https://远程上游地址/v1","api_key":"上游API-Key"}'
+```
+
+返回 token 后，客户端使用：`http://<网关IP>:18080/v1/__gw__/t/<返回的token>`
+
+也可以直接编辑 `config/gw_tokens.json`（参考 `config/gw_tokens.json.example`）：
+
+```json
+{
+  "tokens": {
+    "remote-claude": {
+      "upstream_base": "https://远程上游地址/v1",
+      "gateway_key": "上游API-Key",
+      "whitelist_key": []
+    }
+  }
+}
+```
+
+重启网关后生效。命名 token 优先级高于端口自动路由。
+
+### 场景三：Caddy + 网关对公网暴露
+
+通过域名 + TLS 对外提供服务时，Caddy 在网关前面做 TLS 终结，请求仍走网关端口路由到上游：
+
+```
+客户端 → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
 ```
 
 **Caddyfile 示例**：
 
 ```caddy
-# API 域名：所有请求经 AegisGate 安检
 api.example.com {
     header {
         X-Content-Type-Options "nosniff"
@@ -65,7 +94,7 @@ api.example.com {
         -Server
     }
 
-    # 阻断管理端点，不对公网暴露
+    # 管理端点不对公网暴露
     @gw_admin path /__gw__ /__gw__/*
     respond @gw_admin "forbidden" 403
 
@@ -81,6 +110,7 @@ api.example.com {
     @not_api not path /v1/* /v2/*
     respond @not_api 404
 
+    # 转发到网关（端口路由由网关处理）
     reverse_proxy aegisgate:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
@@ -96,38 +126,19 @@ api.example.com {
 
 # 上游管理后台（可选）：直连上游，不经网关
 # panel.example.com {
-#     reverse_proxy localhost:8080 {    # Sub2API 后台
+#     reverse_proxy localhost:8080 {
 #         flush_interval -1
-#         transport http {
-#             response_header_timeout 660s
-#         }
+#         transport http { response_header_timeout 660s }
 #     }
 # }
 ```
 
-关键配置说明：
-- `flush_interval -1`：SSE 流式传输不缓冲，必须设置
-- `response_header_timeout 660s`：长时间推理请求不超时
-- `@gw_admin respond 403`：管理接口不对公网暴露
-- 管理后台（Sub2API/CLIProxyAPI 的 Web UI）建议单独域名直连上游，不经网关
-
-### 高级：命名 Token
-
-如需自定义 token 名称或绑定固定 API Key，可编辑 `config/gw_tokens.json`（参考 `config/gw_tokens.json.example`）：
-
-```json
-{
-  "tokens": {
-    "my-claude": {
-      "upstream_base": "http://localhost:8080/v1",
-      "gateway_key": "固定的API-Key",
-      "whitelist_key": []
-    }
-  }
-}
-```
-
-命名 token 优先级高于端口自动路由。
+要点：
+- `flush_interval -1`：SSE 流式不缓冲，**必须设置**
+- `response_header_timeout 660s`：长时间推理不超时
+- `/__gw__/*` 返回 403：管理接口不暴露到公网
+- 管理后台建议单独域名直连上游，不经网关
+- Caddy 只做 TLS + 转发，路由逻辑全在网关内部
 
 ## Agent Skill
 
