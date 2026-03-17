@@ -71,12 +71,27 @@ def _save() -> None:
 
 
 def get(token: str) -> dict[str, Any] | None:
-    """根据 token 取映射，不存在返回 None。"""
+    """根据 token 取映射，不存在返回 None。
+
+    当 ``settings.enable_local_port_routing`` 为 True 且 token 为纯数字端口
+    （1024-65535）时，自动生成本地端口映射，无需预注册。
+    """
     with _lock:
         mapping = _tokens.get(token)
-        if mapping is None:
-            return None
-        return copy.deepcopy(mapping)
+        if mapping is not None:
+            return copy.deepcopy(mapping)
+
+    # 本地端口自动路由 fallback
+    if settings.enable_local_port_routing and token.isdigit():
+        port = int(token)
+        if 1024 <= port <= 65535:
+            host = (settings.local_port_routing_host or "host.docker.internal").strip()
+            return {
+                "upstream_base": f"http://{host}:{port}/v1",
+                "gateway_key": "",
+                "whitelist_key": [],
+            }
+    return None
 
 
 def _normalize_upstream(s: str) -> str:

@@ -35,6 +35,9 @@ services:
       AEGIS_INIT_STRICT: "true"
       AEGIS_BOOTSTRAP_RULES_DIR: "/app/bootstrap/rules"
       AEGIS_SECURITY_RULES_PATH: "/app/aegisgate/policies/rules/security_filters.yaml"
+      # 本地端口自动路由：/v1/__gw__/t/{port}/... → http://host.docker.internal:{port}/v1/...
+      AEGIS_ENABLE_LOCAL_PORT_ROUTING: "${AEGIS_ENABLE_LOCAL_PORT_ROUTING:-true}"
+      AEGIS_LOCAL_PORT_ROUTING_HOST: "${AEGIS_LOCAL_PORT_ROUTING_HOST:-host.docker.internal}"
     volumes:
       - ./logs:/app/logs:rw
       - ./config:/app/aegisgate/policies/rules:rw

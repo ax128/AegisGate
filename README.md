@@ -65,33 +65,19 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 
 ### 多平台共存（推荐）
 
-当同时使用多个上游（如 CLIProxyAPI + Sub2API + AIClient-2-API）时，**建议所有上游走 Token 路由**，只需两步：
+当同时使用多个上游时，**token 即端口号**，零配置自动路由：
 
-**第 1 步：编辑 `config/gw_tokens.json`**（参考 `config/gw_tokens.json.example`）
-
-```json
-{
-  "tokens": {
-    "cliproxy": {
-      "upstream_base": "http://cli-proxy-api:8317/v1",
-      "gateway_key": "你的API-Key",
-      "whitelist_key": []
-    },
-    "sub2api": {
-      "upstream_base": "http://sub2api:8080/v1",
-      "gateway_key": "sub2api的API-Key",
-      "whitelist_key": []
-    },
-    "aiclient": {
-      "upstream_base": "http://aiclient2api:3000/v1",
-      "gateway_key": "aiclient的API-Key",
-      "whitelist_key": []
-    }
-  }
-}
+```
+/v1/__gw__/t/{端口号}/...  →  http://host.docker.internal:{端口号}/v1/...
 ```
 
-**第 2 步：叠加 compose 启动**
+| 上游 | 端口 | 客户端 Base URL |
+|------|------|----------------|
+| CLIProxyAPI | 8317 | `http://<host>:18080/v1/__gw__/t/8317` |
+| Sub2API | 8080 | `http://<host>:18080/v1/__gw__/t/8080` |
+| AIClient-2-API | 3000 | `http://<host>:18080/v1/__gw__/t/3000` |
+
+只需叠加 compose 启动，客户端填对应端口号即可：
 
 ```bash
 docker compose -f docker-compose.yml \
@@ -101,12 +87,27 @@ docker compose -f docker-compose.yml \
   up -d --build
 ```
 
-客户端按 token 访问各上游：
-- CLIProxyAPI：`http://<host>:18080/v1/__gw__/t/cliproxy/chat/completions`
-- Sub2API：`http://<host>:18080/v1/__gw__/t/sub2api/chat/completions`
-- AIClient-2-API：`http://<host>:18080/v1/__gw__/t/aiclient/chat/completions`
+> **原理**：`AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`（默认开启）时，纯数字 token（1024-65535）自动映射到本地端口。客户端自带的 `Authorization` 头直接透传给上游，无需在网关配置 API Key。
+>
+> **自定义 host**：裸机部署时可改为 `AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`。
 
-> token 名称可自定义（如 `my-gpt`、`claude-proxy`），支持字母数字和 `-_`。无需 curl 注册，编辑 JSON 文件 + 重启即生效。
+#### 高级：命名 Token
+
+如需自定义 token 名称或绑定固定 API Key，可编辑 `config/gw_tokens.json`（参考 `config/gw_tokens.json.example`）：
+
+```json
+{
+  "tokens": {
+    "my-claude": {
+      "upstream_base": "http://sub2api:8080/v1",
+      "gateway_key": "sub2api的API-Key",
+      "whitelist_key": []
+    }
+  }
+}
+```
+
+命名 token 优先级高于端口自动路由。
 
 ## Agent Skill
 
