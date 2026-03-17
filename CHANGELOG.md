@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **过滤模式（Filter Mode）**：token 路径支持 `__redact` 和 `__passthrough` 后缀，按需切换过滤行为
+  - `token__redact`：仅执行脱敏过滤器（`exact_value_redaction` / `redaction` / `restoration`），跳过安全检测
+  - `token__passthrough`：跳过所有过滤器，请求/响应直接转发
+  - 无效模式名返回 `400 invalid_filter_mode`
+  - 审计日志记录 `filter_mode:redact` / `filter_mode:passthrough` 安全标签
+  - 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`
+
+### Changed
+
+- **Token 生成改为纯字母数字**（`a-zA-Z0-9`），不再包含 `-` `_` 符号，避免与 `__` 过滤模式分隔符冲突
+
 ### Fixed
 
 - **[Critical] SSE 流式 holdback 分隔符泄露导致客户端 JSON 解析失败**

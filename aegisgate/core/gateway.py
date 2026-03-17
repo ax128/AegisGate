@@ -120,8 +120,11 @@ from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
 # /v1/__gw__/t/{token}/chat/completions -> /v1/chat/completions
+# /v1/__gw__/t/{token}__redact/chat/completions -> redact-only mode
+# /v1/__gw__/t/{token}__passthrough/chat/completions -> passthrough mode
 # /v2/__gw__/t/{token}/proxy -> /v2/proxy
-_GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+)(?:/(.*))?$")
+_GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+?)(?:__([a-z]+))?(?:/(.*))?$")
+_VALID_FILTER_MODES = frozenset({"redact", "passthrough"})
 
 _confirmation_cache_task: ConfirmationCacheTask | None = None
 _hot_reloader: HotReloader | None = None
@@ -261,7 +264,18 @@ class GWTokenRewriteMiddleware:
             await self.app(scope, receive, send)
             return
 
-        version, token, rest = matched.group(1), matched.group(2), matched.group(3)
+        version, token, filter_mode, rest = (
+            matched.group(1), matched.group(2), matched.group(3), matched.group(4),
+        )
+        # 验证 filter_mode
+        if filter_mode and filter_mode not in _VALID_FILTER_MODES:
+            response = JSONResponse(
+                status_code=400,
+                content={"error": "invalid_filter_mode", "detail": f"unknown mode '{filter_mode}', valid: {sorted(_VALID_FILTER_MODES)}"},
+            )
+            await response(scope, receive, send)
+            return
+
         mapping = gw_tokens_get(token)
         if not mapping:
             logger.warning("gw_token not found token=%s path=%s", token, path)
@@ -273,7 +287,7 @@ class GWTokenRewriteMiddleware:
             return
 
         new_path = f"/{version}/{rest}" if rest else f"/{version}"
-        logger.debug("gw_token_rewrite path=%s -> %s token=%s…", path, new_path, token[:6])
+        logger.debug("gw_token_rewrite path=%s -> %s token=%s… mode=%s", path, new_path, token[:6], filter_mode or "default")
 
         ub = mapping["upstream_base"]
         gk = mapping["gateway_key"]
@@ -287,6 +301,7 @@ class GWTokenRewriteMiddleware:
         new_scope["aegis_upstream_base"] = ub
         new_scope["aegis_gateway_key"] = gk
         new_scope["aegis_redaction_whitelist_keys"] = wk
+        new_scope["aegis_filter_mode"] = filter_mode  # None | "redact" | "passthrough"
 
         headers = list(new_scope.get("headers") or [])
         ub_name = settings.upstream_base_header.encode("latin-1")

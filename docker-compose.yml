@@ -58,4 +58,4 @@ networks:
     name: ${CLIPROXY_NETWORK:-cliproxyapi_default}
   sub2api_net:
     external: true
-    name: ${SUB2API_NETWORK:-sub2api-main_sub2api-network}
+    name: ${SUB2API_NETWORK:-sub2api-deploy_sub2api-network}

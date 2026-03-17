@@ -104,6 +104,9 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_whitelist_keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
     if injected_whitelist_keys:
         headers[_REDACTION_WHITELIST_HEADER] = ",".join(injected_whitelist_keys)
+    injected_filter_mode = request.scope.get("aegis_filter_mode")
+    if injected_filter_mode:
+        headers["x-aegis-filter-mode"] = injected_filter_mode
     return headers
 
 

@@ -147,6 +147,25 @@ _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
 _pipeline_local = threading.local()
 
+# Filter modes set via URL path: token__redact or token__passthrough
+_REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
+
+
+def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
+    """根据 x-aegis-filter-mode header 调整 ctx.enabled_filters。返回 mode 或 None。"""
+    mode = headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
+    if not mode:
+        return None
+    if mode == "redact":
+        ctx.enabled_filters = ctx.enabled_filters & _REDACT_ONLY_FILTERS
+        ctx.security_tags.add("filter_mode:redact")
+        logger.info("filter_mode=redact applied request_id=%s active_filters=%s", ctx.request_id, sorted(ctx.enabled_filters))
+    elif mode == "passthrough":
+        ctx.enabled_filters = set()
+        ctx.security_tags.add("filter_mode:passthrough")
+        logger.info("filter_mode=passthrough applied request_id=%s (all filters skipped)", ctx.request_id)
+    return mode
+
 
 def _build_pipeline() -> Pipeline:
     request_filters = [
@@ -2503,6 +2522,7 @@ async def _execute_chat_stream_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -2883,6 +2903,7 @@ async def _execute_responses_stream_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3354,6 +3375,7 @@ async def _execute_chat_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3630,6 +3652,7 @@ async def _execute_responses_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3917,6 +3940,7 @@ async def _execute_generic_stream_once(
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
     logger.info("generic proxy stream start request_id=%s route=%s", ctx.request_id, request_path)
 
     try:
@@ -4081,6 +4105,7 @@ async def _execute_generic_once(
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    _apply_filter_mode(ctx, request_headers)
     logger.info("generic proxy start request_id=%s route=%s", ctx.request_id, request_path)
 
     try:

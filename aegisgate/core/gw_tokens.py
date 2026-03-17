@@ -25,6 +25,15 @@ _GW_TOKENS_KEY = "tokens"
 _WHITELIST_UNSET = object()
 
 
+def _generate_alnum_token(length: int) -> str:
+    """生成纯字母数字 token（a-zA-Z0-9），不含 - _ 等符号。"""
+    chars = []
+    while len(chars) < length:
+        raw = secrets.token_urlsafe(length * 2)
+        chars.extend(c for c in raw if c.isalnum())
+    return "".join(chars[:length])
+
+
 def _path() -> Path:
     p = settings.gw_tokens_path
     return Path(p) if os.path.isabs(p) else Path.cwd() / p
@@ -145,11 +154,11 @@ def register(upstream_base: str, gateway_key: str, whitelist_key: Any = _WHITELI
                     _save()
             return existing, True
         for _ in range(10):
-            token = secrets.token_urlsafe(_TOKEN_LEN)[:_TOKEN_LEN]
+            token = _generate_alnum_token(_TOKEN_LEN)
             if token not in _tokens:
                 break
         else:
-            token = secrets.token_hex(_TOKEN_LEN // 2)[:_TOKEN_LEN]
+            token = _generate_alnum_token(_TOKEN_LEN)
         _tokens[token] = {
             "upstream_base": upstream_base,
             "gateway_key": gateway_key,

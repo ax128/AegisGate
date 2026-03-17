@@ -47,6 +47,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - 客户端的 `Authorization: Bearer <key>` 直接透传到上游
 - 多个上游可同时使用，互不冲突
 - **无需注册 token、无需编辑配置、无需重启网关**
+- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.3 过滤模式](#23-过滤模式tokenredact--tokenpassthrough)
 
 > **Docker 端口路由原理**：网关容器通过 `host.docker.internal:{端口}` 访问宿主机端口（compose 已配置 `extra_hosts`）。
 >
@@ -303,15 +304,15 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ```json
 {
-  "token": "rQ5VZva-ssZsqAy1gAyondtS",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/rQ5VZva-ssZsqAy1gAyondtS",
+  "token": "rQ5VZvassZsqAy1gAyondtS0",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0",
   "whitelist_key": ["bn_key", "okx_key"]
 }
 ```
 
 说明：
 
-1. token 长度为 24 位（`secrets.token_urlsafe` 生成，约 144 位熵）。
+1. token 长度为 24 位纯字母数字（`a-zA-Z0-9`，不含 `-` `_` 等符号），约 142 位熵。
 2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
 3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
 4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
@@ -361,7 +362,25 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
   -d '{"token":"Ab3k9Qx7Yp","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
 ```
 
-### 2.2 Claude 接入快速示例
+### 2.3 过滤模式（`token__redact` / `token__passthrough`）
+
+在 token 后追加 `__redact` 或 `__passthrough` 后缀，可按需切换网关对该请求的过滤行为：
+
+| 模式 | URL 示例 | 行为 |
+|------|----------|------|
+| **默认**（全保护） | `/v1/__gw__/t/Ab3k9Qx7Yp/chat/completions` | 执行策略中全部已启用的过滤器 |
+| **仅脱敏**（`__redact`） | `/v1/__gw__/t/Ab3k9Qx7Yp__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
+| **直接穿透**（`__passthrough`） | `/v1/__gw__/t/Ab3k9Qx7Yp__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
+
+说明：
+
+1. 过滤模式仅对当前请求生效，不改变 token 本身的注册状态。
+2. 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`、`/v1/__gw__/t/8317__passthrough/...`。
+3. 无效的模式名（如 `__foo`）会返回 `400 invalid_filter_mode`。
+4. 审计日志会记录使用的过滤模式（`filter_mode:redact` 或 `filter_mode:passthrough` 安全标签）。
+5. **安全提示**：`passthrough` 模式跳过所有安全检查，建议仅在受信环境或调试场景使用。
+
+### 2.4 Claude 接入快速示例
 
 ```bash
 # 非流式
