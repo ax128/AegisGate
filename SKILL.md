@@ -4,7 +4,7 @@
 
 ## 0) 先读项目要点（必须）
 
-- AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/阻断/确认放行；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
+- AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/自动净化（auto-sanitize）；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
 - **两种路由模式**（可同时启用）：
   - **Token 路由**（推荐多租户场景）：每个 token 绑定独立的上游地址和网关密钥。
     - v1（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
@@ -234,9 +234,7 @@ docker compose up -d --build
 2. 确认使用哪种路由模式：token 路由（路径含 `/v1/__gw__/t/<TOKEN>/...`）或直连上游（`AEGIS_UPSTREAM_BASE_URL` 是否已设置）。
 3. Token 路由：token 是否存在（`/__gw__/lookup`）；上游地址与 API key 是否正确。
 4. 直连模式：`.env` 中 `AEGIS_UPSTREAM_BASE_URL` 是否正确，是否已重启。
-5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、确认放行、阻断原因。
-6. 若遇到高风险确认（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`），用户必须发送完整指令：
-   - `yes cfm-<id>--act-<token>` 或 `no cfm-<id>--act-<token>`
+5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、自动净化（auto-sanitize）、阻断原因。
 
 ## 11) 安全基线（必须遵守）
 

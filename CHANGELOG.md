@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **[Critical] SSE 流式 holdback 分隔符泄露导致客户端 JSON 解析失败**
+  - content 事件被 hold back 时，SSE 空行分隔符直接 yield 给客户端，导致事件顺序错乱
+  - `response.completed` 在剩余 text delta 之前到达，且 flush 的 pending 事件之间缺少分隔符
+  - 客户端收到破损 SSE 流 → `Unexpected end of JSON input`
+  - 修复：`_suppress_next_separator` 标志位抑制被 hold back 事件的分隔符，释放时补上 `b"\n"`
+  - chat completions 和 responses 两条流式路径均已修复
+
+- **[Critical] 被阻断的 tool call `function.arguments` 非法 JSON**
+  - `_patch_chat_tool_call` 将 `arguments` 设为裸中文占位符（非 JSON），客户端解析失败
+  - 修复：改为 `json.dumps({"_blocked": "【AegisGate已处理危险疑似片段】"})`
+
+- **日志 `info_log_sanitized` 泄露原始危险 tool call 内容**
+  - `_extract_chat_output_text` 生成 tool call 摘要时未检测危险性
+  - 修复：先检查 `_looks_executable_payload_dangerous`，危险内容用占位符替代
+
+### Changed
+
+- **过滤规则降敏（降低误报率）**
+  - `dangerous_param_patterns`：`&&`/`;`/`||`/`` ` `` 裸匹配 → 必须后跟危险命令（curl/wget/bash/sh/nc 等）
+  - `python`/`perl`/`ruby`/`php` → 仅在 `-c`/`-e` 内联执行标志时触发
+  - `semantic_approval_patterns`：`delete`/`drop` 裸词 → 仅匹配完整短语如 `drop table`
+  - `privilege_escalation`：`读取配置`/`read config` 过宽 → 收窄为 `系统配置`/`system file` 等
+  - `tool_call_injection`：severity 9→6，action block→review，从 non-reducible 移除
+  - `obfuscated`：从 non-reducible 移除（讨论编码原理时可降分）
+  - non-reducible 类别：5→3（仅保留 system_exfil, unicode_bidi, spam_noise）
+
+### Added
+
+- **电脑/基础设施信息 PII 脱敏（请求侧，宽松模式）**
+  - 新增 9 个 field-labeled 模式：SYS_HOSTNAME、SYS_USERNAME、SYS_OS_VERSION、SYS_KERNEL、SYS_HOME_PATH、SYS_ENV_VAR、SYS_DOCKER_ID、SYS_K8S_RESOURCE、SYS_INTERNAL_URL
+  - 仅匹配 `field: value` / `field=value` 格式（如 `hostname: prod-web-01`），避免普通提及误报
+  - SYS_HOME_PATH 和 SYS_INTERNAL_URL 无需字段标签，直接匹配路径/URL 格式
+
+---
+
+## [Previous]
+
 ### Breaking Changes
 
 - **yes/no 确认放行流程已永久移除**

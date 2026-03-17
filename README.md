@@ -132,6 +132,7 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 - 人员与地理：姓名字段、地址/经纬度/邮编字段、精确日期（生日/入院/出院/死亡）、传真字段
 - 车辆与生物：`VIN`、车牌字段、生物特征模板字段（文本形态）
 - Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
+- 电脑/基础设施（宽松模式，仅 `field: value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
 
 `responses` 结构化输入补充说明（当前）：
 - 全节点文本扫描：`role=user/developer/system/assistant` + `type=function_call_output/tool_result/tool_output/computer_call_output`
