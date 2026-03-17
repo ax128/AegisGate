@@ -104,6 +104,25 @@ redaction:
       regex: '(?i)\b(?:plate|license[_\-\s]?plate|车牌)\b\s*[:=]\s*[A-Za-z0-9\u4e00-\u9fff\-]{5,12}'
     - id: BIOMETRIC_TEMPLATE
       regex: '(?i)\b(?:fingerprint|faceprint|voiceprint|iris|retina|biometric|指纹|面纹|声纹|虹膜|生物特征)\b\s*[:=]\s*[A-Za-z0-9+/=._\-]{8,}'
+    # ── 电脑 / 基础设施信息（宽松模式：仅匹配 field: value 格式） ──
+    - id: SYS_HOSTNAME
+      regex: '(?i)\b(?:hostname|host[_\-\s]?name|主机名|计算机名)\b\s*[:=]\s*[A-Za-z0-9._\-]{2,60}'
+    - id: SYS_USERNAME
+      regex: '(?i)\b(?:username|user[_\-\s]?name|login|whoami|用户名|登录名)\b\s*[:=]\s*[^\n,;]{2,40}'
+    - id: SYS_OS_VERSION
+      regex: '(?i)\b(?:os[_\-\s]?(?:version|name|release)|operating[_\-\s]?system|系统版本|操作系统)\b\s*[:=]\s*[^\n,;]{3,80}'
+    - id: SYS_KERNEL
+      regex: '(?i)\b(?:kernel|uname|内核版本)\b\s*[:=]\s*[^\n,;]{3,120}'
+    - id: SYS_HOME_PATH
+      regex: '(?:(?:/home/|/Users/|C:\\Users\\|/root/)[A-Za-z0-9._\-]+(?:[/\\][A-Za-z0-9._\-]+){0,5})'
+    - id: SYS_ENV_VAR
+      regex: '(?i)\b(?:env|environ|环境变量)\b\s*[:=]\s*[^\n]{3,200}'
+    - id: SYS_DOCKER_ID
+      regex: '(?i)\b(?:container[_\-\s]?id|docker[_\-\s]?id|容器ID)\b\s*[:=]\s*[a-f0-9]{12,64}'
+    - id: SYS_K8S_RESOURCE
+      regex: '(?i)\b(?:namespace|pod[_\-\s]?name|service[_\-\s]?name|命名空间|Pod名)\b\s*[:=]\s*[A-Za-z0-9._\-]{2,60}'
+    - id: SYS_INTERNAL_URL
+      regex: '(?i)https?://[A-Za-z0-9._\-]+\.(?:internal|local|svc\.cluster\.local|corp|intranet)(?:[:/][^\s]*)?'
 
 restoration:
   placeholder_regex: '\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}'
