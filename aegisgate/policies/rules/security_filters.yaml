@@ -442,7 +442,7 @@ injection_detector:
         severity: 4
       tool_call_injection:
         bucket: hijack
-        severity: 9       # 伪造工具调用：高危，直接拦截
+        severity: 6       # 伪造工具调用：中高危，允许讨论上下文降分
       spam_noise:
         bucket: hijack
         severity: 7        # 垃圾内容噪声：高危，与 tool injection 组合时强制拦截
@@ -454,9 +454,7 @@ injection_detector:
     max_risk_reduction: 0.45
     non_reducible_categories:
       - system_exfil
-      - obfuscated
       - unicode_bidi
-      - tool_call_injection
       - spam_noise
     discussion_patterns:
       - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
@@ -872,7 +870,7 @@ action_map:
     indirect_injection: review
     direct: downgrade
     typoglycemia: review
-    tool_call_injection: block
+    tool_call_injection: review
     spam_noise: block
     # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
   rag_poison_guard:
