@@ -299,8 +299,16 @@ def _extract_chat_output_text(upstream_body: dict[str, Any] | str) -> str:
             if isinstance(tool_calls, list):
                 parts = []
                 for tc in tool_calls[:5]:
-                    fn = tc.get("function", {})
-                    parts.append(f"[tool_call:{fn.get('name','?')}({str(fn.get('arguments',''))[:200]})]")
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    if not isinstance(fn, dict):
+                        fn = {}
+                    tc_name = str(fn.get("name", "?"))
+                    tc_args = str(fn.get("arguments", ""))[:200]
+                    combined = f"{tc_name} {tc_args}".strip()
+                    if _looks_executable_payload_dangerous(combined):
+                        parts.append(f"[tool_call:{_DANGER_FRAGMENT_NOTICE}]")
+                    else:
+                        parts.append(f"[tool_call:{tc_name}({tc_args})]")
                 if parts:
                     return " ".join(parts)
             if finish_reason:
@@ -1465,7 +1473,7 @@ def _patch_chat_tool_call(tool_call: dict[str, Any], ctx: RequestContext) -> dic
     if _looks_executable_payload_dangerous(combined):
         patched["function"] = {
             "name": _CRITICAL_DANGER_PLACEHOLDER,
-            "arguments": _CRITICAL_DANGER_PLACEHOLDER,
+            "arguments": json.dumps({"_blocked": _CRITICAL_DANGER_PLACEHOLDER}, ensure_ascii=False),
         }
         return patched
     if isinstance(function, dict):
@@ -1513,7 +1521,7 @@ def _patch_responses_output_item(item: dict[str, Any], ctx: RequestContext) -> d
         combined = f"{patched.get('name', '')} {patched.get('arguments', '')}".strip()
         if _looks_executable_payload_dangerous(combined):
             patched["name"] = _CRITICAL_DANGER_PLACEHOLDER
-            patched["arguments"] = _CRITICAL_DANGER_PLACEHOLDER
+            patched["arguments"] = json.dumps({"_blocked": _CRITICAL_DANGER_PLACEHOLDER}, ensure_ascii=False)
             return patched
         if isinstance(patched.get("name"), str):
             patched["name"] = _sanitize_hit_fragments(str(patched["name"]), ctx)
@@ -2624,11 +2632,15 @@ async def _execute_chat_stream_once(
         saw_done = False
         stream_end_reason = "upstream_eof_no_done"
         blocked_reason: str | None = None
+        _suppress_next_separator = False
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
                 payload_text = _extract_sse_data_payload(line)
                 if payload_text is None:
                     if blocked_reason:
+                        continue
+                    if _suppress_next_separator:
+                        _suppress_next_separator = False
                         continue
                     yield line
                     continue
@@ -2640,6 +2652,7 @@ async def _execute_chat_stream_once(
                         break
                     while pending_lines:
                         yield pending_lines.pop(0)
+                        yield b"\n"
                     yield line
                     break
 
@@ -2654,6 +2667,7 @@ async def _execute_chat_stream_once(
 
                 if is_content_event:
                     pending_lines.append(line)
+                    _suppress_next_separator = True
 
                 should_probe = bool(tool_calls) or bool(
                     chunk_text and (chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0)
@@ -2780,6 +2794,7 @@ async def _execute_chat_stream_once(
                 if is_content_event:
                     while len(pending_lines) > _STREAM_BLOCK_HOLDBACK_EVENTS:
                         yield pending_lines.pop(0)
+                        yield b"\n"
                     continue
 
                 yield line
@@ -2790,11 +2805,13 @@ async def _execute_chat_stream_once(
                 info_log_sanitized("chat_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
                 while pending_lines:
                     yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
+                    yield b"\n"
                 yield _stream_done_sse_chunk()
                 stream_end_reason = "policy_auto_sanitize"
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
                 while pending_lines:
                     yield pending_lines.pop(0)
+                    yield b"\n"
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
@@ -3013,11 +3030,15 @@ async def _execute_responses_stream_once(
         blocked_confirmation_summary = ""
         blocked_confirmation_meta: dict[str, Any] | None = None
         blocked_message_text = ""
+        _suppress_next_separator = False
         try:
             async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
                 payload_text = _extract_sse_data_payload(line)
                 if payload_text is None:
                     if blocked_reason:
+                        continue
+                    if _suppress_next_separator:
+                        _suppress_next_separator = False
                         continue
                     yield line
                     continue
@@ -3029,6 +3050,7 @@ async def _execute_responses_stream_once(
                         break
                     while pending_lines:
                         yield pending_lines.pop(0)
+                        yield b"\n"
                     yield line
                     break
 
@@ -3057,6 +3079,7 @@ async def _execute_responses_stream_once(
 
                 if is_content_event:
                     pending_lines.append(line)
+                    _suppress_next_separator = True
 
                 should_probe = (not blocked_reason) and bool(
                     tool_calls or (chunk_text and (chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0))
@@ -3141,6 +3164,7 @@ async def _execute_responses_stream_once(
                 if is_content_event:
                     while len(pending_lines) > _STREAM_BLOCK_HOLDBACK_EVENTS:
                         yield pending_lines.pop(0)
+                        yield b"\n"
                     continue
 
                 yield line
@@ -3153,6 +3177,7 @@ async def _execute_responses_stream_once(
                     info_log_sanitized("responses_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
                     while pending_lines:
                         yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
+                        yield b"\n"
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_auto_sanitize"
                 else:
@@ -3240,6 +3265,7 @@ async def _execute_responses_stream_once(
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 while pending_lines:
                     yield pending_lines.pop(0)
+                    yield b"\n"
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
                 if saw_terminal_event:

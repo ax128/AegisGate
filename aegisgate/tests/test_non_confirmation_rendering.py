@@ -83,7 +83,7 @@ async def test_responses_non_confirmation_replaces_dangerous_function_call_field
     assert item["call_id"] == "call_1"
     assert item["status"] == "completed"
     assert item["name"] == "【AegisGate已处理危险疑似片段】"
-    assert item["arguments"] == "【AegisGate已处理危险疑似片段】"
+    assert json.loads(item["arguments"]) == {"_blocked": "【AegisGate已处理危险疑似片段】"}
     assert "yes cfm-" not in json.dumps(result, ensure_ascii=False)
 
 

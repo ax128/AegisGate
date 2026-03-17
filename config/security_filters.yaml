@@ -542,7 +542,9 @@ anomaly_detector:
     - id: xss_script_event
       regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
     - id: command_injection_chain
-      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: command_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
     - id: path_traversal
       regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
     - id: xxe_external_entity
@@ -608,10 +610,10 @@ request_sanitizer:
       regex: '(泄露|显示|输出|打印|给我|提供|导出).*(系统提示词|开发者消息|密钥|口令|密码|令牌|token|cookie|私钥|ssh\s*key|助记词|种子短语|钱包密钥|交易所密钥)'
     - id: privilege_escalation_en
       category: privilege_escalation
-      regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|config|log|database)|((execute|run).*(shell|powershell|cmd|bash))|(access|scan).*(intranet|internal\s+network|server|database)'
+      regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|\/etc\/|\/proc\/|\.ssh)|((execute|run)\s+(a\s+)?(shell|powershell|cmd|bash)\s+(command|script))|(access|scan).*(intranet|internal\s+network|internal\s+server|production\s+database)'
     - id: privilege_escalation_zh
       category: privilege_escalation
-      regex: '(读取|打开|导出).*(本地文件|系统文件|配置|日志|数据库)|(执行|运行).*(命令|shell|powershell|cmd|bash)|(访问|探测).*(内网|服务器|数据库)'
+      regex: '(读取|打开|导出).*(本地文件|系统文件|系统配置|服务器日志|生产数据库)|(执行|运行).*(shell|powershell|cmd|bash)\s*(命令|脚本)|(访问|探测).*(内网|内部网络|生产服务器|生产数据库)'
     - id: rule_bypass_en
       category: rule_bypass
       regex: '(ignore|override|bypass).*(previous\s+instructions?|safety|policy)|from\s+now\s+on.*(you\s+are|act\s+as).*(system|developer|admin)'
@@ -662,7 +664,9 @@ request_sanitizer:
     - id: web_path_traversal
       regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
     - id: web_command_injection
-      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: web_command_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
     - id: web_xxe_ssti
       regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
     - id: web_ssrf_crlf
@@ -779,17 +783,33 @@ tool_call_guard:
       param: location
       regex: '^.{1,120}$'
   dangerous_param_patterns:
-    - id: shell
-      regex: '(;|\|\||&&|`|\$\(|/etc/passwd|rm\s+-rf)'
+    # 只拦截真正危险的 shell 注入链：分隔符 + 已知危险命令
+    # curl/wget/bash/sh/nc 等独立即危险；python/perl/ruby/php 仅在 -c/-e 内联执行时才危险
+    - id: shell_injection
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: shell_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
+    - id: shell_dangerous_cmd
+      regex: '(?:rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r|mkfs\b|dd\s+if=.*of=|chmod\s+-R\s+777\s+/|>\s*/dev/sd[a-z])'
+    - id: shell_subshell_exec
+      regex: '\$\(\s*(?:curl|wget|bash|sh|nc|python[23]?|perl|ruby|php)\b'
+    - id: backtick_exec
+      regex: '`\s*(?:curl|wget|bash|sh|nc|python[23]?|perl|ruby|php)\b'
+    - id: sensitive_file_access
+      regex: '(/etc/(?:passwd|shadow|sudoers)|/var/run/secrets|/proc/self/environ)'
     - id: path_traversal
-      regex: '(\.\./|~/.ssh|/var/run/secrets)'
+      regex: '(\.\.\/)(?:.*\/)?(?:etc|proc|var|root|home)\/'
+    - id: ssh_key_access
+      regex: '~/.ssh/(?:id_|authorized_keys|known_hosts|config)'
     - id: zh_sensitive
-      regex: '(删除|提权|读取本地|密钥|口令)'
+      regex: '(提权|读取本地密钥|导出.*(?:密钥|口令|凭据))'
   semantic_approval_patterns:
     - id: approval_en
-      regex: '(delete|drop|shutdown|exfiltrate|leak)'
+      regex: '\b(exfiltrate|leak\s+(?:secret|key|token|credential))\b'
+    - id: destructive_en
+      regex: '\b(drop\s+(?:table|database|collection)|shutdown\s+(?:server|service|system))\b'
     - id: approval_zh
-      regex: '(删除|清空|泄露|导出敏感)'
+      regex: '(泄露.*(?:密钥|口令|凭据)|清空.*(?:数据库|表|集合))'
   default_action: review
 
 post_restore_guard:

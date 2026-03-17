@@ -342,9 +342,24 @@ injection_detector:
       regex: '["'']method["'']\s*:\s*["'']resources/read["'']'
     # ===== 垃圾词组合 =====
     - id: tool_call_with_spam
-      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,30}(?:tool_use|function_call|tool_calls?|multi_tool)'
+      regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,60}(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.)'
     - id: spam_with_tool_call
-      regex: '(?:tool_use|function_call|tool_calls?|multi_tool).{0,30}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
+      regex: '(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.).{0,60}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
+    # --- to=functions.xxx 格式伪造 ---
+    - id: to_eq_functions
+      regex: 'to\s*=\s*functions?\.\s*\w+'
+  # ===== 垃圾内容噪声检测（独立信号） =====
+  spam_noise_patterns:
+    - id: gambling_zh
+      regex: '(?:彩神争霸|大发快三|北京赛车|重庆时时彩|天天中彩票|天天爱彩票|腾讯分分彩|大发时时彩|大发彩票|六合彩|大发快|香港赛马会|福利彩票天天|天天乐彩票|全民彩票|彩票平台注册|彩票平台开户|彩票娱乐注册)'
+    - id: porn_zh
+      regex: '(?:毛片|无码|一级特黄|一本道|久久精品|久久综合|男人天堂|做爰片|黄色录像|高清无码|免费视频观看|AV不卡免费|夫妻性生活|中文字幕无码)'
+    - id: spam_platform
+      regex: '(?:菲律宾申博|娱乐平台注册|娱乐平台招商|娱乐平台开户|棋牌游戏官网|娱乐官方网站|娱乐彩票注册|娱乐平台主管)'
+  # 同一消息内命中 >=2 个不同 spam 类别时触发
+  spam_noise_min_distinct_hits: 2
+  # 同一消息内出现 >=3 种非常见 Unicode 脚本族时触发混淆信号
+  message_script_diversity_threshold: 3
   typoglycemia_targets:
     - ignore
     - bypass
@@ -409,6 +424,9 @@ injection_detector:
       tool_call_injection:
         bucket: hijack
         severity: 9       # 伪造工具调用：高危，直接拦截
+      spam_noise:
+        bucket: hijack
+        severity: 7        # 垃圾内容噪声：高危，与 tool injection 组合时强制拦截
       unicode_bidi:
         bucket: anomaly
         severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
@@ -420,6 +438,7 @@ injection_detector:
       - obfuscated
       - unicode_bidi
       - tool_call_injection
+      - spam_noise
     discussion_patterns:
       - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文|学习路线|面试题|转型建议|开发指南|最佳实践|教程|原理|架构设计|做法是|投毒|后门|常见方式|常见效果|风险等级|危险点|典型后果|攻击类型|威胁模型|防御措施)'
       - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
@@ -523,7 +542,9 @@ anomaly_detector:
     - id: xss_script_event
       regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
     - id: command_injection_chain
-      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: command_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
     - id: path_traversal
       regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
     - id: xxe_external_entity
@@ -589,10 +610,10 @@ request_sanitizer:
       regex: '(泄露|显示|输出|打印|给我|提供|导出).*(系统提示词|开发者消息|密钥|口令|密码|令牌|token|cookie|私钥|ssh\s*key|助记词|种子短语|钱包密钥|交易所密钥)'
     - id: privilege_escalation_en
       category: privilege_escalation
-      regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|config|log|database)|((execute|run).*(shell|powershell|cmd|bash))|(access|scan).*(intranet|internal\s+network|server|database)'
+      regex: '(read|open|cat|dump|export).*(local\s+file|system\s+file|\/etc\/|\/proc\/|\.ssh)|((execute|run)\s+(a\s+)?(shell|powershell|cmd|bash)\s+(command|script))|(access|scan).*(intranet|internal\s+network|internal\s+server|production\s+database)'
     - id: privilege_escalation_zh
       category: privilege_escalation
-      regex: '(读取|打开|导出).*(本地文件|系统文件|配置|日志|数据库)|(执行|运行).*(命令|shell|powershell|cmd|bash)|(访问|探测).*(内网|服务器|数据库)'
+      regex: '(读取|打开|导出).*(本地文件|系统文件|系统配置|服务器日志|生产数据库)|(执行|运行).*(shell|powershell|cmd|bash)\s*(命令|脚本)|(访问|探测).*(内网|内部网络|生产服务器|生产数据库)'
     - id: rule_bypass_en
       category: rule_bypass
       regex: '(ignore|override|bypass).*(previous\s+instructions?|safety|policy)|from\s+now\s+on.*(you\s+are|act\s+as).*(system|developer|admin)'
@@ -643,7 +664,9 @@ request_sanitizer:
     - id: web_path_traversal
       regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
     - id: web_command_injection
-      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|python3?|perl|powershell|cmd(?:\.exe)?)\b'
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: web_command_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
     - id: web_xxe_ssti
       regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://|\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)'
     - id: web_ssrf_crlf
@@ -732,6 +755,7 @@ sanitizer:
     payload: '[REDACTED:encoded-payload]'
     uri: '[unsafe-uri-removed]'
     markup: '[unsafe-tag-removed]'
+    spam: '[AegisGate:spam-content-removed]'
   block_message: '[AegisGate] response blocked by security policy.'
   sanitize_prefix: '[AegisGate] content sanitized: '
   # 仅在 LLM 明确「泄露」系统提示词时拦截；普通提及（如解释 AI 原理）不触发
@@ -759,17 +783,33 @@ tool_call_guard:
       param: location
       regex: '^.{1,120}$'
   dangerous_param_patterns:
-    - id: shell
-      regex: '(;|\|\||&&|`|\$\(|/etc/passwd|rm\s+-rf)'
+    # 只拦截真正危险的 shell 注入链：分隔符 + 已知危险命令
+    # curl/wget/bash/sh/nc 等独立即危险；python/perl/ruby/php 仅在 -c/-e 内联执行时才危险
+    - id: shell_injection
+      regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
+    - id: shell_injection_scripting
+      regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
+    - id: shell_dangerous_cmd
+      regex: '(?:rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r|mkfs\b|dd\s+if=.*of=|chmod\s+-R\s+777\s+/|>\s*/dev/sd[a-z])'
+    - id: shell_subshell_exec
+      regex: '\$\(\s*(?:curl|wget|bash|sh|nc|python[23]?|perl|ruby|php)\b'
+    - id: backtick_exec
+      regex: '`\s*(?:curl|wget|bash|sh|nc|python[23]?|perl|ruby|php)\b'
+    - id: sensitive_file_access
+      regex: '(/etc/(?:passwd|shadow|sudoers)|/var/run/secrets|/proc/self/environ)'
     - id: path_traversal
-      regex: '(\.\./|~/.ssh|/var/run/secrets)'
+      regex: '(\.\.\/)(?:.*\/)?(?:etc|proc|var|root|home)\/'
+    - id: ssh_key_access
+      regex: '~/.ssh/(?:id_|authorized_keys|known_hosts|config)'
     - id: zh_sensitive
-      regex: '(删除|提权|读取本地|密钥|口令)'
+      regex: '(提权|读取本地密钥|导出.*(?:密钥|口令|凭据))'
   semantic_approval_patterns:
     - id: approval_en
-      regex: '(delete|drop|shutdown|exfiltrate|leak)'
+      regex: '\b(exfiltrate|leak\s+(?:secret|key|token|credential))\b'
+    - id: destructive_en
+      regex: '\b(drop\s+(?:table|database|collection)|shutdown\s+(?:server|service|system))\b'
     - id: approval_zh
-      regex: '(删除|清空|泄露|导出敏感)'
+      regex: '(泄露.*(?:密钥|口令|凭据)|清空.*(?:数据库|表|集合))'
   default_action: review
 
 post_restore_guard:
@@ -814,6 +854,7 @@ action_map:
     direct: downgrade
     typoglycemia: review
     tool_call_injection: block
+    spam_noise: block
     # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
   rag_poison_guard:
     ingestion_poison: block
