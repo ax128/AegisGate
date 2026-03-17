@@ -128,6 +128,23 @@ async def test_boundary_allows_token_authenticated_v2_requests():
 
 @pytest.mark.asyncio
 async def test_boundary_blocks_admin_endpoints_from_public_ip():
+    # With enforce_loopback_only=True (default), public IPs are rejected at the
+    # loopback check before reaching the admin network restriction check.
+    request = _build_request(
+        "/__gw__/register",
+        client_host="8.8.8.8",
+        body={"upstream_base": "https://upstream.example.com/v1", "gateway_key": "agent"},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "loopback_only_reject"
+
+
+@pytest.mark.asyncio
+async def test_boundary_blocks_admin_endpoints_from_public_ip_loopback_disabled(monkeypatch):
+    # With loopback disabled, admin endpoints are still blocked for non-internal IPs.
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
     request = _build_request(
         "/__gw__/register",
         client_host="8.8.8.8",
@@ -181,6 +198,21 @@ async def test_boundary_blocks_xff_public_when_trusted_proxy(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_boundary_blocks_add_endpoint_from_public_ip():
+    # With enforce_loopback_only=True (default), rejected at loopback check first.
+    request = _build_request(
+        "/__gw__/add",
+        client_host="8.8.8.8",
+        body={"token": "tok123", "gateway_key": "agent", "whitelist_key": ["okx_key"]},
+    )
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["error"]["code"] == "loopback_only_reject"
+
+
+@pytest.mark.asyncio
+async def test_boundary_blocks_add_endpoint_from_public_ip_loopback_disabled(monkeypatch):
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
     request = _build_request(
         "/__gw__/add",
         client_host="8.8.8.8",

@@ -197,7 +197,7 @@ def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
             json={
                 "values": {
                     "log_level": "debug",
-                    "require_confirmation_on_block": True,
+                    "strict_command_block_enabled": True,
                     "v2_enable_response_command_filter": False,
                 }
             },
@@ -208,6 +208,6 @@ def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
 
     saved = env_path.read_text(encoding="utf-8")
     assert "AEGIS_LOG_LEVEL=debug" in saved
-    assert "AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true" in saved
+    assert "AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true" in saved
     assert "AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER=false" in saved
     assert reloaded["called"] is True

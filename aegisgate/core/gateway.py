@@ -130,20 +130,24 @@ _hot_reloader: HotReloader | None = None
 # Simple in-memory rate limiter for admin endpoints
 # ---------------------------------------------------------------------------
 class _AdminRateLimiter:
+    _EVICT_INTERVAL = 300.0  # 每 5 分钟清理一次过期 bucket
+
     def __init__(self, max_per_minute: int = 30) -> None:
         self._max = max(1, max_per_minute)
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = Lock()
+        self._last_evict: float = 0.0
 
     def is_allowed(self, client_ip: str) -> bool:
         now = time.monotonic()
         cutoff = now - 60.0
         with self._lock:
             # Periodically evict stale buckets to prevent unbounded memory growth
-            if len(self._buckets) > 10000:
+            if now - self._last_evict > self._EVICT_INTERVAL:
                 self._buckets = defaultdict(list, {
                     k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
                 })
+                self._last_evict = now
             bucket = self._buckets[client_ip]
             self._buckets[client_ip] = [t for t in bucket if t > cutoff]
             if len(self._buckets[client_ip]) >= self._max:
@@ -264,7 +268,7 @@ class GWTokenRewriteMiddleware:
             return
 
         new_path = f"/{version}/{rest}" if rest else f"/{version}"
-        logger.info("gw_token_rewrite path=%s -> %s token=%s…", path, new_path, token[:6])
+        logger.debug("gw_token_rewrite path=%s -> %s token=%s…", path, new_path, token[:6])
 
         ub = mapping["upstream_base"]
         gk = mapping["gateway_key"]
@@ -295,6 +299,14 @@ class GWTokenRewriteMiddleware:
 # ---------------------------------------------------------------------------
 # Security boundary middleware
 # ---------------------------------------------------------------------------
+
+async def _drain_and_reject(request: Request, boundary: dict, reason: str, status_code: int, detail: str | None = None) -> JSONResponse:
+    """Consume request body (prevent Starlette warnings) and return a blocked response."""
+    await request.body()
+    boundary["rejected_reason"] = reason
+    return _blocked_response(status_code=status_code, reason=reason, detail=detail)
+
+
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary = {
@@ -306,6 +318,7 @@ async def security_boundary_middleware(request: Request, call_next):
     }
     request.state.security_boundary = boundary
 
+    # --- UI branch (internal network only) ---
     if request.url.path.startswith("/__ui__"):
         client_ip = _real_client_ip(request)
         if not _is_internal_ip(client_ip):
@@ -338,32 +351,33 @@ async def security_boundary_middleware(request: Request, call_next):
         response = await call_next(request)
         return _apply_ui_security_headers(response)
 
+    # --- Passthrough (health, root, robots, favicon) ---
     if request.url.path in _PASSTHROUGH_PATHS and request.method.upper() in {"GET", "HEAD"}:
         return await call_next(request)
 
     logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
 
+    # --- Loopback enforcement (reject early, before any auth/body processing) ---
+    if settings.enforce_loopback_only:
+        client_host = request.client.host if request.client else ""
+        if client_host not in _LOOPBACK_HOSTS:
+            logger.warning("boundary reject non-loopback host=%s path=%s", client_host, request.url.path)
+            return await _drain_and_reject(request, boundary, "loopback_only_reject", 403)
+
+    # --- Admin endpoint guards ---
     if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
         client_ip = _real_client_ip(request)
         if not _admin_rate_limiter.is_allowed(client_ip):
-            await request.body()
-            boundary["rejected_reason"] = "admin_rate_limited"
             logger.warning("boundary reject admin rate limit host=%s path=%s", client_ip, request.url.path)
-            return _blocked_response(status_code=429, reason="admin_rate_limited", detail="too many requests")
+            return await _drain_and_reject(request, boundary, "admin_rate_limited", 429, "too many requests")
         if not _is_internal_ip(client_ip):
-            await request.body()
-            boundary["rejected_reason"] = "admin_endpoint_network_restricted"
-            logger.warning(
-                "boundary reject admin endpoint from non-internal host=%s path=%s",
-                client_ip,
-                request.url.path,
-            )
-            return _blocked_response(
-                status_code=403,
-                reason="admin_endpoint_network_restricted",
-                detail="admin endpoint only allowed from internal network",
+            logger.warning("boundary reject admin endpoint from non-internal host=%s path=%s", client_ip, request.url.path)
+            return await _drain_and_reject(
+                request, boundary, "admin_endpoint_network_restricted", 403,
+                "admin endpoint only allowed from internal network",
             )
 
+    # --- v1/v2 token authentication ---
     protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
     protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
 
@@ -384,69 +398,49 @@ async def security_boundary_middleware(request: Request, call_next):
             request.scope["aegis_token_authenticated"] = True
             logger.debug("using default upstream for v1 path=%s", request.url.path)
         else:
-            await request.body()
-            boundary["rejected_reason"] = "token_route_required"
             client_ip = _real_client_ip(request)
             logger.warning(
                 "boundary reject non-token request path=%s client=%s hint=set AEGIS_UPSTREAM_BASE_URL or use token path",
                 request.url.path, client_ip,
             )
-            return _blocked_response(
-                status_code=403,
-                reason="token_route_required",
-                detail="no default upstream configured; use /v1/__gw__/t/<token>/... or set AEGIS_UPSTREAM_BASE_URL",
+            return await _drain_and_reject(
+                request, boundary, "token_route_required", 403,
+                "no default upstream configured; use /v1/__gw__/t/<token>/... or set AEGIS_UPSTREAM_BASE_URL",
             )
 
     if protected_v2 and not bool(request.scope.get("aegis_token_authenticated")):
-        await request.body()
-        boundary["rejected_reason"] = "token_route_required"
         logger.warning("boundary reject non-token v2 request path=%s", request.url.path)
-        return _blocked_response(
-            status_code=403,
-            reason="token_route_required",
-            detail="use /v2/__gw__/t/<token>/... routes for v2 proxy access",
+        return await _drain_and_reject(
+            request, boundary, "token_route_required", 403,
+            "use /v2/__gw__/t/<token>/... routes for v2 proxy access",
         )
 
+    # --- Request body size check ---
     cached_body: bytes | None = None
     content_length_header = request.headers.get("content-length", "").strip()
     if settings.max_request_body_bytes > 0 and request.method.upper() in {"POST", "PUT", "PATCH"} and content_length_header:
         try:
             content_length = int(content_length_header)
         except ValueError:
-            await request.body()
-            boundary["rejected_reason"] = "invalid_content_length"
             logger.warning("boundary reject invalid content-length path=%s", request.url.path)
-            return _blocked_response(status_code=400, reason="invalid_content_length")
+            return await _drain_and_reject(request, boundary, "invalid_content_length", 400)
         if content_length > settings.max_request_body_bytes:
-            await request.body()
-            boundary["rejected_reason"] = "request_body_too_large"
             logger.warning(
                 "boundary reject oversize request content_length=%s max=%s path=%s",
-                content_length,
-                settings.max_request_body_bytes,
-                request.url.path,
+                content_length, settings.max_request_body_bytes, request.url.path,
             )
-            return _blocked_response(status_code=413, reason="request_body_too_large")
+            return await _drain_and_reject(request, boundary, "request_body_too_large", 413)
     elif settings.max_request_body_bytes > 0 and request.method.upper() in {"POST", "PUT", "PATCH"}:
         cached_body = await request.body()
         if len(cached_body) > settings.max_request_body_bytes:
             boundary["rejected_reason"] = "request_body_too_large"
             logger.warning(
                 "boundary reject oversize request actual_size=%s max=%s path=%s",
-                len(cached_body),
-                settings.max_request_body_bytes,
-                request.url.path,
+                len(cached_body), settings.max_request_body_bytes, request.url.path,
             )
             return _blocked_response(status_code=413, reason="request_body_too_large")
 
-    if settings.enforce_loopback_only:
-        client_host = request.client.host if request.client else ""
-        if client_host not in _LOOPBACK_HOSTS:
-            await request.body()
-            boundary["rejected_reason"] = "loopback_only_reject"
-            logger.warning("boundary reject non-loopback host=%s path=%s", client_host, request.url.path)
-            return _blocked_response(status_code=403, reason="loopback_only_reject")
-
+    # --- HMAC authentication ---
     if settings.enable_request_hmac_auth:
         secret = settings.request_hmac_secret
         if not secret:

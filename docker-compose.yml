@@ -1,6 +1,4 @@
-# 默认基础部署：仅启动 AegisGate（不启用 Caddy / CLIProxyAPI）。
-# 如需启用 CLIProxyAPI 代理优化栈，请使用：
-# docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
+# 默认基础部署：仅启动 AegisGate。
 
 services:
   aegisgate:

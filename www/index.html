@@ -95,6 +95,12 @@
               </svg>
               安全规则
             </a>
+            <a href="#redact-values" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+              </svg>
+              精确值脱敏
+            </a>
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">资源</span>
@@ -318,6 +324,48 @@
             </div>
           </section>
 
+          <!-- Exact Value Redaction -->
+          <section id="redact-values" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>精确值脱敏</h2>
+                <p class="panel-desc">配置需要精确匹配脱敏的敏感值（API Key、密钥等），命中后替换为 <code>[REDACTED:EXACT_VALUE]</code>。最少 10 个字符，V1/V2 均适用。</p>
+              </div>
+            </div>
+            <div class="token-toolbar">
+              <span id="redact-count" style="font-size:0.83rem;color:var(--muted);">加载中…</span>
+              <div style="display:flex;gap:8px;">
+                <button id="redact-refresh" class="btn-sm-ghost" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                    <polyline points="23,4 23,10 17,10"/>
+                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                  </svg>刷新
+                </button>
+                <button id="redact-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  添加值
+                </button>
+              </div>
+            </div>
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead>
+                  <tr><th>#</th><th>脱敏值（已遮蔽）</th><th>长度</th><th>操作</th></tr>
+                </thead>
+                <tbody id="redact-tbody">
+                  <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           <!-- Token management -->
           <section id="tokens" class="panel">
             <div class="panel-head">
@@ -458,9 +506,6 @@
             </div>
             <div class="compose-selector">
               <button class="compose-file-btn active" data-compose-file="docker-compose.yml">docker-compose.yml</button>
-              <button class="compose-file-btn" data-compose-file="docker-compose.cliproxy.yml">cliproxy</button>
-              <button class="compose-file-btn" data-compose-file="docker-compose.aiclient2api.yml">aiclient2api</button>
-              <button class="compose-file-btn" data-compose-file="docker-compose.sub2api.yml">sub2api</button>
             </div>
             <div id="compose-not-found" class="hidden" style="padding:16px;color:var(--muted);font-size:0.87rem;">该文件不存在，保存后将创建。</div>
             <textarea id="compose-editor" class="compose-editor" spellcheck="false" placeholder="输入 YAML 配置内容…"></textarea>

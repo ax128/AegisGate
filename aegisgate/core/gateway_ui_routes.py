@@ -610,9 +610,6 @@ def register_ui_routes(app: FastAPI) -> None:
 
     _COMPOSE_FILES_ALLOWED = frozenset({
         "docker-compose.yml",
-        "docker-compose.cliproxy.yml",
-        "docker-compose.aiclient2api.yml",
-        "docker-compose.sub2api.yml",
     })
 
     def _compose_file_path(filename: str) -> Path:
@@ -700,7 +697,6 @@ def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
         "upstream_base_url": (settings.upstream_base_url or "").strip(),
         "security": {
             "level": settings.security_level,
-            "confirmation_on_block": settings.require_confirmation_on_block,
             "strict_command_block": settings.strict_command_block_enabled,
         },
         "v2": {

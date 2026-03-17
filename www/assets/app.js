@@ -614,6 +614,80 @@ loadBootstrap().catch((error) => {
   showDocError(error);
 });
 
+// ─── Exact Value Redaction ─────────────────────
+
+async function loadRedactValues() {
+  const tbody = document.getElementById("redact-tbody");
+  const countEl = document.getElementById("redact-count");
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
+  try {
+    const data = await fetchJson("/__ui__/api/redact_values");
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (countEl) countEl.textContent = `共 ${items.length} 条`;
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">暂无精确值脱敏配置，点击「添加值」新增。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = "";
+    items.forEach((item, idx) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${idx}</td>
+        <td><code style="font-size:0.85rem;">${escapeHtml(item.masked)}</code></td>
+        <td>${item.length}</td>
+        <td>
+          <button class="btn-danger-sm" data-del-redact="${idx}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+            </svg>
+            删除
+          </button>
+        </td>`;
+      tr.querySelector(".btn-danger-sm").addEventListener("click", async () => {
+        if (!confirm(`确认删除第 ${idx} 条脱敏值？`)) return;
+        try {
+          await fetchJson(`/__ui__/api/redact_values/${idx}`, {
+            method: "DELETE",
+            headers: { "x-aegis-ui-csrf": uiCsrfToken },
+          });
+          loadRedactValues();
+        } catch (err) {
+          alert(`删除失败: ${err.message}`);
+        }
+      });
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    if (countEl) countEl.textContent = "加载失败";
+  }
+}
+
+function bindRedactUI() {
+  const addBtn = document.getElementById("redact-add");
+  const refreshBtn = document.getElementById("redact-refresh");
+  if (addBtn) addBtn.addEventListener("click", async () => {
+    const value = prompt("输入要精确脱敏的敏感值（至少 10 个字符）：");
+    if (!value) return;
+    try {
+      await fetchJson("/__ui__/api/redact_values", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify({ value }),
+      });
+      loadRedactValues();
+    } catch (err) {
+      alert(`添加失败: ${err.message}`);
+    }
+  });
+  if (refreshBtn) refreshBtn.addEventListener("click", loadRedactValues);
+  loadRedactValues();
+}
+
+bindRedactUI();
+
 // ─── Security Rules ───────────────────────────
 
 let currentRulesSection = "pii_patterns";

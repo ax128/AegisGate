@@ -26,7 +26,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 ### 场景一：同机部署（网关与上游在同一台服务器）
 
-网关默认开启**本地端口自动路由**，客户端 Base URL 带上端口号即可，零配置：
+网关支持**本地端口自动路由**（Docker 部署默认开启，裸机部署需设 `AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`），客户端 Base URL 带上端口号即可，零配置：
 
 ```
 客户端 → http://<网关IP>:18080/v1/__gw__/t/{端口号}/... → localhost:{端口号}/v1/...
@@ -51,10 +51,10 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 上游在远程时，端口路由不可用，需通过 `/__gw__/register` 注册 token 绑定远程地址：
 
 ```bash
+# gateway_key 的值即 config/aegis_gateway.key 文件内容（cat config/aegis_gateway.key 查看）
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat config/aegis_gateway.key)" \
-  -d '{"upstream_base":"https://远程上游地址/v1","api_key":"上游API-Key"}'
+  -d '{"upstream_base":"https://远程上游地址/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
 ```
 
 返回 token 后，客户端使用：`http://<网关IP>:18080/v1/__gw__/t/<返回的token>`
@@ -83,55 +83,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 客户端 → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
 ```
 
-**Caddyfile 示例**：
-
-```caddy
-api.example.com {
-    header {
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        -Server
-    }
-
-    # 管理端点不对公网暴露
-    @gw_admin path /__gw__ /__gw__/*
-    respond @gw_admin "forbidden" 403
-
-    # 拦截扫描器探测路径
-    @scanner_probe {
-        path /assets/* /static/* /js/* /css/* /images/* /fonts/*
-        path /robots.txt /favicon.ico /.env /wp-login.php /wp-admin/*
-        path /.git/* /.svn/* /phpmyadmin/* /admin/* /cgi-bin/*
-    }
-    respond @scanner_probe 404
-
-    # 仅放行 API 路径
-    @not_api not path /v1/* /v2/*
-    respond @not_api 404
-
-    # 转发到网关（端口路由由网关处理）
-    reverse_proxy aegisgate:18080 {
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-        header_up X-Real-IP {remote_host}
-        flush_interval -1
-        transport http {
-            response_header_timeout 660s
-            read_timeout 660s
-            write_timeout 660s
-        }
-    }
-}
-
-# 上游管理后台（可选）：直连上游，不经网关
-# panel.example.com {
-#     reverse_proxy localhost:8080 {
-#         flush_interval -1
-#         transport http { response_header_timeout 660s }
-#     }
-# }
-```
+完整 Caddyfile 示例见 [Caddyfile.example](Caddyfile.example)。
 
 要点：
 - `flush_interval -1`：SSE 流式不缓冲，**必须设置**
@@ -556,18 +508,18 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（启用后可直连 `/v1/...`） | 空 |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔） | 空 |
 | `AEGIS_ENABLE_THREAD_OFFLOAD` | Store/过滤管道线程池执行开关（避免阻塞 event loop） | `true` |
-| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `30.0` |
+| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
 | `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |
 | `AEGIS_STORAGE_BACKEND` | `sqlite`/`redis`/`postgres` | `sqlite` |
 | `AEGIS_SQLITE_DB_PATH` | sqlite 文件路径 | `logs/aegisgate.db` |
 | `AEGIS_AUDIT_LOG_PATH` | 审计日志路径 | `logs/audit.jsonl` |
 | `AEGIS_GW_TOKENS_PATH` | token 映射文件路径 | `config/gw_tokens.json` |
-| `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `2000000` |
-| `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `100` |
-| `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `50000` |
-| `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `100000` |
-| `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
+| `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `12000000` |
+| `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `300` |
+| `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `250000` |
+| `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `1200000` |
+| `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
 | `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | **[已废弃]** 放行确认流程已移除，该值无论设为何均等同 `false`：拦截时自动遮挡/分割后返回 | `false` |

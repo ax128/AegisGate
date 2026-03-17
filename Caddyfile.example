@@ -1,21 +1,39 @@
-# 接入 AegisGate：api.example.com 先到网关安检，再转 cli-proxy-api:8317
+# Caddy + AegisGate 对公网暴露示例
+#
+# 架构：客户端 → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
+#
+# reverse_proxy 目标地址按部署方式选择：
+#   - Caddy 与网关在同一 docker compose 网络：aegisgate:18080（Docker 服务名解析）
+#   - Caddy 在宿主机，网关在 Docker：127.0.0.1:18080（compose 已映射端口）
+#   - Caddy 与网关都在宿主机：127.0.0.1:18080
+#   - Caddy 在另一台机器：<网关机器IP>:18080
+#
+# 要点：
+#   - flush_interval -1：SSE 流式不缓冲，必须设置
+#   - response_header_timeout 660s：长时间推理不超时
+#   - /__gw__/* 返回 403：管理接口不暴露到公网
+#   - X-Aegis-Proxy-Token：Caddy ↔ AegisGate 信任凭证（可选，启用后网关可识别来自 Caddy 的请求）
+#   - 管理后台建议单独域名直连上游，不经网关
+#   - Caddy 只做 TLS + 转发，路由逻辑全在网关内部
+#
 # 需 80/443 开放；证书由 Caddy 自动申请
 
-example.com, www.example.com {
-    header {
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.example.com https://panel.example.com; frame-ancestors 'self'"
-        Permissions-Policy "geolocation=(), microphone=(), camera=()"
-        -Server
-    }
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    root * /srv/www
-    file_server
-}
+# 前端静态站点（可选，与网关无关；如不需要可删除整段）
+# example.com, www.example.com {
+#     header {
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "SAMEORIGIN"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#         Permissions-Policy "geolocation=(), microphone=(), camera=()"
+#         -Server
+#     }
+#     header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#     root * /srv/www
+#     file_server
+# }
 
-# API：先经 AegisGate 安检与过滤，再由网关转发到 cli-proxy-api
+# API：先经 AegisGate 安检与过滤，再由网关转发到上游
+# reverse_proxy 目标按实际部署方式填写（见文件头部说明）
 api.example.com {
     header {
         X-Content-Type-Options "nosniff"
@@ -44,11 +62,15 @@ api.example.com {
     }
     respond @not_api 404
 
-    reverse_proxy aegisgate:18080 {
+    # Caddy 在宿主机时改为 127.0.0.1:18080（见文件头部说明）
+    reverse_proxy 127.0.0.1:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
-        header_up X-Forwarded-Host {host}
         header_up X-Real-IP {remote_host}
+        # Caddy ↔ AegisGate 信任凭证（可选）
+        # 值来自 config/aegis_proxy_token.key（首次启动自动生成）
+        # 启用方式：设置 Caddy 环境变量 AEGIS_PROXY_TOKEN 后取消下行注释
+        # header_up X-Aegis-Proxy-Token {env.AEGIS_PROXY_TOKEN}
         flush_interval -1
         transport http {
             response_header_timeout 660s
@@ -58,27 +80,20 @@ api.example.com {
     }
 }
 
-# 管理后台：直连 CLIProxyAPI，不经过网关。
-# 生产环境建议加 IP 白名单或 Basic Auth 限制公网访问：
-#   @allowed remote_ip 你的管理IP/32
-#   respond @denied "forbidden" 403
-panel.example.com {
-    header {
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        X-XSS-Protection "1; mode=block"
-        -Server
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    }
-    reverse_proxy cli-proxy-api:8317 {
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-        flush_interval -1
-        transport http {
-            response_header_timeout 660s
-            read_timeout 660s
-            write_timeout 660s
-        }
-    }
-}
+# 上游管理后台（可选）：直连上游，不经过网关。
+# 按实际上游地址和端口替换（CLIProxyAPI=8317, Sub2API=8080, AIClient-2-API=3000）。
+# 生产环境建议加 IP 白名单限制公网访问。
+# panel.example.com {
+#     @allowed remote_ip 你的管理IP/32
+#     handle @allowed {
+#         reverse_proxy localhost:8317 {
+#             flush_interval -1
+#             transport http {
+#                 response_header_timeout 660s
+#                 read_timeout 660s
+#                 write_timeout 660s
+#             }
+#         }
+#     }
+#     respond "forbidden" 403
+# }
