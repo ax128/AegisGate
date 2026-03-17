@@ -298,8 +298,9 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
 ```
 
 建议：
-1. 上游使用 v1 基路径，例如 CLIProxyAPI 配置为 `http://cli-proxy-api:8317/v1`。
+1. 上游使用 v1 基路径，例如 `AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1`。
 2. 该模式仅适用于 `v1`；`v2` 仍建议使用 token 路径。
+3. 多上游场景建议使用端口路由（`/v1/__gw__/t/{端口号}/...`）而非此模式。
 
 ### 2.1 Token 注册（多上游/多租户推荐）
 
@@ -356,7 +357,7 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
 - 追加白名单：`POST /__gw__/add`（必填：`token`、`gateway_key`、`whitelist_key`(list)；可选：`upstream_base`，传入则替换该 token 绑定上游）
 - 减少白名单：`POST /__gw__/remove`（必填：`token`、`gateway_key`、`whitelist_key`(list)）
 
-> 若启用 `docker-compose.cliproxy.yml`（含 Caddy），“公网域名 -> /__gw__/*” 默认会被 `403` 阻断；请通过 `127.0.0.1:18080` 或内网入口执行注册/查询/变更。
+> 若使用 Caddy 对外暴露，建议在 Caddyfile 中阻断 `/__gw__/*` 管理端点（参见 Caddy 配置示例）。注册/查询/变更请通过 `127.0.0.1:18080` 或内网入口执行。
 
 追加示例（在原 whitelist 基础上增加；可选替换 upstream_base）：
 
@@ -504,24 +505,11 @@ curl -I http://127.0.0.1:18080/__ui__/login
 docker compose up -d --build
 ```
 
-CLIProxyAPI 代理优化模式（按需启用）：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.cliproxy.yml up -d --build
-```
-
-该模式会额外启用：
-- `cli-proxy-api`（本地 `127.0.0.1:8317`）
-- `caddy`（读取 `./Caddyfile`，用于域名入口）
-- 网关高负载参数（流式、长上下文、连接池与超时优化）
-
 默认端口策略：
 - `127.0.0.1:18080:18080`：仅宿主机本机可访问，不对公网直接暴露。
 - `expose: 18080`：同 Docker 网络内其它容器可通过服务名 `aegisgate:18080` 访问。
 - `extra_hosts: host.docker.internal:host-gateway`：容器内可访问宿主机服务（Linux/WSL2 也可用）。
-- 若启用 `docker-compose.cliproxy.yml`（含 Caddy）：
-  - `api.<your-domain>` -> `aegisgate:18080`
-  - `__gw__` 管理端点默认不对公网开放
+- 对公网暴露时，在网关前加 Caddy 做 TLS（参见上方 Caddy 配置示例）。
 
 查看日志：
 

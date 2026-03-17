@@ -111,7 +111,7 @@ def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
     raw = _header_value(headers, settings.upstream_base_header)
     if raw.strip():
         return _normalize_upstream_base(raw)
-    # 未提供 x-upstream-base 时使用默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://cli-proxy-api:8317），无需注册
+    # 未提供 x-upstream-base 时使用默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1）
     default = (settings.upstream_base_url or "").strip()
     if not default:
         raise ValueError("missing_upstream_base")

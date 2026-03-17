@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # 设为 0 表示不限制（不推荐生产使用）。
     filter_pipeline_timeout_s: float = 90.0
     upstream_base_header: str = "x-upstream-base"
-    # 默认上游：设置后可直接请求 /v1/... 与 /v2/...，无需走 /v1/__gw__/t/{token}/... 注册流程（如对接 cli-proxy-api:8317）
+    # 默认上游（可选）：设置后可直接请求 /v1/...，无需走端口路由或 token 注册（如 http://localhost:8317/v1）
     upstream_base_url: str = ""
     upstream_whitelist_url_list: str = ""
     # 编辑器读写 docker-compose 文件的目录。空字符串 = 默认使用 config/compose/

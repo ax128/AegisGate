@@ -45,7 +45,7 @@ Client config baseline:
 - `baseUrl = token baseUrl`
 - `apiKey = upstream real API key`
 
-> If you enable the `docker-compose.cliproxy.yml` stack (with Caddy), public domain requests to `/__gw__/*` are blocked.  
+> If you use Caddy to expose the gateway publicly, `/__gw__/*` admin endpoints should be blocked in Caddyfile.
 > Run registration against `http://127.0.0.1:18080` (localhost) or an internal admin ingress.
 
 ---
