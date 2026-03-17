@@ -50,13 +50,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 > | 上游运行方式 | 端口路由是否可用 | 说明 |
 > |-------------|:---:|------|
 > | 裸机运行在宿主机 | **可用** | 端口已在宿主机上监听，网关直接到达 |
-> | Docker 容器 | **需映射端口** | 上游 compose 必须配置 `ports: "127.0.0.1:{端口}:{端口}"`，否则网关无法通过 `host.docker.internal` 到达 |
->
-> 示例：CLIProxyAPI 也运行在 Docker 中，需要在其 `docker-compose.yml` 中添加：
-> ```yaml
-> ports:
->   - "127.0.0.1:8317:8317"   # 映射到宿主机，供网关端口路由到达
-> ```
+> | Docker 容器 | **需配置** | 上游 compose 必须配置 `ports` + `extra_hosts`（详见下方 §4 Docker 部署说明） |
 >
 > 裸机部署改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
 
@@ -490,13 +484,21 @@ environment:
   AEGIS_PORT: "28080"           # ③ 网关监听端口
 ```
 
-上游服务也在 Docker 运行时，端口自动路由通过 `host.docker.internal` 访问宿主机端口，因此**上游容器必须映射端口到宿主机**：
+上游服务也在 Docker 运行时，端口自动路由通过 `host.docker.internal` 访问宿主机端口。上游容器需要两项配置才能让网关到达：
 ```yaml
 # 上游服务的 docker-compose.yml（示例：CLIProxyAPI）
-ports:
-  - "127.0.0.1:8317:8317"      # 映射到宿主机，网关才能通过端口路由到达
+services:
+  cliproxy:
+    ports:
+      - "127.0.0.1:8317:8317"              # ① 映射端口到宿主机
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # ② 让容器能解析 host.docker.internal
 ```
-若上游不映射端口，网关请求 `host.docker.internal:8317` 会连接失败。
+
+- `ports`：将上游端口映射到宿主机，网关容器通过 `host.docker.internal:8317` 才能到达
+- `extra_hosts`：Linux/WSL2 默认不自动添加 `host.docker.internal`，需显式配置（macOS/Windows Docker Desktop 已内置）
+
+缺少任一项，网关请求 `host.docker.internal:8317` 会连接失败。AegisGate 自身的 compose 已包含这两项配置。
 
 查看日志：
 
