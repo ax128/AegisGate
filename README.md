@@ -3,6 +3,7 @@
 AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。支持 **MCP**（Model Context Protocol）与 **Agent SKILL** 接入，可与 Cursor/Codex 等 Agent 环境配合使用。
 
 核心目标：
+
 - 统一入口：把安全策略集中在网关层，而不是散落在各个 Agent/应用里。
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、自动遮挡/分割危险内容。
@@ -15,12 +16,14 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 ### 已验证的上游
 
-| 上游 | 官方文档 | 默认端口 |
-|------|---------|---------|
-| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | OAuth 多账号 LLM 代理（Claude/Gemini/OpenAI） | 8317 |
-| [Sub2API](https://github.com/Wei-Shaw/sub2api) | AI API 订阅管理平台（Claude/Gemini/Antigravity） | 8080 |
-| [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) | 多源 AI 客户端代理（Gemini CLI/Codex/Kiro/Grok） | 3000 |
-| 任意 OpenAI 兼容 API | — | — |
+
+| 上游                                                               | 官方文档                                     | 默认端口 |
+| ---------------------------------------------------------------- | ---------------------------------------- | ---- |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)      | OAuth 多账号 LLM 代理（Claude/Gemini/OpenAI）   | 8317 |
+| [Sub2API](https://github.com/Wei-Shaw/sub2api)                   | AI API 订阅管理平台（Claude/Gemini/Antigravity） | 8080 |
+| [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) | 多源 AI 客户端代理（Gemini CLI/Codex/Kiro/Grok）  | 3000 |
+| 任意 OpenAI 兼容 API                                                 | —                                        | —    |
+
 
 > 请先按上游官方文档完成安装和配置，确认上游本身可用后再接入网关。
 
@@ -32,12 +35,14 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 客户端 → http://<网关IP>:18080/v1/__gw__/t/{端口号}/... → localhost:{端口号}/v1/...
 ```
 
-| 上游 | 客户端 Base URL |
-|------|----------------|
-| CLIProxyAPI | `http://<网关IP>:18080/v1/__gw__/t/8317` |
-| Sub2API | `http://<网关IP>:18080/v1/__gw__/t/8080` |
-| AIClient-2-API | `http://<网关IP>:18080/v1/__gw__/t/3000` |
-| 自建 OpenAI 兼容 | `http://<网关IP>:18080/v1/__gw__/t/{你的端口}` |
+
+| 上游             | 客户端 Base URL                             |
+| -------------- | ---------------------------------------- |
+| CLIProxyAPI    | `http://<网关IP>:18080/v1/__gw__/t/8317`   |
+| Sub2API        | `http://<网关IP>:18080/v1/__gw__/t/8080`   |
+| AIClient-2-API | `http://<网关IP>:18080/v1/__gw__/t/3000`   |
+| 自建 OpenAI 兼容   | `http://<网关IP>:18080/v1/__gw__/t/{你的端口}` |
+
 
 - 客户端的 `Authorization: Bearer <key>` 直接透传到上游
 - 多个上游可同时使用，互不冲突
@@ -47,10 +52,12 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 >
 > 因此，**上游服务的端口必须映射到宿主机**，端口路由才能到达。两种常见情况：
 >
-> | 上游运行方式 | 端口路由是否可用 | 说明 |
-> |-------------|:---:|------|
-> | 裸机运行在宿主机 | **可用** | 端口已在宿主机上监听，网关直接到达 |
-> | Docker 容器 | **需配置** | 上游 compose 必须配置 `ports` + `extra_hosts`（详见下方 §4 Docker 部署说明） |
+>
+> | 上游运行方式    | 端口路由是否可用 | 说明                                                           |
+> | --------- | -------- | ------------------------------------------------------------ |
+> | 裸机运行在宿主机  | **可用**   | 端口已在宿主机上监听，网关直接到达                                            |
+> | Docker 容器 | **需配置**  | 上游 compose 必须配置 `ports` + `extra_hosts`（详见下方 §4 Docker 部署说明） |
+>
 >
 > 裸机部署改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
 
@@ -94,15 +101,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 完整 Caddyfile 示例见 [Caddyfile.example](Caddyfile.example)。
 
 要点：
+
 - `flush_interval -1`：SSE 流式不缓冲，**必须设置**
 - `response_header_timeout 660s`：长时间推理不超时
-- `/__gw__/*` 返回 403：管理接口不暴露到公网
+- `/__gw__/`* 返回 403：管理接口不暴露到公网
 - 管理后台建议单独域名直连上游，不经网关
 - Caddy 只做 TLS + 转发，路由逻辑全在网关内部
 
 ## Agent Skill
 
 给 Agent 直接执行的安装与接入手册：
+
 - [SKILL.md](SKILL.md)
 
 ## 1. 主要能力
@@ -145,16 +154,19 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 网关对 LLM 响应中的危险内容按以下分级自动处理：
 
-| 风险等级 | 处理方式 | 示例 |
-|---------|---------|------|
-| **无风险** | 直接透传 | 正常对话内容 |
-| **轻度危险** | 每 3 字符插入 `-` 分割变形（chunked-hyphen） | `dev-elo-per mes-sag-e` |
-| **重度危险/危险指令** | 危险片段替换为 `【AegisGate已处理危险疑似片段】` | SQL 注入、反弹 shell、`rm -rf` 等 |
-| **垃圾内容噪声** | 替换为 `[AegisGate:spam-content-removed]` | 赌博/色情推广 + 伪造工具调用组合 |
+
+| 风险等级          | 处理方式                                   | 示例                         |
+| ------------- | -------------------------------------- | -------------------------- |
+| **无风险**       | 直接透传                                   | 正常对话内容                     |
+| **轻度危险**      | 每 3 字符插入 `-` 分割变形（chunked-hyphen）      | `dev-elo-per mes-sag-e`    |
+| **重度危险/危险指令** | 危险片段替换为 `【AegisGate已处理危险疑似片段】`         | SQL 注入、反弹 shell、`rm -rf` 等 |
+| **垃圾内容噪声**    | 替换为 `[AegisGate:spam-content-removed]` | 赌博/色情推广 + 伪造工具调用组合         |
+
 
 处理后的内容会以 INFO 级别记录到网关日志（遮挡/分割后的安全摘要），便于审计追踪。
 
 说明：
+
 - `AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true|false`（默认 `false`）：开启后命中强制命令规则即直接拦截并遮挡，不依赖 `security_level` 阈值。
 - `AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW=true|false`（默认 `true`）：拦截通知中是否展示命中片段（安全变形后）的预览。
 
@@ -172,6 +184,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - 电脑/基础设施（宽松模式，仅 `field: value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
 
 `responses` 结构化输入补充说明（当前）：
+
 - 全节点文本扫描：`role=user/developer/system/assistant` + `type=function_call_output/tool_result/tool_output/computer_call_output`
 - 角色分级：`user/developer/system/assistant/tool` 统一使用放宽规则（优先脱敏 token/key/secret/private key 等高风险项）
 - 命中位置记录：日志记录 `path/field/role/pattern/count` 摘要（不含命中原文）
@@ -180,12 +193,14 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 ### 1.3 v1 / v2 实现链路与逻辑
 
 统一入口（v1/v2 共用）：
+
 1. `v1` 支持两种方式：默认上游直连（配置 `AEGIS_UPSTREAM_BASE_URL`）或 token 路径 `/v1/__gw__/t/<token>/...`
 2. `v2` 必须走 token 路径：`/v2/__gw__/t/<token>/...`（避免非 token 的通用代理暴露）
 3. token 路径会先被中间件重写到真实路由，并把 token 绑定信息注入请求上下文
 4. 安全边界中间件执行基础限制：请求体大小限制、可选 loopback-only、可选 HMAC/nonce 防重放
 
 `v1` 链路（OpenAI 兼容）：
+
 1. 请求侧过滤：`redaction -> untrusted_content_guard -> request_sanitizer -> rag_poison_guard`
 2. 转发到上游 LLM（chat/responses/generic 子路径）
 3. 响应侧过滤：`anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
@@ -193,12 +208,14 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 5. 记录审计事件（含风险标签、处置原因、确认状态）
 
 说明：
+
 - 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
 - 当前默认策略已启用 `untrusted_content_guard` 与 `tool_call_guard`，但默认采取低误拦策略：
   - `untrusted_content_guard` 默认只做不可信来源包裹与风险抬升，不直接阻断。
   - `tool_call_guard` 默认重点阻断危险参数；工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
 
 `v2` 链路（通用 HTTP 代理）：
+
 1. 读取 `x-target-url` 请求头获取原始目标 URL（必须是 `http://` 或 `https://` 完整 URL，含 query string）
 2. 请求侧：仅做请求体脱敏（可选，默认开启），不做其他拦截
 3. 转发到目标 HTTP(S) 地址（`follow_redirects=false`：不自动跟随 3xx 重定向，直接透传给客户端）
@@ -209,14 +226,16 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ### 1.4 过滤范围、安全检查、审计能力
 
-| 维度 | v1 | v2 |
-|---|---|---|
-| 请求体过滤 | 脱敏 + 非可信来源隔离 + 请求清洗 + RAG 投毒检测 | 仅脱敏（文本/JSON，可选） |
-| 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文） |
-| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、危险 tool call 参数、投毒传播等 | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则 |
-| 处置动作 | `allow`、`sanitize`、`block`（自动遮挡/分割，无确认流程） | `allow`、`block(403)` |
-| 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
-| 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录 + 处理后内容 INFO 日志） | 运行日志与阻断元信息 |
+
+| 维度       | v1                                                  | v2                                                                           |
+| -------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 请求体过滤    | 脱敏 + 非可信来源隔离 + 请求清洗 + RAG 投毒检测                      | 仅脱敏（文本/JSON，可选）                                                              |
+| 响应过滤     | 异常评分、注入检测、权限防护、恢复后防护、输出清洗                           | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文）                                     |
+| 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、危险 tool call 参数、投毒传播等          | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则              |
+| 处置动作     | `allow`、`sanitize`、`block`（自动遮挡/分割，无确认流程）           | `allow`、`block(403)`                                                         |
+| 流式处理     | 支持（含流式窗口检测、提前断流恢复）                                  | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
+| 审计       | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录 + 处理后内容 INFO 日志） | 运行日志与阻断元信息                                                                   |
+
 
 ### 1.5 命中后的处理方式（怎么处理）
 
@@ -227,14 +246,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 > **注意**：yes/no 确认放行流程已永久移除。`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` 设置已废弃，无论值为何均等同 `false`。
 
 补充：
+
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
 - `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
 
 **分级变形策略**：
+
 - **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
+
 1. LLM 主链路用 `v1`（具备完整安全过滤与审计）。
 2. 通用 HTTP 安检用 `v2`（命中即阻断，响应更直接）。
 3. 外部 MCP / Skill（涉及外部网站访问）同样支持走 `v1` 或 `v2` 网关路径；默认建议优先走 `v1`，安全检查更全面、使用方式与普通模型请求一致。
@@ -242,6 +264,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 ## 2. 接入模型
 
 当前支持两种接入模式：
+
 - `v1` 默认上游直连模式：配置 `AEGIS_UPSTREAM_BASE_URL` 后，客户端可直接请求 `/v1/...`（适合单上游、零注册）。
 - token 路由模式：
   - `v1`：`/v1/__gw__/t/<token>/...`（**一个 token 绑定一个 upstream_base URL**）
@@ -258,6 +281,7 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
 ```
 
 建议：
+
 1. 上游使用 v1 基路径，例如 `AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1`。
 2. 该模式仅适用于 `v1`；`v2` 仍建议使用 token 路径。
 3. 多上游场景建议使用端口路由（`/v1/__gw__/t/{端口号}/...`）而非此模式。
@@ -286,6 +310,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 ```
 
 说明：
+
 1. token 长度为 24 位（`secrets.token_urlsafe` 生成，约 144 位熵）。
 2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
 3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
@@ -312,6 +337,7 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
 说明：`v2` 仅识别 `x-target-url` 请求头，头值必须是完整的 `http://` 或 `https://` URL。
 
 辅助接口：
+
 - 查询：`POST /__gw__/lookup`
 - 删除：`POST /__gw__/unregister`
 - 追加白名单：`POST /__gw__/add`（必填：`token`、`gateway_key`、`whitelist_key`(list)；可选：`upstream_base`，传入则替换该 token 绑定上游）
@@ -350,15 +376,18 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 ```
 
 更多终端/客户端（Codex CLI、OpenClaw、Cherry、VS Code、Cursor、WSL2）接入见：  
+
 - [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)
 - OpenClaw 自动注入代理脚本说明见：
   - [OPENCLAW_INJECT_PROXY_FETCH.md](OPENCLAW_INJECT_PROXY_FETCH.md)
 
 外部 MCP / Skill 对外网站访问接入建议：
+
 1. 可走 `v1`：`/v1/__gw__/t/<TOKEN>/...`（推荐，检查链路更完整）。
 2. 可走 `v2`：`/v2/__gw__/t/<TOKEN>/...`（通用 HTTP 代理模式，需 `x-target-url`）。
 
 OpenClaw 自动注入脚本位置：
+
 - `scripts/openclaw-inject-proxy-fetch.py`
 - 推荐命令（注入 + 构建 + 自动写入服务环境并重启网关）：
   - `python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
@@ -466,6 +495,7 @@ docker compose up -d --build
 ```
 
 默认端口策略：
+
 - `127.0.0.1:18080:18080`：仅宿主机本机可访问，不对公网直接暴露。
 - `expose: 18080`：同 Docker 网络内其它容器可通过服务名 `aegisgate:18080` 访问。
 - `extra_hosts: host.docker.internal:host-gateway`：容器内可访问宿主机服务（Linux/WSL2 也可用）。
@@ -474,6 +504,7 @@ docker compose up -d --build
 **改端口 / 上游也在 Docker 中的情况**：
 
 网关默认监听 `18080`。如需改为其他端口（如 `28080`），需同时修改三处：
+
 ```yaml
 # docker-compose.yml
 ports:
@@ -485,6 +516,7 @@ environment:
 ```
 
 上游服务也在 Docker 运行时，端口自动路由通过 `host.docker.internal` 访问宿主机端口。上游容器需要两项配置才能让网关到达：
+
 ```yaml
 # 上游服务的 docker-compose.yml（示例：CLIProxyAPI）
 services:
@@ -526,12 +558,14 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 ```
 
 校验 token 是否持久化：
+
 1. 调 `POST /__gw__/register` 注册 token。
 2. 确认宿主机出现 `./config/gw_tokens.json`。
 3. 执行 `docker compose restart aegisgate`。
 4. 用原 token 继续请求，应可正常使用（除非手动 `unregister` 或未注册）。
 
 ## 5. 关键环境变量
+
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
@@ -559,8 +593,10 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
-| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | **[已废弃]** 放行确认流程已移除，该值无论设为何均等同 `false`：拦截时自动遮挡/分割后返回 | `false` |
-| `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
+| `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即直接拦截并遮挡，不依赖阈值） | `false` |
+| `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | 本地端口自动路由（Docker 部署默认开启） | `false` |
+| `AEGIS_LOCAL_PORT_ROUTING_HOST` | 端口路由目标 Host | `host.docker.internal` |
+| `AEGIS_DOCKER_UPSTREAMS` | Docker 上游自动注入（格式：`token:service[:port]`，逗号分隔；见下方说明） | 空 |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
 | `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | v2 响应 HTTP 注入攻击过滤开关 | `true` |
@@ -570,19 +606,47 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_V2_SSE_FILTER_PROBE_MAX_CHARS` | v2 SSE 流式响应检测探针最大字符数 | `4000` |
 | `AEGIS_V2_BLOCK_INTERNAL_TARGETS` | v2 阻止请求到内网/私有 IP（SSRF 防护） | `true` |
 
-说明：v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
+说明：
+- `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` **已废弃**，该值无论设为何均等同 `false`（拦截时自动遮挡/分割后返回）。
+- v1 与 v2 的 HTTP/HTTPS 响应命中库已统一收敛到协议层高危签名（来源于 `sanitizer.command_patterns`）。
+
+### 5.1 Docker 上游自动注入（`AEGIS_DOCKER_UPSTREAMS`）
+
+当上游服务也运行在 Docker 中时，端口自动路由（`host.docker.internal`）因 `127.0.0.1` 端口绑定无法到达。此变量在网关启动时自动注册 token → Docker 服务名映射，通过容器内网直连上游。
+
+格式：`token:service[:port]`，逗号分隔。`port` 省略时默认等于 `token`。
+
+```bash
+# docker-compose.yml 环境变量示例
+AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
+```
+
+| 配置项 | 生成的 token | upstream_base |
+|--------|:---:|---|
+| `8317:cli-proxy-api` | `8317` | `http://cli-proxy-api:8317/v1` |
+| `8080:sub2api` | `8080` | `http://sub2api:8080/v1` |
+| `3000:aiclient2api` | `3000` | `http://aiclient2api:3000/v1` |
+| `8317:my-proxy:9000` | `8317` | `http://my-proxy:9000/v1` |
+
+- 注入的 token **优先级高于端口自动路由**（named token > fallback）
+- 已存在的同名 token 会被覆盖（环境变量始终是权威来源）
+- 客户端 URL 不变：`/v1/__gw__/t/8317/...`
+- 改名/改端口/新增上游：修改此变量后重启网关即生效
 
 ### 5.1 安全级别（`AEGIS_SECURITY_LEVEL`）
 
 三档定位，控制所有阈值/地板的缩放系数：
 
-| 级别 | 定位 | 行为 |
-|------|------|------|
-| `high` | 全量检测，宁可误拦不放过 | 阈值缩小（×0.90），地板抬高（×1.05），更容易触发拦截 |
-| **`medium`（默认）** | 宽松，仅高危 + 脱敏 | 阈值放大（×1.30），地板降低（×0.85），大部分"可能危险"指令不拦截 |
-| `low` | 极宽松，基本只脱敏 | 阈值放大（×1.60），地板大幅降低（×0.70），几乎不触发 risk-based 拦截 |
+
+| 级别               | 定位           | 行为                                            |
+| ---------------- | ------------ | --------------------------------------------- |
+| `high`           | 全量检测，宁可误拦不放过 | 阈值缩小（×0.90），地板抬高（×1.05），更容易触发拦截               |
+| `**medium`（默认）** | 宽松，仅高危 + 脱敏  | 阈值放大（×1.30），地板降低（×0.85），大部分"可能危险"指令不拦截        |
+| `low`            | 极宽松，基本只脱敏    | 阈值放大（×1.60），地板大幅降低（×0.70），几乎不触发 risk-based 拦截 |
+
 
 **所有级别下，`disposition=block` 的特殊类别始终强制拦截**（不受阈值影响）：
+
 - `system_exfil`（系统提示泄露）
 - `obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）
 - `unicode_bidi`（bidi 方向控制攻击）
@@ -605,6 +669,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 `moltbook.com,semanticscholar.org,openalex.org,arxiv.org,pubmed.ncbi.nlm.nih.gov,search.crossref.org,core.ac.uk,doaj.org`
 
 完整可调项见：
+
 - [config/.env.example](config/.env.example)
 - [aegisgate/config/settings.py](aegisgate/config/settings.py)
 
@@ -639,6 +704,7 @@ pytest -q
 ### 8.1 `sqlite3.OperationalError: unable to open database file`
 
 典型原因是容器内路径不可写。优先检查：
+
 - `AEGIS_SQLITE_DB_PATH` 指向的路径是否可写
 - 宿主机挂载目录权限是否正确
 
