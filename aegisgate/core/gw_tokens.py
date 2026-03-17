@@ -238,3 +238,45 @@ def list_tokens() -> dict[str, dict[str, Any]]:
     """返回当前所有 token 映射（副本）。"""
     with _lock:
         return copy.deepcopy(_tokens)
+
+
+def inject_docker_upstreams() -> int:
+    """解析 AEGIS_DOCKER_UPSTREAMS 环境变量，自动注入 Docker 服务名 token 映射。
+
+    格式：逗号分隔，每项为 ``token:service[:port]``。port 省略时默认等于 token。
+    示例：``8317:cli-proxy-api,8080:sub2api,3000:aiclient2api:3000``
+    生成：token="8317" → upstream_base="http://cli-proxy-api:8317/v1"
+
+    已存在的同名 token 会被**静默覆盖**（确保 compose 环境变量始终是权威来源）。
+    返回注入的条目数。
+    """
+    raw = (settings.docker_upstreams or "").strip()
+    if not raw:
+        return 0
+    injected = 0
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split(":")
+        if len(parts) < 2:
+            logger.warning("docker_upstreams: invalid entry %r (expected token:service[:port]), skipped", entry)
+            continue
+        token = parts[0].strip()
+        service = parts[1].strip()
+        port = parts[2].strip() if len(parts) >= 3 else token
+        if not token or not service or not port:
+            logger.warning("docker_upstreams: empty field in %r, skipped", entry)
+            continue
+        upstream_base = f"http://{service}:{port}/v1"
+        with _lock:
+            _tokens[token] = {
+                "upstream_base": upstream_base,
+                "gateway_key": "",
+                "whitelist_key": [],
+            }
+        injected += 1
+    if injected:
+        _save()
+        logger.info("docker_upstreams injected %d token(s): %s", injected, raw)
+    return injected

@@ -15,6 +15,10 @@ services:
       - "127.0.0.1:18080:18080"
     expose:
       - "18080"
+    networks:
+      - default
+      - cliproxy_net
+      - sub2api_net
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -36,6 +40,10 @@ services:
       # 本地端口自动路由：/v1/__gw__/t/{port}/... → http://host.docker.internal:{port}/v1/...
       AEGIS_ENABLE_LOCAL_PORT_ROUTING: "${AEGIS_ENABLE_LOCAL_PORT_ROUTING:-true}"
       AEGIS_LOCAL_PORT_ROUTING_HOST: "${AEGIS_LOCAL_PORT_ROUTING_HOST:-host.docker.internal}"
+      # Docker 上游自动注入（启动时自动注册 token → Docker 服务名，优先级高于端口路由）
+      # 格式：token:service[:port]，逗号分隔。port 省略时默认等于 token。
+      # 改名/改端口：直接修改此变量，重启网关即生效。
+      AEGIS_DOCKER_UPSTREAMS: "${AEGIS_DOCKER_UPSTREAMS:-8317:cli-proxy-api,8080:sub2api,3000:aiclient2api}"
     volumes:
       - ./logs:/app/logs:rw
       - ./config:/app/aegisgate/policies/rules:rw
@@ -43,3 +51,11 @@ services:
     tmpfs:
       - /tmp
     restart: unless-stopped
+
+networks:
+  cliproxy_net:
+    external: true
+    name: ${CLIPROXY_NETWORK:-cliproxyapi_default}
+  sub2api_net:
+    external: true
+    name: ${SUB2API_NETWORK:-sub2api-main_sub2api-network}

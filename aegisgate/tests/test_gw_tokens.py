@@ -107,3 +107,71 @@ def test_list_tokens_returns_deep_copy(monkeypatch, tmp_path):
     assert latest is not None
     assert latest["gateway_key"] == "agent"
     assert latest["whitelist_key"] == ["bn_key"]
+
+
+def test_inject_docker_upstreams(monkeypatch, tmp_path):
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
+    monkeypatch.setattr(gw_tokens.settings, "docker_upstreams", "8317:cli-proxy-api,8080:sub2api,3000:aiclient2api:3000")
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+
+    count = gw_tokens.inject_docker_upstreams()
+    assert count == 3
+
+    m1 = gw_tokens.get("8317")
+    assert m1 is not None
+    assert m1["upstream_base"] == "http://cli-proxy-api:8317/v1"
+    assert m1["gateway_key"] == ""
+
+    m2 = gw_tokens.get("8080")
+    assert m2 is not None
+    assert m2["upstream_base"] == "http://sub2api:8080/v1"
+
+    m3 = gw_tokens.get("3000")
+    assert m3 is not None
+    assert m3["upstream_base"] == "http://aiclient2api:3000/v1"
+
+    # Verify persisted to file
+    assert (tmp_path / "gw_tokens.json").is_file()
+
+
+def test_inject_docker_upstreams_custom_port(monkeypatch, tmp_path):
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
+    monkeypatch.setattr(gw_tokens.settings, "docker_upstreams", "8317:my-proxy:9000")
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+
+    count = gw_tokens.inject_docker_upstreams()
+    assert count == 1
+
+    m = gw_tokens.get("8317")
+    assert m is not None
+    assert m["upstream_base"] == "http://my-proxy:9000/v1"
+
+
+def test_inject_docker_upstreams_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
+    monkeypatch.setattr(gw_tokens.settings, "docker_upstreams", "")
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+
+    count = gw_tokens.inject_docker_upstreams()
+    assert count == 0
+
+
+def test_inject_docker_upstreams_overrides_existing(monkeypatch, tmp_path):
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+        gw_tokens._tokens["8317"] = {
+            "upstream_base": "http://old-host:8317/v1",
+            "gateway_key": "old-key",
+            "whitelist_key": ["keep_me"],
+        }
+
+    monkeypatch.setattr(gw_tokens.settings, "docker_upstreams", "8317:new-proxy")
+    gw_tokens.inject_docker_upstreams()
+
+    m = gw_tokens.get("8317")
+    assert m["upstream_base"] == "http://new-proxy:8317/v1"
+    assert m["gateway_key"] == ""

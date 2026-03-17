@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     enable_local_port_routing: bool = False
     # 自定义 host（Docker 环境默认 host.docker.internal，裸机可改为 127.0.0.1）
     local_port_routing_host: str = "host.docker.internal"
+    # Docker 上游自动注入：启动时自动注册 token → Docker 服务名映射，无需手动编辑 gw_tokens.json。
+    # 格式：逗号分隔，每项为 token:service_name[:port]，port 省略时默认等于 token。
+    # 示例：8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
+    # 生成映射：token=8317 → upstream_base=http://cli-proxy-api:8317/v1
+    docker_upstreams: str = ""
     enforce_loopback_only: bool = True
     # Trusted reverse-proxy IPs (comma-separated); only these may set X-Forwarded-For.
     # Empty = trust direct client IP only (safest default).
