@@ -6,7 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **yes/no 确认放行流程已永久移除**
+  - 所有危险内容统一走自动遮挡/分割处理，不再支持手动放行
+  - `YES_WORDS` 已清空，`parse_confirmation_decision("yes")` 返回 `"unknown"`
+  - `confirmation_template` 改为纯通知模板（拦截原因 + 处理方式 + 事件编号），不含 yes/no 选项
+  - `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` 已废弃，无论值为何均等同 `false`
+  - 发送 `yes cfm-xxx--act-yyy` 将返回 `⚠️ [AegisGate] 放行功能已禁用` 提示
+  - 处理策略：无风险→直接透传；轻度危险→每3字符 `-` 分割；重度危险/指令→替换为 `【AegisGate已处理危险疑似片段】`；垃圾内容→替换为 `[AegisGate:spam-content-removed]`
+
+### Added
+
+- **垃圾内容噪声检测（`spam_noise` 信号）**
+  - 新增 3 类 spam 模式：赌博（`彩神争霸`/`大发快三`/`北京赛车` 等 18 关键词）、色情（`毛片`/`无码`/`一级特黄` 等 14 关键词）、平台推广（`菲律宾申博`/`娱乐平台注册` 等 8 关键词）
+  - 同一消息命中 >=2 个不同类别时触发 `spam_noise` 信号 → action: `block`，不可被讨论上下文缓解
+  - 已加入 `non_reducible_categories`，防止误判为"研究讨论"而被降权
+
+- **结构化 tool call 参数安全扫描**
+  - 新增 `InternalResponse.tool_call_content` 属性，自动提取 OpenAI `function.arguments` 和 Anthropic `tool_use.input`
+  - `injection_detector` 和 `output_sanitizer` 的响应管道同时扫描 `output_text` + `tool_call_content`
+  - 对 `choice`/`msg`/`tc`/`func` 等嵌套字段做全链路 `isinstance` 防御，防止上游返回 `null`/非 dict 时崩溃
+
+- **增强 spam + tool injection 组合检测**
+  - `tool_call_with_spam` / `spam_with_tool_call` 的 tool call 匹配部分新增 `functions\.` 命名空间（覆盖 `functions.ls` 等变体）
+  - 新增独立规则 `to_eq_functions`：检测 `to=functions.xxx` 格式的伪造函数调用
+  - 匹配距离从 30 字符扩展到 60 字符
+
+- **消息级多脚本多样性检测**
+  - 当同一消息出现 >=3 种非常见 Unicode 脚本（如亚美尼亚文+古吉拉特文+格鲁吉亚文）时触发 `obfuscated` 信号
+  - 常见脚本（Latin/CJK/Hiragana/Katakana/Hangul/Fullwidth/Digit）不计入
+
+- **处理后内容 INFO 级别日志**
+  - 新增 `info_log_sanitized()` 函数（`debug_excerpt.py`），在 INFO 级别记录遮挡/分割后的内容摘要
+  - 覆盖所有 auto-sanitize 路径：chat completions / responses endpoint / chat stream / responses stream / generic proxy / generic stream / request blocked
+  - 默认截断 800 字符，可通过 `AEGIS_DEBUG_EXCERPT_MAX_LEN` 环境变量调整
+
 ### Fixed
+
+- **[Critical] `tool_call_content` 属性在上游返回 `tool_calls: null` 时崩溃**
+  - `msg.get("tool_calls", [])` 在值为 `null` 时返回 `None` 而非 `[]`，导致 `for tc in None` 抛出 `TypeError: 'NoneType' object is not iterable`
+  - 已修复：使用 `msg.get("tool_calls") or []` 并对所有嵌套字段添加 `isinstance` 防御
 
 - **[Critical] 过滤器 sanitize 管道未真正修改响应文本**
   - `PostRestoreGuard`：sanitize 模式下计算了 masked 文本，但未回写 `resp.output_text`，导致恢复后的密钥/token 原样泄露。
@@ -27,11 +67,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **可配置拦截行为：`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK`**
-  - 默认 `false`：拦截时直接将危险片段±20 字符上下文做 chunked-hyphen 变形后返回，无需等待 yes/no 确认放行
-  - 设为 `true`：走原有确认流程（缓存 pending → 返回确认模板 → 等待用户 yes/no 放行指令）
-  - 覆盖所有拦截路径：chat/responses × streaming/non-streaming × request-side/response-side + generic proxy
-  - 新增 `_sanitize_hit_fragments()` 辅助函数
+- **可配置拦截行为：`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK`（现已废弃）**
+  - 原本支持 `true` 走确认流程，现已永久禁用，所有路径统一自动遮挡/分割
+  - `_sanitize_hit_fragments()` 辅助函数保留，作为自动遮挡的核心实现
 
 - **极度危险指令完全移除（分级变形策略）**
   - 匹配约 45 条高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `【AegisGate已处理危险疑似片段】`，原文**不会出现在返回中**
@@ -139,7 +177,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 |---|---|---|
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `30.0` | 过滤管道最大执行时间（秒），超时后响应被拦截，请求被放行，`0` 表示不限制 |
 | `AEGIS_ENABLE_THREAD_OFFLOAD` | `true` | 控制 Store 操作是否在线程池执行（默认开启，避免 SQLite 阻塞 event loop） |
-| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | `false` | 拦截后是否走 yes/no 确认流程；`false` 时直接将危险片段变形后返回，`true` 时缓存 pending 等待用户放行 |
+| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | `false` | **[已废弃]** 放行确认流程已移除，无论值为何均自动遮挡/分割后返回 |
 
 ### 调试日志配置
 

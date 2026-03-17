@@ -5,7 +5,7 @@ AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 
 核心目标：
 - 统一入口：把安全策略集中在网关层，而不是散落在各个 Agent/应用里。
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
-- 可追踪：统一审计、风险标签、确认放行流程（yes/no）。
+- 可追踪：统一审计、风险标签、自动遮挡/分割危险内容。
 
 ## 上游代理支持
 
@@ -93,7 +93,7 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
 - `responses` 结构化 `input` 预转发脱敏：覆盖 `user/developer/system/assistant` 与 `function_call_output/tool_output` 等节点
-- 高风险确认：命中高风险可返回确认模板，确认指令在 request 入口按三态处理
+- 高风险自动处理：命中高风险时自动遮挡/分割危险片段后返回，无需人工确认
 - 流式韧性：上游未发送 `[DONE]` 提前断流时，网关会合成恢复完成事件并补齐 `[DONE]`
 - **语义检测（TF-IDF）**：内置轻量 TF-IDF + LogisticRegression 分类器，中英文双语 prompt injection 检测，无需 GPU，启动时自动加载（约 166KB 模型文件）。高置信度安全文本直接放行（跳过正则），高置信度注入文本提前标记，灰区交由正则细分。
 - 可选能力：
@@ -102,21 +102,24 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
   - loopback-only 边界限制
 - 存储后端：`sqlite` / `redis` / `postgres`
 
-### 1.1 确认放行三态（当前行为）
+### 1.1 危险内容处理策略（当前行为）
 
-当会话中存在 pending 确认时，新消息在请求入口按以下规则处理：
+> **重要变更**：yes/no 确认放行流程已移除。所有危险内容统一走自动处理，不再支持手动放行。
 
-1. `yes` 放行：仅当消息中命中绑定码 `cfm-<id>--act-<token>`，且绑定码前缀可提取到 `yes`，才放行并回放/释放对应 pending 缓存内容。
-2. `no` 取消：仅当消息中命中绑定码 `cfm-<id>--act-<token>`，且绑定码前缀可提取到 `no`，才取消并销毁对应 pending 缓存数据。
-3. 其他输入：包括未命中绑定码、命中但格式不符合放行规则、或命中系统模板前缀（如 `放行（复制这一行）` / `Approve (copy this line):`），都视为普通新消息继续转发上游，不会被网关直接丢弃。
+网关对 LLM 响应中的危险内容按以下分级自动处理：
 
-推荐发送完整单行指令：`yes cfm-<id>--act-<token>` 或 `no cfm-<id>--act-<token>`。  
-当前实现不再支持仅 `yes` / `no` 的简化确认。
+| 风险等级 | 处理方式 | 示例 |
+|---------|---------|------|
+| **无风险** | 直接透传 | 正常对话内容 |
+| **轻度危险** | 每 3 字符插入 `-` 分割变形（chunked-hyphen） | `dev-elo-per mes-sag-e` |
+| **重度危险/危险指令** | 危险片段替换为 `【AegisGate已处理危险疑似片段】` | SQL 注入、反弹 shell、`rm -rf` 等 |
+| **垃圾内容噪声** | 替换为 `[AegisGate:spam-content-removed]` | 赌博/色情推广 + 伪造工具调用组合 |
 
-确认文案中的“命中片段（安全变形）”可通过开关控制：
-- `AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW=true|false`（默认 `true`）
-- 展示规则：默认按“命中片段前后 40 字”分段变形展示；无可匹配上下文时回退到命中片段本身。
-- `AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true|false`（默认 `false`）：开启后命中强制命令会进入高风险确认拦截（返回 `yes/no cfm...`），不依赖 `security_level` 阈值。默认覆盖高危 `SSH/sshd` 改写与密钥外传、`iptables/nft/ufw/pfctl/netsh` 关键放开动作、`docker --privileged/挂载宿主根目录/docker.sock` 等。
+处理后的内容会以 INFO 级别记录到网关日志（遮挡/分割后的安全摘要），便于审计追踪。
+
+说明：
+- `AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true|false`（默认 `false`）：开启后命中强制命令规则即直接拦截并遮挡，不依赖 `security_level` 阈值。
+- `AEGIS_CONFIRMATION_SHOW_HIT_PREVIEW=true|false`（默认 `true`）：拦截通知中是否展示命中片段（安全变形后）的预览。
 
 ### 1.2 脱敏覆盖范围（当前）
 
@@ -148,7 +151,7 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 1. 请求侧过滤：`redaction -> untrusted_content_guard -> request_sanitizer -> rag_poison_guard`
 2. 转发到上游 LLM（chat/responses/generic 子路径）
 3. 响应侧过滤：`anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
-4. 按风险处置：`allow / sanitize / block / confirmation(yes/no)`
+4. 按风险处置：`allow / sanitize / block`（危险片段自动遮挡/分割，不走确认流程）
 5. 记录审计事件（含风险标签、处置原因、确认状态）
 
 说明：
@@ -173,18 +176,17 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 | 请求体过滤 | 脱敏 + 非可信来源隔离 + 请求清洗 + RAG 投毒检测 | 仅脱敏（文本/JSON，可选） |
 | 响应过滤 | 异常评分、注入检测、权限防护、恢复后防护、输出清洗 | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文） |
 | 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、危险 tool call 参数、投毒传播等 | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则 |
-| 处置动作 | `allow`、`sanitize`、`block`、`confirmation` | `allow`、`block(403)` |
+| 处置动作 | `allow`、`sanitize`、`block`（自动遮挡/分割，无确认流程） | `allow`、`block(403)` |
 | 流式处理 | 支持（含流式窗口检测、提前断流恢复） | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
-| 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录） | 运行日志与阻断元信息（不走确认缓存链路） |
+| 审计 | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录 + 处理后内容 INFO 日志） | 运行日志与阻断元信息 |
 
 ### 1.5 命中后的处理方式（怎么处理）
 
 1. `allow`：直接透传结果。
-2. `sanitize`：过滤器就地替换敏感/可疑片段后直接返回，无需用户确认。
-3. `block`：高风险拦截。`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true` 时返回确认模板等待 `yes/no cfm-...--act-...`；`false` 时对危险片段做 hit-fragment 变形后直接返回。
-4. `confirmation`（仅 v1，需 `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=true`）：返回确认模板，用户确认放行后响应仍会经过 hit-fragment 变形（纵深防御）。
+2. `sanitize`：过滤器就地替换敏感/可疑片段（如危险标签/URI/命令/垃圾内容）后直接返回。
+3. `block`：高风险拦截，危险片段±20 字符上下文自动变形（轻度：chunked-hyphen 分割；重度：完全替换为网关提示）后返回。
 
-默认行为（`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK=false`）：拦截时不走确认流程，危险片段±20 字符上下文直接变形后返回。过滤器级别的 `sanitize`（如危险标签/URI/命令替换）直接就地生效，无需确认。
+> **注意**：yes/no 确认放行流程已永久移除。`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` 设置已废弃，无论值为何均等同 `false`。
 
 补充：
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
@@ -195,7 +197,7 @@ AegisGate 可对接多种上游 AI 代理服务，提供两种接入模式：
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
-1. LLM 主链路用 `v1`（具备确认放行与完整审计）。
+1. LLM 主链路用 `v1`（具备完整安全过滤与审计）。
 2. 通用 HTTP 安检用 `v2`（命中即阻断，响应更直接）。
 3. 外部 MCP / Skill（涉及外部网站访问）同样支持走 `v1` 或 `v2` 网关路径；默认建议优先走 `v1`，安全检查更全面、使用方式与普通模型请求一致。
 
@@ -502,7 +504,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `500000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
-| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | 拦截后是否走 yes/no 确认流程（`false`=直接变形返回，`true`=缓存 pending 等待放行） | `false` |
+| `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | **[已废弃]** 放行确认流程已移除，该值无论设为何均等同 `false`：拦截时自动遮挡/分割后返回 | `false` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即进入确认拦截） | `false` |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |
@@ -527,8 +529,10 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 **所有级别下，`disposition=block` 的特殊类别始终强制拦截**（不受阈值影响）：
 - `system_exfil`（系统提示泄露）
-- `obfuscated`（编码混淆攻击）
+- `obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）
 - `unicode_bidi`（bidi 方向控制攻击）
+- `tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等 45+ 模式）
+- `spam_noise`（赌博/色情/平台垃圾内容噪声，>=2 类别组合时触发）
 
 ### 5.2 语义检测模块
 
