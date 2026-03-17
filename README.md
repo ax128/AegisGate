@@ -43,7 +43,21 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - 多个上游可同时使用，互不冲突
 - **无需注册 token、无需编辑配置、无需重启网关**
 
-> Docker 环境默认通过 `host.docker.internal` 访问宿主机端口（compose 已配置）。
+> **Docker 端口路由原理**：网关容器通过 `host.docker.internal:{端口}` 访问宿主机端口（compose 已配置 `extra_hosts`）。
+>
+> 因此，**上游服务的端口必须映射到宿主机**，端口路由才能到达。两种常见情况：
+>
+> | 上游运行方式 | 端口路由是否可用 | 说明 |
+> |-------------|:---:|------|
+> | 裸机运行在宿主机 | **可用** | 端口已在宿主机上监听，网关直接到达 |
+> | Docker 容器 | **需映射端口** | 上游 compose 必须配置 `ports: "127.0.0.1:{端口}:{端口}"`，否则网关无法通过 `host.docker.internal` 到达 |
+>
+> 示例：CLIProxyAPI 也运行在 Docker 中，需要在其 `docker-compose.yml` 中添加：
+> ```yaml
+> ports:
+>   - "127.0.0.1:8317:8317"   # 映射到宿主机，供网关端口路由到达
+> ```
+>
 > 裸机部署改 host：`AEGIS_LOCAL_PORT_ROUTING_HOST=127.0.0.1`
 
 ### 场景二：远程上游（网关与上游不在同一台服务器）
@@ -462,6 +476,27 @@ docker compose up -d --build
 - `expose: 18080`：同 Docker 网络内其它容器可通过服务名 `aegisgate:18080` 访问。
 - `extra_hosts: host.docker.internal:host-gateway`：容器内可访问宿主机服务（Linux/WSL2 也可用）。
 - 对公网暴露时，在网关前加 Caddy 做 TLS（参见上方 Caddy 配置示例）。
+
+**改端口 / 上游也在 Docker 中的情况**：
+
+网关默认监听 `18080`。如需改为其他端口（如 `28080`），需同时修改三处：
+```yaml
+# docker-compose.yml
+ports:
+  - "127.0.0.1:28080:28080"    # ① 宿主机映射
+expose:
+  - "28080"                     # ② 容器间暴露
+environment:
+  AEGIS_PORT: "28080"           # ③ 网关监听端口
+```
+
+上游服务也在 Docker 运行时，端口自动路由通过 `host.docker.internal` 访问宿主机端口，因此**上游容器必须映射端口到宿主机**：
+```yaml
+# 上游服务的 docker-compose.yml（示例：CLIProxyAPI）
+ports:
+  - "127.0.0.1:8317:8317"      # 映射到宿主机，网关才能通过端口路由到达
+```
+若上游不映射端口，网关请求 `host.docker.internal:8317` 会连接失败。
 
 查看日志：
 
