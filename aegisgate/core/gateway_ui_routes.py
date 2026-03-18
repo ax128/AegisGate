@@ -24,15 +24,11 @@ from aegisgate.core.gateway_auth import (
     _public_base_url,
     _string_field,
     _ui_csrf_token,
-    _verify_admin_gateway_key,
     _UI_SESSION_COOKIE,
 )
 from aegisgate.core.gateway_keys import (
-    _DEFAULT_ADMIN_PASSWORD,
     _FORBIDDEN_UPSTREAM_BASE_EXAMPLES,
     _ensure_gateway_key,
-    _is_admin_initialized,
-    _mark_admin_initialized,
     _normalize_required_whitelist_list,
 )
 from aegisgate.core.gateway_ui_config import (
@@ -162,11 +158,9 @@ def register_ui_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
         password = _string_field(body.get("password"))
         gateway_key = _ensure_gateway_key()
-        default_ok = (not _is_admin_initialized()) and password == _DEFAULT_ADMIN_PASSWORD
         key_ok = bool(password) and hmac.compare_digest(password.encode("utf-8"), gateway_key.encode("utf-8"))
-        if not (default_ok or key_ok):
+        if not key_ok:
             return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
-        _mark_admin_initialized()
         response = JSONResponse(content={"ok": True})
         response.set_cookie(
             key=_UI_SESSION_COOKIE,
@@ -193,11 +187,9 @@ def register_ui_routes(app: FastAPI) -> None:
         raw = gw_tokens_list()
         items = []
         for token, m in raw.items():
-            gk = m.get("gateway_key") or ""
             items.append({
                 "token": token,
                 "upstream_base": m.get("upstream_base", ""),
-                "gateway_key_hint": (gk[:6] + "…" + gk[-3:]) if len(gk) > 9 else ("*" * len(gk) if gk else ""),
                 "whitelist_keys": m.get("whitelist_key") or [],
             })
         return JSONResponse(content={"items": items})
@@ -211,14 +203,13 @@ def register_ui_routes(app: FastAPI) -> None:
         upstream_base = _string_field(body.get("upstream_base"))
         if not upstream_base:
             return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "upstream_base 为必填"})
-        gateway_key = _ensure_gateway_key()
         upstream_normalized = upstream_base.rstrip("/").lower()
         if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
             return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
         raw_whitelist = body.get("whitelist_key")
         whitelist = normalize_whitelist_keys(raw_whitelist) if raw_whitelist is not None else []
         try:
-            token, already = gw_tokens_register(upstream_base.rstrip("/"), gateway_key, whitelist)
+            token, already = gw_tokens_register(upstream_base.rstrip("/"), whitelist_key=whitelist)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
         base_url = f"{_public_base_url(request)}/v1/__gw__/t/{token}"
@@ -246,11 +237,6 @@ def register_ui_routes(app: FastAPI) -> None:
             if upstream_normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES:
                 return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
             kwargs["upstream_base"] = upstream_base.rstrip("/")
-        if "gateway_key" in body:
-            gk = _string_field(body["gateway_key"])
-            if not gk:
-                return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "gateway_key 不能为空"})
-            kwargs["gateway_key"] = gk
         if "whitelist_key" in body:
             kwargs["whitelist_key"] = body["whitelist_key"]
         if "new_token" in body:

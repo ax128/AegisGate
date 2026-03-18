@@ -81,7 +81,6 @@ def test_effective_gateway_headers_uses_scope_injected_upstream_and_key():
         "query_string": b"",
         "headers": [(b"authorization", b"Bearer demo"), (b"x-upstream-base", b"https://evil.example.com/v1")],
         "aegis_upstream_base": "https://upstream.example.com/v1",
-        "aegis_gateway_key": "agent",
     }
 
     async def receive():
@@ -90,7 +89,6 @@ def test_effective_gateway_headers_uses_scope_injected_upstream_and_key():
     request = Request(scope, receive)
     headers = _effective_gateway_headers(request)
     assert headers["x-upstream-base"] == "https://upstream.example.com/v1"
-    assert headers["gateway-key"] == "agent"
     assert headers["authorization"] == "Bearer demo"
 
 

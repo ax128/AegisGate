@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import socket
 from contextlib import AsyncExitStack
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Mapping
@@ -560,7 +561,30 @@ _SSRF_METADATA_HOSTS = frozenset({
 })
 
 
-def _is_ssrf_target(hostname: str) -> bool:
+def _is_blocked_target_ip(addr: ipaddress._BaseAddress) -> bool:
+    return not addr.is_global or addr.is_reserved
+
+
+async def _resolve_target_ips(hostname: str) -> set[ipaddress._BaseAddress]:
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(
+        hostname,
+        None,
+        type=socket.SOCK_STREAM,
+    )
+    resolved: set[ipaddress._BaseAddress] = set()
+    for family, _socktype, _proto, _canonname, sockaddr in infos:
+        candidate = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if family in {socket.AF_INET, socket.AF_INET6}:
+            resolved.add(addr)
+    return resolved
+
+
+async def _is_ssrf_target(hostname: str) -> bool:
     """Check if the hostname resolves to an internal/private IP or cloud metadata endpoint."""
     if not hostname:
         return True
@@ -577,17 +601,24 @@ def _is_ssrf_target(hostname: str) -> bool:
     # Block .internal TLD commonly used for cloud metadata
     if lowered.endswith(".internal"):
         return True
+    try:
+        resolved = await _resolve_target_ips(lowered)
+    except socket.gaierror:
+        logger.warning("v2 target dns lookup failed host=%s — blocking (fail-closed)", lowered)
+        return True
+    if any(_is_blocked_target_ip(addr) for addr in resolved):
+        return True
     return False
 
 
-def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
+async def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
     value = request.headers.get(_V2_TARGET_URL_HEADER, "").strip()
     if not value:
         return None, f"missing required header: {_V2_TARGET_URL_HEADER}"
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None, f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https"
-    if settings.v2_block_internal_targets and _is_ssrf_target(parsed.hostname or ""):
+    if settings.v2_block_internal_targets and await _is_ssrf_target(parsed.hostname or ""):
         return None, "target url points to an internal/private address (SSRF protection)"
     return value, None
 
@@ -872,7 +903,7 @@ def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
 async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     del proxy_path
 
-    target_url, err = _extract_target_url(request)
+    target_url, err = await _extract_target_url(request)
     if err:
         return JSONResponse(
             status_code=400,

@@ -82,7 +82,6 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   "tokens": {
     "remote-claude": {
       "upstream_base": "https://远程上游地址/v1",
-      "gateway_key": "上游API-Key",
       "whitelist_key": []
     }
   }
@@ -463,7 +462,7 @@ API: http://127.0.0.1:18080
 UI:  http://127.0.0.1:18080/__ui__/login
 ```
 
-> **首次登录**：密码为 `admin123`（一次性默认密码，仅全新部署第一次登录有效）。登录成功后系统写入初始化标记，之后需用 `config/aegis_gateway.key` 的内容登录。
+> **登录说明**：本地 UI 默认仅允许 loopback 访问，登录密码为 `config/aegis_gateway.key` 文件内容；如需允许内网访问，显式设置 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK=true`。
 
 说明：
 
@@ -615,6 +614,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即直接拦截并遮挡，不依赖阈值） | `false` |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | 本地端口自动路由（Docker 部署默认开启） | `false` |
 | `AEGIS_LOCAL_PORT_ROUTING_HOST` | 端口路由目标 Host | `host.docker.internal` |
+| `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK` | 本地 UI 是否允许内网访问（默认仅 loopback） | `false` |
 | `AEGIS_DOCKER_UPSTREAMS` | Docker 上游自动注入（格式：`token:service[:port]`，逗号分隔；见下方说明） | 空 |
 | `AEGIS_ENABLE_V2_PROXY` | 启用 v2 通用代理 | `true` |
 | `AEGIS_V2_ENABLE_REQUEST_REDACTION` | v2 请求体脱敏开关 | `true` |

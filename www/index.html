@@ -444,7 +444,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>Token 管理</h2>
-                <p class="panel-desc">注册上游地址与网关密钥，获取可用于转发请求的网关 Token；脱敏豁免字段中的值将跳过脱敏直接转发</p>
+                <p class="panel-desc">注册上游地址并生成路由 Token；脱敏豁免字段中的值将跳过脱敏直接转发</p>
               </div>
             </div>
 
@@ -472,13 +472,12 @@
                   <tr>
                     <th>Token（路由令牌）</th>
                     <th>上游地址</th>
-                    <th>网关密钥</th>
                     <th>脱敏豁免字段</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody id="token-tbody">
-                  <tr><td colspan="5" class="token-table-empty">加载中…</td></tr>
+                  <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
                 </tbody>
               </table>
             </div>
@@ -632,11 +631,6 @@
             <label for="modal-upstream">上游地址 <span style="color:var(--error)">*</span></label>
             <input id="modal-upstream" type="text" placeholder="https://api.openai.com/v1">
             <p class="field-hint">转发目标的 base URL，末尾无需加斜线</p>
-          </div>
-          <div class="modal-field hidden" id="modal-gateway-key-field">
-            <label for="modal-gateway-key">网关密钥（AEGIS_GATEWAY_KEY）</label>
-            <input id="modal-gateway-key" type="password" placeholder="留空保持不变，重新输入以更改">
-            <p class="field-hint">客户端访问此 Token 路径时须提供的认证密钥，对应服务端 AEGIS_GATEWAY_KEY</p>
           </div>
           <div class="modal-field">
             <label for="modal-whitelist">脱敏豁免字段（可选）</label>

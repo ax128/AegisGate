@@ -101,6 +101,7 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset({
     "request_hmac_secret",
     "v2_block_internal_targets",
     "trusted_proxy_ips",
+    "local_ui_allow_internal_network",
 })
 
 

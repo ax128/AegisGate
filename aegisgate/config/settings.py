@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     local_ui_session_ttl_seconds: int = 43_200
     local_ui_login_rate_limit_per_minute: int = 10
     local_ui_secure_cookie: bool = False
+    local_ui_allow_internal_network: bool = False
     # Block internal/private IPs as v2 target URL (SSRF protection)
     v2_block_internal_targets: bool = True
 

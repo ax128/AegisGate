@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **移除 Token 映射中的 `gateway_key` 字段**
+  - `gw_tokens.json` 不再包含 `gateway_key`，每个 token 仅绑定 `upstream_base` + `whitelist_key`
+  - 同一 `upstream_base` 只保留一个 token（此前按 `upstream_base + gateway_key` 组合去重）
+  - `/__gw__/register`、`/__gw__/add`、`/__gw__/remove`、`/__gw__/lookup`、`/__gw__/unregister` 等管理端点不再将请求体中的 `gateway_key` 写入映射或用于匹配 token（管理端点仍需要 `gateway_key` 做身份认证）
+  - `register()`、`find_token()`、`update()`、`update_and_rename()` 的 `gateway_key` 参数已废弃，传入时忽略
+  - UI Token 管理表格和编辑弹窗移除「网关密钥」列
+
+- **移除默认管理密码 `admin123`**
+  - 本地 UI 登录不再接受一次性默认密码，始终使用 `config/aegis_gateway.key` 文件内容
+  - 删除 `_is_admin_initialized()` / `_mark_admin_initialized()` 和 `.admin_initialized` 标记文件机制
+
+### Added
+
+- **本地 UI 访问范围收紧**：新增 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK` 配置项（默认 `false`）
+  - 默认仅允许 loopback（127.0.0.1 / ::1）访问 UI，内网 IP 被拒绝
+  - 显式设置为 `true` 时恢复此前行为（允许 RFC1918 内网访问）
+  - 属于不可变字段（immutable），变更需重启生效
+
+- **v2 SSRF 防护增强：DNS 解析检查**
+  - 新增 `_resolve_target_ips()` 异步 DNS 解析，阻止域名解析到内网/私有 IP 的请求
+  - DNS 解析失败时采用 fail-closed 策略（阻断请求），防止 DNS rebinding 攻击
+  - `_is_ssrf_target()` 和 `_extract_target_url()` 改为 async，避免同步 DNS 阻塞事件循环
+
+### Fixed
+
+- **上游 400 错误：tool name 包含非法字符**
+  - OpenAI Responses API 要求 `input[].name` 匹配 `^[a-zA-Z0-9_-]+`，包含中文等字符时被拒绝
+  - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）
+  - 非函数类型的 `name` 字段（如用户名）保持不变
+
 ### Added
 
 - **过滤模式（Filter Mode）**：token 路径支持 `__redact` 和 `__passthrough` 后缀，按需切换过滤行为

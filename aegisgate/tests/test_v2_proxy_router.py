@@ -10,6 +10,15 @@ from aegisgate.adapters.v2_proxy import router as v2_router
 from aegisgate.config.settings import settings
 
 
+@pytest.fixture(autouse=True)
+def _stub_dns_resolve(monkeypatch):
+    """Return a public IP for all DNS lookups so tests don't hit real DNS or get blocked by fail-closed."""
+    async def _fake_resolve(_hostname: str):
+        return {v2_router.ipaddress.ip_address("93.184.216.34")}
+
+    monkeypatch.setattr(v2_router, "_resolve_target_ips", _fake_resolve)
+
+
 def _build_request(
     *,
     path: str = "/v2/proxy",
@@ -547,6 +556,35 @@ async def test_v2_proxy_accepts_x_target_url_header(monkeypatch):
     response = await v2_router.proxy_v2(request)
     assert response.status_code == 200
     assert captured["url"] == "https://upstream.example.com/path"
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_blocks_hostname_resolving_to_private_ip(monkeypatch):
+    async def fake_resolve(hostname):
+        if hostname == "evil.example.com":
+            return {v2_router.ipaddress.ip_address("127.0.0.1")}
+        return set()
+
+    monkeypatch.setattr(v2_router, "_resolve_target_ips", fake_resolve)
+    request = _build_request(headers={"x-target-url": "https://evil.example.com/path"}, body=b"{}")
+    response = await v2_router.proxy_v2(request)
+    assert response.status_code == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["message"] == "target url points to an internal/private address (SSRF protection)"
+
+
+@pytest.mark.asyncio
+async def test_v2_proxy_blocks_unresolved_hostname_fail_closed(monkeypatch):
+    """DNS resolution failure should block the request (fail-closed)."""
+    async def fake_resolve(_hostname: str):
+        raise v2_router.socket.gaierror("dns unavailable")
+
+    monkeypatch.setattr(v2_router, "_resolve_target_ips", fake_resolve)
+    request = _build_request(headers={"x-target-url": "https://unresolved.example.com/path"}, body=b"{}")
+    response = await v2_router.proxy_v2(request)
+    assert response.status_code == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["message"] == "target url points to an internal/private address (SSRF protection)"
 
 
 @pytest.mark.asyncio

@@ -152,3 +152,33 @@ def test_sanitize_responses_input_for_upstream_respects_whitelist_key():
     content = sanitized[0]["content"]
     assert "bn_key=sk-abcdeABCDE1234567890xyz" in content
     assert "sk-zzzzzzzzzz1234567890" not in content
+
+
+def test_sanitize_responses_input_for_upstream_sanitizes_tool_name():
+    payload = [
+        {
+            "type": "function_call",
+            "name": "读取文件_test",
+            "arguments": "{}",
+            "call_id": "call_1",
+        },
+        {
+            "type": "function_call_output",
+            "name": "写入/文件.txt",
+            "call_id": "call_2",
+            "output": "ok",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "name": "用户名",
+            "content": "hello",
+        },
+    ]
+
+    sanitized = openai_router._sanitize_responses_input_for_upstream(payload)
+    # function_call and function_call_output names should be sanitized
+    assert sanitized[0]["name"] == "_____test"
+    assert sanitized[1]["name"] == "______txt"
+    # non-function type name should NOT be sanitized
+    assert sanitized[2]["name"] == "用户名"

@@ -15,36 +15,7 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 # ---------------------------------------------------------------------------
 _GATEWAY_KEY_FILE = "aegis_gateway.key"
 
-_ADMIN_INIT_MARKER_FILE = ".admin_initialized"
-_DEFAULT_ADMIN_PASSWORD = "admin123"
-
 _gateway_key_cached: str | None = None
-
-
-def _is_admin_initialized() -> bool:
-    """Return True if the admin UI has been accessed at least once."""
-    for candidate in (
-        (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve(),
-        Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE,
-    ):
-        if candidate.is_file():
-            return True
-    return False
-
-
-def _mark_admin_initialized() -> None:
-    """Create the admin init marker file so default password is no longer valid."""
-    marker = (Path.cwd() / "config" / _ADMIN_INIT_MARKER_FILE).resolve()
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    except OSError:
-        try:
-            fallback = Path("/tmp/aegisgate") / _ADMIN_INIT_MARKER_FILE
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            fallback.touch()
-        except OSError:
-            pass
 
 
 def _ensure_gateway_key() -> str:

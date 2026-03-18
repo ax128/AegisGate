@@ -48,7 +48,7 @@ def _build_request(path: str, body: dict, headers: dict[str, str] | None = None)
 
 @pytest.mark.asyncio
 async def test_gw_register_base_url_prefers_request_host(monkeypatch):
-    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
+    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, whitelist_key=None: ("token123", False))
     request = _build_request(
         "/__gw__/register",
         {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": ["bn_key"]},
@@ -62,7 +62,7 @@ async def test_gw_register_base_url_prefers_request_host(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gw_register_base_url_uses_forwarded_headers(monkeypatch):
-    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, key, whitelist_key=None: ("token123", False))
+    monkeypatch.setattr(gateway, "gw_tokens_register", lambda upstream, whitelist_key=None: ("token123", False))
     # 127.0.0.1 must be a trusted proxy for forwarded headers to be honoured.
     monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "127.0.0.1")
     monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
@@ -90,7 +90,7 @@ def test_sanitize_public_host_replaces_zero_host():
 async def test_gw_register_accepts_set_like_whitelist_payload(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_register(upstream, key, whitelist_key=None):
+    def fake_register(upstream, whitelist_key=None):
         captured["whitelist_key"] = whitelist_key
         return "token123", False
 
@@ -143,19 +143,16 @@ async def test_gw_register_rejects_example_upstream():
 async def test_gw_add_appends_whitelist_keys(monkeypatch):
     state = {
         "upstream_base": "https://gmn.chuangzuoli.com/v1",
-        "gateway_key": "agent",
         "whitelist_key": ["bn_key"],
     }
     monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: dict(state) if token == "tok123" else None)
-    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda _upstream, _key: "tok123")
+    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda _upstream: "tok123")
     captured: dict[str, object] = {}
 
     def fake_update(_token, *, upstream_base=None, gateway_key=None, whitelist_key=None):
         captured["upstream_base"] = upstream_base
-        captured["gateway_key"] = gateway_key
         captured["whitelist_key"] = list(whitelist_key or [])
         state["upstream_base"] = str(upstream_base or state["upstream_base"])
-        state["gateway_key"] = str(gateway_key or state["gateway_key"])
         state["whitelist_key"] = list(whitelist_key or [])
         return True
 
@@ -171,26 +168,23 @@ async def test_gw_add_appends_whitelist_keys(monkeypatch):
     assert body["added"] == ["okx_key"]
     assert body["whitelist_key"] == ["bn_key", "okx_key"]
     assert captured["upstream_base"] == "https://gmn.chuangzuoli.com/v1"
-    assert captured["gateway_key"] == "agent"
 
 
 @pytest.mark.asyncio
 async def test_gw_add_replaces_upstream_base_when_provided(monkeypatch):
     state = {
         "upstream_base": "https://old.example.com/v1",
-        "gateway_key": "agent",
         "whitelist_key": ["bn_key"],
     }
     monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: dict(state) if token == "tok123" else None)
     monkeypatch.setattr(
         gateway,
         "gw_tokens_find_token",
-        lambda upstream, key: "tok123" if (upstream, key) == ("https://new.example.com/v1", "agent") else None,
+        lambda upstream: "tok123" if upstream == "https://new.example.com/v1" else None,
     )
 
     def fake_update(_token, *, upstream_base=None, gateway_key=None, whitelist_key=None):
         state["upstream_base"] = str(upstream_base or state["upstream_base"])
-        state["gateway_key"] = str(gateway_key or state["gateway_key"])
         state["whitelist_key"] = list(whitelist_key or [])
         return True
 
@@ -217,11 +211,11 @@ async def test_gw_add_rejects_upstream_pair_conflict(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://old.example.com/v1", "gateway_key": "agent", "whitelist_key": []}
+        lambda token: {"upstream_base": "https://old.example.com/v1", "whitelist_key": []}
         if token == "tok123"
         else None,
     )
-    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda upstream, key: "othertok" if (upstream, key) == ("https://new.example.com/v1", "agent") else None)
+    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda upstream: "othertok" if upstream == "https://new.example.com/v1" else None)
     request = _build_request(
         "/__gw__/add",
         {
@@ -242,14 +236,12 @@ async def test_gw_add_rejects_upstream_pair_conflict(monkeypatch):
 async def test_gw_remove_deletes_whitelist_keys(monkeypatch):
     state = {
         "upstream_base": "https://gmn.chuangzuoli.com/v1",
-        "gateway_key": "agent",
         "whitelist_key": ["bn_key", "okx_key"],
     }
     monkeypatch.setattr(gateway, "gw_tokens_get", lambda token: dict(state) if token == "tok123" else None)
 
     def fake_update(_token, *, upstream_base=None, gateway_key=None, whitelist_key=None):
         state["upstream_base"] = str(upstream_base or state["upstream_base"])
-        state["gateway_key"] = str(gateway_key or state["gateway_key"])
         state["whitelist_key"] = list(whitelist_key or [])
         return True
 
@@ -284,7 +276,7 @@ async def test_gw_add_rejects_gateway_key_mismatch(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": []}
+        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "whitelist_key": []}
         if token == "tok123"
         else None,
     )
@@ -306,7 +298,6 @@ async def test_gw_register_without_whitelist_keeps_existing(monkeypatch):
     call_shape: dict[str, object] = {}
     state = {
         "upstream_base": "https://gmn.chuangzuoli.com/v1",
-        "gateway_key": "agent",
         "whitelist_key": ["bn_key"],
     }
 
@@ -324,7 +315,7 @@ async def test_gw_register_without_whitelist_keeps_existing(monkeypatch):
     resp = await gateway.gw_register(request)
     body = json.loads(resp.body.decode("utf-8"))
     assert resp.status_code == 200
-    assert call_shape["arg_count"] == 2
+    assert call_shape["arg_count"] == 1
     assert body["already_registered"] is True
     assert body["whitelist_key"] == ["bn_key"]
 
@@ -334,11 +325,11 @@ async def test_gw_add_returns_404_when_update_fails(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": []}
+        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "whitelist_key": []}
         if token == "tok123"
         else None,
     )
-    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda _upstream, _key: "tok123")
+    monkeypatch.setattr(gateway, "gw_tokens_find_token", lambda _upstream: "tok123")
     monkeypatch.setattr(gateway, "gw_tokens_update", lambda *_args, **_kwargs: False)
     request = _build_request(
         "/__gw__/add",
@@ -356,7 +347,7 @@ async def test_gw_remove_returns_404_when_update_fails(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": ["bn_key"]}
+        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "whitelist_key": ["bn_key"]}
         if token == "tok123"
         else None,
     )
@@ -390,7 +381,7 @@ async def test_gw_unregister_rejects_gateway_key_mismatch(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": []}
+        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "whitelist_key": []}
         if token == "tok123"
         else None,
     )
@@ -411,7 +402,7 @@ async def test_gw_unregister_success(monkeypatch):
     monkeypatch.setattr(
         gateway,
         "gw_tokens_get",
-        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "gateway_key": "agent", "whitelist_key": []}
+        lambda token: {"upstream_base": "https://gmn.chuangzuoli.com/v1", "whitelist_key": []}
         if token == "tok123"
         else None,
     )

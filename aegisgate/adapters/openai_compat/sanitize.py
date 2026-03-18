@@ -338,6 +338,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     return None
 
             copied: dict[str, Any] = dict(node)
+
             for key, item in node.items():
                 child_path = f"{path}.{key}" if path else key
 
@@ -367,6 +368,12 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     continue
 
                 copied[key] = _sanitize(item, path=child_path, role=node_role, field=key)
+
+            # Sanitize tool/function name to match upstream pattern ^[a-zA-Z0-9_-]+
+            if node_type in {"function_call", "function", "function_call_output"} and "name" in copied and isinstance(copied["name"], str):
+                sanitized_name = re.sub(r"[^a-zA-Z0-9_-]", "_", copied["name"])
+                copied["name"] = sanitized_name or "_"
+
             return copied
 
         return node

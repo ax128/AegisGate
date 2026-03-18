@@ -16,6 +16,7 @@ def _build_request(
     client_host: str = "127.0.0.1",
     method: str = "GET",
     headers: dict[str, str] | None = None,
+    body: bytes = b"",
 ) -> Request:
     raw_headers = []
     for key, value in (headers or {}).items():
@@ -34,10 +35,26 @@ def _build_request(
         "server": ("127.0.0.1", 18080),
     }
 
+    sent = False
+
     async def receive() -> dict:
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
 
     return Request(scope, receive)
+
+
+def _find_route_handler(path: str, method: str):
+    for route in gateway.app.router.routes:
+        if getattr(route, "path", None) != path:
+            continue
+        methods = getattr(route, "methods", None) or set()
+        if method.upper() in methods:
+            return route.endpoint
+    raise AssertionError(f"route not found: {method} {path}")
 
 
 async def _allow_next(_request: Request):
@@ -62,6 +79,23 @@ async def test_boundary_blocks_local_ui_from_public_ip():
 
 
 @pytest.mark.asyncio
+async def test_boundary_blocks_local_ui_from_private_ip_by_default():
+    request = _build_request("/__ui__", client_host="10.0.0.8")
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 403
+    body = json.loads(bytes(response.body).decode("utf-8"))
+    assert body["error"]["code"] == "local_ui_network_restricted"
+
+
+@pytest.mark.asyncio
+async def test_boundary_allows_local_ui_from_private_ip_when_enabled(monkeypatch):
+    monkeypatch.setattr(gateway.settings, "local_ui_allow_internal_network", True)
+    request = _build_request("/__ui__/login", client_host="10.0.0.8")
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_boundary_redirects_unauthenticated_local_ui_requests():
     request = _build_request("/__ui__", client_host="127.0.0.1")
     response = await gateway.security_boundary_middleware(request, _allow_next)
@@ -81,6 +115,21 @@ async def test_boundary_allows_authenticated_local_ui_requests(monkeypatch):
     )
     response = await gateway.security_boundary_middleware(request, _allow_next)
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_local_ui_login_rejects_default_password(monkeypatch):
+    monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
+    handler = _find_route_handler("/__ui__/api/login", "POST")
+    request = _build_request(
+        "/__ui__/api/login",
+        method="POST",
+        headers={"content-type": "application/json"},
+        body=b'{"password":"admin123"}',
+    )
+    response = await handler(request)
+    assert response.status_code == 403
+    assert b"ui_login_failed" in response.body
 
 
 def test_local_ui_bootstrap_returns_expected_fields():
@@ -106,13 +155,16 @@ def test_local_ui_index_serves_html_file():
 
 def test_login_and_docs_require_auth(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
-    monkeypatch.setattr(gateway, "_is_internal_ip", lambda host: host in {"127.0.0.1", "testclient"})
+    monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     with TestClient(gateway.app, base_url="http://127.0.0.1") as client:
         bootstrap = client.get("/__ui__/api/bootstrap", follow_redirects=False)
         assert bootstrap.status_code == 401
 
         failed = client.post("/__ui__/api/login", json={"password": "wrong"})
         assert failed.status_code == 403
+
+        default_password = client.post("/__ui__/api/login", json={"password": "admin123"})
+        assert default_password.status_code == 403
 
         logged_in = client.post("/__ui__/api/login", json={"password": "agent"})
         assert logged_in.status_code == 200
@@ -138,7 +190,7 @@ def test_login_and_docs_require_auth(monkeypatch):
 
 def test_ui_session_is_bound_to_user_agent(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
-    monkeypatch.setattr(gateway, "_is_internal_ip", lambda host: host in {"127.0.0.1", "testclient"})
+    monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     with TestClient(gateway.app, base_url="http://127.0.0.1", headers={"user-agent": "agent-a"}) as client_a:
         login = client_a.post("/__ui__/api/login", json={"password": "agent"})
         assert login.status_code == 200
@@ -152,7 +204,7 @@ def test_ui_session_is_bound_to_user_agent(monkeypatch):
 
 def test_ui_login_rate_limit(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
-    monkeypatch.setattr(gateway, "_is_internal_ip", lambda host: host in {"127.0.0.1", "testclient"})
+    monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     monkeypatch.setattr(gateway._UI_LOGIN_RATE_LIMITER, "_max", 1)
     gateway._UI_LOGIN_RATE_LIMITER._buckets.clear()
     with TestClient(gateway.app, base_url="http://127.0.0.1") as client:
@@ -175,7 +227,7 @@ def test_ui_config_payload_contains_defaults():
 
 def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
-    monkeypatch.setattr(gateway, "_is_internal_ip", lambda host: host in {"127.0.0.1", "testclient"})
+    monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     env_path = tmp_path / ".env"
     env_path.write_text("AEGIS_LOG_LEVEL=info\nAEGIS_SECURITY_LEVEL=medium\n", encoding="utf-8")
     monkeypatch.setattr(gateway_ui_config, "_ENV_PATH", env_path)

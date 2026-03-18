@@ -4,17 +4,14 @@
   "tokens": {
     "sub2api": {
       "upstream_base": "http://sub2api:8080/v1",
-      "gateway_key": "sub2api管理后台分配的API-Key",
       "whitelist_key": []
     },
     "aiclient": {
       "upstream_base": "http://aiclient2api:3000/v1",
-      "gateway_key": "aiclient管理后台分配的API-Key",
       "whitelist_key": []
     },
     "my-openai": {
       "upstream_base": "https://api.openai.com/v1",
-      "gateway_key": "sk-xxxxxxxx",
       "whitelist_key": []
     }
   }

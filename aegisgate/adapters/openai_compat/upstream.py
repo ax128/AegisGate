@@ -98,9 +98,6 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()
-    injected_gateway_key = request.scope.get("aegis_gateway_key")
-    if isinstance(injected_gateway_key, str) and injected_gateway_key.strip():
-        headers[settings.gateway_key_header] = injected_gateway_key.strip()
     injected_whitelist_keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
     if injected_whitelist_keys:
         headers[_REDACTION_WHITELIST_HEADER] = ",".join(injected_whitelist_keys)

@@ -360,13 +360,13 @@ async function loadTokens() {
   const tbody = document.getElementById("token-tbody");
   const countEl = document.getElementById("token-count");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="5" class="token-table-empty">加载中…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
   try {
     const data = await fetchJson("/__ui__/api/tokens");
     const items = Array.isArray(data.items) ? data.items : [];
     if (countEl) countEl.textContent = `共 ${items.length} 个 Token`;
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="5" class="token-table-empty">暂无已注册的 Token，点击右上角「注册 Token」添加。</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">暂无已注册的 Token，点击右上角「注册 Token」添加。</td></tr>`;
       return;
     }
     tbody.innerHTML = "";
@@ -383,7 +383,6 @@ async function loadTokens() {
           </button>
         </td>
         <td><div class="token-upstream" title="${escapeHtml(item.upstream_base)}">${escapeHtml(item.upstream_base)}</div></td>
-        <td><span class="token-key-hint">${escapeHtml(item.gateway_key_hint || "—")}</span></td>
         <td><span class="token-wl-count" title="${escapeHtml(wlTitle)}">${wlCount || "∞"}</span></td>
         <td style="white-space:nowrap;">
           <button class="btn-edit-sm" data-edit-token="${escapeHtml(item.token)}" data-edit-upstream="${escapeHtml(item.upstream_base)}" data-edit-whitelist="${escapeHtml((item.whitelist_keys||[]).join(', '))}">
@@ -435,7 +434,7 @@ async function loadTokens() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="5" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
     if (countEl) countEl.textContent = "加载失败";
   }
 }
@@ -447,11 +446,9 @@ function openTokenModal() {
   document.getElementById("modal-title").textContent = "注册新 Token";
   document.getElementById("modal-token-input").value = "";
   document.getElementById("modal-upstream").value = "";
-  document.getElementById("modal-gateway-key").value = "";
   document.getElementById("modal-whitelist").value = "";
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.add("hidden");
-  document.getElementById("modal-gateway-key-field").classList.add("hidden");
   document.getElementById("modal-submit").textContent = "注册";
   modal.classList.remove("hidden");
   document.getElementById("modal-upstream").focus();
@@ -464,11 +461,9 @@ function openEditModal(item) {
   document.getElementById("modal-title").textContent = "编辑 Token";
   document.getElementById("modal-token-input").value = item.token;
   document.getElementById("modal-upstream").value = item.upstream_base || "";
-  document.getElementById("modal-gateway-key").value = "";
   document.getElementById("modal-whitelist").value = (item.whitelist_keys || []).join(", ");
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.remove("hidden");
-  document.getElementById("modal-gateway-key-field").classList.remove("hidden");
   document.getElementById("modal-submit").textContent = "保存";
   modal.classList.remove("hidden");
   document.getElementById("modal-upstream").focus();
@@ -485,8 +480,6 @@ async function submitTokenModal() {
   const isEdit = !!editToken;
   const newTokenInput = document.getElementById("modal-token-input").value.trim();
   const upstream = document.getElementById("modal-upstream").value.trim();
-  // Only read gatewayKey in edit mode; field is hidden (and irrelevant) during register
-  const gatewayKey = isEdit ? document.getElementById("modal-gateway-key").value.trim() : "";
   const whitelist = document.getElementById("modal-whitelist").value.trim();
   const whitelistArr = whitelist ? whitelist.split(",").map((s) => s.trim()).filter(Boolean) : [];
   errorEl.textContent = "";
@@ -497,7 +490,6 @@ async function submitTokenModal() {
   if (isEdit) {
     // PATCH mode
     const body = { upstream_base: upstream, whitelist_key: whitelistArr };
-    if (gatewayKey) body.gateway_key = gatewayKey;
     if (newTokenInput && newTokenInput !== editToken) body.new_token = newTokenInput;
     submitBtn.disabled = true;
     submitBtn.textContent = "保存中…";

@@ -17,7 +17,7 @@ from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
-# 内存映射：token -> {"upstream_base": str, "gateway_key": str, "whitelist_key": list[str]}
+# 内存映射：token -> {"upstream_base": str, "whitelist_key": list[str]}
 _tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _TOKEN_LEN = 24
@@ -53,10 +53,9 @@ def load() -> None:
             if isinstance(tokens, dict):
                 _tokens.clear()
                 for k, v in tokens.items():
-                    if isinstance(v, dict) and "upstream_base" in v and "gateway_key" in v:
+                    if isinstance(v, dict) and "upstream_base" in v:
                         _tokens[str(k)] = {
                             "upstream_base": str(v["upstream_base"]),
-                            "gateway_key": str(v["gateway_key"]),
                             "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
                         }
                 logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
@@ -97,7 +96,6 @@ def get(token: str) -> dict[str, Any] | None:
             host = (settings.local_port_routing_host or "host.docker.internal").strip()
             return {
                 "upstream_base": f"http://{host}:{port}/v1",
-                "gateway_key": "",
                 "whitelist_key": [],
             }
     return None
@@ -107,43 +105,46 @@ def _normalize_upstream(s: str) -> str:
     return (s or "").strip().rstrip("/")
 
 
-def _find_token_holding_lock(ub: str, gk: str) -> str | None:
-    """在已持有 _lock 时根据 (upstream_base, gateway_key) 查找 token。"""
+def _find_token_holding_lock(ub: str) -> str | None:
+    """在已持有 _lock 时根据 upstream_base 查找 token。"""
     for token, m in _tokens.items():
-        if _normalize_upstream(m["upstream_base"]) == ub and (m.get("gateway_key") or "").strip() == gk:
+        if _normalize_upstream(m["upstream_base"]) == ub:
             return token
     return None
 
 
-def find_token(upstream_base: str, gateway_key: str) -> str | None:
+def find_token(upstream_base: str, gateway_key: str | None = None, **_kwargs: Any) -> str | None:
     """
-    根据 upstream_base + gateway_key 查找已注册的 token。
+    根据 upstream_base 查找已注册的 token。
     不存在返回 None。比较时做与 register 一致的规范化。
+
+    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
     """
     ub = _normalize_upstream(upstream_base)
-    gk = (gateway_key or "").strip()
-    if not ub or not gk:
+    if not ub:
         return None
     with _lock:
-        return _find_token_holding_lock(ub, gk)
+        return _find_token_holding_lock(ub)
 
 
-def register(upstream_base: str, gateway_key: str, whitelist_key: Any = _WHITELIST_UNSET) -> tuple[str, bool]:
+def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _WHITELIST_UNSET, **_kwargs: Any) -> tuple[str, bool]:
     """
-    注册：同一 (upstream_base, gateway_key) 只保留一个 token。
+    注册：同一 upstream_base 只保留一个 token。
     若已存在则返回 (已有 token, True)，否则新建并返回 (新 token, False)。
     未传 whitelist_key 时，已存在映射的 whitelist_key 保持不变。
+
+    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
     """
+    # Backward compat: register(ub, ["key1"]) — positional list was whitelist_key
+    if whitelist_key is _WHITELIST_UNSET and gateway_key is not None and not isinstance(gateway_key, str):
+        whitelist_key = gateway_key
     upstream_base = _normalize_upstream(upstream_base)
     if not upstream_base:
         raise ValueError("upstream_base required")
-    gateway_key = (gateway_key or "").strip()
-    if not gateway_key:
-        raise ValueError("gateway_key required")
     whitelist_provided = whitelist_key is not _WHITELIST_UNSET
     whitelist_keys = normalize_whitelist_keys(whitelist_key) if whitelist_provided else []
     with _lock:
-        existing = _find_token_holding_lock(upstream_base, gateway_key)
+        existing = _find_token_holding_lock(upstream_base)
         if existing is not None:
             if whitelist_provided:
                 mapping = _tokens.get(existing) or {}
@@ -161,7 +162,6 @@ def register(upstream_base: str, gateway_key: str, whitelist_key: Any = _WHITELI
             token = _generate_alnum_token(_TOKEN_LEN)
         _tokens[token] = {
             "upstream_base": upstream_base,
-            "gateway_key": gateway_key,
             "whitelist_key": whitelist_keys if whitelist_provided else [],
         }
         _save()
@@ -178,8 +178,11 @@ def unregister(token: str) -> bool:
         return True
 
 
-def update(token: str, *, upstream_base: str | None = None, gateway_key: str | None = None, whitelist_key: Any = None) -> bool:
-    """按 token 更新映射并持久化。token 不存在返回 False。"""
+def update(token: str, *, upstream_base: str | None = None, gateway_key: str | None = None, whitelist_key: Any = None, **_kwargs: Any) -> bool:
+    """按 token 更新映射并持久化。token 不存在返回 False。
+
+    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
+    """
     with _lock:
         mapping = _tokens.get(token)
         if mapping is None:
@@ -190,11 +193,6 @@ def update(token: str, *, upstream_base: str | None = None, gateway_key: str | N
             if not normalized_upstream:
                 raise ValueError("upstream_base required")
             next_mapping["upstream_base"] = normalized_upstream
-        if gateway_key is not None:
-            normalized_gateway_key = (gateway_key or "").strip()
-            if not normalized_gateway_key:
-                raise ValueError("gateway_key required")
-            next_mapping["gateway_key"] = normalized_gateway_key
         if whitelist_key is not None:
             next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
         _tokens[token] = next_mapping
@@ -209,9 +207,12 @@ def update_and_rename(
     gateway_key: str | None = None,
     whitelist_key: Any = None,
     new_token: str | None = None,
+    **_kwargs: Any,
 ) -> bool:
     """在单一锁内同时更新映射字段并可选地重命名 token，保证原子性。
     token 不存在返回 False；new_token 已存在或字段非法抛 ValueError。
+
+    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
     """
     with _lock:
         mapping = _tokens.get(token)
@@ -223,11 +224,6 @@ def update_and_rename(
             if not normalized_upstream:
                 raise ValueError("upstream_base required")
             next_mapping["upstream_base"] = normalized_upstream
-        if gateway_key is not None:
-            normalized_gk = (gateway_key or "").strip()
-            if not normalized_gk:
-                raise ValueError("gateway_key required")
-            next_mapping["gateway_key"] = normalized_gk
         if whitelist_key is not None:
             next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
         active_token = token
@@ -281,7 +277,6 @@ def inject_docker_upstreams() -> int:
         with _lock:
             _tokens[token] = {
                 "upstream_base": upstream_base,
-                "gateway_key": "",
                 "whitelist_key": [],
             }
         injected += 1
