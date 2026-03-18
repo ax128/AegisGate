@@ -93,8 +93,14 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         return "response_blocked"
     if ctx.response_disposition == "sanitize":
         return "response_sanitized"
+    # tool_call_violation 仅在实际 block 动作时才阻断流；review 动作不阻断
     if "tool_call_violation" in ctx.security_tags:
-        return "response_tool_call_violation"
+        has_block_action = any(
+            a.endswith(":block") and a.startswith("tool_call_guard:")
+            for a in ctx.enforcement_actions
+        )
+        if has_block_action:
+            return "response_tool_call_violation"
     if ctx.requires_human_review and any(tag.startswith("response_") for tag in ctx.security_tags):
         return "response_human_review_required"
 

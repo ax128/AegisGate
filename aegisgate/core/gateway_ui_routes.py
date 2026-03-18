@@ -99,6 +99,11 @@ def register_ui_routes(app: FastAPI) -> None:
     def local_ui_docs_list() -> dict[str, object]:
         return {"items": _docs_catalog()}
 
+    @app.get("/__ui__/api/stats")
+    def local_ui_stats() -> JSONResponse:
+        from aegisgate.core.stats import snapshot
+        return JSONResponse(content=snapshot())
+
     @app.get("/__ui__/api/config")
     def local_ui_config() -> dict[str, object]:
         return _ui_config_payload()

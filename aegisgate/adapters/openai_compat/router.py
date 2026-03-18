@@ -2468,6 +2468,8 @@ def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> Non
             "report": ctx.report_items,
         }
     )
+    from aegisgate.core.stats import record as stats_record
+    stats_record(ctx)
 
 
 def _error_response(status_code: int, reason: str, detail: str, ctx: RequestContext, boundary: dict | None = None) -> JSONResponse:

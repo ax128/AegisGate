@@ -1087,8 +1087,70 @@ function bindComposeUI() {
   loadComposeFile("docker-compose.yml");
 }
 
+// ─── Stats Dashboard ─────────────────────
+
+var currentStatsView = "hourly";
+
+async function loadStats() {
+  var tbody = document.getElementById("stats-tbody");
+  var sinceEl = document.getElementById("stats-since");
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty">加载中...</td></tr>';
+  try {
+    var data = await fetchJson("/__ui__/api/stats");
+    var t = data.totals || {};
+    document.getElementById("stats-total-requests").textContent = (t.requests || 0).toLocaleString();
+    document.getElementById("stats-total-redactions").textContent = (t.redactions || 0).toLocaleString();
+    document.getElementById("stats-total-dangerous").textContent = (t.dangerous_replaced || 0).toLocaleString();
+    document.getElementById("stats-total-blocked").textContent = (t.blocked || 0).toLocaleString();
+    document.getElementById("stats-total-passthrough").textContent = (t.passthrough || 0).toLocaleString();
+    if (sinceEl && data.since) sinceEl.textContent = "统计起始: " + data.since.replace("T", " ").replace(/\+.*/, "");
+
+    var rows = currentStatsView === "hourly" ? data.hourly : data.daily;
+    var timeKey = currentStatsView === "hourly" ? "hour" : "date";
+    var thead = document.getElementById("stats-thead");
+    if (thead) thead.innerHTML = "<tr><th>" + (currentStatsView === "hourly" ? "小时" : "日期") + "</th><th>请求</th><th>脱敏</th><th>危险替换</th><th>拦截</th><th>直通</th></tr>";
+
+    if (!rows || !rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty">暂无数据</td></tr>';
+      return;
+    }
+    tbody.innerHTML = "";
+    rows.slice().reverse().forEach(function(row) {
+      var tr = document.createElement("tr");
+      var label = row[timeKey] || "";
+      if (currentStatsView === "hourly" && label.length >= 13) label = label.slice(5) + ":00";
+      tr.innerHTML =
+        "<td>" + escapeHtml(label) + "</td>" +
+        "<td>" + (row.requests || 0).toLocaleString() + "</td>" +
+        "<td>" + (row.redactions || 0).toLocaleString() + "</td>" +
+        "<td>" + (row.dangerous_replaced || 0).toLocaleString() + "</td>" +
+        "<td>" + (row.blocked || 0).toLocaleString() + "</td>" +
+        "<td>" + (row.passthrough || 0).toLocaleString() + "</td>";
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty" style="color:var(--error)">加载失败: ' + escapeHtml(err.message) + '</td></tr>';
+  }
+}
+
+function bindStatsUI() {
+  document.querySelectorAll("[data-stats-view]").forEach(function(tab) {
+    tab.addEventListener("click", function() {
+      document.querySelectorAll("[data-stats-view]").forEach(function(t) { t.classList.remove("active"); });
+      tab.classList.add("active");
+      currentStatsView = tab.dataset.statsView;
+      loadStats();
+    });
+  });
+  var refreshBtn = document.getElementById("stats-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", loadStats);
+  loadStats();
+}
+
 // ─── Init new UI modules ─────────────────────
 
 bindRulesUI();
 bindKeysUI();
 bindComposeUI();
+bindStatsUI();

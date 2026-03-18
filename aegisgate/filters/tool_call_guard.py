@@ -12,6 +12,23 @@ from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 
 
+# 编码工具：参数是代码/diff 内容，跳过 dangerous_param 扫描避免误报
+_CODE_CONTENT_TOOLS = frozenset({
+    # 文件操作
+    "apply_patch", "write", "edit", "read", "glob", "grep", "patch",
+    "str_replace_editor", "file_editor", "create_file", "replace_in_file",
+    "insert_code_block", "write_file", "read_file", "delete_file",
+    # 终端/执行
+    "bash", "shell", "terminal", "computer_call", "run_command", "execute",
+    # Notebook
+    "notebook_edit", "notebookedit",
+    # 搜索/浏览
+    "web_search", "webfetch", "web_fetch", "browser", "search",
+    # 通用 Agent 工具
+    "todowrite", "task", "submit", "multi_tool_use.parallel",
+})
+
+
 class ToolCallGuard(BaseFilter):
     name = "tool_call_guard"
 
@@ -164,13 +181,24 @@ class ToolCallGuard(BaseFilter):
                 violations.append(f"disallowed_tool:{tool_name}")
                 action = self._apply_action(ctx, "disallowed_tool")
                 blocked = blocked or action == "block"
+                logger.debug(
+                    "disallowed_tool hit request_id=%s tool=%s action=%s",
+                    ctx.request_id, tool_name, action,
+                )
 
-            for pattern in self._dangerous_param_patterns:
-                if pattern.search(args_text):
-                    violations.append(f"dangerous_param:{tool_name or 'unknown'}")
-                    action = self._apply_action(ctx, "dangerous_param")
-                    blocked = blocked or action == "block"
-                    break
+            if tool_name.lower() not in _CODE_CONTENT_TOOLS:
+                for pattern in self._dangerous_param_patterns:
+                    match = pattern.search(args_text)
+                    if match:
+                        matched_text = match.group(0)[:120]
+                        violations.append(f"dangerous_param:{tool_name or 'unknown'}")
+                        action = self._apply_action(ctx, "dangerous_param")
+                        blocked = blocked or action == "block"
+                        logger.debug(
+                            "dangerous_param hit request_id=%s tool=%s pattern=%s matched=%s",
+                            ctx.request_id, tool_name, pattern.pattern[:60], matched_text,
+                        )
+                        break
 
             if isinstance(args, dict):
                 for (rule_tool, rule_param), rule_pattern in self._param_rules.items():
@@ -186,10 +214,16 @@ class ToolCallGuard(BaseFilter):
 
             semantic_input = f"{tool_name} {args_text}"
             for pattern in self._semantic_patterns:
-                if pattern.search(semantic_input):
+                match = pattern.search(semantic_input)
+                if match:
+                    matched_text = match.group(0)[:120]
                     violations.append(f"semantic_review:{tool_name or 'unknown'}")
                     action = self._apply_action(ctx, "semantic_review")
                     blocked = blocked or action == "block"
+                    logger.debug(
+                        "semantic_review hit request_id=%s tool=%s pattern=%s matched=%s",
+                        ctx.request_id, tool_name, pattern.pattern[:60], matched_text,
+                    )
                     break
 
         if violations:

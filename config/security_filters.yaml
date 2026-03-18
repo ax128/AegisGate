@@ -886,7 +886,7 @@ action_map:
     partial_restore: review
   tool_call_guard:
     disallowed_tool: review
-    dangerous_param: block
+    dangerous_param: review
     invalid_param: review
     semantic_review: review
   sanitizer:

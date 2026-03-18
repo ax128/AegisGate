@@ -60,6 +60,12 @@
               </svg>
               概览
             </a>
+            <a href="#stats" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+              请求统计
+            </a>
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">配置</span>
@@ -179,6 +185,65 @@
                 <div class="stat-card-label">默认上游</div>
                 <div class="stat-card-value" id="upstream-text" style="font-size:0.88rem;word-break:break-all;">—</div>
               </div>
+            </div>
+          </section>
+
+          <!-- Stats dashboard -->
+          <section id="stats" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>请求统计</h2>
+                <p class="panel-desc">实时请求统计，含脱敏、拦截、穿透等维度。数据保留 7 天，重启后重新计数。</p>
+              </div>
+            </div>
+
+            <div class="stat-grid">
+              <div class="stat-card">
+                <div class="stat-card-label">总请求</div>
+                <div class="stat-card-value" id="stats-total-requests">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">脱敏替换</div>
+                <div class="stat-card-value" id="stats-total-redactions">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">危险内容替换</div>
+                <div class="stat-card-value" id="stats-total-dangerous">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">已拦截</div>
+                <div class="stat-card-value" id="stats-total-blocked">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">直通穿透</div>
+                <div class="stat-card-value" id="stats-total-passthrough">--</div>
+              </div>
+            </div>
+
+            <div class="rules-tabs" style="margin-top:16px;">
+              <button class="rules-tab active" data-stats-view="hourly">按小时</button>
+              <button class="rules-tab" data-stats-view="daily">按天</button>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead id="stats-thead">
+                  <tr><th>时间</th><th>请求</th><th>脱敏</th><th>危险替换</th><th>拦截</th><th>直通</th></tr>
+                </thead>
+                <tbody id="stats-tbody">
+                  <tr><td colspan="6" class="token-table-empty">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="token-toolbar" style="margin-top:8px;">
+              <span id="stats-since" style="font-size:0.83rem;color:var(--muted);"></span>
+              <button id="stats-refresh" class="btn-sm-ghost" type="button">刷新</button>
             </div>
           </section>
 

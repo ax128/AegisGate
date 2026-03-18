@@ -15,11 +15,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 审计日志记录 `filter_mode:redact` / `filter_mode:passthrough` 安全标签
   - 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`
 
+- **请求统计仪表盘**：新增 `GET /__ui__/api/stats` 端点和 UI 统计页面
+  - 线程安全的内存统计收集器，按小时分桶，保留 7 天
+  - 追踪 5 个维度：总请求、脱敏替换次数、危险内容替换、拦截、穿透
+  - UI 页面包含汇总卡片 + 按小时/按天表格，支持刷新
+
 ### Changed
 
 - **Token 生成改为纯字母数字**（`a-zA-Z0-9`），不再包含 `-` `_` 符号，避免与 `__` 过滤模式分隔符冲突
 
 ### Fixed
+
+- **[Critical] tool_call_guard `review` 动作在流式模式下被当作 `block` 处理**
+  - `_stream_block_reason()` 只要检测到 `tool_call_violation` 标签就触发流阻断，不区分 `block`/`review`
+  - 导致 `apply_patch`、`write` 等编码工具的正常 tool call 被整体替换为 `【AegisGate已处理危险疑似片段】`
+  - 修复：仅在 `tool_call_guard:*:block` 动作存在时才触发流阻断，`review` 动作不再阻断流
+
+- **tool_call_guard 对编码工具参数的误拦截**
+  - `apply_patch` 等工具的参数是代码/diff 内容，其中可能包含看起来像危险命令的文本
+  - 新增 `_CODE_CONTENT_TOOLS` 白名单（25+ 编码工具），跳过 `dangerous_param_patterns` 扫描
+  - `dangerous_param` action 从 `block` 降为 `review`，避免过度拦截
+  - tool_call_guard 各类命中新增 DEBUG 日志，打印匹配的工具名、pattern、具体文本
 
 - **[Critical] SSE 流式 holdback 分隔符泄露导致客户端 JSON 解析失败**
   - content 事件被 hold back 时，SSE 空行分隔符直接 yield 给客户端，导致事件顺序错乱
