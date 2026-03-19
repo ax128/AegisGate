@@ -67,3 +67,36 @@ def test_semantic_service_client_circuit_open(monkeypatch):
     assert "semantic_service_unavailable" in first.reasons
     assert "semantic_service_unavailable" in second.reasons
     assert "semantic_circuit_open" in third.reasons
+
+
+def test_semantic_service_client_reconfigure_resets_cache_and_breaker():
+    client = SemanticServiceClient(
+        service_url="https://semantic.example.com/analyze",
+        cache_ttl_seconds=60,
+        max_cache_entries=100,
+        failure_threshold=2,
+        open_seconds=60,
+    )
+
+    client._cache["key"] = (123.0, SemanticResult(0.5, ["tag"], ["reason"], False, False, 1.0))
+    client._failure_count = 2
+    client._open_until = 999.0
+    client._half_open_probe_inflight = True
+
+    client.reconfigure(
+        service_url=" https://semantic-2.example.com/analyze ",
+        cache_ttl_seconds=30,
+        max_cache_entries=250,
+        failure_threshold=5,
+        open_seconds=15,
+    )
+
+    assert client.service_url == "https://semantic-2.example.com/analyze"
+    assert client.cache_ttl_seconds == 30
+    assert client.max_cache_entries == 250
+    assert client.failure_threshold == 5
+    assert client.open_seconds == 15
+    assert client._cache == {}
+    assert client._failure_count == 0
+    assert client._open_until == 0.0
+    assert client._half_open_probe_inflight is False

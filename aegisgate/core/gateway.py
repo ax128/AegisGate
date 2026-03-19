@@ -25,8 +25,10 @@ from fastapi.staticfiles import StaticFiles
 
 from aegisgate.adapters.openai_compat.router import (
     clear_pending_confirmations_on_startup,
+    close_runtime_dependencies,
     close_semantic_async_client,
     prune_pending_confirmations,
+    reload_runtime_dependencies,
     router as openai_router,
 )
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
@@ -34,6 +36,7 @@ from aegisgate.adapters.relay_compat.router import router as relay_router
 from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as v2_proxy_router
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
+from aegisgate.core.dangerous_response_log import shutdown_dangerous_response_log_worker
 from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
 from aegisgate.core.hot_reload import HotReloader, build_watcher
 
@@ -98,12 +101,10 @@ from aegisgate.core.gw_tokens import (
     find_token as gw_tokens_find_token,
     get as gw_tokens_get,
     inject_docker_upstreams as gw_tokens_inject_docker_upstreams,
-    list_tokens as gw_tokens_list,
     load as gw_tokens_load,
     register as gw_tokens_register,
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
-    update_and_rename as gw_tokens_update_and_rename,
 )
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.storage.crypto import ensure_key as _ensure_fernet_key
@@ -174,6 +175,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _ensure_gateway_key()
     _ensure_proxy_token()
     _ensure_fernet_key()
+    # Rebuild runtime dependencies at startup so test lifespans and hot-reload
+    # shutdowns never reuse a store backend that has already been closed.
+    reload_runtime_dependencies()
 
     upstream = (settings.upstream_base_url or "").strip()
     logger.info(
@@ -217,10 +221,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     if _confirmation_cache_task is not None:
         await _confirmation_cache_task.stop()
         _confirmation_cache_task = None
+    close_runtime_dependencies()
     await close_upstream_async_client()
     await close_v2_async_client()
     await close_semantic_async_client()
     shutdown_audit_worker()
+    shutdown_dangerous_response_log_worker()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -315,7 +321,13 @@ class GWTokenRewriteMiddleware:
 # Security boundary middleware
 # ---------------------------------------------------------------------------
 
-async def _drain_and_reject(request: Request, boundary: dict, reason: str, status_code: int, detail: str | None = None) -> JSONResponse:
+async def _drain_and_reject(
+    request: Request,
+    boundary: dict[str, object],
+    reason: str,
+    status_code: int,
+    detail: str | None = None,
+) -> JSONResponse:
     """Consume request body (prevent Starlette warnings) and return a blocked response."""
     await request.body()
     boundary["rejected_reason"] = reason
@@ -324,7 +336,7 @@ async def _drain_and_reject(request: Request, boundary: dict, reason: str, statu
 
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
-    boundary = {
+    boundary: dict[str, object] = {
         "loopback_only": settings.enforce_loopback_only,
         "auth_required": settings.enable_request_hmac_auth,
         "auth_verified": False,
@@ -507,7 +519,7 @@ async def security_boundary_middleware(request: Request, call_next):
 
     try:
         response = await call_next(request)
-    except Exception as exc:  # pragma: no cover - fail-safe
+    except Exception:  # pragma: no cover - fail-safe
         logger.exception("gateway unhandled exception path=%s", request.url.path)
         boundary["rejected_reason"] = "gateway_internal_error"
         return _blocked_response(

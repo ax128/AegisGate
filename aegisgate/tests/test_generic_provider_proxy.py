@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from fastapi.responses import StreamingResponse
 from starlette.requests import Request
 
 from aegisgate.adapters.openai_compat import router as openai_router
@@ -148,6 +149,7 @@ async def test_generic_provider_proxy_streaming_for_claude_payload(monkeypatch):
             request,
         )
         assert response.status_code == 200
+        assert isinstance(response, StreamingResponse)
         chunks: list[bytes] = []
         async for chunk in response.body_iterator:
             chunks.append(chunk)

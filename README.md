@@ -596,13 +596,15 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（启用后可直连 `/v1/...`） | 空 |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔） | 空 |
-| `AEGIS_ENABLE_THREAD_OFFLOAD` | Store/过滤管道线程池执行开关（避免阻塞 event loop） | `true` |
+| `AEGIS_ENABLE_THREAD_OFFLOAD` | Store/过滤管道线程池执行开关（避免阻塞 event loop）；当前默认关闭以避免 Python 3.13 下短生命周期进程退出卡住，关闭时过滤管道改为同步执行 | `false` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
 | `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |
 | `AEGIS_STORAGE_BACKEND` | `sqlite`/`redis`/`postgres` | `sqlite` |
 | `AEGIS_SQLITE_DB_PATH` | sqlite 文件路径 | `logs/aegisgate.db` |
 | `AEGIS_AUDIT_LOG_PATH` | 审计日志路径 | `logs/audit.jsonl` |
+| `AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG` | 是否保存响应侧危险样本日志 | `false` |
+| `AEGIS_DANGEROUS_RESPONSE_LOG_PATH` | 危险样本日志基路径；运行时会自动按日期切分为 `dangerous_response_samples-YYYY-MM-DD` 形式，带扩展名时会保留扩展名，并自动清理 10 天前旧文件；不可写时回退 `/tmp/aegisgate/dangerous_response_samples-YYYY-MM-DD.jsonl` | `logs/dangerous_response_samples.jsonl` |
 | `AEGIS_GW_TOKENS_PATH` | token 映射文件路径 | `config/gw_tokens.json` |
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `12000000` |
 | `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `300` |

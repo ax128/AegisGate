@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import cast
 
 import pytest
 
@@ -18,6 +19,11 @@ from aegisgate.adapters.openai_compat.stream_utils import (
 )
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
+
+
+def _iter_response_bytes(resp: object) -> AsyncGenerator[bytes, None]:
+    assert hasattr(resp, "__aiter__")
+    return cast(AsyncGenerator[bytes, None], resp)
 
 
 def test_extract_sse_data_payload():
@@ -103,7 +109,7 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):
         )
         assert hasattr(resp, "__aiter__")
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -144,7 +150,7 @@ def test_execute_chat_stream_forbidden_command_requires_confirmation(monkeypatch
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -182,7 +188,7 @@ def test_execute_chat_stream_whitelist_bypass(monkeypatch):
             )
             assert isinstance(resp, AsyncGenerator)
             out: list[bytes] = []
-            async for chunk in resp:
+            async for chunk in _iter_response_bytes(resp):
                 out.append(chunk)
             return b"".join(out)
 
@@ -219,7 +225,7 @@ def test_execute_chat_stream_returns_error_chunk_when_upstream_runtime_error(mon
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -253,7 +259,7 @@ def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(monkeypat
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -290,7 +296,7 @@ def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_erro
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -324,7 +330,7 @@ def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(monk
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -361,7 +367,7 @@ def test_execute_responses_stream_replays_notice_on_upstream_eof_without_done_an
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -396,7 +402,7 @@ def test_execute_responses_stream_injects_done_when_terminal_event_seen_without_
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -449,7 +455,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatc
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -500,7 +506,7 @@ def test_chat_stream_returns_confirmation_chunk_when_require_confirmation_enable
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -553,7 +559,7 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(monke
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -604,7 +610,7 @@ def test_responses_stream_returns_confirmation_chunk_when_require_confirmation_e
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -658,7 +664,7 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 
@@ -717,7 +723,7 @@ def test_responses_stream_block_drains_and_caches_when_require_confirmation_enab
             boundary={},
         )
         out: list[bytes] = []
-        async for chunk in resp:
+        async for chunk in _iter_response_bytes(resp):
             out.append(chunk)
         return b"".join(out)
 

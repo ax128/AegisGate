@@ -105,6 +105,8 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     {"env": "AEGIS_MAX_PENDING_PAYLOAD_BYTES", "field": "max_pending_payload_bytes", "label": "Pending 最大字节", "type": "int", "section": "general"},
     {"env": "AEGIS_MAX_RESPONSE_LENGTH", "field": "max_response_length", "label": "最大响应字符", "type": "int", "section": "general"},
     {"env": "AEGIS_AUDIT_LOG_PATH", "field": "audit_log_path", "label": "审计日志路径", "type": "string", "section": "general"},
+    {"env": "AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG", "field": "enable_dangerous_response_log", "label": "保存危险响应样本", "type": "bool", "section": "general"},
+    {"env": "AEGIS_DANGEROUS_RESPONSE_LOG_PATH", "field": "dangerous_response_log_path", "label": "危险响应样本日志路径", "type": "string", "section": "general"},
     {"env": "AEGIS_TRUSTED_PROXY_IPS", "field": "trusted_proxy_ips", "label": "信任代理 IP（逗号分隔）", "type": "string", "section": "general"},
     {"env": "AEGIS_ENABLE_LOCAL_PORT_ROUTING", "field": "enable_local_port_routing", "label": "本地端口自动路由", "type": "bool", "section": "general"},
     {"env": "AEGIS_LOCAL_PORT_ROUTING_HOST", "field": "local_port_routing_host", "label": "端口路由目标 Host", "type": "string", "section": "general"},

@@ -45,6 +45,7 @@ observability = [
 [tool.pytest.ini_options]
 testpaths = ["aegisgate/tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 source = ["aegisgate"]
@@ -55,8 +56,41 @@ fail_under = 50
 show_missing = true
 skip_empty = true
 
+[tool.mypy]
+# Exclude packaged build artifacts so `mypy .` only checks source modules and
+# does not fail on duplicate package names under build/lib.
+exclude = '^(build/|dist/|scripts/)'
+
+[[tool.mypy.overrides]]
+# Optional/runtime-only dependencies in this project do not ship stubs, so
+# type-check source code without blocking on third-party package metadata.
+module = [
+  "datasets",
+  "jieba",
+  "joblib",
+  "opentelemetry.*",
+  "prometheus_client",
+  "psycopg",
+  "redis",
+  "sklearn.*",
+  "yaml",
+]
+ignore_missing_imports = true
+
 [tool.setuptools]
-include-package-data = true
+include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["aegisgate*"]
+exclude = ["aegisgate.tests*"]
+
+[tool.setuptools.package-data]
+aegisgate = [
+  "models/tfidf/*.joblib",
+  "policies/rules/*.yaml",
+]
+
+[tool.setuptools.exclude-package-data]
+aegisgate = [
+  "tests/*",
+]

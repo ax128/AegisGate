@@ -24,6 +24,27 @@ except ImportError:
     _HAS_OTEL = False
 
 _tracer_name = "aegisgate"
+_TraceAttributeValue = str | bool | int | float | list[str] | list[bool] | list[int] | list[float]
+
+
+def _coerce_trace_attribute(value: object) -> _TraceAttributeValue:
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        if all(isinstance(item, str) for item in items):
+            return items
+        if all(isinstance(item, bool) for item in items):
+            return items
+        if all(isinstance(item, int) and not isinstance(item, bool) for item in items):
+            return items
+        if all(isinstance(item, float) for item in items):
+            return items
+    return str(value)
+
+
+def _coerce_trace_attributes(attributes: dict[str, object]) -> dict[str, _TraceAttributeValue]:
+    return {key: _coerce_trace_attribute(value) for key, value in attributes.items()}
 
 
 def init_tracing(service_name: str = "aegisgate") -> None:
@@ -76,7 +97,7 @@ def trace_span(name: str, **attributes: Any) -> Generator[Any, None, None]:
     """
     if _HAS_OTEL:
         tracer = _otel_trace.get_tracer(_tracer_name)
-        with tracer.start_as_current_span(name, attributes=attributes) as span:
+        with tracer.start_as_current_span(name, attributes=_coerce_trace_attributes(attributes)) as span:
             yield span
     else:
         yield None
@@ -104,7 +125,7 @@ def trace(span_name: str, **fields: object) -> None:
     """Fire-and-forget trace event — prefer ``trace_span`` context manager."""
     if _HAS_OTEL:
         tracer = _otel_trace.get_tracer(_tracer_name)
-        with tracer.start_as_current_span(span_name, attributes=fields):
+        with tracer.start_as_current_span(span_name, attributes=_coerce_trace_attributes(fields)):
             pass
     else:
         logger.info("trace span=%s fields=%s", span_name, fields)

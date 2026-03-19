@@ -14,6 +14,7 @@ import tempfile
 import time
 import yaml
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -29,7 +30,6 @@ from aegisgate.core.gateway_auth import (
 from aegisgate.core.gateway_keys import (
     _FORBIDDEN_UPSTREAM_BASE_EXAMPLES,
     _ensure_gateway_key,
-    _normalize_required_whitelist_list,
 )
 from aegisgate.core.gateway_ui_config import (
     _coerce_config_value,
@@ -41,15 +41,11 @@ from aegisgate.core.gateway_ui_config import (
     _write_env_updates,
 )
 from aegisgate.core.gw_tokens import (
-    find_token as gw_tokens_find_token,
-    get as gw_tokens_get,
     list_tokens as gw_tokens_list,
     register as gw_tokens_register,
     unregister as gw_tokens_unregister,
-    update as gw_tokens_update,
     update_and_rename as gw_tokens_update_and_rename,
 )
-from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 import hmac
 
@@ -65,21 +61,21 @@ def register_ui_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
 
     @app.get("/__ui__/login")
-    def local_ui_login_page() -> Response:
+    async def local_ui_login_page() -> Response:
         login_path = (_WWW_DIR / "login.html").resolve()
         if not login_path.is_file():
             return PlainTextResponse("local ui login assets not found", status_code=404)
         return FileResponse(login_path, media_type="text/html; charset=utf-8")
 
     @app.get("/__ui__")
-    def local_ui_index() -> Response:
+    async def local_ui_index() -> Response:
         index_path = (_WWW_DIR / "index.html").resolve()
         if not index_path.is_file():
             return PlainTextResponse("local ui assets not found", status_code=404)
         return FileResponse(index_path, media_type="text/html; charset=utf-8")
 
     @app.get("/__ui__/health")
-    def local_ui_health() -> dict[str, object]:
+    async def local_ui_health() -> dict[str, object]:
         from aegisgate.core.gateway import _BOOT_TIME
         return {"status": "ok", "ui": True, "uptime_seconds": int(time.time() - _BOOT_TIME)}
 
@@ -88,20 +84,20 @@ def register_ui_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
 
     @app.get("/__ui__/api/bootstrap")
-    def local_ui_bootstrap(request: Request) -> dict[str, object]:
+    async def local_ui_bootstrap(request: Request) -> dict[str, object]:
         return _ui_bootstrap_payload(request)
 
     @app.get("/__ui__/api/docs")
-    def local_ui_docs_list() -> dict[str, object]:
+    async def local_ui_docs_list() -> dict[str, object]:
         return {"items": _docs_catalog()}
 
     @app.get("/__ui__/api/stats")
-    def local_ui_stats() -> JSONResponse:
+    async def local_ui_stats() -> JSONResponse:
         from aegisgate.core.stats import snapshot
         return JSONResponse(content=snapshot())
 
     @app.get("/__ui__/api/config")
-    def local_ui_config() -> dict[str, object]:
+    async def local_ui_config() -> dict[str, object]:
         return _ui_config_payload()
 
     @app.post("/__ui__/api/config")
@@ -135,7 +131,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
 
     @app.get("/__ui__/api/docs/{doc_id}")
-    def local_ui_doc_content(doc_id: str) -> JSONResponse:
+    async def local_ui_doc_content(doc_id: str) -> JSONResponse:
         doc_path = _resolve_doc_path(doc_id)
         if doc_path is None:
             return JSONResponse(status_code=404, content={"error": "doc_not_found"})
@@ -173,7 +169,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return response
 
     @app.post("/__ui__/api/logout")
-    def local_ui_logout() -> JSONResponse:
+    async def local_ui_logout() -> JSONResponse:
         response = JSONResponse(content={"ok": True})
         response.delete_cookie(_UI_SESSION_COOKIE)
         return response
@@ -183,7 +179,7 @@ def register_ui_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
 
     @app.get("/__ui__/api/tokens")
-    def local_ui_tokens_list() -> JSONResponse:
+    async def local_ui_tokens_list() -> JSONResponse:
         raw = gw_tokens_list()
         items = []
         for token, m in raw.items():
@@ -260,7 +256,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "token": active_token, "base_url": base_url})
 
     @app.delete("/__ui__/api/tokens/{token}")
-    def local_ui_tokens_delete(token: str) -> JSONResponse:
+    async def local_ui_tokens_delete(token: str) -> JSONResponse:
         token = token.strip()
         if not token:
             return JSONResponse(status_code=400, content={"error": "missing_token"})
@@ -311,7 +307,7 @@ def register_ui_routes(app: FastAPI) -> None:
                 pass
 
     @app.get("/__ui__/api/keys")
-    def local_ui_keys_list() -> JSONResponse:
+    async def local_ui_keys_list() -> JSONResponse:
         result = []
         for key_type, filename in _KEY_FILES.items():
             primary = _key_path(key_type)
@@ -322,7 +318,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"items": result})
 
     @app.get("/__ui__/api/keys/{key_type}")
-    def local_ui_key_get(key_type: str) -> JSONResponse:
+    async def local_ui_key_get(key_type: str) -> JSONResponse:
         if key_type not in _KEY_FILES:
             return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
         value = _read_key_file(key_type)
@@ -331,7 +327,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "type": key_type, "value": value})
 
     @app.post("/__ui__/api/keys/{key_type}/rotate")
-    def local_ui_key_rotate(key_type: str, request: Request) -> JSONResponse:
+    async def local_ui_key_rotate(key_type: str, request: Request) -> JSONResponse:
         if key_type not in _KEY_FILES:
             return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
         if key_type == "fernet":
@@ -412,7 +408,7 @@ def register_ui_routes(app: FastAPI) -> None:
 
     def _get_section_list(data: dict, section_key: str) -> list:
         keys = _RULES_SECTIONS[section_key]
-        node = data
+        node: Any = data
         for k in keys:
             if not isinstance(node, dict):
                 return []
@@ -429,12 +425,12 @@ def register_ui_routes(app: FastAPI) -> None:
         node[keys[-1]] = items
 
     @app.get("/__ui__/api/rules")
-    def local_ui_rules_sections() -> JSONResponse:
+    async def local_ui_rules_sections() -> JSONResponse:
         sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
         return JSONResponse(content={"sections": sections})
 
     @app.get("/__ui__/api/rules/{section}")
-    def local_ui_rules_get(section: str) -> JSONResponse:
+    async def local_ui_rules_get(section: str) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
         data = _load_rules_yaml()
@@ -492,7 +488,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(status_code=404, content={"error": "rule_not_found"})
 
     @app.delete("/__ui__/api/rules/{section}/{rule_id}")
-    def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
+    async def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
         data = _load_rules_yaml()
@@ -505,7 +501,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True})
 
     @app.get("/__ui__/api/rules_action_map")
-    def local_ui_action_map_get() -> JSONResponse:
+    async def local_ui_action_map_get() -> JSONResponse:
         data = _load_rules_yaml()
         return JSONResponse(content={"action_map": data.get("action_map") or {}})
 
@@ -549,7 +545,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return val[:4] + "****" + val[-3:]
 
     @app.get("/__ui__/api/redact_values")
-    def local_ui_redact_values_list() -> JSONResponse:
+    async def local_ui_redact_values_list() -> JSONResponse:
         from aegisgate.config.redact_values import load_redact_values
 
         values = load_redact_values()
@@ -585,7 +581,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"ok": True, "count": len(values)})
 
     @app.delete("/__ui__/api/redact_values/{index}")
-    def local_ui_redact_values_delete(index: int) -> JSONResponse:
+    async def local_ui_redact_values_delete(index: int) -> JSONResponse:
         from aegisgate.config.redact_values import load_redact_values, save_redact_values
 
         values = load_redact_values()
@@ -613,7 +609,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return (base / filename).resolve()
 
     @app.get("/__ui__/api/compose")
-    def local_ui_compose_list() -> JSONResponse:
+    async def local_ui_compose_list() -> JSONResponse:
         items = []
         for name in sorted(_COMPOSE_FILES_ALLOWED):
             path = _compose_file_path(name)
@@ -621,7 +617,7 @@ def register_ui_routes(app: FastAPI) -> None:
         return JSONResponse(content={"items": items})
 
     @app.get("/__ui__/api/compose/{filename:path}")
-    def local_ui_compose_get(filename: str) -> JSONResponse:
+    async def local_ui_compose_get(filename: str) -> JSONResponse:
         if filename not in _COMPOSE_FILES_ALLOWED:
             return JSONResponse(status_code=404, content={"error": "not_allowed"})
         path = _compose_file_path(filename)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 
+from aegisgate.config.settings import settings
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
+from aegisgate.core.dangerous_response_log import mark_text_with_spans, write_dangerous_response_sample
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
@@ -74,10 +76,37 @@ class PostRestoreGuard(BaseFilter):
             return resp
 
         masked = text
+        secret_spans: list[tuple[int, int]] = []
         for pattern in self._secret_patterns:
+            for match in pattern.finditer(text):
+                if match.start() != match.end():
+                    secret_spans.append((match.start(), match.end()))
             masked = pattern.sub(self._replacement, masked)
 
         if masked != text:
+            if settings.enable_dangerous_response_log and "dangerous_response_log:post_restore_guard" not in ctx.security_tags:
+                marked_text = mark_text_with_spans(text, secret_spans)
+                fragments: list[str] = []
+                for start, end in secret_spans:
+                    fragment = text[start:end]
+                    if fragment and fragment not in fragments:
+                        fragments.append(fragment)
+                if fragments:
+                    write_dangerous_response_sample(
+                        {
+                            "request_id": ctx.request_id,
+                            "session_id": ctx.session_id,
+                            "route": ctx.route,
+                            "model": resp.model,
+                            "source": self.name,
+                            "response_disposition": "sanitize",
+                            "reasons": list(dict.fromkeys(ctx.disposition_reasons + ["response_post_restore_masked"])),
+                            "fragment_count": len(fragments),
+                            "dangerous_fragments": fragments,
+                            "content": marked_text,
+                        }
+                    )
+                    ctx.security_tags.add("dangerous_response_log:post_restore_guard")
             debug_log_original("post_restore_guard_sanitized", text, reason="response_post_restore_masked")
             resp.output_text = masked
             ctx.response_disposition = "sanitize"

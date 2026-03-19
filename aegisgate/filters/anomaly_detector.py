@@ -6,6 +6,7 @@ import base64
 import re
 import unicodedata
 from collections import Counter
+from typing import Any
 from urllib.parse import unquote
 
 from aegisgate.config.security_level import apply_count, apply_threshold, normalize_security_level
@@ -168,7 +169,7 @@ class AnomalyDetector(BaseFilter):
 
         return points, evidence
 
-    def _score_points(self, points: dict[str, float]) -> dict[str, object]:
+    def _score_points(self, points: dict[str, float]) -> dict[str, Any]:
         bucket_points: dict[str, float] = {bucket: 0.0 for bucket in self._weights}
         point_breakdown: dict[str, dict[str, object]] = {}
 

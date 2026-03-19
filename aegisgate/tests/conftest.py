@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 from starlette.requests import Request
@@ -60,12 +61,12 @@ def make_ctx():
     """Factory fixture for RequestContext with sensible defaults."""
 
     def _build(**overrides) -> RequestContext:
-        defaults = {
+        defaults: dict[str, Any] = {
             "request_id": "test-1",
             "session_id": "test-1",
             "route": "/v1/chat/completions",
         }
         defaults.update(overrides)
-        return RequestContext(**defaults)
+        return RequestContext(**cast(Any, defaults))
 
     return _build

@@ -4,6 +4,7 @@ import logging
 
 import httpx
 import pytest
+from fastapi.responses import StreamingResponse
 from starlette.requests import Request
 
 from aegisgate.adapters.v2_proxy import router as v2_router
@@ -770,6 +771,7 @@ async def test_v2_proxy_streaming_injects_done_when_upstream_eof_without_done(mo
 
     response = await v2_router.proxy_v2(request)
     assert response.status_code == 200
+    assert isinstance(response, StreamingResponse)
     chunks: list[bytes] = []
     async for chunk in response.body_iterator:
         chunks.append(chunk)
@@ -845,9 +847,13 @@ async def test_v2_proxy_streaming_handles_high_concurrency(monkeypatch):
             body=b'{"stream": true, "input":"hello"}',
         )
         response = await v2_router.proxy_v2(request)
+        assert isinstance(response, StreamingResponse)
         chunks: list[bytes] = []
         async for chunk in response.body_iterator:
-            chunks.append(chunk)
+            if isinstance(chunk, str):
+                chunks.append(chunk.encode("utf-8"))
+            else:
+                chunks.append(bytes(chunk))
         return b"".join(chunks).decode("utf-8", errors="replace")
 
     total = 40

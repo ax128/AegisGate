@@ -182,10 +182,13 @@ class RedactionFilter(BaseFilter):
                     )
                 return placeholder
 
+            def _apply_pattern(pattern: re.Pattern[str], kind: str, source_text: str) -> str:
+                return pattern.sub(lambda match: _replace_match(match, kind), source_text)
+
             for kind, pattern in active_pii_patterns:
-                text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
+                text = _apply_pattern(pattern, kind, text)
             for kind, pattern in self._field_patterns:
-                text = pattern.sub(lambda m, k=kind: _replace_match(m, k), text)
+                text = _apply_pattern(pattern, kind, text)
             return text
 
         ctx.redaction_whitelist_keys = set(normalize_whitelist_keys(ctx.redaction_whitelist_keys))

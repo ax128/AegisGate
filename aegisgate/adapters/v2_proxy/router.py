@@ -271,12 +271,12 @@ def _compile_patterns(items: list[dict[str, Any]] | None, fallback: tuple[tuple[
         except re.error:
             continue
     for item in items or []:
-        regex = item.get("regex")
-        if not isinstance(regex, str) or not regex.strip():
+        regex_value = item.get("regex")
+        if not isinstance(regex_value, str) or not regex_value.strip():
             continue
         pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
         try:
-            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            compiled.append((pattern_id, re.compile(regex_value, re.IGNORECASE)))
         except re.error as exc:
             logger.warning("v2 pattern compile skipped id=%s error=%s", pattern_id, exc)
     return compiled
@@ -443,10 +443,10 @@ def _sanitize_json_value(
         return out, total, hit_ids, markers
     if isinstance(value, dict):
         total = 0
-        hit_ids = []
-        hit_set: set[str] = set()
-        markers: list[dict[str, str]] = []
-        out: dict[str, Any] = {}
+        dict_hit_ids: list[str] = []
+        dict_hit_set: set[str] = set()
+        dict_markers: list[dict[str, str]] = []
+        dict_out: dict[str, Any] = {}
         for key, item in value.items():
             next_item, next_count, next_hits, next_markers = _sanitize_json_value(
                 item,
@@ -454,13 +454,13 @@ def _sanitize_json_value(
                 whitelist_keys=whitelist_keys,
             )
             total += next_count
-            out[key] = next_item
+            dict_out[key] = next_item
             for hit in next_hits:
-                if hit not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
-                    hit_set.add(hit)
-                    hit_ids.append(hit)
-            markers.extend(next_markers)
-        return out, total, hit_ids, markers
+                if hit not in dict_hit_set and len(dict_hit_ids) < _V2_MAX_MATCH_IDS:
+                    dict_hit_set.add(hit)
+                    dict_hit_ids.append(hit)
+            dict_markers.extend(next_markers)
+        return dict_out, total, dict_hit_ids, dict_markers
     return value, 0, [], []
 
 
@@ -561,18 +561,18 @@ _SSRF_METADATA_HOSTS = frozenset({
 })
 
 
-def _is_blocked_target_ip(addr: ipaddress._BaseAddress) -> bool:
+def _is_blocked_target_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return not addr.is_global or addr.is_reserved
 
 
-async def _resolve_target_ips(hostname: str) -> set[ipaddress._BaseAddress]:
+async def _resolve_target_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(
         hostname,
         None,
         type=socket.SOCK_STREAM,
     )
-    resolved: set[ipaddress._BaseAddress] = set()
+    resolved: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
     for family, _socktype, _proto, _canonname, sockaddr in infos:
         candidate = sockaddr[0]
         try:

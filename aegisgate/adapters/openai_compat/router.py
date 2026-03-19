@@ -7,10 +7,9 @@ import json
 import logging
 import asyncio
 import re
-import threading
 import time
 from functools import lru_cache
-from typing import Any, AsyncGenerator, AsyncIterable, Generator, Iterable, Mapping
+from typing import Any, AsyncGenerator, Generator, Mapping
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
@@ -20,13 +19,21 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_internal_responses,
     to_responses_output,
 )
+from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - router re-exports for gateway startup hooks
+    _get_pipeline,
+    clear_pending_confirmations_on_startup,
+    close_runtime_dependencies,
+    prune_pending_confirmations,
+    reload_runtime_dependencies,
+    store,
+)
 from aegisgate.adapters.openai_compat.stream_utils import (
     _build_streaming_response,
     _extract_sse_data_payload,
     _extract_stream_event_type,
     _extract_stream_text_from_event,
     _stream_block_reason,
-    _stream_block_sse_chunk,
+    _stream_block_sse_chunk,  # noqa: F401 - re-exported for tests
     _stream_confirmation_sse_chunk,
     _stream_done_sse_chunk,
     _stream_error_sse_chunk,
@@ -40,7 +47,6 @@ from aegisgate.adapters.openai_compat.upstream import (
     _is_upstream_whitelisted,
     _resolve_upstream_base,
     _safe_error_detail,
-    close_upstream_async_client,
 )
 from aegisgate.config.settings import settings
 from aegisgate.config.security_rules import load_security_rules
@@ -62,8 +68,6 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _should_skip_responses_field_redaction,
     _strip_system_exec_runtime_lines,
 )
-from aegisgate.util.base64_detect import looks_like_base64_blob
-from aegisgate.util.masking import mask_for_log
 from aegisgate.core.audit import write_audit
 from aegisgate.core.confirmation import (
     make_confirm_id,
@@ -79,36 +83,16 @@ from aegisgate.core.confirmation_flow import (
     get_reason_and_summary as _flow_reason_and_summary,
 )
 from aegisgate.core.context import RequestContext
+from aegisgate.core.dangerous_response_log import mark_text_with_spans, write_dangerous_response_sample
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.core.semantic import SemanticServiceClient
-from aegisgate.core.pipeline import Pipeline
-from aegisgate.filters.exact_value_redaction import ExactValueRedactionFilter
-from aegisgate.filters.anomaly_detector import AnomalyDetector
-from aegisgate.filters.injection_detector import PromptInjectionDetector
-from aegisgate.filters.post_restore_guard import PostRestoreGuard
-from aegisgate.filters.privilege_guard import PrivilegeGuard
-from aegisgate.filters.request_sanitizer import RequestSanitizer
-from aegisgate.filters.rag_poison_guard import RagPoisonGuard
-from aegisgate.filters.redaction import RedactionFilter
-from aegisgate.filters.restoration import RestorationFilter
-from aegisgate.filters.sanitizer import OutputSanitizer
-from aegisgate.filters.tool_call_guard import ToolCallGuard
-from aegisgate.filters.untrusted_content_guard import UntrustedContentGuard
 from aegisgate.policies.policy_engine import PolicyEngine
-from aegisgate.storage import create_store
-from aegisgate.init_config import ensure_runtime_storage_paths
 from aegisgate.util.debug_excerpt import debug_log_original, info_log_sanitized
 from aegisgate.util.logger import logger
-from aegisgate.util.redaction_whitelist import (
-    normalize_whitelist_keys,
-    protected_spans_for_text,
-    range_overlaps_protected,
-)
+from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
 
 router = APIRouter()
-ensure_runtime_storage_paths()
-store = create_store()
 policy_engine = PolicyEngine()
 semantic_service_client = SemanticServiceClient(
     service_url=settings.semantic_service_url,
@@ -145,7 +129,6 @@ _CONFIRMATION_HIT_CONTEXT_CHARS = 40
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
-_pipeline_local = threading.local()
 
 # Filter modes set via URL path: token__redact or token__passthrough
 _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
@@ -167,43 +150,18 @@ def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str |
     return mode
 
 
-def _build_pipeline() -> Pipeline:
-    request_filters = [
-        ExactValueRedactionFilter(),
-        RedactionFilter(store),
-        UntrustedContentGuard(),
-        RequestSanitizer(),
-        RagPoisonGuard(),
-    ]
-    response_filters = [
-        ExactValueRedactionFilter(),
-        AnomalyDetector(),
-        PromptInjectionDetector(),
-        RagPoisonGuard(),
-        PrivilegeGuard(),
-        ToolCallGuard(),
-        RestorationFilter(store),
-        PostRestoreGuard(),
-        OutputSanitizer(),
-    ]
-    return Pipeline(request_filters=request_filters, response_filters=response_filters)
-
-
-def _get_pipeline() -> Pipeline:
-    from aegisgate.core.hot_reload import get_pipeline_generation
-
-    pipeline = getattr(_pipeline_local, "pipeline", None)
-    gen = getattr(_pipeline_local, "pipeline_gen", -1)
-    current_gen = get_pipeline_generation()
-    if pipeline is None or gen != current_gen:
-        pipeline = _build_pipeline()
-        _pipeline_local.pipeline = pipeline
-        _pipeline_local.pipeline_gen = current_gen
-    return pipeline
-
-
 async def close_semantic_async_client() -> None:
     await semantic_service_client.aclose()
+
+
+def reload_semantic_client_settings() -> None:
+    semantic_service_client.reconfigure(
+        service_url=settings.semantic_service_url,
+        cache_ttl_seconds=settings.semantic_cache_ttl_seconds,
+        max_cache_entries=settings.semantic_cache_max_entries,
+        failure_threshold=settings.semantic_circuit_failure_threshold,
+        open_seconds=settings.semantic_circuit_open_seconds,
+    )
 
 
 def _should_stream(payload: dict[str, Any]) -> bool:
@@ -744,7 +702,7 @@ def _iter_responses_text_stream_replay(
         "content": [{"type": "output_text", "text": replay_text, "annotations": []}],
     }
 
-    events = [
+    events: list[dict[str, Any]] = [
         {
             "type": "response.created",
             "response": {"id": request_id, "object": "response", "model": model, "status": "in_progress", "output": []},
@@ -871,17 +829,6 @@ def _is_pending_payload_omitted(payload: Any) -> bool:
     return isinstance(payload, dict) and bool(payload.get(_PENDING_PAYLOAD_OMITTED_KEY))
 
 
-def prune_pending_confirmations(now_ts: int) -> int:
-    return int(store.prune_pending_confirmations(now_ts))
-
-
-def clear_pending_confirmations_on_startup() -> int:
-    """启动时清空所有待确认记录，使重启后仅新请求的确认有效。"""
-    if hasattr(store, "clear_all_pending_confirmations"):
-        return store.clear_all_pending_confirmations()
-    return 0
-
-
 async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
     if settings.enable_thread_offload:
         return await asyncio.to_thread(func, *args, **kwargs)
@@ -898,8 +845,17 @@ def _run_response_pipeline_sync(resp: InternalResponse, ctx: RequestContext) -> 
     return _get_pipeline().run_response(resp, ctx)
 
 
-async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContext) -> Any:
-    # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+async def _run_request_pipeline(
+    pipeline: Any,  # noqa: ARG001 - kept for test/mocking compatibility
+    req: Any,
+    ctx: RequestContext,
+) -> Any:
+    # Thread offload is optional. In current Python 3.13 test/runtime environments,
+    # asyncio.to_thread() can leave short-lived event loops hanging during teardown.
+    # When offload is disabled, run inline and accept that timeout enforcement is unavailable.
+    if not settings.enable_thread_offload:
+        return _run_request_pipeline_sync(req, ctx)
+
     # _get_pipeline() is called inside the pool thread so that threading.local()
     # correctly isolates filter instances per pool thread (not per event-loop thread).
     # asyncio.wait_for lets us enforce a hard timeout as a safety net.
@@ -928,8 +884,14 @@ async def _run_request_pipeline(pipeline: Pipeline, req: Any, ctx: RequestContex
         return req
 
 
-async def _run_response_pipeline(pipeline: Pipeline, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
-    # Always run in a thread so the event loop is never blocked by CPU-bound filter work.
+async def _run_response_pipeline(
+    pipeline: Any,  # noqa: ARG001 - kept for test/mocking compatibility
+    resp: InternalResponse,
+    ctx: RequestContext,
+) -> InternalResponse:
+    if not settings.enable_thread_offload:
+        return _run_response_pipeline_sync(resp, ctx)
+
     # _get_pipeline() is called inside the pool thread so that threading.local()
     # correctly isolates filter instances per pool thread (not per event-loop thread).
     # asyncio.wait_for lets us enforce a hard timeout as a safety net.
@@ -962,13 +924,8 @@ async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
 
 
 async def _delete_pending_confirmation(confirm_id: str) -> bool:
-    method = getattr(store, "delete_pending_confirmation", None)
-    if not callable(method):
-        return False
     try:
-        return bool(await _maybe_offload(method, confirm_id=confirm_id))
-    except TypeError:
-        return bool(await _maybe_offload(method, confirm_id))
+        return bool(await _maybe_offload(store.delete_pending_confirmation, confirm_id=confirm_id))
     except Exception as exc:
         logger.warning("delete pending confirmation failed confirm_id=%s error=%s", confirm_id, exc)
         return False
@@ -1351,7 +1308,12 @@ def _obfuscate_preserving_structure(text: str) -> str:
     return "".join(parts)
 
 
-def _collect_hit_regions(source_text: str, ctx: RequestContext) -> list[tuple[int, int, bool]]:
+def _collect_dangerous_regions(
+    source_text: str,
+    ctx: RequestContext,
+    *,
+    context_chars: int = 0,
+) -> list[tuple[int, int, bool]]:
     if not source_text:
         return []
 
@@ -1377,21 +1339,83 @@ def _collect_hit_regions(source_text: str, ctx: RequestContext) -> list[tuple[in
     if not regions:
         return []
 
-    expanded: list[tuple[int, int, bool]] = []
+    scoped: list[tuple[int, int, bool]] = []
     for start, end, critical in regions:
-        left = max(0, start - _SANITIZE_HIT_CONTEXT_CHARS)
-        right = min(len(source_text), end + _SANITIZE_HIT_CONTEXT_CHARS)
-        expanded.append((left, right, critical))
+        left = max(0, start - context_chars)
+        right = min(len(source_text), end + context_chars)
+        scoped.append((left, right, critical))
 
-    expanded.sort(key=lambda item: (item[0], item[1]))
-    merged: list[tuple[int, int, bool]] = [expanded[0]]
-    for left, right, critical in expanded[1:]:
+    scoped.sort(key=lambda item: (item[0], item[1]))
+    merged: list[tuple[int, int, bool]] = [scoped[0]]
+    for left, right, critical in scoped[1:]:
         prev_left, prev_right, prev_critical = merged[-1]
         if left <= prev_right:
             merged[-1] = (prev_left, max(prev_right, right), prev_critical or critical)
             continue
         merged.append((left, right, critical))
     return merged
+
+
+def _collect_hit_regions(source_text: str, ctx: RequestContext) -> list[tuple[int, int, bool]]:
+    return _collect_dangerous_regions(
+        source_text,
+        ctx,
+        context_chars=_SANITIZE_HIT_CONTEXT_CHARS,
+    )
+
+
+def _mark_dangerous_fragments_for_log(source_text: str, ctx: RequestContext) -> tuple[str, list[str]]:
+    regions = _collect_dangerous_regions(source_text, ctx, context_chars=0)
+    if not regions:
+        return source_text, []
+
+    fragments: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for start, end, _critical in regions:
+        spans.append((start, end))
+        fragment = source_text[start:end]
+        if fragment and fragment not in fragments:
+            fragments.append(fragment)
+    return mark_text_with_spans(source_text, spans), fragments
+
+
+def _maybe_log_dangerous_response_sample(
+    ctx: RequestContext,
+    source_text: str,
+    *,
+    route: str,
+    model: str,
+    source: str,
+    log_key: str,
+) -> None:
+    if not settings.enable_dangerous_response_log:
+        return
+    if not source_text:
+        return
+
+    marker = f"dangerous_response_log:{log_key}"
+    if marker in ctx.security_tags:
+        return
+
+    marked_text, fragments = _mark_dangerous_fragments_for_log(source_text, ctx)
+    if not fragments:
+        return
+
+    write_dangerous_response_sample(
+        {
+            "request_id": ctx.request_id,
+            "session_id": ctx.session_id,
+            "route": route,
+            "model": model,
+            "source": source,
+            "response_disposition": ctx.response_disposition,
+            "reasons": list(dict.fromkeys(ctx.disposition_reasons)),
+            "fragment_count": len(fragments),
+            "dangerous_fragments": fragments,
+            "content": marked_text,
+        }
+    )
+    ctx.security_tags.add(marker)
 
 
 def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
@@ -1415,6 +1439,8 @@ def _sanitize_hit_fragments(source_text: str, ctx: RequestContext) -> str:
         cursor = right
     parts.append(source_text[cursor:])
     return "".join(parts)
+
+
 def _build_sanitized_full_response(ctx: RequestContext, source_text: str = "") -> str:
     """Return the full LLM response with only dangerous fragments transformed."""
     return _sanitize_hit_fragments(source_text, ctx) if source_text else ""
@@ -1662,7 +1688,7 @@ def _patch_responses_stream_payload(payload: dict[str, Any], ctx: RequestContext
 
 def _sanitize_stream_event_line(line: bytes, *, route: str, ctx: RequestContext) -> bytes:
     payload_text = _extract_sse_data_payload(line)
-    if payload_text in (None, "[DONE]"):
+    if payload_text is None or payload_text == "[DONE]":
         return line
     try:
         payload = json.loads(payload_text)
@@ -2165,17 +2191,14 @@ def _resolve_pending_confirmation(
     status = str(record.get("status"))
     recover_before = _executing_recover_before(now_ts)
     if status == "executing" and recover_before is not None and int(record.get("updated_at", 0)) <= int(recover_before):
-        method = getattr(store, "compare_and_update_pending_confirmation_status", None)
-        changed = False
-        if callable(method):
-            changed = bool(
-                method(
-                    confirm_id=confirm_id,
-                    expected_status="executing",
-                    new_status="pending",
-                    now_ts=now_ts,
-                )
+        changed = bool(
+            store.compare_and_update_pending_confirmation_status(
+                confirm_id=confirm_id,
+                expected_status="executing",
+                new_status="pending",
+                now_ts=now_ts,
             )
+        )
         if changed:
             record = store.get_pending_confirmation(confirm_id) or {}
             status = str(record.get("status"))
@@ -2396,29 +2419,14 @@ async def _try_transition_pending_status(
     new_status: str,
     now_ts: int,
 ) -> bool:
-    method = getattr(store, "compare_and_update_pending_confirmation_status", None)
-    if callable(method):
-        result = await _maybe_offload(
-            method,
-            confirm_id=confirm_id,
-            expected_status=expected_status,
-            new_status=new_status,
-            now_ts=now_ts,
-        )
-        return bool(result)
-
-    record = await _store_call("get_pending_confirmation", confirm_id)
-    if not record:
-        return False
-    if str(record.get("status")) != expected_status:
-        return False
-    await _store_call(
-        "update_pending_confirmation_status",
+    result = await _maybe_offload(
+        store.compare_and_update_pending_confirmation_status,
         confirm_id=confirm_id,
-        status=new_status,
+        expected_status=expected_status,
+        new_status=new_status,
         now_ts=now_ts,
     )
-    return True
+    return bool(result)
 
 
 def _resolve_action(ctx: RequestContext) -> str:
@@ -2822,6 +2830,14 @@ async def _execute_chat_stream_once(
                 yield line
 
             if blocked_reason and not _confirmation_approval_enabled():
+                _maybe_log_dangerous_response_sample(
+                    ctx,
+                    stream_window,
+                    route=req.route,
+                    model=req.model,
+                    source="chat_stream_buffered_patch",
+                    log_key="chat_stream_buffered_patch",
+                )
                 logger.info("chat stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
                 sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
                 info_log_sanitized("chat_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
@@ -3195,6 +3211,14 @@ async def _execute_responses_stream_once(
                 if not _confirmation_approval_enabled():
                     ctx.response_disposition = "sanitize"
                     ctx.enforcement_actions.append("auto_sanitize:stream_buffered_patch")
+                    _maybe_log_dangerous_response_sample(
+                        ctx,
+                        stream_window,
+                        route=req.route,
+                        model=req.model,
+                        source="responses_stream_buffered_patch",
+                        log_key="responses_stream_buffered_patch",
+                    )
                     logger.info("responses stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
                     sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
                     info_log_sanitized("responses_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
@@ -3424,9 +3448,8 @@ async def _execute_chat_once(
         logger.info("chat completion bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_chat_response(upstream_body, req)
 
-    pipeline = _get_pipeline()
-
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
+    pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
         upstream_payload = _build_chat_upstream_payload(payload, req.messages)
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
@@ -3550,6 +3573,14 @@ async def _execute_chat_once(
     if not skip_confirmation:
         await _apply_semantic_review(ctx, final_resp.output_text, phase="response")
     if skip_confirmation and ctx.response_disposition in {"block", "sanitize"}:
+        _maybe_log_dangerous_response_sample(
+            ctx,
+            final_resp.output_text,
+            route=req.route,
+            model=req.model,
+            source="chat_confirmed_release",
+            log_key="chat_confirmed_release",
+        )
         final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
         ctx.response_disposition = "allow"
         ctx.disposition_reasons.append("confirmed_release_override")
@@ -3562,6 +3593,14 @@ async def _execute_chat_once(
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
 
         if not _confirmation_approval_enabled():
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                final_resp.output_text,
+                route=req.route,
+                model=req.model,
+                source="chat_auto_sanitize",
+                log_key="chat_auto_sanitize",
+            )
             final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
@@ -3701,9 +3740,8 @@ async def _execute_responses_once(
         logger.info("responses endpoint bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
         return _passthrough_responses_output(upstream_body, req)
 
-    pipeline = _get_pipeline()
-
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
+    pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
         upstream_payload = _build_responses_upstream_payload(
             payload, req.messages,
@@ -3832,6 +3870,14 @@ async def _execute_responses_once(
     if not skip_confirmation:
         await _apply_semantic_review(ctx, final_resp.output_text, phase="response")
     if skip_confirmation and ctx.response_disposition in {"block", "sanitize"}:
+        _maybe_log_dangerous_response_sample(
+            ctx,
+            final_resp.output_text,
+            route=req.route,
+            model=req.model,
+            source="responses_confirmed_release",
+            log_key="responses_confirmed_release",
+        )
         final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
         ctx.response_disposition = "allow"
         ctx.disposition_reasons.append("confirmed_release_override")
@@ -3844,6 +3890,14 @@ async def _execute_responses_once(
         debug_log_original("response_confirmation_original", final_resp.output_text, reason=resp_reason)
 
         if not _confirmation_approval_enabled():
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                final_resp.output_text,
+                route=req.route,
+                model=req.model,
+                source="responses_auto_sanitize",
+                log_key="responses_auto_sanitize",
+            )
             final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
@@ -4059,6 +4113,14 @@ async def _execute_generic_stream_once(
                                 ctx.disposition_reasons.append(block_reason)
                             if not _confirmation_approval_enabled():
                                 ctx.enforcement_actions.append("stream:auto_sanitize")
+                                _maybe_log_dangerous_response_sample(
+                                    ctx,
+                                    stream_window,
+                                    route=request_path,
+                                    model=model,
+                                    source="generic_stream_auto_sanitize",
+                                    log_key="generic_stream_auto_sanitize",
+                                )
                                 sanitized_response = _build_sanitized_full_response(ctx, source_text=stream_window)
                                 logger.info("generic stream auto-sanitized request_id=%s reason=%s", ctx.request_id, block_reason)
                                 info_log_sanitized("generic_stream_sanitized", sanitized_response, request_id=ctx.request_id, reason=block_reason)
@@ -4240,6 +4302,14 @@ async def _execute_generic_once(
 
     if _needs_confirmation(ctx):
         if not _confirmation_approval_enabled():
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                capped_upstream_text,
+                route=request_path,
+                model=model,
+                source="generic_auto_sanitize",
+                log_key="generic_auto_sanitize",
+            )
             sanitized_text = _build_sanitized_full_response(ctx, source_text=capped_upstream_text)
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
@@ -4295,7 +4365,6 @@ async def chat_completions(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    tail_preview = _confirmation_tail_preview(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,
@@ -4770,7 +4839,6 @@ async def responses(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    tail_preview = _confirmation_tail_preview(user_text)
     pending = await _maybe_offload(
         _resolve_pending_confirmation,
         payload,

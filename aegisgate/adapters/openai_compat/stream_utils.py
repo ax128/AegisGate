@@ -125,7 +125,7 @@ def _stream_block_message(reason: str) -> str:
 
 def _stream_block_sse_chunk(ctx: RequestContext, model: str, reason: str, route: str) -> bytes:
     if route == "/v1/responses":
-        payload = {
+        payload: dict[str, Any] = {
             "id": ctx.request_id,
             "object": "response.chunk",
             "model": model,
@@ -199,7 +199,7 @@ def _stream_confirmation_sse_chunk(
     else:
         aegis_meta["action"] = "blocked"
     if route == "/v1/responses":
-        payload = {
+        payload: dict[str, Any] = {
             "id": ctx.request_id,
             "object": "response.chunk",
             "model": model,

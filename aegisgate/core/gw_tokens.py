@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import secrets
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ _WHITELIST_UNSET = object()
 
 def _generate_alnum_token(length: int) -> str:
     """生成纯字母数字 token（a-zA-Z0-9），不含 - _ 等符号。"""
-    chars = []
+    chars: list[str] = []
     while len(chars) < length:
         raw = secrets.token_urlsafe(length * 2)
         chars.extend(c for c in raw if c.isalnum())
@@ -39,27 +40,42 @@ def _path() -> Path:
     return Path(p) if os.path.isabs(p) else Path.cwd() / p
 
 
-def load() -> None:
-    """启动时加载映射表；无文件或空则不变。"""
+def load(*, replace: bool = False) -> None:
+    """从磁盘加载映射表。
+
+    ``replace=False`` 时保留原有兼容行为：文件缺失或解析失败只记录日志，不清空内存。
+    ``replace=True`` 时以磁盘内容为准；文件缺失、格式非法或解析失败都会清空内存映射，
+    以避免热重载后继续放行已被删除的旧 token。
+    """
     path = _path()
-    if not path.is_file():
-        logger.debug("gw_tokens file not found path=%s, skip load", path)
-        return
     with _lock:
+        if not path.is_file():
+            if replace:
+                _tokens.clear()
+                logger.info("gw_tokens file missing path=%s, cleared in-memory tokens", path)
+            else:
+                logger.debug("gw_tokens file not found path=%s, skip load", path)
+            return
         try:
             raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
             tokens = data.get(_GW_TOKENS_KEY)
-            if isinstance(tokens, dict):
-                _tokens.clear()
-                for k, v in tokens.items():
-                    if isinstance(v, dict) and "upstream_base" in v:
-                        _tokens[str(k)] = {
-                            "upstream_base": str(v["upstream_base"]),
-                            "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
-                        }
-                logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
+            if not isinstance(tokens, dict):
+                if replace:
+                    _tokens.clear()
+                    logger.warning("gw_tokens load failed path=%s error=invalid tokens payload; in-memory tokens cleared", path)
+                return
+            _tokens.clear()
+            for k, v in tokens.items():
+                if isinstance(v, dict) and "upstream_base" in v:
+                    _tokens[str(k)] = {
+                        "upstream_base": str(v["upstream_base"]),
+                        "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
+                    }
+            logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
         except Exception as exc:
+            if replace:
+                _tokens.clear()
             logger.warning("gw_tokens load failed path=%s error=%s", path, exc)
 
 
@@ -67,14 +83,34 @@ def _save() -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = {_GW_TOKENS_KEY: dict(_tokens)}
+    tmp_path: Path | None = None
     try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Write to a sibling temp file first so readers never observe a
+        # partially-written gw_tokens.json during concurrent reloads.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as tmp:
+            tmp.write(json.dumps(data, ensure_ascii=False, indent=2))
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass
         logger.debug("gw_tokens saved path=%s count=%d", path, len(_tokens))
     except OSError as exc:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         logger.warning("gw_tokens: could not persist to %s: %s (in-memory state intact)", path, exc)
 
 
@@ -226,13 +262,11 @@ def update_and_rename(
             next_mapping["upstream_base"] = normalized_upstream
         if whitelist_key is not None:
             next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
-        active_token = token
         if new_token and new_token != token:
             if new_token in _tokens:
                 raise ValueError(f"token already exists: {new_token}")
             _tokens[new_token] = next_mapping
             del _tokens[token]
-            active_token = new_token
         else:
             _tokens[token] = next_mapping
         _save()
@@ -258,7 +292,7 @@ def inject_docker_upstreams() -> int:
     raw = (settings.docker_upstreams or "").strip()
     if not raw:
         return 0
-    injected = 0
+    pending: dict[str, dict[str, Any]] = {}
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
@@ -274,13 +308,14 @@ def inject_docker_upstreams() -> int:
             logger.warning("docker_upstreams: empty field in %r, skipped", entry)
             continue
         upstream_base = f"http://{service}:{port}/v1"
-        with _lock:
-            _tokens[token] = {
-                "upstream_base": upstream_base,
-                "whitelist_key": [],
-            }
-        injected += 1
+        pending[token] = {
+            "upstream_base": upstream_base,
+            "whitelist_key": [],
+        }
+    injected = len(pending)
     if injected:
-        _save()
+        with _lock:
+            _tokens.update(pending)
+            _save()
         logger.info("docker_upstreams injected %d token(s): %s", injected, raw)
     return injected

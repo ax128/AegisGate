@@ -120,7 +120,8 @@ class SemanticAnalyzer:
         if self.artificial_delay_ms > 0:
             time.sleep(self.artificial_delay_ms / 1000.0)
 
-        norm = self._normalize_text(text)
+        # Input is already normalized by analyze(); use directly.
+        norm = text
         if not norm:
             return 0.0, [], []
 
@@ -210,6 +211,16 @@ class SemanticAnalyzer:
                 tags=[],
                 reasons=["semantic_timeout"],
                 timed_out=True,
+                cache_hit=False,
+                duration_ms=(time.perf_counter() - start) * 1000.0,
+            )
+        except Exception:
+            logger.exception("semantic_analyzer classify error request text length=%d", len(norm))
+            return SemanticResult(
+                risk_score=0.0,
+                tags=[],
+                reasons=["semantic_classify_error"],
+                timed_out=False,
                 cache_hit=False,
                 duration_ms=(time.perf_counter() - start) * 1000.0,
             )
@@ -304,6 +315,27 @@ class SemanticServiceClient:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    def reconfigure(
+        self,
+        *,
+        service_url: str,
+        cache_ttl_seconds: int,
+        max_cache_entries: int,
+        failure_threshold: int,
+        open_seconds: int,
+    ) -> None:
+        self.service_url = service_url.strip()
+        self.cache_ttl_seconds = max(1, int(cache_ttl_seconds))
+        self.max_cache_entries = max(100, int(max_cache_entries))
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.open_seconds = max(1, int(open_seconds))
+        with self._cache_lock:
+            self._cache.clear()
+        with self._breaker_lock:
+            self._failure_count = 0
+            self._open_until = 0.0
+            self._half_open_probe_inflight = False
 
     def _acquire_breaker_permission(self, now: float) -> tuple[bool, bool]:
         """

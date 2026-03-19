@@ -1,9 +1,11 @@
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from aegisgate.core import gateway
@@ -49,6 +51,8 @@ def _build_request(
 
 def _find_route_handler(path: str, method: str):
     for route in gateway.app.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
         if getattr(route, "path", None) != path:
             continue
         methods = getattr(route, "methods", None) or set()
@@ -59,6 +63,17 @@ def _find_route_handler(path: str, method: str):
 
 async def _allow_next(_request: Request):
     return JSONResponse(status_code=200, content={"ok": True})
+
+
+@asynccontextmanager
+async def _async_client(*, headers: dict[str, str] | None = None):
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1",
+        headers=headers,
+    ) as client:
+        yield client
 
 
 @pytest.mark.asyncio
@@ -153,64 +168,67 @@ def test_local_ui_index_serves_html_file():
     assert response.media_type == "text/html; charset=utf-8"
 
 
-def test_login_and_docs_require_auth(monkeypatch):
+@pytest.mark.asyncio
+async def test_login_and_docs_require_auth(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
     monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
-    with TestClient(gateway.app, base_url="http://127.0.0.1") as client:
-        bootstrap = client.get("/__ui__/api/bootstrap", follow_redirects=False)
+    async with _async_client() as client:
+        bootstrap = await client.get("/__ui__/api/bootstrap", follow_redirects=False)
         assert bootstrap.status_code == 401
 
-        failed = client.post("/__ui__/api/login", json={"password": "wrong"})
+        failed = await client.post("/__ui__/api/login", json={"password": "wrong"})
         assert failed.status_code == 403
 
-        default_password = client.post("/__ui__/api/login", json={"password": "admin123"})
+        default_password = await client.post("/__ui__/api/login", json={"password": "admin123"})
         assert default_password.status_code == 403
 
-        logged_in = client.post("/__ui__/api/login", json={"password": "agent"})
+        logged_in = await client.post("/__ui__/api/login", json={"password": "agent"})
         assert logged_in.status_code == 200
-        assert gateway._UI_SESSION_COOKIE in logged_in.cookies
+        assert gateway._UI_SESSION_COOKIE in client.cookies
 
-        docs_list = client.get("/__ui__/api/docs")
+        docs_list = await client.get("/__ui__/api/docs")
         assert docs_list.status_code == 200
         items = docs_list.json()["items"]
         assert items
 
         doc_id = items[0]["id"]
-        doc_content = client.get(f"/__ui__/api/docs/{doc_id}")
+        doc_content = await client.get(f"/__ui__/api/docs/{doc_id}")
         assert doc_content.status_code == 200
         assert "content" in doc_content.json()
 
-        logout_without_csrf = client.post("/__ui__/api/logout")
+        logout_without_csrf = await client.post("/__ui__/api/logout")
         assert logout_without_csrf.status_code == 403
 
-        csrf_token = client.get("/__ui__/api/bootstrap").json()["ui"]["csrf_token"]
-        logout = client.post("/__ui__/api/logout", headers={"x-aegis-ui-csrf": csrf_token})
+        csrf_token = (await client.get("/__ui__/api/bootstrap")).json()["ui"]["csrf_token"]
+        logout = await client.post("/__ui__/api/logout", headers={"x-aegis-ui-csrf": csrf_token})
         assert logout.status_code == 200
 
 
-def test_ui_session_is_bound_to_user_agent(monkeypatch):
+@pytest.mark.asyncio
+async def test_ui_session_is_bound_to_user_agent(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
     monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
-    with TestClient(gateway.app, base_url="http://127.0.0.1", headers={"user-agent": "agent-a"}) as client_a:
-        login = client_a.post("/__ui__/api/login", json={"password": "agent"})
+    async with _async_client(headers={"user-agent": "agent-a"}) as client_a:
+        login = await client_a.post("/__ui__/api/login", json={"password": "agent"})
         assert login.status_code == 200
-        cookie = login.cookies.get(gateway._UI_SESSION_COOKIE)
+        cookie = client_a.cookies.get(gateway._UI_SESSION_COOKIE)
         assert cookie is not None
-    with TestClient(gateway.app, base_url="http://127.0.0.1", headers={"user-agent": "agent-b"}) as client_b:
+    async with _async_client(headers={"user-agent": "agent-b"}) as client_b:
         client_b.cookies.set(gateway._UI_SESSION_COOKIE, cookie)
-        response = client_b.get("/__ui__/api/bootstrap")
+        response = await client_b.get("/__ui__/api/bootstrap")
         assert response.status_code == 401
 
 
-def test_ui_login_rate_limit(monkeypatch):
+@pytest.mark.asyncio
+async def test_ui_login_rate_limit(monkeypatch):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
     monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     monkeypatch.setattr(gateway._UI_LOGIN_RATE_LIMITER, "_max", 1)
     gateway._UI_LOGIN_RATE_LIMITER._buckets.clear()
-    with TestClient(gateway.app, base_url="http://127.0.0.1") as client:
-        first = client.post("/__ui__/api/login", json={"password": "wrong"})
+    async with _async_client() as client:
+        first = await client.post("/__ui__/api/login", json={"password": "wrong"})
         assert first.status_code == 403
-        second = client.post("/__ui__/api/login", json={"password": "wrong"})
+        second = await client.post("/__ui__/api/login", json={"password": "wrong"})
         assert second.status_code == 429
 
 
@@ -225,7 +243,8 @@ def test_ui_config_payload_contains_defaults():
     assert "section" in first
 
 
-def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
+@pytest.mark.asyncio
+async def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(gateway.settings, "gateway_key", "agent")
     monkeypatch.setattr(gateway, "_is_loopback_ip", lambda host: host in {"127.0.0.1", "testclient"})
     env_path = tmp_path / ".env"
@@ -239,11 +258,11 @@ def test_ui_config_update_persists_env(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr("aegisgate.core.hot_reload.reload_settings", fake_reload_settings)
 
-    with TestClient(gateway.app, base_url="http://127.0.0.1") as client:
-        login = client.post("/__ui__/api/login", json={"password": "agent"})
+    async with _async_client() as client:
+        login = await client.post("/__ui__/api/login", json={"password": "agent"})
         assert login.status_code == 200
-        csrf_token = client.get("/__ui__/api/bootstrap").json()["ui"]["csrf_token"]
-        response = client.post(
+        csrf_token = (await client.get("/__ui__/api/bootstrap")).json()["ui"]["csrf_token"]
+        response = await client.post(
             "/__ui__/api/config",
             headers={"x-aegis-ui-csrf": csrf_token},
             json={

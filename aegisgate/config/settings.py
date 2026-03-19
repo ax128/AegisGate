@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: float = 600.0
     upstream_max_connections: int = 300
     upstream_max_keepalive_connections: int = 100
-    enable_thread_offload: bool = True
+    # 默认关闭线程池卸载：当前 Python 3.13 运行环境下，asyncio.to_thread 会让
+    # 事件循环在关闭阶段卡住，导致 pytest/短生命周期脚本无法正常退出。
+    # 生产如确认运行时无该问题，可通过环境变量显式开启。
+    enable_thread_offload: bool = False
     # 过滤管道（request/response pipeline）最大允许执行时间（秒）。
     # 超时后该请求被拒绝（response: block，request: pass-through），event loop 不再被阻塞。
     # 设为 0 表示不限制（不推荐生产使用）。
@@ -122,6 +125,8 @@ class Settings(BaseSettings):
     pending_prune_interval_seconds: int = 60
     clear_pending_on_startup: bool = False
     audit_log_path: str = "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl
+    enable_dangerous_response_log: bool = False  # 保存响应侧危险样本，按日期切分并自动清理 10 天前旧文件
+    dangerous_response_log_path: str = "logs/dangerous_response_samples.jsonl"  # 危险响应样本日志基路径；Docker 下可设为 /tmp/aegisgate/dangerous_response_samples.jsonl
 
     enable_redaction: bool = True
     enable_restoration: bool = True

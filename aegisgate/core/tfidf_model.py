@@ -7,8 +7,9 @@ Gracefully degrades if models are missing or dependencies unavailable.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aegisgate.util.logger import logger
 
@@ -27,8 +28,8 @@ class TfidfClassifier:
     """Thread-safe TF-IDF classifier. Falls back to (\"unknown\", 0.5) if unavailable."""
 
     def __init__(self) -> None:
-        self._vectorizer = _UNAVAILABLE
-        self._classifier = _UNAVAILABLE
+        self._vectorizer: Any = _UNAVAILABLE
+        self._classifier: Any = _UNAVAILABLE
         self._jieba_loaded = False
         self._load()
 
@@ -112,10 +113,13 @@ class TfidfClassifier:
 
 # Module-level singleton (lazy init on first import)
 _instance: TfidfClassifier | None = None
+_instance_lock = threading.Lock()
 
 
 def get_tfidf_classifier() -> TfidfClassifier:
     global _instance
     if _instance is None:
-        _instance = TfidfClassifier()
+        with _instance_lock:
+            if _instance is None:
+                _instance = TfidfClassifier()
     return _instance

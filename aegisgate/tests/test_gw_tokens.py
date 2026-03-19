@@ -40,6 +40,21 @@ def test_load_legacy_tokens_without_whitelist_key(monkeypatch, tmp_path):
     assert mapping["whitelist_key"] == []
 
 
+def test_load_replace_clears_stale_tokens_when_file_missing(monkeypatch, tmp_path):
+    path = tmp_path / "gw_tokens.json"
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(path))
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+        gw_tokens._tokens["stale-token"] = {
+            "upstream_base": "https://stale.example.com/v1",
+            "whitelist_key": [],
+        }
+
+    gw_tokens.load(replace=True)
+
+    assert gw_tokens.get("stale-token") is None
+
+
 def test_update_rewrites_upstream_and_whitelist(monkeypatch, tmp_path):
     monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(tmp_path / "gw_tokens.json"))
     with gw_tokens._lock:
@@ -164,3 +179,25 @@ def test_inject_docker_upstreams_overrides_existing(monkeypatch, tmp_path):
     m = gw_tokens.get("8317")
     assert m["upstream_base"] == "http://new-proxy:8317/v1"
     assert m["whitelist_key"] == []
+
+
+def test_save_keeps_existing_file_when_atomic_replace_fails(monkeypatch, tmp_path):
+    path = tmp_path / "gw_tokens.json"
+    path.write_text('{"tokens":{"existing":{"upstream_base":"https://kept.example/v1"}}}', encoding="utf-8")
+    monkeypatch.setattr(gw_tokens.settings, "gw_tokens_path", str(path))
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+        gw_tokens._tokens["tok123"] = {
+            "upstream_base": "https://new.example/v1",
+            "whitelist_key": [],
+        }
+
+    def _raise_replace(self, target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(type(path), "replace", _raise_replace)
+
+    gw_tokens._save()
+
+    assert path.read_text(encoding="utf-8") == '{"tokens":{"existing":{"upstream_base":"https://kept.example/v1"}}}'
+    assert list(tmp_path.iterdir()) == [path]

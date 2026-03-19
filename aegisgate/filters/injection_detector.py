@@ -10,6 +10,7 @@ import binascii
 import re
 import string
 import unicodedata
+from typing import Any, TypedDict
 from urllib.parse import unquote
 
 from aegisgate.config.security_level import apply_threshold, normalize_security_level
@@ -33,6 +34,14 @@ _COMMON_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAK
 
 # 每 3 个字符插入 "-" 以变形展示，防止日志本身被利用
 _DEFORM_CHUNK_SIZE = 3
+
+
+class ScanDiagnostics(TypedDict):
+    text_raw_len: int
+    text_norm_len: int
+    unicode_invisible_count: int
+    unicode_bidi_count: int
+    discussion_context: bool
 
 
 def _deform_text(text: str) -> str:
@@ -277,7 +286,7 @@ class PromptInjectionDetector(BaseFilter):
 
         return list(discovered)
 
-    def _scan_text(self, text: str) -> tuple[dict[str, list[str]], dict[str, object]]:
+    def _scan_text(self, text: str) -> tuple[dict[str, list[str]], ScanDiagnostics]:
         text_raw = text
         text_nfkc = unicodedata.normalize("NFKC", text_raw)
         text_norm = self._normalize_text(text_nfkc)
@@ -327,10 +336,12 @@ class PromptInjectionDetector(BaseFilter):
                 signals["remote_content_instruction"].add(label)
 
         for label, pattern in self._tool_call_injection_patterns.items():
-            match = pattern.search(text_nfkc) or pattern.search(text_norm)
+            nfkc_match = pattern.search(text_nfkc)
+            matched_text = text_nfkc if nfkc_match else text_norm
+            match = nfkc_match or pattern.search(text_norm)
             if match:
                 signals["tool_call_injection"].add(label)
-                deformed = _extract_match_context(text_nfkc if pattern.search(text_nfkc) else text_norm, match)
+                deformed = _extract_match_context(matched_text, match)
                 logger.warning(
                     "tool_call_injection_hit rule=%s excerpt=%s",
                     label,
@@ -384,7 +395,7 @@ class PromptInjectionDetector(BaseFilter):
         discussion_context = any(pattern.search(text_norm) for pattern in self._discussion_patterns) or any(
             pattern.search(text_nfkc) for pattern in self._quoted_instruction_patterns
         )
-        diagnostics = {
+        diagnostics: ScanDiagnostics = {
             "text_raw_len": len(text_raw),
             "text_norm_len": len(text_norm),
             "unicode_invisible_count": len(invisible_hits),
@@ -403,7 +414,7 @@ class PromptInjectionDetector(BaseFilter):
     def _finalize_signals(signals: dict[str, set[str]]) -> dict[str, list[str]]:
         return {key: sorted(values) for key, values in signals.items() if values}
 
-    def _score_signals(self, signals: dict[str, list[str]]) -> dict[str, object]:
+    def _score_signals(self, signals: dict[str, list[str]]) -> dict[str, Any]:
         feature_scores = {key: 0.0 for key in self._risk_weights}
         signal_breakdown: dict[str, dict[str, object]] = {}
 

@@ -82,3 +82,19 @@ def test_apply_semantic_review_skips_outside_gray_zone():
 
     assert ctx.risk_score == 0.05
     assert not any(tag.startswith("response_semantic_") for tag in ctx.security_tags)
+
+
+def test_semantic_analyzer_classify_error_returns_safe_fallback(monkeypatch):
+    analyzer = SemanticAnalyzer(cache_ttl_seconds=60, max_cache_entries=100)
+
+    def raise_error(text: str):
+        raise RuntimeError("simulated classify failure")
+
+    monkeypatch.setattr(analyzer, "_classify_sync", raise_error)
+
+    result = analyzer.analyze(text="some input text", timeout_ms=500)
+
+    assert result.timed_out is False
+    assert result.risk_score == 0.0
+    assert "semantic_classify_error" in result.reasons
+    assert result.cache_hit is False

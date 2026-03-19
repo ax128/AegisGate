@@ -8,6 +8,7 @@ from aegisgate.config.security_level import apply_threshold, normalize_security_
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
+from aegisgate.core.dangerous_response_log import mark_text_with_spans, write_dangerous_response_sample
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
@@ -99,6 +100,53 @@ class OutputSanitizer(BaseFilter):
             if pattern.search(text):
                 hits.append(pattern_id)
         return sorted(set(hits))
+
+    @staticmethod
+    def _collect_replacement_spans(text: str, patterns: list[re.Pattern[str]]) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                if match.start() != match.end():
+                    spans.append((match.start(), match.end()))
+        return spans
+
+    def _log_dangerous_sample(
+        self,
+        *,
+        text: str,
+        ctx: RequestContext,
+        resp: InternalResponse,
+        spans: list[tuple[int, int]],
+    ) -> None:
+        if not settings.enable_dangerous_response_log or not spans:
+            return
+        if "dangerous_response_log:output_sanitizer" in ctx.security_tags:
+            return
+
+        marked_text = mark_text_with_spans(text, spans)
+        fragments: list[str] = []
+        for start, end in spans:
+            fragment = text[start:end]
+            if fragment and fragment not in fragments:
+                fragments.append(fragment)
+        if not fragments:
+            return
+
+        write_dangerous_response_sample(
+            {
+                "request_id": ctx.request_id,
+                "session_id": ctx.session_id,
+                "route": ctx.route,
+                "model": resp.model,
+                "source": self.name,
+                "response_disposition": "sanitize",
+                "reasons": list(dict.fromkeys(ctx.disposition_reasons + ["response_sanitized"])),
+                "fragment_count": len(fragments),
+                "dangerous_fragments": fragments,
+                "content": marked_text,
+            }
+        )
+        ctx.security_tags.add("dangerous_response_log:output_sanitizer")
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "action": "none"}
@@ -208,6 +256,11 @@ class OutputSanitizer(BaseFilter):
             or (ctx.risk_score >= self._sanitize_threshold)
         )
         if should_sanitize:
+            replacement_spans = self._collect_replacement_spans(resp.output_text, self._command_patterns)
+            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._encoded_payload_patterns))
+            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_uri_patterns))
+            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_markup_patterns))
+            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._spam_noise_patterns))
             cleaned = resp.output_text
             for pattern in self._command_patterns:
                 cleaned = pattern.sub(self._command_replacement, cleaned)
@@ -221,6 +274,12 @@ class OutputSanitizer(BaseFilter):
                 cleaned = pattern.sub(self._spam_replacement, cleaned)
 
             if cleaned != resp.output_text:
+                self._log_dangerous_sample(
+                    text=resp.output_text,
+                    ctx=ctx,
+                    resp=resp,
+                    spans=replacement_spans,
+                )
                 debug_log_original("output_sanitizer_sanitized", resp.output_text, reason="response_sanitized")
                 resp.output_text = cleaned
                 ctx.response_disposition = "sanitize"

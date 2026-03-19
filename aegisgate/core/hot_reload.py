@@ -7,10 +7,9 @@ Runs as a background asyncio task started from the app lifespan.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from aegisgate.util.logger import logger
 
@@ -57,7 +56,7 @@ class HotReloader:
         if self._task is not None:
             return
         self._stop_event.clear()
-        self._task = asyncio.get_event_loop().create_task(self._poll_loop())
+        self._task = asyncio.create_task(self._poll_loop(), name="aegisgate-hot-reload")
         labels = [w.label for w, _ in self._watches]
         logger.info("hot_reload watcher started poll_seconds=%.1f watches=%s", self._poll_seconds, labels)
 
@@ -88,6 +87,14 @@ class HotReloader:
                     logger.exception("hot_reload callback error label=%s", watched.label)
 
 
+def _watch_label(prefix: str, path: Path) -> str:
+    try:
+        suffix = path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except Exception:
+        suffix = path.as_posix()
+    return f"{prefix}:{suffix}"
+
+
 # ---------------------------------------------------------------------------
 # Reload actions
 # ---------------------------------------------------------------------------
@@ -116,7 +123,7 @@ def reload_settings() -> None:
 
     try:
         fresh = Settings()
-        for field_name in fresh.model_fields:
+        for field_name in Settings.model_fields:
             if field_name in _IMMUTABLE_FIELDS:
                 continue
             setattr(settings, field_name, getattr(fresh, field_name))
@@ -129,6 +136,10 @@ def reload_settings() -> None:
         # Apply new log level immediately so callers see the change at once.
         from aegisgate.util.logger import apply_log_level
         apply_log_level(settings.log_level)
+        from aegisgate.adapters.openai_compat.pipeline_runtime import reload_runtime_dependencies
+        reload_runtime_dependencies()
+        from aegisgate.adapters.openai_compat.router import reload_semantic_client_settings
+        reload_semantic_client_settings()
         logger.info("hot_reload settings reloaded from environment / .env")
     except Exception:
         logger.exception("hot_reload settings reload failed")
@@ -159,7 +170,7 @@ def reload_gw_tokens() -> None:
     """Reload gw_tokens.json into memory."""
     try:
         from aegisgate.core.gw_tokens import load
-        load()
+        load(replace=True)
         logger.info("hot_reload gw_tokens reloaded")
     except Exception:
         logger.exception("hot_reload gw_tokens reload failed")
@@ -212,14 +223,11 @@ def _clear_v2_lru_caches() -> None:
 
 
 def _reset_filter_pipeline() -> None:
-    """Reset thread-local pipeline so next request rebuilds with fresh rules."""
+    """Reset cached pipelines so next request rebuilds with fresh rules."""
     try:
-        from aegisgate.adapters.openai_compat.router import _pipeline_local
-        # Clear for the current thread; other threads will see stale pipelines
-        # until their next request, at which point _get_pipeline() must rebuild.
-        # We set a generation counter so _get_pipeline can detect staleness.
-        _pipeline_local.pipeline = None
-        _bump_pipeline_generation()
+        from aegisgate.adapters.openai_compat.pipeline_runtime import reset_pipeline_cache
+
+        reset_pipeline_cache()
     except Exception:
         logger.exception("hot_reload pipeline reset failed")
 
@@ -252,8 +260,7 @@ def build_watcher() -> HotReloader:
 
     # .env files
     for env_candidate in [Path.cwd() / ".env", Path.cwd() / "config" / ".env"]:
-        if env_candidate.exists():
-            watcher.watch(env_candidate, f"env:{env_candidate.name}", reload_settings)
+        watcher.watch(env_candidate, _watch_label("env", env_candidate), reload_settings)
 
     # security_filters.yaml
     rules_path = Path(settings.security_rules_path)

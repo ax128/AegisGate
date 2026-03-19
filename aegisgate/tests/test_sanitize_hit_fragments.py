@@ -1,5 +1,7 @@
 """Tests for _sanitize_hit_fragments and critical danger redaction."""
 
+from typing import Any, cast
+
 from aegisgate.adapters.openai_compat.router import (
     _contains_critical_danger,
     _sanitize_hit_fragments,
@@ -9,9 +11,13 @@ from aegisgate.core.context import RequestContext
 
 
 def _make_ctx(**kwargs) -> RequestContext:
-    defaults = {"request_id": "test-1", "session_id": "test-1", "route": "/v1/chat/completions"}
+    defaults: dict[str, Any] = {
+        "request_id": "test-1",
+        "session_id": "test-1",
+        "route": "/v1/chat/completions",
+    }
     defaults.update(kwargs)
-    return RequestContext(**defaults)
+    return RequestContext(**cast(Any, defaults))
 
 
 class TestContainsCriticalDanger:

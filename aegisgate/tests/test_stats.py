@@ -6,8 +6,6 @@ import threading
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
-import pytest
-
 from aegisgate.core.context import RequestContext
 from aegisgate.core.stats import StatsCollector, _hour_key
 

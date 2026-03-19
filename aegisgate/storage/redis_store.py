@@ -46,6 +46,17 @@ class RedisKVStore(KVStore):
         self.client = redis.Redis.from_url(redis_url, decode_responses=False)
         self.key_prefix = key_prefix.strip() or "aegisgate"
 
+    def close(self) -> None:
+        # Hot-reload can swap Redis backends repeatedly; close pooled sockets
+        # so old clients do not accumulate across reloads or shutdown.
+        close_method = getattr(self.client, "close", None)
+        if callable(close_method):
+            close_method()
+        connection_pool = getattr(self.client, "connection_pool", None)
+        disconnect = getattr(connection_pool, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
+
     def _mapping_key(self, session_id: str, request_id: str) -> str:
         return f"{self.key_prefix}:mapping:{session_id}:{request_id}"
 
@@ -348,10 +359,18 @@ class RedisKVStore(KVStore):
             while True:
                 cursor, keys = self.client.scan(cursor=cursor, match=pattern, count=200)
                 for key in keys:
-                    status = _to_str(self.client.hget(key, "status") or "")
+                    try:
+                        status = _to_str(self.client.hget(key, "status") or "")
+                    except Exception:
+                        # Skip non-hash keys (session index / retention sorted sets)
+                        # matched by the broad SCAN pattern.
+                        continue
                     if status != "executing":
                         continue
-                    updated_at = int(_to_str(self.client.hget(key, "updated_at") or "0"))
+                    try:
+                        updated_at = int(_to_str(self.client.hget(key, "updated_at") or "0"))
+                    except Exception:
+                        continue
                     if updated_at <= recover_before:
                         self.client.hset(key, mapping={"status": "pending", "updated_at": str(now_ts)})
                 if cursor == 0:
