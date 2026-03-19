@@ -41,6 +41,8 @@ config/.admin_initialized
 # Auto-generated IDE/agent files
 AGENTS.md
 *.egg-info/
+build/
+dist/
 
 # Local editor/OS files
 .DS_Store

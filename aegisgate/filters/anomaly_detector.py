@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import re
 import unicodedata
-from collections import Counter
+from collections import Counter, OrderedDict
 from typing import Any
 from urllib.parse import unquote
 
@@ -25,7 +25,7 @@ class AnomalyDetector(BaseFilter):
 
     def __init__(self) -> None:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": [], "risk_model": {}}
-        self._logged_response_ids: set[str] = set()
+        self._logged_response_ids: OrderedDict[str, None] = OrderedDict()
 
         rules = load_security_rules().get(self.name, {})
         repetition_rules = rules.get("repetition", {})
@@ -256,9 +256,9 @@ class AnomalyDetector(BaseFilter):
         self._process_text(resp.output_text, ctx, phase="response")
         if self._report.get("hit"):
             if ctx.request_id not in self._logged_response_ids:
-                if len(self._logged_response_ids) >= self._MAX_LOGGED:
-                    self._logged_response_ids.clear()
-                self._logged_response_ids.add(ctx.request_id)
+                self._logged_response_ids[ctx.request_id] = None
+                while len(self._logged_response_ids) > self._MAX_LOGGED:
+                    self._logged_response_ids.popitem(last=False)
                 logger.debug(
                     "anomaly detected on response request_id=%s signals=%s",
                     ctx.request_id,

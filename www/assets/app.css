@@ -23,6 +23,9 @@
   --radius-sm: 7px;
   --radius: 11px;
   --radius-lg: 18px;
+  --surface: var(--panel);
+  --surface2: var(--panel-2);
+  --border: var(--line);
 }
 
 * {

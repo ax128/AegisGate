@@ -29,7 +29,7 @@ def _json_loads(data: str) -> dict[str, Any]:
 def _to_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 

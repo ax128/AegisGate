@@ -19,6 +19,17 @@ from aegisgate.util.logger import logger
 DEFAULT_EXCERPT_MAX_LEN = 500
 
 
+def _resolve_max_len(default: int) -> int:
+    """Read AEGIS_DEBUG_EXCERPT_MAX_LEN env override once per call site."""
+    env_max = os.environ.get("AEGIS_DEBUG_EXCERPT_MAX_LEN")
+    if env_max is not None:
+        try:
+            return int(env_max)
+        except ValueError:
+            pass
+    return default
+
+
 def excerpt_for_debug(text: str, max_len: int = DEFAULT_EXCERPT_MAX_LEN) -> str:
     """
     将原文截断为可读摘要，便于 DEBUG 日志。不修改原字符串。
@@ -47,12 +58,7 @@ def debug_log_original(
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return
-    env_max = os.environ.get("AEGIS_DEBUG_EXCERPT_MAX_LEN")
-    if env_max is not None:
-        try:
-            max_len = int(env_max)
-        except ValueError:
-            pass
+    max_len = _resolve_max_len(max_len)
     excerpt = excerpt_for_debug(original_text, max_len=max_len)
     if reason:
         logger.debug("%s original_excerpt request_id=see_context reason=%s excerpt=%s", label, reason, excerpt)
@@ -78,12 +84,7 @@ def info_log_sanitized(
     """
     if not logger.isEnabledFor(logging.INFO):
         return
-    env_max = os.environ.get("AEGIS_DEBUG_EXCERPT_MAX_LEN")
-    if env_max is not None:
-        try:
-            max_len = int(env_max)
-        except ValueError:
-            pass
+    max_len = _resolve_max_len(max_len)
     excerpt = excerpt_for_debug(sanitized_text, max_len=max_len)
     rid = request_id or "see_context"
     if reason:

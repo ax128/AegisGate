@@ -90,7 +90,10 @@ def compute_hmac_sha256(secret: str, payload: bytes) -> str:
 def verify_hmac_signature(secret: str, payload: bytes, presented: str) -> bool:
     normalized = presented.strip()
     if normalized.lower().startswith("sha256="):
-        normalized = normalized.split("=", 1)[1].strip()
+        parts = normalized.split("=", 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return False
+        normalized = parts[1].strip()
     expected = compute_hmac_sha256(secret, payload)
     return hmac.compare_digest(expected, normalized)
 

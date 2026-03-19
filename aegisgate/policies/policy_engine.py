@@ -38,6 +38,7 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
 
 # 已打过「policy file not found」的 policy 名，进程内只打一次
 _builtin_policy_warned: set[str] = set()
+_builtin_policy_warned_lock = Lock()
 
 
 def _resolve_rules_dir(rules_dir: str | None) -> Path:
@@ -72,9 +73,10 @@ class PolicyEngine:
         rule_path = self.rules_dir / f"{policy_name}.yaml"
         if not rule_path.exists():
             if policy_name == "default":
-                global _builtin_policy_warned
-                if policy_name not in _builtin_policy_warned:
+                with _builtin_policy_warned_lock:
+                    already_warned = policy_name in _builtin_policy_warned
                     _builtin_policy_warned.add(policy_name)
+                if not already_warned:
                     logger.warning(
                         "policy file not found, using built-in default policy path=%s (will not warn again this run)",
                         rule_path,

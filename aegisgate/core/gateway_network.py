@@ -44,7 +44,8 @@ def _is_trusted_proxy(ip_str: str) -> bool:
     global _trusted_proxy_exact, _trusted_proxy_networks
     if _trusted_proxy_exact is None:
         _parse_trusted_proxy_ips()
-    assert _trusted_proxy_exact is not None and _trusted_proxy_networks is not None
+    if _trusted_proxy_exact is None or _trusted_proxy_networks is None:
+        return False
     if not _trusted_proxy_exact and not _trusted_proxy_networks:
         return False
     if ip_str in _trusted_proxy_exact:

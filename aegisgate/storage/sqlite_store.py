@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -36,8 +37,17 @@ class SqliteKVStore(KVStore):
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
+    @contextmanager
+    def _managed_connection(self) -> Any:
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._managed_connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(
@@ -130,7 +140,7 @@ class SqliteKVStore(KVStore):
         payload = encrypt_mapping(mapping)
 
         def _write() -> None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO mapping_store (session_id, request_id, payload)
@@ -149,7 +159,7 @@ class SqliteKVStore(KVStore):
         if cached is not None:
             return cached
 
-        with self._connect() as conn:
+        with self._managed_connection() as conn:
             row = conn.execute(
                 "SELECT payload FROM mapping_store WHERE session_id = ? AND request_id = ?",
                 (session_id, request_id),
@@ -167,7 +177,7 @@ class SqliteKVStore(KVStore):
         if cached is not None:
 
             def _delete_cached_row() -> None:
-                with self._connect() as conn:
+                with self._managed_connection() as conn:
                     conn.execute(
                         "DELETE FROM mapping_store WHERE session_id = ? AND request_id = ?",
                         (session_id, request_id),
@@ -178,7 +188,7 @@ class SqliteKVStore(KVStore):
             return cached
 
         def _read_and_delete() -> tuple[str] | None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT payload FROM mapping_store WHERE session_id = ? AND request_id = ?",
@@ -218,7 +228,7 @@ class SqliteKVStore(KVStore):
         payload = json_dumps(pending_request_payload)
 
         def _write() -> None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO pending_confirmation (
@@ -259,7 +269,7 @@ class SqliteKVStore(KVStore):
         tenant_id: str = "default",
     ) -> dict[str, Any] | None:
         def _read() -> tuple | None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 row = conn.execute(
                     """
                     SELECT
@@ -294,7 +304,7 @@ class SqliteKVStore(KVStore):
         recover_executing_before: int | None = None,
     ) -> dict[str, Any] | None:
         def _read() -> list[tuple]:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 rows = conn.execute(
                     """
                     SELECT
@@ -346,7 +356,7 @@ class SqliteKVStore(KVStore):
         now_ts: int,
     ) -> bool:
         def _update() -> bool:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 cursor = conn.execute(
                     """
                     UPDATE pending_confirmation
@@ -362,7 +372,7 @@ class SqliteKVStore(KVStore):
 
     def get_pending_confirmation(self, confirm_id: str) -> dict[str, Any] | None:
         def _read() -> tuple | None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 row = conn.execute(
                     """
                     SELECT
@@ -384,7 +394,7 @@ class SqliteKVStore(KVStore):
 
     def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
         def _write() -> None:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 conn.execute(
                     """
                     UPDATE pending_confirmation
@@ -399,7 +409,7 @@ class SqliteKVStore(KVStore):
 
     def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
         def _delete() -> bool:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 cursor = conn.execute(
                     """
                     DELETE FROM pending_confirmation
@@ -414,7 +424,7 @@ class SqliteKVStore(KVStore):
 
     def prune_pending_confirmations(self, now_ts: int) -> int:
         def _delete() -> int:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 cursor = conn.execute(
                     """
                     DELETE FROM pending_confirmation
@@ -443,7 +453,7 @@ class SqliteKVStore(KVStore):
     def clear_all_pending_confirmations(self) -> int:
         """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
         def _delete() -> int:
-            with self._connect() as conn:
+            with self._managed_connection() as conn:
                 cursor = conn.execute("DELETE FROM pending_confirmation")
                 conn.commit()
                 return int(cursor.rowcount or 0)

@@ -51,7 +51,7 @@ def _ensure_worker() -> None:
     with _AUDIT_LOCK:
         if _AUDIT_WORKER is not None and _AUDIT_WORKER.is_alive():
             return
-        _AUDIT_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-audit-writer", daemon=True)
+        _AUDIT_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-audit-writer", daemon=False)
         _AUDIT_WORKER.start()
 
 
@@ -74,9 +74,11 @@ def shutdown_audit_worker(timeout_seconds: float = 1.0) -> None:
     if _AUDIT_WORKER is None:
         return
     try:
-        _AUDIT_QUEUE.put_nowait(None)
+        _AUDIT_QUEUE.put(None, timeout=max(0.01, timeout_seconds))
     except queue.Full:
-        pass
+        logger.warning("audit shutdown: queue full, sentinel could not be sent")
     worker = _AUDIT_WORKER
-    worker.join(timeout=timeout_seconds)
+    worker.join(timeout=max(0.01, timeout_seconds))
+    if worker.is_alive():
+        logger.warning("audit worker did not stop within %.2fs", timeout_seconds)
     _AUDIT_WORKER = None

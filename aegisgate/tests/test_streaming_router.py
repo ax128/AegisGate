@@ -13,8 +13,10 @@ from aegisgate.adapters.openai_compat.router import (
     _stream_block_sse_chunk,
 )
 from aegisgate.adapters.openai_compat.stream_utils import (
+    _build_streaming_response,
     _extract_stream_event_type,
     _extract_stream_text_from_event,
+    _stream_confirmation_sse_chunk,
     _stream_error_sse_chunk,
 )
 from aegisgate.config.settings import settings
@@ -81,6 +83,51 @@ def test_extract_stream_event_type_normalizes_type():
     assert _extract_stream_event_type('{"type":"response.completed"}') == "response.completed"
     assert _extract_stream_event_type('{"type":" Response.Output_Text.Delta "}') == "response.output_text.delta"
     assert _extract_stream_event_type('{"x":1}') == ""
+
+
+def test_extract_stream_text_from_event_handles_nested_content_shapes():
+    payload = (
+        '{"choices":[{"delta":{"content":[{"text":"hello"},{"content":{"text":" world"}}]}}]}'
+    )
+    assert _extract_stream_text_from_event(payload) == "hello world"
+
+
+def test_stream_block_reason_requires_block_action_for_tool_violation():
+    ctx = RequestContext(request_id="r2", session_id="s2", route="/v1/chat/completions")
+    ctx.security_tags.add("tool_call_violation")
+    ctx.enforcement_actions.append("tool_call_guard:review")
+    assert _stream_block_reason(ctx) is None
+
+    ctx.enforcement_actions.append("tool_call_guard:block")
+    assert _stream_block_reason(ctx) == "response_tool_call_violation"
+
+
+def test_stream_block_reason_uses_risk_threshold_when_no_tag():
+    ctx = RequestContext(request_id="r3", session_id="s3", route="/v1/chat/completions")
+    ctx.risk_score = 0.95
+    ctx.risk_threshold = 0.7
+    assert _stream_block_reason(ctx) == "response_high_risk"
+
+
+def test_stream_confirmation_sse_chunk_marks_blocked_without_confirmation_meta():
+    ctx = RequestContext(request_id="r4", session_id="s4", route="/v1/chat/completions")
+    chunk = _stream_confirmation_sse_chunk(
+        ctx,
+        "test-model",
+        "/v1/chat/completions",
+        "blocked by policy",
+        None,
+    )
+    payload = chunk.decode("utf-8")
+    assert '"action": "blocked"' in payload
+    assert '"awaiting_confirmation"' not in payload
+
+
+def test_build_streaming_response_sets_sse_headers():
+    response = _build_streaming_response(iter([b"data: [DONE]\n\n"]))
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
 
 
 def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch):

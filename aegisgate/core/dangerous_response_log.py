@@ -213,7 +213,7 @@ def _ensure_worker() -> None:
     with _LOG_WORKER_LOCK:
         if _LOG_WORKER is not None and _LOG_WORKER.is_alive():
             return
-        _LOG_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-dangerous-response-log", daemon=True)
+        _LOG_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-dangerous-response-log", daemon=False)
         _LOG_WORKER.start()
 
 

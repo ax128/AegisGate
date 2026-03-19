@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -13,20 +14,25 @@ from aegisgate.util.logger import logger
 # Filters slower than this threshold (seconds) will emit a WARNING for diagnosis.
 _SLOW_FILTER_WARN_S = 1.0
 
+_init_log_lock = threading.Lock()
+_init_logged: bool = False
+
 
 class Pipeline:
-    _logged_once: bool = False
 
     def __init__(self, request_filters: list[BaseFilter], response_filters: list[BaseFilter]) -> None:
         self.request_filters = request_filters
         self.response_filters = response_filters
-        if not Pipeline._logged_once:
-            Pipeline._logged_once = True
-            logger.info(
-                "pipeline initialized request_filters=%s response_filters=%s",
-                [p.name for p in self.request_filters],
-                [p.name for p in self.response_filters],
-            )
+        global _init_logged
+        if not _init_logged:
+            with _init_log_lock:
+                if not _init_logged:
+                    _init_logged = True
+                    logger.info(
+                        "pipeline initialized request_filters=%s response_filters=%s",
+                        [p.name for p in self.request_filters],
+                        [p.name for p in self.response_filters],
+                    )
 
     def _run_phase(
         self,

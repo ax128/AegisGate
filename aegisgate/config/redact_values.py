@@ -42,8 +42,12 @@ def load_redact_values() -> list[str]:
             _cached_mtime_ns = 0
         return []
 
-    mtime_ns = path.stat().st_mtime_ns
     with _lock:
+        # Read mtime inside the lock to avoid TOCTOU race.
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return list(_cached_values) if _cached_values is not None else []
         if _cached_values is not None and _cached_mtime_ns == mtime_ns:
             return list(_cached_values)
 

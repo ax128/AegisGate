@@ -15,7 +15,10 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from aegisgate.util.logger import logger
 
+import threading
+
 _fernet_instance: Fernet | None = None
+_fernet_lock = threading.Lock()
 _FERNET_KEY_FILE = "aegis_fernet.key"
 _FERNET_FALLBACK_DIR = Path("/tmp/aegisgate")
 
@@ -77,7 +80,9 @@ def _load_or_generate_key() -> bytes:
 def _get_fernet() -> Fernet:
     global _fernet_instance
     if _fernet_instance is None:
-        _fernet_instance = Fernet(_load_or_generate_key())
+        with _fernet_lock:
+            if _fernet_instance is None:
+                _fernet_instance = Fernet(_load_or_generate_key())
     return _fernet_instance
 
 
