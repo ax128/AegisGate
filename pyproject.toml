@@ -42,10 +42,6 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 
-[project.urls]
-Homepage = "https://github.com/ax128/AegisGate"
-Repository = "https://github.com/ax128/AegisGate"
-Issues = "https://github.com/ax128/AegisGate/issues"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
@@ -55,6 +51,11 @@ dependencies = [
   "pyyaml>=6.0.0",
   "cryptography>=42.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ax128/AegisGate"
+Repository = "https://github.com/ax128/AegisGate"
+Issues = "https://github.com/ax128/AegisGate/issues"
 
 [project.optional-dependencies]
 dev = [
