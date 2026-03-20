@@ -436,37 +436,14 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
   -d '{"model":"claude-3-5-sonnet-latest","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-更多终端/客户端（Codex CLI、OpenClaw、Cherry、VS Code、Cursor、WSL2）接入见：  
+更多终端/客户端（Codex CLI、Cherry、VS Code、Cursor、WSL2）接入见：
 
 - [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)
-- OpenClaw 自动注入代理脚本说明见：
-  - [OPENCLAW_INJECT_PROXY_FETCH.md](OPENCLAW_INJECT_PROXY_FETCH.md)
 
 外部 MCP / Skill 对外网站访问接入建议：
 
 1. 可走 `v1`：`/v1/__gw__/t/<TOKEN>/...`（推荐，检查链路更完整）。
 2. 可走 `v2`：`/v2/__gw__/t/<TOKEN>/...`（通用 HTTP 代理模式，需 `x-target-url`）。
-
-OpenClaw 自动注入脚本位置：
-
-- `scripts/openclaw-inject-proxy-fetch.py`
-- 推荐命令（注入 + 构建 + 自动写入服务环境并重启网关）：
-  - `python scripts/openclaw-inject-proxy-fetch.py /path/to/openclaw OPENCLAW_PROXY_GATEWAY_URL=http://127.0.0.1:18080/v2/__gw__/t/XapJ3D0x`
-  - 如需强制服务运行本地注入构建：在命令后追加 `--pin-local-build`
-- 关键行为：
-  - 不自动检索目录；必须通过参数或 `OPENCLAW_ROOT` 显式指定 OpenClaw 根目录
-  - 检测到已注入时，先恢复备份再重注入，避免重复注入错位
-  - 自动备份到 `.aegisgate-backups/openclaw-inject-proxy-fetch/`
-  - 自动维护 OpenClaw 仓库 `.gitignore`：忽略 `.aegisgate-backups/` 与 `src/infra/proxy-fetch.ts`（避免上传 git）
-  - 注入成功后自动执行 `build`（`pnpm/yarn/npm` 自动检测）
-  - 命令携带 `OPENCLAW_PROXY_GATEWAY_URL=...` 时，脚本自动生成/更新：
-    - `~/.config/systemd/user/openclaw-gateway.service.d/90-openclaw-proxy-fetch.conf`
-    - 写入 `OPENCLAW_PROXY_GATEWAY_URL`
-    - 自动补充默认 `OPENCLAW_PROXY_DIRECT_HOSTS`（未显式传入时）
-    - 执行 `systemctl --user daemon-reload && systemctl --user restart openclaw-gateway.service`
-  - 追加 `--pin-local-build` 时，脚本会额外写入 `91-openclaw-local-build.conf`，把 systemd `ExecStart` 固定到 `/path/to/openclaw/dist/index.js`
-  - 若未携带网关变量，脚本只做注入 + build，不改服务环境
-  - `--remove` 会恢复备份、删除注入文件与备份目录、删除相关 systemd drop-in，并自动 `daemon-reload + restart`
 
 ## 3. 本地开发与本地 UI
 

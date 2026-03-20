@@ -28,7 +28,6 @@ _DOC_FRIENDLY_TITLES: dict[str, str] = {
     "SUB2API-QUICKSTART.md": "Sub2API 快速上手",
     "AICLIENT2API-QUICKSTART.md": "AI Client→API 快速上手",
     "OTHER_TERMINAL_CLIENTS_USAGE.md": "其他终端客户端用法",
-    "OPENCLAW_INJECT_PROXY_FETCH.md": "OpenClaw 注入代理",
     "SKILL.md": "Skill 功能说明",
 }
 
@@ -39,7 +38,6 @@ _DOC_ORDER: tuple[str, ...] = (
     "SUB2API-QUICKSTART.md",
     "AICLIENT2API-QUICKSTART.md",
     "OTHER_TERMINAL_CLIENTS_USAGE.md",
-    "OPENCLAW_INJECT_PROXY_FETCH.md",
     "SKILL.md",
 )
 

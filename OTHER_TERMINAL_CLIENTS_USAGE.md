@@ -110,7 +110,6 @@ curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-vers
 |---|---|---|---|
 | Codex CLI | Yes | Yes | No |
 | OpenCodeX | Yes | Yes | No |
-| OpenClaw | Yes | Yes | No |
 | Cherry Studio | Yes | Yes | No |
 | VS Code extensions | Extension-dependent | Yes (if base URL configurable) | No |
 | Cursor | Yes | Yes | No |
@@ -126,10 +125,6 @@ curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-vers
 ### OpenCodeX
 - Use OpenAI-compatible provider mode.
 - Recommended: Token mode.
-
-### OpenClaw
-- Use OpenAI-compatible endpoint.
-- Use Token mode.
 
 ### Cherry Studio
 - Provider: OpenAI-compatible.
@@ -192,4 +187,3 @@ model: claude-3-5-sonnet-latest
 ## Related Docs
 
 - `README.md`
-- `OPENCLAW_INJECT_PROXY_FETCH.md`
