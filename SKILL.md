@@ -1,8 +1,10 @@
 # AegisGate Agent Skill
 
+> **What is this document?** This is an agent-executable skill document for AegisGate — an open-source LLM security gateway. It walks through installation, startup, token registration, upstream configuration, and client integration on a fresh machine.
+
 本技能文档给 Agent 直接使用，目标是：在一台新机器上完成 AegisGate 的安装、启动、注册 token 或配置直连上游、以及客户端接入配置。
 
-## 0) 先读项目要点（必须）
+## 0) What does AegisGate do? 先读项目要点（必须）
 
 - AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/自动净化（auto-sanitize）；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
 - **两种路由模式**（可同时启用）：
@@ -17,7 +19,7 @@
   - URL 查询参数：`?field=value`
 - 管理接口（`/__gw__/register|lookup|unregister|add|remove`）应只允许内网/管理机访问。
 
-## 1) 环境检查
+## 1) What are the prerequisites? 环境检查
 
 ```bash
 uname -a
@@ -28,7 +30,7 @@ git --version || true
 python3 --version || true
 ```
 
-## 2) 如果没有 Docker：先安装 Docker（Ubuntu/Debian）
+## 2) How to install Docker? 如果没有 Docker：先安装（Ubuntu/Debian）
 
 ```bash
 sudo apt-get update
@@ -54,7 +56,7 @@ sudo usermod -aG docker "$USER"
 newgrp docker
 ```
 
-## 3) 获取源码（Git 或源码包）
+## 3) How to get the source code? 获取源码
 
 ### 3.1 Git 方式
 
@@ -69,7 +71,7 @@ cd AegisGate
 cd /path/to/AegisGate
 ```
 
-## 4) 推荐安装方式：Docker 一键启动
+## 4) How to start AegisGate with Docker? 推荐安装方式
 
 ```bash
 docker compose up -d --build
@@ -83,7 +85,7 @@ docker compose logs -f aegisgate
 curl -sS http://127.0.0.1:18080/health
 ```
 
-## 5) 可选安装方式：源码本地运行（无 Docker）
+## 5) How to run without Docker? 源码本地运行
 
 ```bash
 python3 -m venv .venv
@@ -93,9 +95,9 @@ python -m pip install -e .
 uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
 ```
 
-## 6) 接入方式选择
+## 6) How to connect upstream LLM providers? 接入方式选择
 
-### 6.1 Token 路由（多租户，推荐）
+### 6.1 What is token routing? Token 路由（多租户，推荐）
 
 注册上游并生成 token：
 
@@ -123,7 +125,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>","whitelist_key":["api_key","secret"]}'
 ```
 
-### 6.2 直连上游（单用户/Agent 快速接入）
+### 6.2 What is direct upstream mode? 直连上游（单用户/Agent 快速接入）
 
 在 `config/.env` 中设置：
 
@@ -140,7 +142,7 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
 
-## 7) 验证调用
+## 7) How to verify the gateway is working? 验证调用
 
 ### Token 路由
 
@@ -160,7 +162,7 @@ curl -X POST "http://127.0.0.1:18080/v1/responses" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
 
-## 8) 客户端配置模板（Agent/CLI）
+## 8) How to configure AI agents and clients? 客户端配置模板
 
 ### Token 路由
 
@@ -184,7 +186,7 @@ model: gpt-4.1-mini
 - 若客户端默认流式输出，网关会处理 `[DONE]` 断流恢复。
 - 直连模式下不需要 `base_url` 携带 token 路径段。
 
-## 9) 常用管理命令
+## 9) How to manage tokens and the gateway? 常用管理命令
 
 查看 token：
 
@@ -228,7 +230,7 @@ git pull
 docker compose up -d --build
 ```
 
-## 10) 故障排查顺序（Agent 执行顺序）
+## 10) How to troubleshoot issues? 故障排查顺序
 
 1. `health` 是否正常（`curl http://127.0.0.1:18080/health`）。
 2. 确认使用哪种路由模式：token 路由（路径含 `/v1/__gw__/t/<TOKEN>/...`）或直连上游（`AEGIS_UPSTREAM_BASE_URL` 是否已设置）。
@@ -236,7 +238,7 @@ docker compose up -d --build
 4. 直连模式：`.env` 中 `AEGIS_UPSTREAM_BASE_URL` 是否正确，是否已重启。
 5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、自动净化（auto-sanitize）、阻断原因。
 
-## 11) 安全基线（必须遵守）
+## 11) What are the security best practices? 安全基线
 
 - 对外仅暴露业务入口，管理接口仅限内网。
 - 默认监听建议使用 `127.0.0.1`，通过反向代理做外部暴露控制。

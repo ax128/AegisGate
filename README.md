@@ -41,6 +41,75 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 
 > **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI at `http://localhost:18080/__ui__`
 
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        A1[AI Agent / Cursor / Claude Code]
+        A2[Web App / API Client]
+    end
+
+    subgraph AegisGate["AegisGate Security Gateway"]
+        direction TB
+        MW[Token Router & Middleware]
+
+        subgraph ReqPipeline["Request Pipeline"]
+            R1[PII Redaction<br/>50+ patterns]
+            R2[Exact-Value Redaction<br/>API keys, secrets]
+            R3[Request Sanitizer<br/>injection & leak detection]
+            R4[RAG Poison Guard]
+        end
+
+        subgraph RespPipeline["Response Pipeline"]
+            S1[Injection Detector<br/>regex + TF-IDF semantic]
+            S2[Anomaly Detector<br/>encoding & command patterns]
+            S3[Privilege Guard]
+            S4[Tool Call Guard]
+            S5[Output Sanitizer<br/>block / sanitize / pass]
+        end
+
+        MW --> ReqPipeline --> RespPipeline
+    end
+
+    subgraph Upstream["Upstream LLM Providers"]
+        U1[OpenAI / Claude / Gemini]
+        U2[Self-hosted LLM]
+        U3[Any OpenAI-compatible API]
+    end
+
+    A1 & A2 -->|"baseUrl → gateway"| MW
+    RespPipeline -->|filtered request| U1 & U2 & U3
+    U1 & U2 & U3 -->|raw response| RespPipeline
+    RespPipeline -->|sanitized response| A1 & A2
+```
+
+### Frequently Asked Questions
+
+**What is AegisGate?**
+AegisGate is an open-source, self-hosted security gateway that sits between your AI applications and LLM API providers. It inspects and filters both requests and responses in real-time, protecting against prompt injection, PII leakage, and dangerous LLM outputs.
+
+**How does AegisGate detect prompt injection?**
+AegisGate uses a multi-layer approach: (1) bilingual regex patterns for known injection techniques (direct injection, system prompt exfiltration, typoglycemia obfuscation), (2) a built-in TF-IDF + Logistic Regression semantic classifier that runs locally without GPU, and (3) Unicode/encoding attack detection for invisible characters, bidirectional control abuse, and multi-stage encoded payloads.
+
+**Does AegisGate work with OpenAI, Claude, and other LLM providers?**
+Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/responses`) and a generic HTTP proxy (`/v2/`). Any application that supports a custom `baseUrl` can use AegisGate as a drop-in proxy. It has been verified with OpenAI, Claude (via compatible proxies), Gemini, and any OpenAI-compatible API.
+
+**What data does AegisGate redact?**
+Over 50 PII pattern categories including: API keys and tokens (OpenAI, AWS, GitHub, Slack), credit card numbers, SSNs, email addresses, phone numbers, crypto wallet addresses and seed phrases, medical record numbers, IP addresses, internal URLs, and infrastructure identifiers. Custom exact-value redaction is also supported for arbitrary secrets.
+
+**Can I use AegisGate with AI coding agents like Cursor, Claude Code, or Codex?**
+Yes. AegisGate supports MCP (Model Context Protocol) and Agent SKILL integration. Point your agent's `baseUrl` to the gateway and it will transparently filter all LLM traffic. See [SKILL.md](SKILL.md) for agent-specific setup instructions.
+
+**How does AegisGate handle dangerous LLM responses?**
+Responses are scored by multiple filters (injection detector, anomaly detector, privilege guard, tool call guard). Based on the cumulative risk score and configurable security level (low/medium/high), the gateway either passes the response through, sanitizes dangerous fragments (replacing them with safe markers), or blocks the entire response. Streaming responses are checked incrementally and can be terminated mid-stream.
+
+**Does AegisGate require an external AI service for detection?**
+No. The built-in TF-IDF semantic classifier runs locally (~166KB model file) without GPU. All regex-based detection also runs locally. An optional external semantic service can be configured for advanced use cases, but is not required.
+
+**How do I deploy AegisGate?**
+The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
+
 ---
 
 AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。支持 **MCP**（Model Context Protocol）与 **Agent SKILL** 接入，可与 Cursor/Codex 等 Agent 环境配合使用。
