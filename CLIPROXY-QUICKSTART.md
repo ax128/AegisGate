@@ -19,9 +19,10 @@ http://<网关IP>:18080/v1/__gw__/t/8317
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat config/aegis_gateway.key)" \
-  -d '{"upstream_base":"http://远程IP:8317/v1","api_key":"你的API-Key"}'
+  -d '{"upstream_base":"http://远程IP:8317/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
 ```
+
+其中 `gateway_key` 的值为 `cat config/aegis_gateway.key` 输出内容。
 
 客户端使用返回的 token：`http://<网关IP>:18080/v1/__gw__/t/<token>`
 

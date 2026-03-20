@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import queue
 import threading
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from aegisgate.config.settings import settings
+from aegisgate.core.background_worker import ensure_worker_thread, run_queue_worker, shutdown_queue_worker
 from aegisgate.util.logger import logger
 
 _FALLBACK_LOG_PATH = Path("/tmp") / "aegisgate" / "dangerous_response_samples.jsonl"
@@ -22,6 +24,7 @@ _LOG_PATH_LOCK = threading.Lock()
 _LOG_QUEUE: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=10000)
 _LOG_WORKER: threading.Thread | None = None
 _LOG_WORKER_LOCK = threading.Lock()
+_LOG_ATEXIT_REGISTERED = False
 
 
 def _reset_log_path_cache() -> None:
@@ -194,27 +197,33 @@ def _append_payload(payload: dict[str, Any]) -> None:
 
 
 def _worker_loop() -> None:
-    while True:
-        item = _LOG_QUEUE.get()
-        try:
-            if item is None:
-                break
-            _append_payload(item)
-        except Exception as exc:  # pragma: no cover - operational safeguard
-            logger.warning("dangerous response log worker failed: %s", exc)
-        finally:
-            _LOG_QUEUE.task_done()
+    run_queue_worker(
+        _LOG_QUEUE,
+        _append_payload,
+        on_error=lambda exc: logger.warning("dangerous response log worker failed: %s", exc),
+    )
+
+
+def _register_shutdown_handler() -> None:
+    global _LOG_ATEXIT_REGISTERED
+    if _LOG_ATEXIT_REGISTERED:
+        return
+    atexit.register(shutdown_dangerous_response_log_worker)
+    _LOG_ATEXIT_REGISTERED = True
 
 
 def _ensure_worker() -> None:
     global _LOG_WORKER
-    if _LOG_WORKER is not None and _LOG_WORKER.is_alive():
-        return
-    with _LOG_WORKER_LOCK:
-        if _LOG_WORKER is not None and _LOG_WORKER.is_alive():
-            return
-        _LOG_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-dangerous-response-log", daemon=False)
-        _LOG_WORKER.start()
+    _register_shutdown_handler()
+    _LOG_WORKER = ensure_worker_thread(
+        _LOG_WORKER,
+        lock=_LOG_WORKER_LOCK,
+        build_thread=lambda: threading.Thread(
+            target=_worker_loop,
+            name="aegisgate-dangerous-response-log",
+            daemon=False,
+        ),
+    )
 
 
 def write_dangerous_response_sample(event: dict[str, Any]) -> None:
@@ -241,15 +250,13 @@ def shutdown_dangerous_response_log_worker(timeout_seconds: float = 1.0) -> None
     if _LOG_WORKER is None:
         _reset_log_path_cache()
         return
-    timeout = max(0.01, float(timeout_seconds))
-    worker = _LOG_WORKER
-    try:
-        _LOG_QUEUE.put(None, timeout=timeout)
-    except queue.Full:
-        logger.warning("dangerous response log shutdown queue full, waiting for worker drain")
-    worker.join(timeout=timeout)
-    if worker.is_alive():
-        logger.warning("dangerous response log worker did not stop within %.2fs", timeout)
+    _LOG_WORKER = shutdown_queue_worker(
+        _LOG_WORKER,
+        work_queue=_LOG_QUEUE,
+        timeout_seconds=timeout_seconds,
+        on_queue_full=lambda: logger.warning("dangerous response log shutdown queue full, waiting for worker drain"),
+        on_timeout=lambda timeout: logger.warning("dangerous response log worker did not stop within %.2fs", timeout),
+    )
+    if _LOG_WORKER is not None:
         return
-    _LOG_WORKER = None
     _reset_log_path_cache()

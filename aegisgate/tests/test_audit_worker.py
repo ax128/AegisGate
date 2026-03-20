@@ -17,6 +17,7 @@ def _reset_audit_state(monkeypatch):
     monkeypatch.setattr(audit, "_AUDIT_QUEUE", queue.Queue(maxsize=10000))
     monkeypatch.setattr(audit, "_AUDIT_WORKER", None)
     monkeypatch.setattr(audit, "_AUDIT_LOCK", threading.Lock())
+    monkeypatch.setattr(audit, "_AUDIT_ATEXIT_REGISTERED", False)
 
 
 # ---------- _append_payload ----------
@@ -48,7 +49,6 @@ def test_append_payload_handles_oserror(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "audit_log_path", "/nonexistent/path/audit.log")
 
     from pathlib import Path
-    original_mkdir = Path.mkdir
 
     def _raise_os(self, *a, **kw):
         raise OSError("disk full")
@@ -109,6 +109,37 @@ def test_shutdown_sends_sentinel(monkeypatch, tmp_path):
     assert audit._AUDIT_WORKER is None
 
 
+def test_shutdown_preserves_live_worker_when_queue_is_full(monkeypatch):
+    class FullQueue:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object | None, float | None]] = []
+
+        def put(self, item, timeout=None):
+            self.calls.append((item, timeout))
+            raise queue.Full
+
+    class LiveWorker:
+        def __init__(self) -> None:
+            self.join_calls: list[float | None] = []
+
+        def join(self, timeout=None) -> None:
+            self.join_calls.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    fake_queue = FullQueue()
+    fake_worker = LiveWorker()
+    monkeypatch.setattr(audit, "_AUDIT_QUEUE", fake_queue)
+    monkeypatch.setattr(audit, "_AUDIT_WORKER", fake_worker)
+
+    audit.shutdown_audit_worker(timeout_seconds=0.2)
+
+    assert fake_queue.calls == [(None, 0.2)]
+    assert fake_worker.join_calls == [0.2]
+    assert audit._AUDIT_WORKER is fake_worker
+
+
 # ---------- _ensure_worker (double-checked locking) ----------
 
 def test_ensure_worker_idempotent(monkeypatch, tmp_path):
@@ -122,3 +153,27 @@ def test_ensure_worker_idempotent(monkeypatch, tmp_path):
     assert worker1 is worker2
 
     audit.shutdown_audit_worker(timeout_seconds=2.0)
+
+
+def test_ensure_worker_registers_atexit_once(monkeypatch):
+    calls: list[object] = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def is_alive(self) -> bool:
+            return self.started
+
+    monkeypatch.setattr(audit.atexit, "register", lambda fn: calls.append(fn))
+    monkeypatch.setattr(audit.threading, "Thread", FakeThread)
+
+    audit._ensure_worker()
+    audit._ensure_worker()
+
+    assert calls == [audit.shutdown_audit_worker]
+    assert isinstance(audit._AUDIT_WORKER, FakeThread)
+    assert audit._AUDIT_WORKER.started is True

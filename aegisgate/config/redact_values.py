@@ -36,14 +36,14 @@ def load_redact_values() -> list[str]:
     global _cached_values, _cached_mtime_ns
 
     path = _config_path()
-    if not path.is_file():
-        with _lock:
+    with _lock:
+        if not path.is_file():
             _cached_values = []
             _cached_mtime_ns = 0
-        return []
+            return []
 
-    with _lock:
-        # Read mtime inside the lock to avoid TOCTOU race.
+        # Serialize reloads so concurrent callers do not race to refresh the
+        # cache from different file snapshots.
         try:
             mtime_ns = path.stat().st_mtime_ns
         except OSError:
@@ -51,23 +51,22 @@ def load_redact_values() -> list[str]:
         if _cached_values is not None and _cached_mtime_ns == mtime_ns:
             return list(_cached_values)
 
-    try:
-        encrypted = path.read_text(encoding="utf-8").strip()
-        if not encrypted:
-            values: list[str] = []
-        else:
-            fernet = _get_fernet()
-            raw = fernet.decrypt(encrypted.encode("utf-8"))
-            data = json.loads(raw.decode("utf-8"))
-            values = list(data.get("values", []))
-    except Exception:
-        logger.warning("redact_values: failed to load %s, treating as empty", path)
-        values = []
+        try:
+            encrypted = path.read_text(encoding="utf-8").strip()
+            if not encrypted:
+                values: list[str] = []
+            else:
+                fernet = _get_fernet()
+                raw = fernet.decrypt(encrypted.encode("utf-8"))
+                data = json.loads(raw.decode("utf-8"))
+                values = list(data.get("values", []))
+        except Exception:
+            logger.warning("redact_values: failed to load %s, treating as empty", path)
+            values = []
 
-    with _lock:
         _cached_values = values
         _cached_mtime_ns = mtime_ns
-    return list(values)
+        return list(values)
 
 
 def save_redact_values(values: list[str]) -> None:

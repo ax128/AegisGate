@@ -51,7 +51,6 @@ def test_nonce_replay_reuse_after_expiry():
 # ---------- verify_hmac_signature edge cases ----------
 
 def test_verify_rejects_sha256_prefix_without_value():
-    from aegisgate.core.security_boundary import compute_hmac_sha256
     payload = b"test"
     assert verify_hmac_signature("secret", payload, "sha256=") is False
 

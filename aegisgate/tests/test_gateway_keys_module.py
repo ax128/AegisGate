@@ -60,9 +60,6 @@ def test_gateway_key_fallback_on_permission_error(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "gateway_key", "")
     monkeypatch.setattr(Path, "cwd", lambda: tmp_path / "readonly")
 
-    fallback_dir = tmp_path / "fallback"
-    fallback_file = fallback_dir / "aegis_gateway.key"
-
     original_write = Path.write_text
 
     def _raise_perm(self, *args, **kwargs):
@@ -73,7 +70,6 @@ def test_gateway_key_fallback_on_permission_error(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "write_text", _raise_perm)
 
     # Point fallback to our tmp dir
-    original_init = gateway_keys._ensure_gateway_key.__code__
     # Simpler: just monkeypatch the fallback path used in the function
     # Since the fallback path is hardcoded to /tmp/aegisgate, we need a different approach
     # We'll test the primary path write success case instead

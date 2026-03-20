@@ -6,10 +6,10 @@
 
 - AegisGate 是 LLM 安全网关：请求侧脱敏/清洗，响应侧检测/自动净化（auto-sanitize）；`responses` 结构化 `input`（含 function/tool 输出）也会在转发上游前做脱敏。
 - **两种路由模式**（可同时启用）：
-  - **Token 路由**（推荐多租户场景）：每个 token 绑定独立的上游地址和网关密钥。
+  - **Token 路由**（推荐多租户场景）：每个 token 绑定独立的上游地址；注册/管理 token 时需提供网关密钥。
     - v1（LLM）：`http://<host>:18080/v1/__gw__/t/<TOKEN>/...`
     - v2（通用 HTTP 代理）：`http://<host>:18080/v2/__gw__/t/<TOKEN>`，须携带 `x-target-url: <完整目标URL>` 请求头
-  - **直连上游**（单用户/Agent 快速接入）：设置 `AEGIS_UPSTREAM_BASE_URL=<上游地址>` 后，直接请求 `/v1/...` 或 `/v2/...`，无需注册 token。
+  - **直连上游**（单用户/Agent 快速接入）：设置 `AEGIS_UPSTREAM_BASE_URL=<上游地址>` 后，可直接请求 `/v1/...`，无需注册 token。`v2` 仍必须使用 token 路径。
 - **脱敏豁免字段（whitelist_key）**：注册 token 时可指定逗号分隔的字段名列表（如 `api_key,secret,token`）。请求体中这些字段的值**不做 PII 脱敏**，直接透传到上游。适用于需要原始凭证通过的场景。支持以下匹配模式：
   - JSON：`"field":"value"` 或 `"field": "value"`
   - 等号赋值：`field=value`
@@ -120,7 +120,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>","whitelist_key":"api_key,secret"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>","whitelist_key":["api_key","secret"]}'
 ```
 
 ### 6.2 直连上游（单用户/Agent 快速接入）
@@ -131,7 +131,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 AEGIS_UPSTREAM_BASE_URL=https://your-upstream.example.com/v1
 ```
 
-重启后直接请求 `/v1/...`，无需注册 token：
+重启后直接请求 `/v1/...`，无需注册 token。`/v2/...` 不支持直连模式，仍需使用 `/v2/__gw__/t/<TOKEN>/...`：
 
 ```bash
 curl -X POST http://127.0.0.1:18080/v1/responses \

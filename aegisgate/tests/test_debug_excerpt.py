@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
-import pytest
-
 from aegisgate.util.debug_excerpt import (
     _resolve_max_len,
     debug_log_original,

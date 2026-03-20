@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 from aegisgate.config.settings import settings
 
@@ -18,6 +18,11 @@ from aegisgate.util.logger import logger
 
 
 T = TypeVar("T")
+_PENDING_CONFIRMATION_COLUMNS = """
+confirm_id, session_id, route, request_id, model, upstream_base,
+pending_request_payload, pending_request_hash, reason, summary,
+status, created_at, expires_at, retained_until, updated_at, tenant_id
+"""
 
 
 class SqliteKVStore(KVStore):
@@ -38,11 +43,13 @@ class SqliteKVStore(KVStore):
         return conn
 
     @contextmanager
-    def _managed_connection(self) -> Any:
+    def _managed_connection(self) -> Iterator[sqlite3.Connection]:
         conn = self._connect()
         try:
-            with conn:
-                yield conn
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -95,6 +102,12 @@ class SqliteKVStore(KVStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
                 ON pending_confirmation (tenant_id, session_id, route, status, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pending_retained_until
+                ON pending_confirmation (retained_until)
                 """
             )
             conn.commit()
@@ -273,9 +286,7 @@ class SqliteKVStore(KVStore):
                 row = conn.execute(
                     """
                     SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
+                      """ + _PENDING_CONFIRMATION_COLUMNS + """
                     FROM pending_confirmation
                     WHERE session_id = ? AND tenant_id = ? AND status = 'pending'
                     ORDER BY created_at DESC
@@ -308,9 +319,7 @@ class SqliteKVStore(KVStore):
                 rows = conn.execute(
                     """
                     SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
+                      """ + _PENDING_CONFIRMATION_COLUMNS + """
                     FROM pending_confirmation
                     WHERE session_id = ? AND route = ? AND tenant_id = ? AND expires_at > ?
                       AND status IN ('pending', 'executing')
@@ -376,9 +385,7 @@ class SqliteKVStore(KVStore):
                 row = conn.execute(
                     """
                     SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
+                      """ + _PENDING_CONFIRMATION_COLUMNS + """
                     FROM pending_confirmation
                     WHERE confirm_id = ?
                     LIMIT 1
@@ -469,7 +476,11 @@ def json_dumps(data: dict[str, Any]) -> str:
 def json_loads(data: str) -> dict[str, Any]:
     import json
 
-    loaded = json.loads(data)
+    try:
+        loaded = json.loads(data)
+    except (TypeError, ValueError) as exc:
+        logger.warning("sqlite pending_confirmation payload decode failed: %s", exc)
+        return {}
     if isinstance(loaded, dict):
         return loaded
     return {}

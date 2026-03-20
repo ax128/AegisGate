@@ -27,7 +27,6 @@ def test_config_dir_uses_env_when_set(monkeypatch, tmp_path):
 
 def test_config_dir_defaults_to_cwd_config(monkeypatch):
     monkeypatch.delenv("AEGIS_CONFIG_DIR", raising=False)
-    from pathlib import Path
     result = crypto._config_dir()
     assert result.name == "config"
 

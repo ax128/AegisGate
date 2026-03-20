@@ -212,7 +212,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
 - 当前默认策略已启用 `untrusted_content_guard` 与 `tool_call_guard`，但默认采取低误拦策略：
   - `untrusted_content_guard` 默认只做不可信来源包裹与风险抬升，不直接阻断。
-  - `tool_call_guard` 默认对危险参数仅做审查（`review`），不直接阻断；编码工具（`apply_patch`/`write`/`edit`/`bash` 等 25+）自动跳过 `dangerous_param` 扫描，避免代码 diff 内容误触发。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
+  - `tool_call_guard` 默认对未命中白名单的工具名仅做审查（`review`），但对危险参数默认直接按 `block` 处理；编码工具（`apply_patch`/`write`/`edit`/`bash` 等 25+）自动跳过 `dangerous_param` 扫描，避免代码 diff 内容误触发。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
 
 `v2` 链路（通用 HTTP 代理）：
 

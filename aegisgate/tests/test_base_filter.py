@@ -11,10 +11,13 @@ class _ConcreteFilter(BaseFilter):
     name = "test_filter"
 
 
-def _make_ctx(**overrides) -> RequestContext:
-    defaults = {"request_id": "t-1", "session_id": "s-1", "route": "/v1/chat/completions"}
-    defaults.update(overrides)
-    return RequestContext(**defaults)
+def _make_ctx(*, enabled_filters: set[str] | None = None) -> RequestContext:
+    return RequestContext(
+        request_id="t-1",
+        session_id="s-1",
+        route="/v1/chat/completions",
+        enabled_filters=enabled_filters or set(),
+    )
 
 
 def _make_request() -> InternalRequest:

@@ -18,6 +18,13 @@ _trusted_proxy_exact: set[str] | None = None
 _trusted_proxy_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
 
 
+def _normalize_ip_host(host: str) -> str:
+    normalized = (host or "").strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
 def _parse_trusted_proxy_ips() -> None:
     """Parse AEGIS_TRUSTED_PROXY_IPS into exact IPs and CIDR networks."""
     global _trusted_proxy_exact, _trusted_proxy_networks
@@ -34,7 +41,10 @@ def _parse_trusted_proxy_ips() -> None:
             except ValueError:
                 logger.warning("trusted_proxy_ips: invalid CIDR %s, skipped", token)
         else:
-            exact.add(token)
+            try:
+                exact.add(str(ipaddress.ip_address(token)))
+            except ValueError:
+                logger.warning("trusted_proxy_ips: invalid IP %s, skipped", token)
     _trusted_proxy_exact = exact
     _trusted_proxy_networks = networks
 
@@ -74,13 +84,11 @@ def _real_client_ip(request: Request) -> str:
 
 
 def _is_loopback_ip(host: str) -> bool:
-    if not host:
+    normalized = _normalize_ip_host(host)
+    if not normalized:
         return False
-    if host in _LOOPBACK_HOSTS:
+    if normalized in _LOOPBACK_HOSTS:
         return True
-    normalized = host
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
     try:
         ip = ipaddress.ip_address(normalized)
     except ValueError:
@@ -89,13 +97,11 @@ def _is_loopback_ip(host: str) -> bool:
 
 
 def _is_internal_ip(host: str) -> bool:
-    if not host:
+    normalized = _normalize_ip_host(host)
+    if not normalized:
         return False
-    if host in _LOOPBACK_HOSTS:
+    if normalized in _LOOPBACK_HOSTS:
         return True
-    normalized = host
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
     try:
         ip = ipaddress.ip_address(normalized)
     except ValueError:

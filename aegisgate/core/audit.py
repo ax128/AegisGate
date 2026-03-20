@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import queue
 import threading
@@ -9,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aegisgate.core.background_worker import ensure_worker_thread, run_queue_worker, shutdown_queue_worker
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
@@ -16,6 +18,7 @@ from aegisgate.util.logger import logger
 _AUDIT_QUEUE: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=10000)
 _AUDIT_WORKER: threading.Thread | None = None
 _AUDIT_LOCK = threading.Lock()
+_AUDIT_ATEXIT_REGISTERED = False
 
 
 def _append_payload(payload: dict[str, Any]) -> None:
@@ -32,27 +35,33 @@ def _append_payload(payload: dict[str, Any]) -> None:
 
 
 def _worker_loop() -> None:
-    while True:
-        item = _AUDIT_QUEUE.get()
-        try:
-            if item is None:
-                break
-            _append_payload(item)
-        except Exception as exc:  # pragma: no cover - operational safeguard
-            logger.warning("audit worker write failed: %s", exc)
-        finally:
-            _AUDIT_QUEUE.task_done()
+    run_queue_worker(
+        _AUDIT_QUEUE,
+        _append_payload,
+        on_error=lambda exc: logger.warning("audit worker write failed: %s", exc),
+    )
+
+
+def _register_shutdown_handler() -> None:
+    global _AUDIT_ATEXIT_REGISTERED
+    if _AUDIT_ATEXIT_REGISTERED:
+        return
+    atexit.register(shutdown_audit_worker)
+    _AUDIT_ATEXIT_REGISTERED = True
 
 
 def _ensure_worker() -> None:
     global _AUDIT_WORKER
-    if _AUDIT_WORKER is not None and _AUDIT_WORKER.is_alive():
-        return
-    with _AUDIT_LOCK:
-        if _AUDIT_WORKER is not None and _AUDIT_WORKER.is_alive():
-            return
-        _AUDIT_WORKER = threading.Thread(target=_worker_loop, name="aegisgate-audit-writer", daemon=False)
-        _AUDIT_WORKER.start()
+    _register_shutdown_handler()
+    _AUDIT_WORKER = ensure_worker_thread(
+        _AUDIT_WORKER,
+        lock=_AUDIT_LOCK,
+        build_thread=lambda: threading.Thread(
+            target=_worker_loop,
+            name="aegisgate-audit-writer",
+            daemon=False,
+        ),
+    )
 
 
 def write_audit(event: dict[str, Any]) -> None:
@@ -71,14 +80,10 @@ def write_audit(event: dict[str, Any]) -> None:
 
 def shutdown_audit_worker(timeout_seconds: float = 1.0) -> None:
     global _AUDIT_WORKER
-    if _AUDIT_WORKER is None:
-        return
-    try:
-        _AUDIT_QUEUE.put(None, timeout=max(0.01, timeout_seconds))
-    except queue.Full:
-        logger.warning("audit shutdown: queue full, sentinel could not be sent")
-    worker = _AUDIT_WORKER
-    worker.join(timeout=max(0.01, timeout_seconds))
-    if worker.is_alive():
-        logger.warning("audit worker did not stop within %.2fs", timeout_seconds)
-    _AUDIT_WORKER = None
+    _AUDIT_WORKER = shutdown_queue_worker(
+        _AUDIT_WORKER,
+        work_queue=_AUDIT_QUEUE,
+        timeout_seconds=timeout_seconds,
+        on_queue_full=lambda: logger.warning("audit shutdown: queue full, sentinel could not be sent"),
+        on_timeout=lambda timeout: logger.warning("audit worker did not stop within %.2fs", timeout),
+    )

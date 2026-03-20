@@ -1,11 +1,28 @@
 import json
 import queue
+import threading
+
+import pytest
 
 from aegisgate.adapters.openai_compat.router import _mark_dangerous_fragments_for_log
 from aegisgate.core.context import RequestContext
 from aegisgate.core.dangerous_response_log import _resolve_log_path, shutdown_dangerous_response_log_worker
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.output_sanitizer import OutputSanitizer
+
+
+@pytest.fixture(autouse=True)
+def _reset_dangerous_log_state(monkeypatch):
+    from aegisgate.core import dangerous_response_log as danger_log
+
+    monkeypatch.setattr(danger_log, "_LOG_QUEUE", queue.Queue(maxsize=10000))
+    monkeypatch.setattr(danger_log, "_LOG_WORKER", None)
+    monkeypatch.setattr(danger_log, "_LOG_WORKER_LOCK", threading.Lock())
+    monkeypatch.setattr(danger_log, "_LOG_ATEXIT_REGISTERED", False)
+    monkeypatch.setattr(danger_log, "_LOG_PATH", None)
+    monkeypatch.setattr(danger_log, "_LOG_PATH_CONFIG", None)
+    monkeypatch.setattr(danger_log, "_LOG_PATH_DATE", None)
+    monkeypatch.setattr(danger_log, "_LOG_PATH_LOCK", threading.Lock())
 
 
 def test_mark_dangerous_fragments_for_log_wraps_exact_fragments():
@@ -151,3 +168,29 @@ def test_shutdown_dangerous_response_log_worker_preserves_live_worker_when_queue
     assert fake_worker.join_calls == [0.2]
     assert danger_log._LOG_WORKER is fake_worker
     assert danger_log._LOG_PATH == "cached-path"
+
+
+def test_ensure_worker_registers_atexit_once(monkeypatch):
+    from aegisgate.core import dangerous_response_log as danger_log
+
+    calls: list[object] = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def is_alive(self) -> bool:
+            return self.started
+
+    monkeypatch.setattr(danger_log.atexit, "register", lambda fn: calls.append(fn))
+    monkeypatch.setattr(danger_log.threading, "Thread", FakeThread)
+
+    danger_log._ensure_worker()
+    danger_log._ensure_worker()
+
+    assert calls == [danger_log.shutdown_dangerous_response_log_worker]
+    assert isinstance(danger_log._LOG_WORKER, FakeThread)
+    assert danger_log._LOG_WORKER.started is True

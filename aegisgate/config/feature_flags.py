@@ -26,8 +26,9 @@ feature_flags = FeatureFlags()
 
 
 def refresh_feature_flags() -> None:
-    # Atomic swap: build a new snapshot then replace all fields at once
-    # to avoid exposing partially-updated state to concurrent readers.
+    # Build a fresh snapshot first, then copy fields from one consistent read
+    # of settings. This reduces skew across flags but is not a fully atomic
+    # swap for concurrent readers of the existing singleton instance.
     new = FeatureFlags(
         redaction=settings.enable_redaction,
         restoration=settings.enable_restoration,
