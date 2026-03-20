@@ -371,6 +371,7 @@ def register_ui_routes(app: FastAPI) -> None:
         "tool_injection": ["injection_detector", "tool_call_injection_patterns"],
         "command_patterns": ["anomaly_detector", "command_patterns"],
         "direct_patterns": ["injection_detector", "direct_patterns"],
+        "system_exfil_patterns": ["injection_detector", "system_exfil_patterns"],
     }
 
     _RULES_SECTION_LABELS: dict[str, str] = {
@@ -378,6 +379,7 @@ def register_ui_routes(app: FastAPI) -> None:
         "tool_injection": "工具调用注入规则",
         "command_patterns": "异常命令规则",
         "direct_patterns": "直接注入规则",
+        "system_exfil_patterns": "提示词窃取规则",
     }
 
     def _resolve_rules_file() -> Path:

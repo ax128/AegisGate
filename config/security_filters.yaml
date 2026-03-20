@@ -549,21 +549,18 @@ anomaly_detector:
       - "\u2068"
       - "\u2069"
     invisible_char_threshold: 6
+  # 仅保留高置信攻击特征；sqli_tautology/xss_script_event/path_traversal 等
+  # 教学类模式在 AI 响应中高频出现（代码示例、安全讲解），已由 injection_detector
+  # 在请求侧覆盖，anomaly_detector 不重复检测以避免响应侧误判。
   command_patterns:
     - id: sqli_union_select
       regex: '\bunion\s+select\b'
-    - id: sqli_tautology
-      regex: '\b(?:or|and)\s+1\s*=\s*1\b'
     - id: sqli_time_blind
       regex: '\b(?:sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\)'
-    - id: xss_script_event
-      regex: '(?:<\s*script\b|on(?:error|load|mouseover)\s*=|javascript:\s*)'
     - id: command_injection_chain
       regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
     - id: command_injection_scripting
       regex: '(?:;|\|\||&&|\|)\s*(?:python[23]?|perl|ruby|php)\s+-[ce]\b'
-    - id: path_traversal
-      regex: '(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|%252e%252e%252f|/etc/passwd\b|/proc/self/environ\b|win\.ini\b)'
     - id: xxe_external_entity
       regex: '(?:<!DOCTYPE[^>]*\[[\s\S]{0,200}?<!ENTITY|<!ENTITY\s+%?\w+\s+SYSTEM\s+(?:file|https?)://)'
     - id: ssti_or_log4shell
@@ -740,16 +737,9 @@ sanitizer:
     - id: web_http_obs_fold_header
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
   # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
-  # 仅保留破坏性 docker 命令；docker ps/images/logs 为只读诊断，不拦截
+  # 仅保留协议层攻击特征；Docker 运维命令（stop/restart/down/exec）在代码助手场景中属正常
+  # 讨论，不做 force block。如需拦截 Docker 命令可另行添加 action_map 条目。
   force_block_command_patterns:
-    - id: docker_compose_down
-      regex: '(?:^|\s)(?:/)?(?:docker\s+compose|docker-compose)\s+down\b'
-    - id: docker_stop
-      regex: '(?:^|\s)(?:/)?docker\s+stop\b'
-    - id: docker_restart
-      regex: '(?:^|\s)(?:/)?docker\s+restart\b'
-    - id: docker_exec_interactive
-      regex: '(?:^|\s)(?:/)?docker\s+exec\b[^\n]*(?:\s-(?:it|ti)\b|\s--interactive\b|\s--tty\b)'
     - id: web_http_smuggling_cl_te
       regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
     - id: web_http_smuggling_te_cl

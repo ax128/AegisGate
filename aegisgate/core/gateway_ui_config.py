@@ -110,6 +110,7 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     {"env": "AEGIS_TRUSTED_PROXY_IPS", "field": "trusted_proxy_ips", "label": "信任代理 IP（逗号分隔）", "type": "string", "section": "general"},
     {"env": "AEGIS_ENABLE_LOCAL_PORT_ROUTING", "field": "enable_local_port_routing", "label": "本地端口自动路由", "type": "bool", "section": "general"},
     {"env": "AEGIS_LOCAL_PORT_ROUTING_HOST", "field": "local_port_routing_host", "label": "端口路由目标 Host", "type": "string", "section": "general"},
+    {"env": "AEGIS_ENABLE_RELAY_ENDPOINT", "field": "enable_relay_endpoint", "label": "Relay 兼容端点", "type": "bool", "section": "general"},
     # ---- security ----
     {"env": "AEGIS_SECURITY_LEVEL", "field": "security_level", "label": "安全档位", "type": "enum", "section": "security", "options": ["low", "medium", "high"]},
     {"env": "AEGIS_DEFAULT_POLICY", "field": "default_policy", "label": "默认策略", "type": "enum", "section": "security", "options": ["default", "permissive", "strict"]},
@@ -136,6 +137,7 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     {"env": "AEGIS_ENABLE_UNTRUSTED_CONTENT_GUARD", "field": "enable_untrusted_content_guard", "label": "不可信内容防护", "type": "bool", "section": "security"},
     {"env": "AEGIS_ENABLE_TOOL_CALL_GUARD", "field": "enable_tool_call_guard", "label": "工具调用防护", "type": "bool", "section": "security"},
     {"env": "AEGIS_ENABLE_RAG_POISON_GUARD", "field": "enable_rag_poison_guard", "label": "RAG 投毒防护", "type": "bool", "section": "security"},
+    {"env": "AEGIS_ENABLE_SYSTEM_PROMPT_GUARD", "field": "enable_system_prompt_guard", "label": "系统提示词防护", "type": "bool", "section": "security"},
     # ---- v2 proxy ----
     {"env": "AEGIS_ENABLE_V2_PROXY", "field": "enable_v2_proxy", "label": "启用 v2 代理", "type": "bool", "section": "v2"},
     {"env": "AEGIS_V2_ENABLE_REQUEST_REDACTION", "field": "v2_enable_request_redaction", "label": "v2 请求脱敏", "type": "bool", "section": "v2"},

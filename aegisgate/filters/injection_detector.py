@@ -441,6 +441,13 @@ class PromptInjectionDetector(BaseFilter):
             "signal_breakdown": signal_breakdown,
         }
 
+    # Categories that are expected in normal AI output (the model quoting or
+    # explaining prompt-injection techniques).  On the *response* side these
+    # signals are treated as discussion context even when the surrounding text
+    # lacks explicit research/educational markers, to avoid over-blocking
+    # legitimate explanatory content.
+    _RESPONSE_SIDE_BENIGN_CATEGORIES: frozenset[str] = frozenset({"direct", "typoglycemia", "html_markdown"})
+
     def _apply_action(
         self, ctx: RequestContext, category: str, *, contextual_discussion: bool = False, phase: str = "request"
     ) -> None:
@@ -448,7 +455,14 @@ class PromptInjectionDetector(BaseFilter):
         if not action:
             return
 
-        if contextual_discussion and action in {"block", "review", "downgrade", "sanitize"}:
+        # On the response side, certain categories are overwhelmingly
+        # educational/explanatory rather than adversarial.  Treat them as if
+        # discussion context is present to avoid penalising normal AI output.
+        effective_discussion = contextual_discussion or (
+            phase == "response" and category in self._RESPONSE_SIDE_BENIGN_CATEGORIES
+        )
+
+        if effective_discussion and action in {"block", "review", "downgrade", "sanitize"}:
             action = "sanitize"
 
         ctx.enforcement_actions.append(f"{self.name}:{category}:{action}")

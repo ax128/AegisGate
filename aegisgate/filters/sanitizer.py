@@ -247,31 +247,45 @@ class OutputSanitizer(BaseFilter):
             )
             return resp
 
+        # Encoded payloads alone (base64/hex in legitimate AI output) should
+        # NOT trigger a full sanitization sweep.  They are only replaced when
+        # another high-confidence signal is already present or risk_score is
+        # elevated.
+        risk_triggered = ctx.risk_score >= self._sanitize_threshold
         should_sanitize = (
             has_unsafe_markup
             or has_unsafe_uri
             or has_command_payload
-            or has_encoded_payload
             or has_spam
-            or (ctx.risk_score >= self._sanitize_threshold)
+            or risk_triggered
         )
-        if should_sanitize:
-            replacement_spans = self._collect_replacement_spans(resp.output_text, self._command_patterns)
-            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._encoded_payload_patterns))
-            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_uri_patterns))
-            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_markup_patterns))
-            replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._spam_noise_patterns))
+        # encoded_payload is replaced only when risk_score is already elevated
+        # (indicating a confirmed threat), not merely because another pattern
+        # type (markup, URI, etc.) happened to match.
+        should_replace_encoded = has_encoded_payload and risk_triggered
+        if should_sanitize or should_replace_encoded:
+            replacement_spans: list[tuple[int, int]] = []
             cleaned = resp.output_text
-            for pattern in self._command_patterns:
-                cleaned = pattern.sub(self._command_replacement, cleaned)
-            for pattern in self._encoded_payload_patterns:
-                cleaned = pattern.sub(self._payload_replacement, cleaned)
-            for pattern in self._unsafe_uri_patterns:
-                cleaned = pattern.sub(self._uri_replacement, cleaned)
-            for pattern in self._unsafe_markup_patterns:
-                cleaned = pattern.sub(self._markup_replacement, cleaned)
-            for pattern in self._spam_noise_patterns:
-                cleaned = pattern.sub(self._spam_replacement, cleaned)
+            if has_command_payload or risk_triggered:
+                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._command_patterns))
+                for pattern in self._command_patterns:
+                    cleaned = pattern.sub(self._command_replacement, cleaned)
+            if should_replace_encoded:
+                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._encoded_payload_patterns))
+                for pattern in self._encoded_payload_patterns:
+                    cleaned = pattern.sub(self._payload_replacement, cleaned)
+            if has_unsafe_uri or risk_triggered:
+                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_uri_patterns))
+                for pattern in self._unsafe_uri_patterns:
+                    cleaned = pattern.sub(self._uri_replacement, cleaned)
+            if has_unsafe_markup or risk_triggered:
+                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_markup_patterns))
+                for pattern in self._unsafe_markup_patterns:
+                    cleaned = pattern.sub(self._markup_replacement, cleaned)
+            if has_spam or risk_triggered:
+                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._spam_noise_patterns))
+                for pattern in self._spam_noise_patterns:
+                    cleaned = pattern.sub(self._spam_replacement, cleaned)
 
             if cleaned != resp.output_text:
                 self._log_dangerous_sample(
