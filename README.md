@@ -1,5 +1,48 @@
 # AegisGate
 
+**Open-source security gateway for LLM API calls** — sits between your AI agents/apps and upstream LLM providers, enforcing security policies on both request and response sides.
+
+## What is AegisGate?
+
+AegisGate is a self-hosted, pipeline-based security proxy designed to protect LLM API traffic. Point your application's `baseUrl` at the gateway, and it automatically applies PII redaction, prompt injection detection, dangerous command blocking, and output sanitization before forwarding to the real upstream model.
+
+### Key Features
+
+- **Prompt Injection Protection** — Multi-layer detection: regex patterns, TF-IDF semantic classifier (bilingual EN/ZH, no GPU required), Unicode/encoding attack detection, typoglycemia defense
+- **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers
+- **Dangerous Response Sanitization** — Automatic obfuscation of high-risk LLM outputs (shell commands, SQL injection payloads, HTTP smuggling) with configurable security levels (low/medium/high)
+- **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/responses`, and generic proxy; works with any OpenAI-compatible provider
+- **MCP & Agent SKILL Support** — Integrates with Cursor, Claude Code, Codex, Windsurf and other AI coding agents via Model Context Protocol
+- **Token-Based Routing** — Route requests to multiple upstream providers through a single gateway with per-token upstream mapping and whitelist controls
+- **Web Management Console** — Built-in admin UI for configuration, token management, security rules CRUD, key rotation, and real-time request statistics
+- **Flexible Deployment** — Docker Compose one-click deploy, supports SQLite/Redis/PostgreSQL backends, Caddy TLS termination
+
+### Use Cases
+
+- **Protect sensitive data** from leaking to LLM providers (PII, API keys, internal URLs)
+- **Detect and block prompt injection attacks** in real-time across your AI agent fleet
+- **Centralize security policy** instead of implementing protections in every AI application
+- **Audit LLM interactions** with structured logging, risk scoring, and dangerous content tracking
+- **Secure MCP tool calls** — guard against malicious tool invocations and privilege escalation
+
+### How It Compares
+
+| Feature | AegisGate | LLM Guard | Rebuff | Prompt Armor |
+|---------|-----------|-----------|--------|--------------|
+| Self-hosted gateway proxy | Yes | Library only | API service | API service |
+| Request + Response filtering | Both sides | Both sides | Request only | Request only |
+| OpenAI-compatible drop-in | Yes | No | No | No |
+| Built-in PII redaction | 50+ patterns | Yes | No | No |
+| Web management UI | Yes | No | No | Dashboard |
+| MCP / Agent SKILL support | Yes | No | No | No |
+| Token-based multi-upstream routing | Yes | N/A | N/A | N/A |
+| No external API dependency | Yes (TF-IDF local) | Yes | No (OpenAI) | No |
+| Bilingual (EN/ZH) | Yes | English | English | English |
+
+> **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI at `http://localhost:18080/__ui__`
+
+---
+
 AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。支持 **MCP**（Model Context Protocol）与 **Agent SKILL** 接入，可与 Cursor/Codex 等 Agent 环境配合使用。
 
 核心目标：

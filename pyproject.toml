@@ -5,9 +5,47 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aegisgate"
 version = "0.1.0"
-description = "Pipeline-based LLM security gateway"
+description = "Open-source security gateway for LLM API calls — prompt injection detection, PII redaction, dangerous response sanitization, and audit logging for AI agents and applications"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+keywords = [
+  "llm",
+  "security",
+  "gateway",
+  "prompt-injection",
+  "pii-redaction",
+  "ai-security",
+  "openai",
+  "mcp",
+  "agent",
+  "api-proxy",
+  "output-sanitization",
+  "audit-logging",
+  "ai-gateway",
+  "llm-firewall",
+  "data-loss-prevention",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Security",
+  "Topic :: Internet :: Proxy Servers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Framework :: FastAPI",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/ax128/AegisGate"
+Repository = "https://github.com/ax128/AegisGate"
+Issues = "https://github.com/ax128/AegisGate/issues"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
