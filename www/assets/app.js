@@ -1137,6 +1137,19 @@ function bindStatsUI() {
   });
   var refreshBtn = document.getElementById("stats-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", loadStats);
+  var clearBtn = document.getElementById("stats-clear");
+  if (clearBtn) clearBtn.addEventListener("click", async function() {
+    if (!confirm("确认清除所有统计数据？此操作不可撤销。")) return;
+    try {
+      await fetchJson("/__ui__/api/stats", {
+        method: "DELETE",
+        headers: { "x-aegis-ui-csrf": uiCsrfToken },
+      });
+      loadStats();
+    } catch (err) {
+      alert("清除失败: " + err.message);
+    }
+  });
   loadStats();
 }
 
@@ -1146,3 +1159,28 @@ bindRulesUI();
 bindKeysUI();
 bindComposeUI();
 bindStatsUI();
+
+(function initThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  const sun = btn.querySelector('.icon-sun');
+  const moon = btn.querySelector('.icon-moon');
+  function updateIcon() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (isDark) {
+      sun.style.display = 'block';
+      moon.style.display = 'none';
+    } else {
+      sun.style.display = 'none';
+      moon.style.display = 'block';
+    }
+  }
+  btn.addEventListener('click', () => {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const newTheme = isDark ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', newTheme);
+    localStorage.setItem('aegisgate_theme', newTheme);
+    updateIcon();
+  });
+  updateIcon();
+})();

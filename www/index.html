@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AegisGate 控制台</title>
     <link rel="stylesheet" href="/__ui__/assets/app.css">
+    <script>
+      (function() {
+        var savedTheme = localStorage.getItem('aegisgate_theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+      })();
+    </script>
   </head>
   <body>
     <div class="app-shell">
@@ -23,6 +31,15 @@
           <span class="header-status-label" id="status-text">连接中…</span>
         </div>
         <div class="header-actions">
+          <button id="theme-toggle" class="btn-hdr" type="button" title="切换主题">
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+              <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+            主题
+          </button>
           <button id="refresh-bootstrap" class="btn-hdr" type="button" title="刷新状态">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="23,4 23,10 17,10"/>
@@ -193,7 +210,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>请求统计</h2>
-                <p class="panel-desc">实时请求统计，含脱敏、拦截、穿透等维度。数据保留 7 天，重启后重新计数。</p>
+                <p class="panel-desc">实时请求统计，含脱敏、拦截、穿透等维度。数据持久化保存，保留 7 天。</p>
               </div>
             </div>
 
@@ -238,7 +255,16 @@
 
             <div class="token-toolbar" style="margin-top:8px;">
               <span id="stats-since" style="font-size:0.83rem;color:var(--muted);"></span>
-              <button id="stats-refresh" class="btn-sm-ghost" type="button">刷新</button>
+              <div style="display:flex;gap:8px;">
+                <button id="stats-refresh" class="btn-sm-ghost" type="button">刷新</button>
+                <button id="stats-clear" class="btn-danger-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                    <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+                  </svg>
+                  清除数据
+                </button>
+              </div>
             </div>
           </section>
 

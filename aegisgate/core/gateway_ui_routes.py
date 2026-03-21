@@ -96,6 +96,12 @@ def register_ui_routes(app: FastAPI) -> None:
         from aegisgate.core.stats import snapshot
         return JSONResponse(content=snapshot())
 
+    @app.delete("/__ui__/api/stats")
+    async def local_ui_stats_clear() -> JSONResponse:
+        from aegisgate.core.stats import clear
+        clear()
+        return JSONResponse(content={"ok": True})
+
     @app.get("/__ui__/api/config")
     async def local_ui_config() -> dict[str, object]:
         return _ui_config_payload()

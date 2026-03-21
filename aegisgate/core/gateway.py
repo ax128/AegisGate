@@ -227,6 +227,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     await close_semantic_async_client()
     shutdown_audit_worker()
     shutdown_dangerous_response_log_worker()
+    from aegisgate.core.stats import flush as flush_stats
+    flush_stats()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
