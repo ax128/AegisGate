@@ -5,7 +5,7 @@
   --bg: #f8f9fb;
   --panel: #ffffff;
   --panel-2: #f3f4f8;
-  --line: rgba(0, 0, 0, 0.08);
+  --line: rgba(0, 0, 0, 0.12);
   --text: #1a1a2e;
   --muted: #6b7280;
   --accent: #5e6ad2;
@@ -146,7 +146,7 @@ body {
 .header-sep {
   width: 1px;
   height: 22px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--header-border);
   flex-shrink: 0;
 }
 
@@ -160,7 +160,7 @@ body {
 
 .header-status-label {
   font-size: 0.82rem;
-  color: rgba(240, 232, 218, 0.55);
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -170,7 +170,7 @@ body {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #6b604f;
+  background: var(--muted);
   flex-shrink: 0;
   transition: background 0.4s;
 }
@@ -189,9 +189,9 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(240, 232, 218, 0.8);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: var(--radius-sm);
   padding: 5px 12px;
   font: inherit;
@@ -208,17 +208,17 @@ body {
 }
 
 .btn-hdr:hover {
-  background: rgba(255, 255, 255, 0.13);
+  background: var(--line);
 }
 
 .btn-hdr-danger {
-  background: rgba(177, 52, 40, 0.2);
-  border-color: rgba(222, 103, 93, 0.25);
-  color: #f09585;
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.2);
+  color: var(--error);
 }
 
 .btn-hdr-danger:hover {
-  background: rgba(177, 52, 40, 0.35);
+  background: rgba(220, 38, 38, 0.25);
 }
 
 /* ─── App Body ───────────────────────────────── */
@@ -461,7 +461,7 @@ body {
 }
 
 .field-card:focus-within {
-  border-color: rgba(123, 75, 42, 0.3);
+  border-color: rgba(94, 106, 210, 0.3);
 }
 
 .field-card.wide { grid-column: 1 / -1; }
@@ -506,7 +506,7 @@ input:focus,
 select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(123, 75, 42, 0.1);
+  box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.15);
 }
 
 .bool-button {
@@ -554,7 +554,7 @@ select:focus {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  background: linear-gradient(135deg, var(--accent), #7b86e8);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   color: #fff;
   border: none;
   border-radius: var(--radius-sm);
@@ -595,7 +595,7 @@ select:focus {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: linear-gradient(135deg, var(--accent), #7b86e8);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   color: #fff;
   border: none;
   border-radius: var(--radius-sm);
@@ -626,7 +626,7 @@ select:focus {
 .btn-sm-ghost:hover {
   background: var(--accent-light);
   color: var(--accent);
-  border-color: rgba(123, 75, 42, 0.2);
+  border-color: var(--accent);
 }
 
 .btn-danger-sm {
@@ -652,8 +652,8 @@ select:focus {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: rgba(123, 75, 42, 0.07);
-  border: 1px solid rgba(123, 75, 42, 0.2);
+  background: rgba(94, 106, 210, 0.1);
+  border: 1px solid rgba(94, 106, 210, 0.2);
   color: var(--accent);
   border-radius: var(--radius-sm);
   padding: 5px 10px;
@@ -665,7 +665,7 @@ select:focus {
   margin-right: 6px;
 }
 .btn-edit-sm svg { width: 12px; height: 12px; }
-.btn-edit-sm:hover { background: rgba(123, 75, 42, 0.15); }
+.btn-edit-sm:hover { background: rgba(94, 106, 210, 0.2); }
 
 .token-table-wrap {
   overflow-x: auto;
@@ -700,12 +700,12 @@ select:focus {
 
 .token-table tr:last-child td { border-bottom: none; }
 
-.token-table tr:hover td { background: rgba(123, 75, 42, 0.03); }
+.token-table tr:hover td { background: rgba(94, 106, 210, 0.05); }
 
 .token-code {
   font-family: "Cascadia Code", "Consolas", monospace;
   font-size: 0.87rem;
-  background: rgba(123, 75, 42, 0.07);
+  background: rgba(94, 106, 210, 0.1);
   padding: 3px 10px;
   border-radius: 4px;
   color: var(--accent);
@@ -719,7 +719,7 @@ select:focus {
   text-align: left;
 }
 
-.token-code:hover { background: rgba(123, 75, 42, 0.14); }
+.token-code:hover { background: rgba(94, 106, 210, 0.18); }
 
 .token-upstream {
   max-width: 320px;
@@ -763,7 +763,7 @@ select:focus {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.18);
   z-index: 200;
   display: flex;
   align-items: center;
@@ -980,7 +980,7 @@ select:focus {
 
 .markdown-body code {
   font-family: "Cascadia Code", "Consolas", monospace;
-  background: rgba(123, 75, 42, 0.08);
+  background: var(--accent-light);
   padding: 0.1em 0.4em;
   border-radius: 4px;
   font-size: 0.86em;
@@ -1053,11 +1053,15 @@ body.login-page {
   box-shadow: 0 28px 72px rgba(0, 0, 0, 0.4), 0 4px 18px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255,255,255,0.05);
 }
 
+[data-theme="dark"] .modal-overlay {
+  background: rgba(0, 0, 0, 0.45);
+}
+
 .login-logo {
   width: 50px;
   height: 50px;
   border-radius: 13px;
-  background: linear-gradient(135deg, var(--accent), #7b86e8);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1124,7 +1128,7 @@ body.login-page {
 .field-input {
   width: 100%;
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--panel);
   border-radius: var(--radius);
   padding: 11px 14px 11px 36px;
   font: inherit;
@@ -1136,15 +1140,15 @@ body.login-page {
 .field-input:focus {
   outline: none;
   border-color: var(--accent);
-  background: #fff;
+  background: var(--panel);
   box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.12);
 }
 
-.field-input::placeholder { color: rgba(107, 96, 79, 0.45); }
+.field-input::placeholder { color: var(--muted); opacity: 0.6; }
 
 .btn-login {
   width: 100%;
-  background: linear-gradient(135deg, var(--accent), #7b86e8);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
   color: #fff;
   border: none;
   border-radius: var(--radius);
