@@ -999,86 +999,6 @@ function bindKeysUI() {
   loadKeys();
 }
 
-// ─── Docker Compose Editor ────────────────────
-
-let currentComposeFile = "docker-compose.yml";
-
-let _composeLoadSeq = 0;
-
-async function loadComposeFile(filename) {
-  currentComposeFile = filename;
-  const seq = ++_composeLoadSeq;
-  const editor = document.getElementById("compose-editor");
-  const notFound = document.getElementById("compose-not-found");
-  if (editor) editor.value = "";
-  if (notFound) notFound.classList.add("hidden");
-  try {
-    const data = await fetchJson(`/__ui__/api/compose/${encodeURIComponent(filename)}`);
-    if (seq !== _composeLoadSeq) return;  // superseded by a newer click
-    if (editor) editor.value = data.content || "";
-  } catch (err) {
-    if (seq !== _composeLoadSeq) return;
-    if (err.message.includes("file_not_found") || err.message.includes("404")) {
-      if (editor) editor.value = "";
-      if (notFound) notFound.classList.remove("hidden");
-    } else {
-      if (editor) editor.value = `# 加载失败: ${err.message}`;
-    }
-  }
-}
-
-async function saveComposeFile() {
-  const editor = document.getElementById("compose-editor");
-  const content = editor ? editor.value : "";
-  setStatus("compose-save-status", "保存中…");
-  try {
-    const saved = await fetchJson(`/__ui__/api/compose/${encodeURIComponent(currentComposeFile)}`, {
-      method: "PUT",
-      headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
-      body: JSON.stringify({content}),
-    });
-    const pathHint = saved.save_path ? `（${saved.save_path}）` : "";
-    setStatus("compose-save-status", `已保存 ${pathHint}`);
-    const notFound = document.getElementById("compose-not-found");
-    if (notFound) notFound.classList.add("hidden");
-  } catch (err) {
-    const msg = err.message.startsWith("invalid_yaml") ? `YAML 格式错误: ${err.message}` : `保存失败: ${err.message}`;
-    setStatus("compose-save-status", msg, true);
-  }
-}
-
-async function restartGateway() {
-  if (!confirm("确认重启网关进程？\n\n- Docker 部署（restart: unless-stopped）：进程退出后自动重启\n- 本地运行：需由 systemd/pm2 等守护进程管理重启")) return;
-  setStatus("restart-status", "重启中…");
-  try {
-    await fetchJson("/__ui__/api/restart", {
-      method: "POST",
-      headers: {"x-aegis-ui-csrf": uiCsrfToken},
-    });
-    setStatus("restart-status", "重启指令已发送，约 2 秒后生效");
-    setTimeout(() => { window.location.href = "/__ui__/login"; }, 4000);
-  } catch (err) {
-    // Expected: connection may drop as server restarts
-    setStatus("restart-status", "重启中，请稍候…");
-    setTimeout(() => { window.location.href = "/__ui__/login"; }, 4000);
-  }
-}
-
-function bindComposeUI() {
-  document.querySelectorAll(".compose-file-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".compose-file-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      loadComposeFile(btn.dataset.composeFile);
-    });
-  });
-  const saveBtn = document.getElementById("save-compose");
-  if (saveBtn) saveBtn.addEventListener("click", saveComposeFile);
-  const restartBtn = document.getElementById("restart-gateway");
-  if (restartBtn) restartBtn.addEventListener("click", restartGateway);
-  loadComposeFile("docker-compose.yml");
-}
-
 // ─── Stats Dashboard ─────────────────────
 
 var currentStatsView = "hourly";
@@ -1157,7 +1077,6 @@ function bindStatsUI() {
 
 bindRulesUI();
 bindKeysUI();
-bindComposeUI();
 bindStatsUI();
 
 (function initThemeToggle() {

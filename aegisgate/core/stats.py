@@ -40,13 +40,18 @@ def _date_key(hour_key: str) -> str:
 
 def _resolve_stats_path() -> Path:
     """返回可写的持久化路径，优先 config/stats.json，不可写时 fallback。"""
-    for candidate in (_STATS_FILE, _STATS_FALLBACK):
+    for idx, candidate in enumerate((_STATS_FILE, _STATS_FALLBACK)):
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
             # 测试可写
             test_path = candidate.parent / ".stats_write_test"
             test_path.write_text("ok", encoding="utf-8")
             test_path.unlink(missing_ok=True)
+            if idx > 0:
+                logger.warning(
+                    "stats path not writable, switched to fallback configured=%s fallback=%s",
+                    _STATS_FILE, candidate,
+                )
             return candidate
         except OSError:
             continue
