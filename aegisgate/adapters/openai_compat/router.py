@@ -1156,6 +1156,7 @@ def _confirmation_hit_regex_patterns() -> tuple[re.Pattern[str], ...]:
     _append_rule_patterns("sanitizer", "force_block_command_patterns")
     _append_rule_patterns("sanitizer", "unsafe_markup_patterns")
     _append_rule_patterns("sanitizer", "unsafe_uri_patterns")
+    _append_rule_patterns("injection_detector", "spam_noise_patterns")
     _append_rule_patterns("post_restore_guard", "secret_patterns")
 
     # Fixed fallback for text-like risky phrases that may not be present in evidence.
