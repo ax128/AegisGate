@@ -136,15 +136,6 @@
               </svg>
               密钥管理
             </a>
-            <a href="#compose" class="nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14,2 14,8 20,8"/>
-                <line x1="16" y1="13" x2="8" y2="13"/>
-                <line x1="16" y1="17" x2="8" y2="17"/>
-              </svg>
-              Docker 配置
-            </a>
             <a href="#logs" class="nav-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="4,17 10,11 4,5"/>
@@ -154,10 +145,14 @@
             </a>
           </div>
           <div class="sidebar-footer">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-            </svg>
-            AegisGate Local UI
+            <a href="https://github.com/ax128/AegisGate" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;color:var(--muted);text-decoration:none;font-size:0.82rem;transition:color 0.15s;">
+              <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+              </svg>
+              GitHub
+            </a>
+            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">·</span>
+            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">AegisGate</span>
           </div>
         </aside>
 
@@ -552,40 +547,6 @@
                   <button class="btn-sm btn-danger-soft" data-key-rotate="fernet">更换（危险）</button>
                 </div>
               </div>
-            </div>
-          </section>
-
-          <!-- Docker Compose Editor -->
-          <section id="compose" class="panel">
-            <div class="panel-head">
-              <div class="panel-head-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14,2 14,8 20,8"/>
-                </svg>
-              </div>
-              <div class="panel-head-info">
-                <h2>Docker 配置文件</h2>
-                <p class="panel-desc">编辑 docker-compose*.yml 文件。文件保存在宿主机 <code>config/compose/</code> 目录下，需手动复制到项目根目录后执行 <code>docker compose up -d</code>，或点击重启</p>
-              </div>
-            </div>
-            <div class="compose-selector">
-              <button class="compose-file-btn active" data-compose-file="docker-compose.yml">docker-compose.yml</button>
-            </div>
-            <div id="compose-not-found" class="hidden" style="padding:16px;color:var(--muted);font-size:0.87rem;">该文件不存在，保存后将创建。</div>
-            <textarea id="compose-editor" class="compose-editor" spellcheck="false" placeholder="输入 YAML 配置内容…"></textarea>
-            <div class="panel-actions" style="margin-top:8px;">
-              <button id="save-compose" class="btn-save" type="button">保存配置文件</button>
-              <span id="compose-save-status" class="status-note"></span>
-              <div style="flex:1"></div>
-              <button id="restart-gateway" class="btn-restart" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;display:inline-block;vertical-align:middle;margin-right:5px;">
-                  <polyline points="23,4 23,10 17,10"/>
-                  <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
-                </svg>
-                重启网关
-              </button>
-              <span id="restart-status" class="status-note"></span>
             </div>
           </section>
 
