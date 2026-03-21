@@ -1,25 +1,25 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
 
 :root {
-  color-scheme: dark;
-  --bg: #030305;
-  --panel: #0d0d12;
-  --panel-2: #15151b;
-  --line: rgba(255, 255, 255, 0.08);
-  --text: #ffffff;
-  --muted: #8b8b9f;
+  color-scheme: light;
+  --bg: #f8f9fb;
+  --panel: #ffffff;
+  --panel-2: #f3f4f8;
+  --line: rgba(0, 0, 0, 0.08);
+  --text: #1a1a2e;
+  --muted: #6b7280;
   --accent: #5e6ad2;
-  --accent-hover: #7b86e8;
-  --accent-light: rgba(94, 106, 210, 0.15);
-  --success: #22c55e;
-  --warning: #eab308;
-  --error: #ef4444;
-  --header-bg: rgba(3, 3, 5, 0.65);
-  --header-border: rgba(255, 255, 255, 0.05);
-  --header-text: #ffffff;
-  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.6);
+  --accent-hover: #4f5bc4;
+  --accent-light: rgba(94, 106, 210, 0.08);
+  --success: #16a34a;
+  --warning: #ca8a04;
+  --error: #dc2626;
+  --header-bg: rgba(255, 255, 255, 0.75);
+  --header-border: rgba(0, 0, 0, 0.06);
+  --header-text: #1a1a2e;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.12);
   --header-h: 60px;
   --sidebar-w: 240px;
   --radius-sm: 8px;
@@ -40,9 +40,9 @@ body {
   font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: var(--text);
   background: var(--bg);
-  background-image: 
-    radial-gradient(circle at 15% 50%, rgba(94, 106, 210, 0.03), transparent 25%),
-    radial-gradient(circle at 85% 30%, rgba(94, 106, 210, 0.03), transparent 25%);
+  background-image:
+    radial-gradient(circle at 15% 50%, rgba(94, 106, 210, 0.04), transparent 30%),
+    radial-gradient(circle at 85% 30%, rgba(94, 106, 210, 0.03), transparent 30%);
   font-size: 14px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
@@ -90,7 +90,7 @@ body {
   width: 20px;
   height: 20px;
   color: var(--accent);
-  filter: drop-shadow(0 0 6px rgba(94, 106, 210, 0.4));
+  filter: drop-shadow(0 0 4px rgba(94, 106, 210, 0.25));
 }
 
 .header-sep {
@@ -514,7 +514,7 @@ select:focus {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 4px 12px rgba(94, 106, 210, 0.25);
+  box-shadow: 0 2px 8px rgba(94, 106, 210, 0.2);
 }
 
 .btn-save svg { width: 14px; height: 14px; }
@@ -959,19 +959,12 @@ select:focus {
 /* ─── Login page ─────────────────────────────── */
 
 body.login-page {
-  background: #030305;
+  background: #f0f2f7;
   background-image:
-    radial-gradient(circle at 80% 10%, rgba(94, 106, 210, 0.15) 0%, transparent 40%),
-    radial-gradient(circle at 20% 90%, rgba(118, 56, 209, 0.1) 0%, transparent 40%),
-    linear-gradient(135deg, #030305 0%, #0a0a0f 100%);
+    radial-gradient(circle at 80% 10%, rgba(94, 106, 210, 0.1) 0%, transparent 40%),
+    radial-gradient(circle at 20% 90%, rgba(118, 56, 209, 0.06) 0%, transparent 40%),
+    linear-gradient(155deg, #f0f2f7 0%, #e8eaf3 100%);
   position: relative;
-}
-body.login-page::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E");
-  pointer-events: none;
 }
 
 .login-shell {
@@ -985,9 +978,9 @@ body.login-page::before {
 .login-card {
   width: min(420px, 100%);
   border-radius: 20px;
-  background: rgba(13, 13, 18, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.4), 0 4px 18px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255,255,255,0.05);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.1), 0 4px 18px rgba(0, 0, 0, 0.05);
   padding: 38px 36px;
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
@@ -1067,7 +1060,7 @@ body.login-page::before {
 .field-input {
   width: 100%;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.03);
+  background: #fff;
   border-radius: var(--radius);
   padding: 11px 14px 11px 36px;
   font: inherit;
@@ -1079,8 +1072,8 @@ body.login-page::before {
 .field-input:focus {
   outline: none;
   border-color: var(--accent);
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.2);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.12);
 }
 
 .field-input::placeholder { color: rgba(107, 96, 79, 0.45); }
@@ -1098,11 +1091,11 @@ body.login-page::before {
   cursor: pointer;
   letter-spacing: 0.03em;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 6px 16px rgba(94, 106, 210, 0.25);
+  box-shadow: 0 4px 12px rgba(94, 106, 210, 0.2);
   margin-top: 4px;
 }
 
-.btn-login:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(94, 106, 210, 0.35); filter: brightness(1.1); }
+.btn-login:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(94, 106, 210, 0.25); filter: brightness(1.05); }
 .btn-login:active { transform: scale(0.98); }
 
 .login-error {
@@ -1120,8 +1113,8 @@ body.login-page::before {
   margin-top: 20px;
   padding: 12px 14px;
   border-radius: var(--radius);
-  background: rgba(94, 106, 210, 0.08);
-  border: 1px solid rgba(94, 106, 210, 0.15);
+  background: rgba(94, 106, 210, 0.05);
+  border: 1px solid rgba(94, 106, 210, 0.12);
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.5;
