@@ -1585,6 +1585,12 @@ def _patch_responses_output_item(item: dict[str, Any], ctx: RequestContext) -> d
             patched["action"] = _sanitize_nested_text_value(action, ctx)
         return patched
 
+    # Unknown/unfamiliar output item types (e.g. "reasoning", "web_search_call",
+    # "mcp_call", future types) — return as-is to preserve structure.
+    # Only sanitize items whose type is empty (legacy compatibility).
+    if item_type:
+        return patched
+
     for key in ("text", "summary", "output_text"):
         if isinstance(patched.get(key), str):
             patched[key] = _sanitize_hit_fragments(str(patched[key]), ctx)
@@ -1652,12 +1658,30 @@ def _patch_chat_stream_payload(payload: dict[str, Any], ctx: RequestContext) -> 
     return patched
 
 
+_RESPONSES_TEXT_DELTA_EVENT_TYPES = frozenset({
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+})
+
+
 def _patch_responses_stream_payload(payload: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
     patched = copy.deepcopy(payload)
-    if isinstance(patched.get("delta"), str):
-        patched["delta"] = _sanitize_hit_fragments(str(patched["delta"]), ctx)
-    if isinstance(patched.get("text"), str):
-        patched["text"] = _sanitize_hit_fragments(str(patched["text"]), ctx)
+    event_type = str(patched.get("type", ""))
+
+    # Only sanitize "delta"/"text" for known text-content event types.
+    # Argument/code delta events (function_call_arguments.delta, mcp_call_arguments.delta,
+    # code_interpreter_call_code.delta, etc.) carry raw JSON/code fragments —
+    # modifying them could corrupt structure. Unknown events pass through unchanged.
+    if event_type in _RESPONSES_TEXT_DELTA_EVENT_TYPES:
+        if isinstance(patched.get("delta"), str):
+            patched["delta"] = _sanitize_hit_fragments(str(patched["delta"]), ctx)
+        if isinstance(patched.get("text"), str):
+            patched["text"] = _sanitize_hit_fragments(str(patched["text"]), ctx)
+
     if isinstance(patched.get("output_text"), str):
         patched["output_text"] = _sanitize_hit_fragments(str(patched["output_text"]), ctx)
     output = patched.get("output")
