@@ -3143,6 +3143,12 @@ async def _execute_responses_stream_once(
                 event_type = _extract_stream_event_type(payload_text)
                 if event_type in {"response.completed", "response.failed", "error"}:
                     saw_terminal_event = True
+                    # Flush held-back content events BEFORE yielding the
+                    # terminal event so the client receives them in order.
+                    if not blocked_reason:
+                        while pending_lines:
+                            yield pending_lines.pop(0)
+                            yield b"\n"
                     if chunk_count <= 0:
                         # Reasoning-only or function-call-only responses produce no
                         # text deltas — this is normal for agentic tool-call loops.
