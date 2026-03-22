@@ -27,7 +27,13 @@ async def _raise_unexpected_async(*args, **kwargs):
 async def _collect_stream_body(response: StreamingResponse) -> bytes:
     chunks: list[bytes] = []
     async for chunk in response.body_iterator:
-        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
+        if isinstance(chunk, memoryview):
+            data = chunk.tobytes()
+        elif isinstance(chunk, bytes):
+            data = chunk
+        else:
+            data = str(chunk).encode("utf-8")
+        chunks.append(data)
     return b"".join(chunks)
 
 
@@ -90,6 +96,7 @@ async def test_chat_endpoint_redirects_responses_json_back_to_chat_shape(monkeyp
     )
 
     result = await openai_router.chat_completions(payload, request)
+    assert isinstance(result, dict)
     assert result["object"] == "chat.completion"
     assert result["choices"][0]["message"]["content"] == "收到。"
 

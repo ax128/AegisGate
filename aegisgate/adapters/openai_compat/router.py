@@ -1072,15 +1072,9 @@ async def _run_request_pipeline(
     req: Any,
     ctx: RequestContext,
 ) -> Any:
-    # Thread offload is optional. In current Python 3.13 test/runtime environments,
-    # asyncio.to_thread() can leave short-lived event loops hanging during teardown.
-    # When offload is disabled, run inline and accept that timeout enforcement is unavailable.
-    if not settings.enable_thread_offload:
-        return _run_request_pipeline_sync(req, ctx)
-
-    # _get_pipeline() is called inside the pool thread so that threading.local()
-    # correctly isolates filter instances per pool thread (not per event-loop thread).
-    # asyncio.wait_for lets us enforce a hard timeout as a safety net.
+    # Always offload filter pipeline to a thread pool to avoid blocking the
+    # asyncio event loop.  CPU-intensive regex scanning on large payloads can
+    # stall the entire gateway when run inline.
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
         return await asyncio.to_thread(_run_request_pipeline_sync, req, ctx)
@@ -1111,12 +1105,7 @@ async def _run_response_pipeline(
     resp: InternalResponse,
     ctx: RequestContext,
 ) -> InternalResponse:
-    if not settings.enable_thread_offload:
-        return _run_response_pipeline_sync(resp, ctx)
-
-    # _get_pipeline() is called inside the pool thread so that threading.local()
-    # correctly isolates filter instances per pool thread (not per event-loop thread).
-    # asyncio.wait_for lets us enforce a hard timeout as a safety net.
+    # Always offload to thread pool — see _run_request_pipeline comment.
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
         return await asyncio.to_thread(_run_response_pipeline_sync, resp, ctx)

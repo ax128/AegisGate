@@ -130,6 +130,15 @@ _FORBIDDEN_UPSTREAM_BASE_EXAMPLES = frozenset(
 )
 
 
+def _normalize_input_upstream_base(value: object) -> str:
+    return value.strip().rstrip("/") if isinstance(value, str) else ""
+
+
+def _is_forbidden_upstream_base_example(value: object) -> bool:
+    normalized = _normalize_input_upstream_base(value).lower()
+    return bool(normalized) and normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES
+
+
 def _normalize_required_whitelist_list(value: object) -> list[str] | None:
     if not isinstance(value, list):
         return None

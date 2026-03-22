@@ -173,3 +173,7 @@ def _public_base_url(request: Request) -> str:
     host_header = (request.headers.get("host") or "").strip()
     host = _sanitize_public_host(forwarded_host or host_header or f"{settings.host}:{settings.port}")
     return f"{scheme}://{host}"
+
+
+def _gateway_token_base_url(request: Request, token: str) -> str:
+    return f"{_public_base_url(request)}/v1/__gw__/t/{token.strip()}"

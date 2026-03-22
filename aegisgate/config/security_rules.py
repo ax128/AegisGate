@@ -164,8 +164,8 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "claude_invoke_xml", "regex": r"<\s*invoke\s+name\s*="},
             {"id": "claude_function_calls_xml", "regex": r"<\s*function_calls?\s*>"},
             # --- ReAct pattern (需要 Action + Action Input 同时出现) ---
-            {"id": "react_action_input", "regex": r"Action\s*:\s*\w+[\s\S]{0,60}Action\s+Input\s*:"},
-            {"id": "react_fake_observation", "regex": r"Observation\s*:\s*[\s\S]{0,80}(?:Final\s+Answer|Action)\s*:"},
+            {"id": "react_action_input", "regex": r"Action\s*:\s*\w+[\s\S]{0,60}?Action\s+Input\s*:"},
+            {"id": "react_fake_observation", "regex": r"Observation\s*:\s*[\s\S]{0,80}?(?:Final\s+Answer|Action)\s*:"},
             # --- Gemini / Bedrock camelCase ---
             {"id": "gemini_function_call", "regex": r"[\"']functionCall[\"']\s*:\s*\{"},
             {"id": "gemini_function_response", "regex": r"[\"']functionResponse[\"']\s*:\s*\{"},
@@ -248,7 +248,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             ],
             "quoted_instruction_patterns": [
                 r"""["'`].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["'`]""",
-                r"```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```",
+                r"```[\s\S]{0,200}?(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}?```",
             ],
         },
     },
@@ -474,7 +474,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "ingestion_exfil_en", "regex": r"(reveal|dump|print|show).*(system\s+prompt|developer\s+message|api\s*key|token|password)"},
             {"id": "ingestion_override_zh", "regex": r"(忽略|覆盖|绕过).*(指令|规则|策略|安全)"},
             {"id": "ingestion_exfil_zh", "regex": r"(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)"},
-            {"id": "hidden_markup_payload", "regex": r"(<!--[\s\S]{0,300}(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)"},
+            {"id": "hidden_markup_payload", "regex": r"(<!--[\s\S]{0,300}?(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)"},
         ],
         "retrieval_poison_patterns": [
             {"id": "retrieval_instruction_en", "regex": r"(retrieved|document|web|link).*(follow|execute|run|copy|paste).*(instruction|command|script|shell)"},

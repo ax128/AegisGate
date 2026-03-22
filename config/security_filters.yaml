@@ -318,10 +318,10 @@ injection_detector:
     # ===== ReAct agent pattern =====
     # Action: xxx ... Action Input: (需同时出现)
     - id: react_action_input
-      regex: 'Action\s*:\s*\w+[\s\S]{0,60}Action\s+Input\s*:'
+      regex: 'Action\s*:\s*\w+[\s\S]{0,60}?Action\s+Input\s*:'
     # Observation: ... Final Answer: (伪造观察结果)
     - id: react_fake_observation
-      regex: 'Observation\s*:\s*[\s\S]{0,80}(?:Final\s+Answer|Action)\s*:'
+      regex: 'Observation\s*:\s*[\s\S]{0,80}?(?:Final\s+Answer|Action)\s*:'
     # ===== Google Gemini / AWS Bedrock =====
     # "functionCall": { (Gemini camelCase)
     - id: gemini_function_call
@@ -461,7 +461,7 @@ injection_detector:
       - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study|best\s+practice|tutorial|interview|learning\s+path|architecture|poisoning|backdoor|threat\s+model|attack\s+type|common\s+effect)'
     quoted_instruction_patterns:
       - '["''`\u201c\u201d\u300c\u300d\u300e\u300f].{0,120}(ignore|bypass|override|忽略|绕过).{0,120}["''`\u201c\u201d\u300c\u300d\u300e\u300f]'
-      - '```[\s\S]{0,200}(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}```'
+      - '```[\s\S]{0,200}?(ignore|bypass|override|忽略|绕过)[\s\S]{0,200}?```'
 
 rag_poison_guard:
   ingestion_risk_score: 0.80
@@ -478,7 +478,7 @@ rag_poison_guard:
     - id: ingestion_exfil_zh
       regex: '(泄露|显示|输出|打印).*(系统提示词|开发者消息|密钥|令牌|token|密码)'
     - id: hidden_markup_payload
-      regex: '(<!--[\s\S]{0,300}(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)'
+      regex: '(<!--[\s\S]{0,300}?(ignore|override|bypass)|BEGIN[_\s-]?PROMPT[_\s-]?INJECTION|data:\s*text/html|javascript:)'
   retrieval_poison_patterns:
     - id: retrieval_instruction_en
       regex: '(retrieved|document|web|link).*(follow|execute|run|copy|paste).*(instruction|command|script|shell)'

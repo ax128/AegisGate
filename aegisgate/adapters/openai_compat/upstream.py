@@ -172,6 +172,7 @@ def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
         "host",
         "content-length",
         settings.upstream_base_header.lower(),
+        settings.upstream_base_header.replace("-", "_").lower(),
         settings.gateway_key_header.lower(),
         settings.gateway_key_header.replace("-", "_").lower(),
         *_HOP_BY_HOP_HEADERS,
@@ -180,7 +181,7 @@ def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
         lowered = key.lower()
         if lowered in excluded:
             continue
-        if lowered.startswith("x-aegis-"):
+        if lowered.startswith("x-aegis-") or lowered.startswith("x_aegis_"):
             continue
         forwarded[key] = value
 
