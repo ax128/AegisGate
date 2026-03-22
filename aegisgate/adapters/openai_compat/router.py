@@ -331,7 +331,7 @@ def _is_structured_content(value: Any) -> bool:
     return isinstance(value, (list, dict))
 
 
-_GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy"})
+_GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy", "metadata"})
 
 
 def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
