@@ -133,6 +133,7 @@ _CONFIRMATION_HIT_CONTEXT_CHARS = 40
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
+_RESPONSES_STREAM_DEBUG_SUPPRESSED_EVENT_TYPES = frozenset({"response.output_text.delta"})
 
 # Filter modes set via URL path: token__redact or token__passthrough
 _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
@@ -140,6 +141,10 @@ _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restora
 
 def _filter_mode_from_headers(headers: Mapping[str, str]) -> str | None:
     return headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
+
+
+def _should_log_responses_stream_event(event_type: str) -> bool:
+    return bool(event_type) and event_type not in _RESPONSES_STREAM_DEBUG_SUPPRESSED_EVENT_TYPES
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
@@ -481,6 +486,14 @@ def _build_responses_upstream_payload(
         else:
             upstream_payload["input"] = _strip_system_exec_runtime_lines(str(sanitized_req_messages[0].content))
     return upstream_payload
+
+
+def _build_chat_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_for_chat({k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS})
+
+
+def _build_responses_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return sanitize_for_responses({k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS})
 
 
 def _extract_generic_analysis_text(value: Any) -> str:
@@ -2660,6 +2673,7 @@ async def _execute_chat_stream_once(
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_chat_passthrough_payload(payload) if filter_mode == "passthrough" else payload
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -2679,7 +2693,7 @@ async def _execute_chat_stream_once(
     if filter_mode == "passthrough":
         return _build_passthrough_stream_response(
             ctx=ctx,
-            payload=payload,
+            payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
@@ -3059,6 +3073,7 @@ async def _execute_responses_stream_once(
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_responses_passthrough_payload(payload) if filter_mode == "passthrough" else payload
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3078,7 +3093,7 @@ async def _execute_responses_stream_once(
     if filter_mode == "passthrough":
         return _build_passthrough_stream_response(
             ctx=ctx,
-            payload=payload,
+            payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
@@ -3242,7 +3257,7 @@ async def _execute_responses_stream_once(
 
                 saw_any_data_event = True
                 event_type = _extract_stream_event_type(payload_text)
-                if event_type:
+                if _should_log_responses_stream_event(event_type):
                     logger.debug(
                         "responses stream event request_id=%s type=%s bytes=%d",
                         ctx.request_id, event_type, len(payload_text),
@@ -3256,15 +3271,14 @@ async def _execute_responses_stream_once(
                             yield pending_lines.pop(0)
                             yield b"\n"
                     _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
-                    _terminal_excerpt = (payload_text[:800] + "…") if len(payload_text) > 800 else payload_text
                     logger.debug(
-                        "responses stream terminal_event request_id=%s event_type=%s chunk_count=%s cached_chars=%s non_text_output=%s excerpt=%s",
-                        ctx.request_id, event_type, chunk_count, len(stream_window), _has_non_text_output, _terminal_excerpt,
+                        "responses stream terminal_event request_id=%s event_type=%s chunk_count=%s cached_chars=%s non_text_output=%s payload_bytes=%s",
+                        ctx.request_id, event_type, chunk_count, len(stream_window), _has_non_text_output, len(payload_text),
                     )
                     if chunk_count <= 0 and not _has_non_text_output:
                         logger.warning(
-                            "responses stream terminal_event with no text_delta request_id=%s event_type=%s excerpt=%s",
-                            ctx.request_id, event_type, _terminal_excerpt,
+                            "responses stream terminal_event with no text_delta request_id=%s event_type=%s payload_bytes=%s",
+                            ctx.request_id, event_type, len(payload_text),
                         )
 
                 chunk_text = _extract_stream_text_from_event(payload_text)
@@ -3561,6 +3575,7 @@ async def _execute_chat_once(
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_chat_passthrough_payload(payload) if filter_mode == "passthrough" else payload
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3580,7 +3595,7 @@ async def _execute_chat_once(
     if filter_mode == "passthrough":
         return await _forward_json_passthrough(
             ctx=ctx,
-            payload=payload,
+            payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
@@ -3864,6 +3879,7 @@ async def _execute_responses_once(
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
     filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_responses_passthrough_payload(payload) if filter_mode == "passthrough" else payload
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3883,7 +3899,7 @@ async def _execute_responses_once(
     if filter_mode == "passthrough":
         return await _forward_json_passthrough(
             ctx=ctx,
-            payload=payload,
+            payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
