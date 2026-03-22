@@ -3141,6 +3141,11 @@ async def _execute_responses_stream_once(
 
                 saw_any_data_event = True
                 event_type = _extract_stream_event_type(payload_text)
+                if event_type:
+                    logger.debug(
+                        "responses stream event request_id=%s type=%s bytes=%d",
+                        ctx.request_id, event_type, len(payload_text),
+                    )
                 if event_type in {"response.completed", "response.failed", "error"}:
                     saw_terminal_event = True
                     # Flush held-back content events BEFORE yielding the
@@ -3149,15 +3154,16 @@ async def _execute_responses_stream_once(
                         while pending_lines:
                             yield pending_lines.pop(0)
                             yield b"\n"
-                    if chunk_count <= 0:
-                        # Reasoning-only or function-call-only responses produce no
-                        # text deltas — this is normal for agentic tool-call loops.
-                        _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
-                        _log_fn = logger.debug if (event_type == "response.completed" and _has_non_text_output) else logger.warning
-                        _excerpt = (payload_text[:500] + "…") if len(payload_text) > 500 else payload_text
-                        _log_fn(
-                            "responses stream terminal_event with no text_delta request_id=%s event_type=%s non_text_output=%s excerpt=%s",
-                            ctx.request_id, event_type, _has_non_text_output, _excerpt,
+                    _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
+                    _terminal_excerpt = (payload_text[:800] + "…") if len(payload_text) > 800 else payload_text
+                    logger.debug(
+                        "responses stream terminal_event request_id=%s event_type=%s chunk_count=%s cached_chars=%s non_text_output=%s excerpt=%s",
+                        ctx.request_id, event_type, chunk_count, len(stream_window), _has_non_text_output, _terminal_excerpt,
+                    )
+                    if chunk_count <= 0 and not _has_non_text_output:
+                        logger.warning(
+                            "responses stream terminal_event with no text_delta request_id=%s event_type=%s excerpt=%s",
+                            ctx.request_id, event_type, _terminal_excerpt,
                         )
 
                 chunk_text = _extract_stream_text_from_event(payload_text)
