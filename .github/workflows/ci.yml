@@ -23,11 +23,11 @@ jobs:
 
       - name: Install dependencies
         timeout-minutes: 8
-        run: pip install -e ".[dev,semantic]" -v
+        run: pip install -e ".[dev,semantic]"
 
       - name: Run tests with coverage
         timeout-minutes: 5
-        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing -q
+        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
