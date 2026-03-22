@@ -6,8 +6,17 @@ import threading
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from aegisgate.core.context import RequestContext
 from aegisgate.core.stats import StatsCollector, _hour_key
+
+
+@pytest.fixture(autouse=True)
+def _isolate_stats(monkeypatch, tmp_path):
+    """Prevent StatsCollector from loading/saving persisted stats."""
+    monkeypatch.setattr("aegisgate.core.stats._STATS_FILE", tmp_path / "stats.json")
+    monkeypatch.setattr("aegisgate.core.stats._STATS_FALLBACK", tmp_path / "stats_fb.json")
 
 
 def _make_ctx(

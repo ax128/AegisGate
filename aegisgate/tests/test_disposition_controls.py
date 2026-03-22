@@ -137,8 +137,8 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
 @pytest.mark.parametrize(
     "payload_text",
     [
-        "docker compose down --remove-orphans",
-        "docker stop my_container",
+        # Docker commands intentionally removed from force_block — treated as
+        # normal discussion in code-assistant scenarios (see security_filters.yaml).
         "Content-Length: 8\r\nTransfer-Encoding: chunked\r\n\r\n",
         "Transfer-Encoding: chunked\r\nContent-Length: 8\r\n\r\n",
         "Transfer-Encoding: gzip, chunked",
@@ -146,7 +146,7 @@ def test_output_sanitizer_force_blocks_web_attack_payload_when_switch_on():
         "%0d%0a\tTransfer-Encoding: chunked",
     ],
 )
-def test_output_sanitizer_force_block_patterns_cover_docker_and_http_framing_payloads(payload_text: str):
+def test_output_sanitizer_force_block_patterns_cover_http_framing_payloads(payload_text: str):
     plugin = OutputSanitizer()
     resp = InternalResponse(
         request_id="disp-6",
