@@ -133,7 +133,7 @@ _CONFIRMATION_HIT_CONTEXT_CHARS = 40
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
-_RESPONSES_STREAM_DEBUG_SUPPRESSED_EVENT_TYPES = frozenset({"response.output_text.delta"})
+_RESPONSES_STREAM_DEBUG_EVENT_TYPES = frozenset({"response.failed", "error"})
 
 # Filter modes set via URL path: token__redact or token__passthrough
 _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
@@ -144,7 +144,7 @@ def _filter_mode_from_headers(headers: Mapping[str, str]) -> str | None:
 
 
 def _should_log_responses_stream_event(event_type: str) -> bool:
-    return bool(event_type) and event_type not in _RESPONSES_STREAM_DEBUG_SUPPRESSED_EVENT_TYPES
+    return bool(event_type) and event_type in _RESPONSES_STREAM_DEBUG_EVENT_TYPES
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
@@ -3271,10 +3271,11 @@ async def _execute_responses_stream_once(
                             yield pending_lines.pop(0)
                             yield b"\n"
                     _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
-                    logger.debug(
-                        "responses stream terminal_event request_id=%s event_type=%s chunk_count=%s cached_chars=%s non_text_output=%s payload_bytes=%s",
-                        ctx.request_id, event_type, chunk_count, len(stream_window), _has_non_text_output, len(payload_text),
-                    )
+                    if event_type in {"response.failed", "error"}:
+                        logger.debug(
+                            "responses stream terminal_event request_id=%s event_type=%s chunk_count=%s cached_chars=%s non_text_output=%s payload_bytes=%s",
+                            ctx.request_id, event_type, chunk_count, len(stream_window), _has_non_text_output, len(payload_text),
+                        )
                     if chunk_count <= 0 and not _has_non_text_output:
                         logger.warning(
                             "responses stream terminal_event with no text_delta request_id=%s event_type=%s payload_bytes=%s",
@@ -3489,14 +3490,6 @@ async def _execute_responses_stream_once(
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
                 if saw_terminal_event:
-                    # response.completed with function_call/reasoning output is
-                    # normal for agentic loops — log at debug, not warning.
-                    logger.debug(
-                        "responses stream inject_done after terminal_event request_id=%s chunk_count=%s cached_chars=%s",
-                        ctx.request_id,
-                        chunk_count,
-                        len(stream_window),
-                    )
                     yield _stream_done_sse_chunk()
                 elif chunk_count <= 0 and not saw_any_data_event:
                     replay_text = _build_upstream_eof_replay_text("")

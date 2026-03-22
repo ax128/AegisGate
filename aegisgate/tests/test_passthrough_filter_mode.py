@@ -6,6 +6,7 @@ import pytest
 from fastapi.responses import StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
+from aegisgate.core import pipeline as pipeline_module
 
 
 def _seed_policy(ctx, policy_name: str = "default") -> dict[str, object]:
@@ -48,9 +49,16 @@ def _install_common_passthrough_mocks(monkeypatch: pytest.MonkeyPatch) -> list[s
 
 
 def test_responses_stream_debug_log_filter() -> None:
-    assert openai_router._should_log_responses_stream_event("response.created") is True
-    assert openai_router._should_log_responses_stream_event("response.completed") is True
+    assert openai_router._should_log_responses_stream_event("response.created") is False
+    assert openai_router._should_log_responses_stream_event("response.completed") is False
     assert openai_router._should_log_responses_stream_event("response.output_text.delta") is False
+    assert openai_router._should_log_responses_stream_event("response.failed") is True
+
+
+def test_filter_done_debug_log_only_when_filter_hits() -> None:
+    assert pipeline_module._should_log_filter_done(phase="request", is_stream=False, report={"hit": False}) is False
+    assert pipeline_module._should_log_filter_done(phase="request", is_stream=False, report={"hit": True}) is True
+    assert pipeline_module._should_log_filter_done(phase="response", is_stream=True, report={"hit": True}) is False
 
 
 @pytest.mark.asyncio
