@@ -144,6 +144,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/{subpath}` 通用代理
+  - 若客户端把 `Responses API` 风格请求（仅 `input`）误发到 `/v1/chat/completions`，网关会转发到上游 `/v1/responses`，并把返回结果重新包装成 Chat Completions 的 JSON/SSE 形状
+  - 若客户端把 `Chat Completions` 风格请求（`messages`）误发到 `/v1/responses`，网关会做反向兼容转换，并返回 Responses 风格结果
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
   - 生产建议使用 token 路径：`/v2/__gw__/t/<token>/...`
@@ -400,7 +402,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
 2. 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`、`/v1/__gw__/t/8317__passthrough/...`。
 3. 无效的模式名（如 `__foo`）会返回 `400 invalid_filter_mode`。
 4. 审计日志会记录使用的过滤模式（`filter_mode:redact` 或 `filter_mode:passthrough` 安全标签）。
-5. **安全提示**：`passthrough` 模式跳过所有安全检查，建议仅在受信环境或调试场景使用。
+5. `passthrough` 模式跳过所有安全过滤器，但仍保留最小协议兼容层：会剥离网关内部字段，并保留 Chat/Responses 的参数兼容转换，避免上游因请求格式不兼容返回 `400`。
+6. **安全提示**：`passthrough` 模式跳过所有安全检查，建议仅在受信环境或调试场景使用。
 
 ### 2.4 Claude 接入快速示例
 

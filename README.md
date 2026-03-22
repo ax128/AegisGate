@@ -166,6 +166,7 @@ Client → http://<gateway-ip>:18080/v1/__gw__/t/{port}/... → localhost:{port}
 - Multiple upstreams can be used simultaneously
 - **No token registration, no config editing, no gateway restart required**
 - Supports filter mode suffixes: `token__redact` (redaction only) or `token__passthrough` (full passthrough)
+  - `token__passthrough` still keeps the OpenAI compatibility layer: gateway-only fields are stripped before forwarding, and Chat/Responses parameter compatibility is preserved
 
 ### Scenario 2: Remote Upstream
 
@@ -194,6 +195,11 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 - **OpenAI-compatible**: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/{subpath}`
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` (requires `x-target-url` header)
 - **Claude API** (pass-through): `POST /v1/messages`, `POST /v1/messages/count_tokens`
+
+Compatibility notes:
+
+- If a client accidentally sends a Responses-style payload (`input`) to `/v1/chat/completions`, AegisGate forwards it upstream as `/v1/responses` but converts the result back to Chat Completions JSON/SSE for the client.
+- If a client accidentally sends a Chat-style payload (`messages`) to `/v1/responses`, AegisGate applies the inverse compatibility mapping and returns Responses-shaped output.
 
 ### Security Pipeline
 

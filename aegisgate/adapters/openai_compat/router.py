@@ -607,6 +607,112 @@ def _passthrough_responses_output(upstream_body: dict[str, Any] | str, req: Any)
     )
 
 
+def _coerce_responses_output_to_chat_output(
+    result: dict[str, Any] | JSONResponse,
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | JSONResponse:
+    if isinstance(result, JSONResponse):
+        return result
+    text = _extract_responses_output_text(result)
+    resp = InternalResponse(
+        request_id=str(result.get("id") or fallback_request_id),
+        session_id=fallback_session_id,
+        model=str(result.get("model") or fallback_model),
+        output_text=text,
+    )
+    aegis_meta = result.get("aegisgate")
+    if isinstance(aegis_meta, dict):
+        resp.metadata["aegisgate"] = aegis_meta
+    return to_chat_response(resp)
+
+
+def _convert_responses_stream_payload_to_chat_chunk(
+    payload_text: str,
+    *,
+    request_id: str,
+    model: str,
+    role_sent: bool,
+    emitted_text: bool,
+) -> tuple[list[bytes], bool, bool]:
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return [], role_sent, emitted_text
+    if not isinstance(payload, dict):
+        return [], role_sent, emitted_text
+
+    event_type = str(payload.get("type") or "").strip().lower()
+    if event_type == "error":
+        return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")], role_sent, emitted_text
+
+    chunks: list[bytes] = []
+    text = ""
+    if event_type == "response.output_text.delta":
+        text = _extract_stream_text_from_event(payload_text)
+    elif event_type == "response.completed" and not emitted_text:
+        response = payload.get("response")
+        if isinstance(response, dict):
+            extracted = _extract_responses_output_text(response)
+            if extracted and not extracted.startswith("[status="):
+                text = extracted
+
+    if not text:
+        return [], role_sent, emitted_text
+
+    delta: dict[str, Any] = {"content": text}
+    if not role_sent:
+        delta["role"] = "assistant"
+        role_sent = True
+    chunk_payload = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": None,
+            }
+        ],
+    }
+    chunks.append(f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+    emitted_text = True
+    return chunks, role_sent, emitted_text
+
+
+def _coerce_responses_stream_to_chat_stream(
+    response: StreamingResponse,
+    *,
+    request_id: str,
+    model: str,
+) -> StreamingResponse:
+    async def generator() -> AsyncGenerator[bytes, None]:
+        role_sent = False
+        emitted_text = False
+        async for line in response.body_iterator:
+            raw = line if isinstance(line, bytes) else str(line).encode("utf-8")
+            payload_text = _extract_sse_data_payload(raw)
+            if payload_text is None:
+                continue
+            if payload_text == "[DONE]":
+                yield _stream_done_sse_chunk()
+                continue
+            chunks, role_sent, emitted_text = _convert_responses_stream_payload_to_chat_chunk(
+                payload_text,
+                request_id=request_id,
+                model=model,
+                role_sent=role_sent,
+                emitted_text=emitted_text,
+            )
+            for chunk in chunks:
+                yield chunk
+
+    return _build_streaming_response(generator())
+
+
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
     try:
         return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -4553,7 +4659,20 @@ async def chat_completions(payload: dict, request: Request):
             "chat_completions format_redirect: payload has 'input' without 'messages', "
             "redirecting to responses handler"
         )
-        return await responses(payload, request)
+        redirected = await responses(payload, request)
+        req_preview = to_internal_responses(payload)
+        if isinstance(redirected, StreamingResponse):
+            return _coerce_responses_stream_to_chat_stream(
+                redirected,
+                request_id=req_preview.request_id,
+                model=req_preview.model,
+            )
+        return _coerce_responses_output_to_chat_output(
+            redirected,
+            fallback_request_id=req_preview.request_id,
+            fallback_session_id=req_preview.session_id,
+            fallback_model=req_preview.model,
+        )
 
     _log_request_if_debug(request, payload, "/v1/chat/completions")
     boundary = getattr(request.state, "security_boundary", {})

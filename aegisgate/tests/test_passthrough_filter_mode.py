@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 
 import pytest
+from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
@@ -59,6 +60,83 @@ def test_filter_done_debug_log_only_when_filter_hits() -> None:
     assert pipeline_module._should_log_filter_done(phase="request", is_stream=False, report={"hit": False}) is False
     assert pipeline_module._should_log_filter_done(phase="request", is_stream=False, report={"hit": True}) is True
     assert pipeline_module._should_log_filter_done(phase="response", is_stream=True, report={"hit": True}) is False
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_redirects_responses_json_back_to_chat_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "gpt-5.4",
+        "input": "hello",
+        "request_id": "redirect-json",
+        "session_id": "redirect-json",
+    }
+
+    async def fake_responses(payload_arg: dict, request_arg: Request):
+        return {"id": "resp-1", "model": "gpt-5.4", "output_text": "收到。"}
+
+    monkeypatch.setattr(openai_router, "responses", fake_responses)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+    result = await openai_router.chat_completions(payload, request)
+    assert result["object"] == "chat.completion"
+    assert result["choices"][0]["message"]["content"] == "收到。"
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_redirects_responses_stream_back_to_chat_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "gpt-5.4",
+        "input": "hello",
+        "stream": True,
+        "request_id": "redirect-stream",
+        "session_id": "redirect-stream",
+    }
+
+    async def responses_generator() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"type":"response.created","response":{"id":"resp-1","model":"gpt-5.4","status":"in_progress"}}\n\n'
+        )
+        yield (
+            b'data: {"type":"response.output_text.delta","delta":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"}\n\n'
+        )
+        yield b'data: [DONE]\n\n'
+
+    async def fake_responses(payload_arg: dict, request_arg: Request):
+        return StreamingResponse(responses_generator(), media_type="text/event-stream")
+
+    monkeypatch.setattr(openai_router, "responses", fake_responses)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+    result = await openai_router.chat_completions(payload, request)
+    assert isinstance(result, StreamingResponse)
+    body = await _collect_stream_body(result)
+    assert b"chat.completion.chunk" in body
+    assert b"response.output_text.delta" not in body
+    assert b"[DONE]" in body
 
 
 @pytest.mark.asyncio
