@@ -323,25 +323,29 @@ def _is_structured_content(value: Any) -> bool:
     return isinstance(value, (list, dict))
 
 
+_GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy"})
+
+
 def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
-    upstream_payload = dict(payload)
+    upstream_payload = {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
     original_messages = payload.get("messages", [])
     updated_messages: list[dict[str, Any]] = []
     for idx, message in enumerate(sanitized_req_messages):
-        merged: dict[str, Any] = {}
         if idx < len(original_messages) and isinstance(original_messages[idx], dict):
-            merged = dict(original_messages[idx])
+            # Start from the original message dict — preserves all upstream-
+            # specific fields (name, tool_call_id, etc.) we don't know about.
+            merged: dict[str, Any] = dict(original_messages[idx])
+        else:
+            merged = {"role": message.role}
         merged["role"] = message.role
         original_content = merged.get("content")
         if _is_structured_content(original_content):
-            # Preserve multimodal structure (image/audio/video/file parts) for upstream compatibility.
+            # Preserve multimodal structure (image/audio/video/file parts).
             merged["content"] = original_content
         else:
             merged["content"] = message.content
-        if message.source:
-            merged["source"] = message.source
-        if message.metadata:
-            merged["metadata"] = message.metadata
+        # Do NOT inject non-standard fields (source, metadata) into upstream
+        # messages — unknown fields may cause upstream API rejections.
         updated_messages.append(merged)
     upstream_payload["messages"] = updated_messages
     return upstream_payload
@@ -356,7 +360,7 @@ def _build_responses_upstream_payload(
     route: str = "-",
     whitelist_keys: set[str] | None = None,
 ) -> dict[str, Any]:
-    upstream_payload = dict(payload)
+    upstream_payload = {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
