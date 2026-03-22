@@ -34,8 +34,10 @@ from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - 
 from aegisgate.adapters.openai_compat.stream_utils import (
     _build_streaming_response,
     _extract_sse_data_payload,
+    _extract_sse_data_payload_from_chunk,
     _extract_stream_event_type,
     _extract_stream_text_from_event,
+    _iter_sse_frames,
     _stream_block_reason,
     _stream_block_sse_chunk,  # noqa: F401 - re-exported for tests
     _stream_confirmation_sse_chunk,
@@ -1933,8 +1935,15 @@ def _patch_responses_stream_payload(payload: dict[str, Any], ctx: RequestContext
 
 
 def _sanitize_stream_event_line(line: bytes, *, route: str, ctx: RequestContext) -> bytes:
-    payload_text = _extract_sse_data_payload(line)
+    payload_text = _extract_sse_data_payload_from_chunk(line)
     if payload_text is None or payload_text == "[DONE]":
+        return line
+    raw_lines = line.splitlines(keepends=True)
+    data_line_index = next(
+        (index for index, raw_line in enumerate(raw_lines) if _extract_sse_data_payload(raw_line) is not None),
+        None,
+    )
+    if data_line_index is None:
         return line
     try:
         payload = json.loads(payload_text)
@@ -1946,7 +1955,13 @@ def _sanitize_stream_event_line(line: bytes, *, route: str, ctx: RequestContext)
         patched = _patch_responses_stream_payload(payload, ctx)
     else:
         patched = _patch_chat_stream_payload(payload, ctx)
-    return f"data: {json.dumps(patched, ensure_ascii=False)}\n\n".encode("utf-8")
+    raw_lines[data_line_index] = f"data: {json.dumps(patched, ensure_ascii=False)}\n".encode("utf-8")
+    output = b"".join(raw_lines)
+    if not output.endswith(b"\n"):
+        output += b"\n"
+    if not output.endswith(b"\n\n"):
+        output += b"\n"
+    return output
 
 
 def _extract_stream_tool_calls(payload_text: str, *, route: str) -> list[dict[str, Any]]:
@@ -2914,20 +2929,16 @@ async def _execute_chat_stream_once(
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         stream_cached_parts: list[str] = []
-        pending_lines: list[bytes] = []
+        pending_frames: list[bytes] = []
         chunk_count = 0
         saw_done = False
         stream_end_reason = "upstream_eof_no_done"
         blocked_reason: str | None = None
-        _suppress_next_separator = False
         try:
-            async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
-                payload_text = _extract_sse_data_payload(line)
+            async for line in _iter_sse_frames(_forward_stream_lines(upstream_url, upstream_payload, forward_headers)):
+                payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     if blocked_reason:
-                        continue
-                    if _suppress_next_separator:
-                        _suppress_next_separator = False
                         continue
                     yield line
                     continue
@@ -2937,9 +2948,8 @@ async def _execute_chat_stream_once(
                     stream_end_reason = "upstream_done"
                     if blocked_reason:
                         break
-                    while pending_lines:
-                        yield pending_lines.pop(0)
-                        yield b"\n"
+                    while pending_frames:
+                        yield pending_frames.pop(0)
                     yield line
                     break
 
@@ -2953,8 +2963,7 @@ async def _execute_chat_stream_once(
                     chunk_count += 1
 
                 if is_content_event:
-                    pending_lines.append(line)
-                    _suppress_next_separator = True
+                    pending_frames.append(line)
 
                 should_probe = bool(tool_calls) or bool(
                     chunk_text and (chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0)
@@ -3079,11 +3088,12 @@ async def _execute_chat_stream_once(
                     continue
 
                 if is_content_event:
-                    while len(pending_lines) > _STREAM_BLOCK_HOLDBACK_EVENTS:
-                        yield pending_lines.pop(0)
-                        yield b"\n"
+                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                        yield pending_frames.pop(0)
                     continue
 
+                while pending_frames:
+                    yield pending_frames.pop(0)
                 yield line
 
             if blocked_reason and not _confirmation_approval_enabled():
@@ -3098,15 +3108,13 @@ async def _execute_chat_stream_once(
                 logger.info("chat stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
                 sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
                 info_log_sanitized("chat_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
-                while pending_lines:
-                    yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
-                    yield b"\n"
+                while pending_frames:
+                    yield _sanitize_stream_event_line(pending_frames.pop(0), route=req.route, ctx=ctx)
                 yield _stream_done_sse_chunk()
                 stream_end_reason = "policy_auto_sanitize"
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
-                while pending_lines:
-                    yield pending_lines.pop(0)
-                    yield b"\n"
+                while pending_frames:
+                    yield pending_frames.pop(0)
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 replay_text = _build_upstream_eof_replay_text(stream_window)
                 logger.warning(
@@ -3325,7 +3333,7 @@ async def _execute_responses_stream_once(
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         stream_cached_parts: list[str] = []
-        pending_lines: list[bytes] = []
+        pending_frames: list[bytes] = []
         chunk_count = 0
         saw_any_data_event = False
         saw_terminal_event = False
@@ -3337,15 +3345,11 @@ async def _execute_responses_stream_once(
         blocked_confirmation_summary = ""
         blocked_confirmation_meta: dict[str, Any] | None = None
         blocked_message_text = ""
-        _suppress_next_separator = False
         try:
-            async for line in _forward_stream_lines(upstream_url, upstream_payload, forward_headers):
-                payload_text = _extract_sse_data_payload(line)
+            async for line in _iter_sse_frames(_forward_stream_lines(upstream_url, upstream_payload, forward_headers)):
+                payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     if blocked_reason:
-                        continue
-                    if _suppress_next_separator:
-                        _suppress_next_separator = False
                         continue
                     yield line
                     continue
@@ -3355,9 +3359,8 @@ async def _execute_responses_stream_once(
                     stream_end_reason = "upstream_done"
                     if blocked_reason:
                         break
-                    while pending_lines:
-                        yield pending_lines.pop(0)
-                        yield b"\n"
+                    while pending_frames:
+                        yield pending_frames.pop(0)
                     yield line
                     break
 
@@ -3370,12 +3373,6 @@ async def _execute_responses_stream_once(
                     )
                 if event_type in {"response.completed", "response.failed", "error"}:
                     saw_terminal_event = True
-                    # Flush held-back content events BEFORE yielding the
-                    # terminal event so the client receives them in order.
-                    if not blocked_reason:
-                        while pending_lines:
-                            yield pending_lines.pop(0)
-                            yield b"\n"
                     _has_non_text_output = '"function_call"' in payload_text or '"reasoning"' in payload_text
                     if event_type in {"response.failed", "error"}:
                         logger.debug(
@@ -3397,8 +3394,7 @@ async def _execute_responses_stream_once(
                     chunk_count += 1
 
                 if is_content_event:
-                    pending_lines.append(line)
-                    _suppress_next_separator = True
+                    pending_frames.append(line)
 
                 should_probe = (not blocked_reason) and bool(
                     tool_calls or (chunk_text and (chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0))
@@ -3481,11 +3477,12 @@ async def _execute_responses_stream_once(
                     continue
 
                 if is_content_event:
-                    while len(pending_lines) > _STREAM_BLOCK_HOLDBACK_EVENTS:
-                        yield pending_lines.pop(0)
-                        yield b"\n"
+                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                        yield pending_frames.pop(0)
                     continue
 
+                while pending_frames:
+                    yield pending_frames.pop(0)
                 yield line
             if blocked_reason:
                 if not _confirmation_approval_enabled():
@@ -3502,9 +3499,8 @@ async def _execute_responses_stream_once(
                     logger.info("responses stream auto-sanitized (buffered) request_id=%s reason=%s", ctx.request_id, blocked_reason)
                     sanitized_window = _build_sanitized_full_response(ctx, source_text=stream_window) if stream_window else ""
                     info_log_sanitized("responses_stream_sanitized", sanitized_window, request_id=ctx.request_id, reason=blocked_reason)
-                    while pending_lines:
-                        yield _sanitize_stream_event_line(pending_lines.pop(0), route=req.route, ctx=ctx)
-                        yield b"\n"
+                    while pending_frames:
+                        yield _sanitize_stream_event_line(pending_frames.pop(0), route=req.route, ctx=ctx)
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_auto_sanitize"
                 else:
@@ -3590,9 +3586,8 @@ async def _execute_responses_stream_once(
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_confirmation"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
-                while pending_lines:
-                    yield pending_lines.pop(0)
-                    yield b"\n"
+                while pending_frames:
+                    yield pending_frames.pop(0)
                 ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
                 recovery_meta = {"action": "allow", "warning": "upstream_eof_no_done", "recovered": True}
                 if saw_terminal_event:

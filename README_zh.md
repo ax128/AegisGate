@@ -752,6 +752,7 @@ pytest -q
   - `v2`（SSE 流）：自动补发 `data: [DONE]\n\n`，保证客户端收到终止信号。
 - 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关确认匹配失败。
 - 建议同时排查上游超时、代理 `read timeout`、连接重置日志。
+- 2026-03 优化：网关对带 `event:` 头的 Responses SSE 现按完整事件帧缓存和转发，不再按单行拆分，避免 `event:` 与对应 `data:` 错位，导致客户端把 `response.output_text.delta`、`response.output_text.done`、`response.completed` 配对错误。
 
 ### 8.5 v2 请求返回 `missing_target_url_header`
 

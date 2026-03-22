@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator
 from typing import Any, AsyncIterable, Iterable
 
 from fastapi.responses import StreamingResponse
@@ -227,6 +228,38 @@ def _extract_sse_data_payload(line: bytes) -> str | None:
     if not stripped.startswith(b"data:"):
         return None
     return stripped[5:].strip().decode("utf-8", errors="replace")
+
+
+def _extract_sse_data_payload_from_chunk(chunk: bytes) -> str | None:
+    for line in chunk.splitlines(keepends=True):
+        payload = _extract_sse_data_payload(line)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _build_sse_frame(lines: list[bytes]) -> bytes:
+    frame = b"".join(lines)
+    if not frame.endswith(b"\n"):
+        frame += b"\n"
+    if not frame.endswith(b"\n\n"):
+        frame += b"\n"
+    return frame
+
+
+async def _iter_sse_frames(lines: AsyncIterable[bytes]) -> AsyncGenerator[bytes, None]:
+    frame_lines: list[bytes] = []
+    async for line in lines:
+        if line.strip():
+            frame_lines.append(line)
+            continue
+        if frame_lines:
+            yield _build_sse_frame(frame_lines)
+            frame_lines = []
+            continue
+        yield line
+    if frame_lines:
+        yield _build_sse_frame(frame_lines)
 
 
 def _build_streaming_response(generator: Iterable[bytes] | AsyncIterable[bytes]) -> StreamingResponse:

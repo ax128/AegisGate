@@ -281,3 +281,85 @@ async def test_passthrough_stream_endpoints_skip_all_filters(
     assert isinstance(response, StreamingResponse)
     assert await _collect_stream_body(response) == b"".join(expected_chunks)
     assert audit_calls == [str(payload["request_id"])]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_preserves_event_and_data_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    audit_calls: list[str] = []
+
+    async def _identity_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(openai_router.policy_engine, "resolve", _seed_policy)
+    monkeypatch.setattr(openai_router, "_resolve_upstream_base", lambda headers: "http://upstream.test")
+    monkeypatch.setattr(openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}")
+    monkeypatch.setattr(openai_router, "_build_forward_headers", lambda headers: {"x-forwarded-for": "test"})
+    monkeypatch.setattr(openai_router, "_run_request_pipeline", _identity_request_pipeline)
+    monkeypatch.setattr(openai_router, "_run_response_pipeline", _noop_async)
+    monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_async)
+    monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        openai_router,
+        "_write_audit_event",
+        lambda ctx, boundary=None: audit_calls.append(ctx.request_id),
+    )
+
+    async def fake_forward_stream_lines(
+        url: str,
+        forwarded_payload: dict[str, object],
+        headers: dict[str, str],
+    ) -> AsyncGenerator[bytes, None]:
+        assert url == "http://upstream.test/v1/responses"
+        assert forwarded_payload == {"model": "gpt-5.4", "input": "hello", "stream": True}
+        chunks = [
+            b"event: response.created\n",
+            b'data: {"type":"response.created","response":{"id":"resp-1","model":"gpt-5.4","status":"in_progress"}}\n',
+            b"\n",
+            b"event: response.output_text.delta\n",
+            b'data: {"type":"response.output_text.delta","delta":"\xe6\x94\xb6\xe5\x88\xb0"}\n',
+            b"\n",
+            b"event: response.output_text.done\n",
+            b'data: {"type":"response.output_text.done","text":"\xe6\x94\xb6\xe5\x88\xb0"}\n',
+            b"\n",
+            b"event: response.completed\n",
+            b'data: {"type":"response.completed","response":{"id":"resp-1","status":"completed"}}\n',
+            b"\n",
+        ]
+        for chunk in chunks:
+            yield chunk
+
+    monkeypatch.setattr(openai_router, "_forward_stream_lines", fake_forward_stream_lines)
+
+    response = await openai_router._execute_responses_stream_once(
+        payload={
+            "model": "gpt-5.4",
+            "input": "hello",
+            "stream": True,
+            "request_id": "resp-stream-order",
+            "session_id": "resp-stream-order",
+        },
+        request_headers={},
+        request_path="/v1/responses",
+        boundary={},
+        tenant_id="default",
+    )
+
+    assert isinstance(response, StreamingResponse)
+    body = await _collect_stream_body(response)
+    assert (
+        b"event: response.output_text.delta\n"
+        b'data: {"type":"response.output_text.delta","delta":"\xe6\x94\xb6\xe5\x88\xb0"}\n\n'
+        in body
+    )
+    assert (
+        b"event: response.output_text.done\n"
+        b'data: {"type":"response.output_text.done","text":"\xe6\x94\xb6\xe5\x88\xb0"}\n\n'
+        in body
+    )
+    assert body.index(b"event: response.output_text.delta") < body.index(b"event: response.output_text.done")
+    assert body.index(b"event: response.output_text.done") < body.index(b"event: response.completed")
+    assert body.endswith(b"data: [DONE]\n\n")
+    assert audit_calls == ["resp-stream-order"]

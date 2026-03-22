@@ -268,6 +268,8 @@ Gateway transparently forwards upstream errors. Verify upstream availability ind
 ### Streaming logs show `upstream_eof_no_done`
 Upstream closed the stream without sending `data: [DONE]`. The gateway auto-recovers by synthesizing a completion event. Check upstream timeout and proxy chain configuration.
 
+Optimization note (2026-03): Responses SSE frames that include explicit `event:` headers are now buffered and forwarded as full event frames instead of line-by-line. This prevents `event:` and `data:` lines from being reordered across `response.output_text.delta`, `response.output_text.done`, and `response.completed`.
+
 ### v2 returns `missing_target_url_header`
 The `x-target-url` header is required for v2 proxy requests. Include the full target URL with query string.
 
