@@ -3071,7 +3071,7 @@ async def _execute_chat_stream_once(
                         ctx.response_disposition = "sanitize"
                         ctx.enforcement_actions.append("auto_sanitize:stream_buffered_patch")
                         stream_end_reason = "policy_auto_sanitize_buffered"
-                        continue
+                        break
 
                 if blocked_reason:
                     continue
@@ -3461,6 +3461,11 @@ async def _execute_responses_stream_once(
                             if _confirmation_approval_enabled()
                             else "policy_auto_sanitize_buffered"
                         )
+                        # Break immediately so the client does not stall
+                        # waiting for the upstream to finish generating.
+                        # The cached content up to this point is sufficient
+                        # for both sanitization and confirmation storage.
+                        break
 
                 if blocked_reason:
                     continue
