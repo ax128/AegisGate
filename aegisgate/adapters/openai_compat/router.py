@@ -19,6 +19,10 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_internal_responses,
     to_responses_output,
 )
+from aegisgate.adapters.openai_compat.payload_compat import (
+    sanitize_for_chat,
+    sanitize_for_responses,
+)
 from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - router re-exports for gateway startup hooks
     _get_pipeline,
     clear_pending_confirmations_on_startup,
@@ -335,7 +339,9 @@ _GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy", "metad
 
 
 def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
-    upstream_payload = {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
+    upstream_payload = sanitize_for_chat(
+        {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS},
+    )
     original_messages = payload.get("messages", [])
     updated_messages: list[dict[str, Any]] = []
     for idx, message in enumerate(sanitized_req_messages):
@@ -368,7 +374,9 @@ def _build_responses_upstream_payload(
     route: str = "-",
     whitelist_keys: set[str] | None = None,
 ) -> dict[str, Any]:
-    upstream_payload = {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
+    upstream_payload = sanitize_for_responses(
+        {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS},
+    )
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
