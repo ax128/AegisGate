@@ -168,6 +168,14 @@ def _should_stream(payload: dict[str, Any]) -> bool:
     return bool(payload.get("stream") is True)
 
 
+def _looks_like_responses_payload(payload: dict[str, Any]) -> bool:
+    return "input" in payload and "messages" not in payload
+
+
+def _looks_like_chat_payload(payload: dict[str, Any]) -> bool:
+    return "messages" in payload and "input" not in payload
+
+
 def _trim_stream_window(current: str, chunk: str) -> str:
     merged = f"{current}{chunk}"
     if len(merged) <= _STREAM_WINDOW_MAX_CHARS:
@@ -991,7 +999,8 @@ def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
 
 def _request_target_path(request: Request, *, fallback_path: str | None = None) -> str:
     """返回 path+query 形式的上游目标路径，确保 query 参数可透传到上游。"""
-    base_path = fallback_path or request.url.path or "/"
+    scope_override = request.scope.get("aegis_upstream_route_path")
+    base_path = str(scope_override or fallback_path or request.url.path or "/")
     query = request.url.query
     if query:
         return f"{base_path}?{query}"
@@ -4364,6 +4373,15 @@ async def _execute_generic_once(
 
 @router.post("/chat/completions")
 async def chat_completions(payload: dict, request: Request):
+    # --- 格式兼容：Responses API 格式误发到 chat 端点时，内部转发 ---
+    if _looks_like_responses_payload(payload):
+        request.scope["aegis_upstream_route_path"] = "/v1/responses"
+        logger.info(
+            "chat_completions format_redirect: payload has 'input' without 'messages', "
+            "redirecting to responses handler"
+        )
+        return await responses(payload, request)
+
     _log_request_if_debug(request, payload, "/v1/chat/completions")
     boundary = getattr(request.state, "security_boundary", {})
     gateway_headers = _effective_gateway_headers(request)
@@ -4838,6 +4856,14 @@ async def chat_completions(payload: dict, request: Request):
 
 @router.post("/responses")
 async def responses(payload: dict, request: Request):
+    if _looks_like_chat_payload(payload):
+        request.scope["aegis_upstream_route_path"] = "/v1/chat/completions"
+        logger.info(
+            "responses format_redirect: payload has 'messages' without 'input', "
+            "redirecting to chat handler"
+        )
+        return await chat_completions(payload, request)
+
     _log_request_if_debug(request, payload, "/v1/responses")
     boundary = getattr(request.state, "security_boundary", {})
     gateway_headers = _effective_gateway_headers(request)
