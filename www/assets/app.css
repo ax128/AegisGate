@@ -1196,6 +1196,29 @@ body.login-page {
   color: var(--accent);
 }
 
+.login-github {
+  margin-top: 16px;
+  text-align: center;
+}
+
+.login-github a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.82rem;
+  transition: color 0.15s;
+}
+
+.login-github a:hover {
+  color: var(--accent);
+}
+
+.login-github svg {
+  flex-shrink: 0;
+}
+
 /* ─── Responsive ─────────────────────────────── */
 
 @media (max-width: 980px) {
