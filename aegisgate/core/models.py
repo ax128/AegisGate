@@ -33,12 +33,13 @@ class InternalResponse(BaseModel):
     def tool_call_content(self) -> str:
         """Extract text from structured tool call arguments for security scanning.
 
-        Supports OpenAI (tool_calls[].function.arguments), Anthropic Claude
-        (content[].input when type=tool_use), and generic fallback.
+        Supports OpenAI Chat Completions (tool_calls[].function.arguments),
+        OpenAI Responses API (metadata.tool_calls with type=function_call),
+        Anthropic Claude (content[].input when type=tool_use), and generic fallback.
         """
         parts: list[str] = []
 
-        # OpenAI format: choices[].message.tool_calls[].function.arguments
+        # OpenAI Chat Completions: choices[].message.tool_calls[].function.arguments
         for choice in self.raw.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
@@ -68,5 +69,21 @@ class InternalResponse(BaseModel):
                 parts.append(str(name))
             if inp:
                 parts.append(str(inp))
+
+        # OpenAI Responses API / streaming probe: metadata.tool_calls[]
+        # Items have {type: "function_call", name: "...", arguments: "..."}
+        _TC_TYPES = {"function_call", "computer_call", "bash"}
+        for tc in self.metadata.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            tc_type = str(tc.get("type", "")).strip().lower()
+            if tc_type not in _TC_TYPES:
+                continue
+            name = tc.get("name", "")
+            args = tc.get("arguments", "")
+            if name:
+                parts.append(str(name))
+            if args:
+                parts.append(str(args))
 
         return " ".join(parts)
