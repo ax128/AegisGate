@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -39,6 +40,7 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
 # 已打过「policy file not found」的 policy 名，进程内只打一次
 _builtin_policy_warned: set[str] = set()
 _builtin_policy_warned_lock = Lock()
+_POLICY_STAT_TTL_SECONDS = 1.0
 
 
 def _resolve_rules_dir(rules_dir: str | None) -> Path:
@@ -67,7 +69,7 @@ class PolicyEngine:
     def __init__(self, rules_dir: str | None = None) -> None:
         self.rules_dir = _resolve_rules_dir(rules_dir)
         self._cache_lock = Lock()
-        self._cache: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._cache: dict[str, tuple[int, float, dict[str, Any]]] = {}
 
     def _load_policy(self, policy_name: str) -> dict[str, Any]:
         rule_path = self.rules_dir / f"{policy_name}.yaml"
@@ -85,15 +87,21 @@ class PolicyEngine:
             raise PolicyResolutionError(f"policy not found: {policy_name}")
 
         mtime_ns = rule_path.stat().st_mtime_ns
+        now = time.monotonic()
         with self._cache_lock:
             cached = self._cache.get(policy_name)
-            if cached and cached[0] == mtime_ns:
-                return cached[1]
+            if cached:
+                cached_mtime_ns, next_stat_at, cached_data = cached
+                if now < next_stat_at:
+                    return cached_data
+                if cached_mtime_ns == mtime_ns:
+                    self._cache[policy_name] = (cached_mtime_ns, now + _POLICY_STAT_TTL_SECONDS, cached_data)
+                    return cached_data
 
             loaded = yaml.safe_load(rule_path.read_text(encoding="utf-8")) or {}
             if not isinstance(loaded, dict):
                 raise PolicyResolutionError(f"invalid policy format: {rule_path}")
-            self._cache[policy_name] = (mtime_ns, loaded)
+            self._cache[policy_name] = (mtime_ns, now + _POLICY_STAT_TTL_SECONDS, loaded)
             return loaded
 
     def resolve(self, ctx: RequestContext, policy_name: str = "default") -> dict[str, Any]:

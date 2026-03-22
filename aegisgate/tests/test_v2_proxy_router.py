@@ -389,6 +389,33 @@ def test_proxy_blocks_streaming_dangerous_probe(monkeypatch: pytest.MonkeyPatch)
     assert body["error"]["code"] == "v2_response_http_attack_blocked"
 
 
+def test_proxy_blocks_streaming_dangerous_probe_split_across_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_resolve(monkeypatch, ["93.184.216.34"])
+    _patch_client(
+        monkeypatch,
+        _FakeStreamClient(
+            _FakeStreamResponse(
+                [b"Content-Length: 1\r\n", b"Transfer-Encoding: chunked"],
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+    )
+
+    response = asyncio.run(
+        proxy_v2(
+            _make_request(
+                headers={"x-target-url": "https://example.com/stream", "accept": "text/event-stream"},
+                body=b'{"stream":true}',
+            )
+        )
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 403
+    body = _response_json(response)
+    assert body["error"]["code"] == "v2_response_http_attack_blocked"
+
+
 def test_proxy_streaming_bypass_host_allows_original_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     original = settings.v2_response_filter_bypass_hosts
     settings.v2_response_filter_bypass_hosts = "example.com"

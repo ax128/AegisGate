@@ -72,6 +72,7 @@ async def test_boundary_allows_token_authenticated_v1_requests() -> None:
     response = await gateway.security_boundary_middleware(request, _allow_next)
 
     assert response.status_code == 200
+    assert request.state.security_boundary["request_body_size"] > 0
 
 
 @pytest.mark.asyncio

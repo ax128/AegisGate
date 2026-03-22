@@ -31,6 +31,7 @@ from aegisgate.adapters.openai_compat.router import (
     reload_runtime_dependencies,
     router as openai_router,
 )
+from aegisgate.adapters.openai_compat.offload import shutdown_payload_transform_executor
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
 from aegisgate.adapters.relay_compat.router import router as relay_router
 from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as v2_proxy_router
@@ -117,6 +118,7 @@ from aegisgate.core.security_boundary import (
     now_ts,
     verify_hmac_signature,
 )
+from aegisgate.storage.offload import run_store_io, shutdown_store_io_executor
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
@@ -201,7 +203,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.warning("docker_upstreams inject failed: %s", exc)
     if settings.clear_pending_on_startup:
         try:
-            n = clear_pending_confirmations_on_startup()
+            n = await run_store_io(clear_pending_confirmations_on_startup)
             if n:
                 logger.info("cleared %d pending confirmation(s) on startup", n)
         except Exception as exc:  # pragma: no cover
@@ -225,6 +227,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         await _confirmation_cache_task.stop()
         _confirmation_cache_task = None
     close_runtime_dependencies()
+    shutdown_store_io_executor()
+    shutdown_payload_transform_executor()
     await close_upstream_async_client()
     await close_v2_async_client()
     await close_semantic_async_client()
@@ -468,8 +472,10 @@ async def security_boundary_middleware(request: Request, call_next):
                 content_length, settings.max_request_body_bytes, request.url.path,
             )
             return await _drain_and_reject(request, boundary, "request_body_too_large", 413)
+        boundary["request_body_size"] = content_length
     elif settings.max_request_body_bytes > 0 and request.method.upper() in {"POST", "PUT", "PATCH"}:
         cached_body = await request.body()
+        boundary["request_body_size"] = len(cached_body)
         if len(cached_body) > settings.max_request_body_bytes:
             boundary["rejected_reason"] = "request_body_too_large"
             logger.warning(
@@ -514,6 +520,7 @@ async def security_boundary_middleware(request: Request, call_next):
             return _blocked_response(status_code=409, reason="replay_nonce_detected")
 
         body = cached_body if cached_body is not None else await request.body()
+        boundary["request_body_size"] = len(body)
         payload = build_signature_payload(timestamp=timestamp, nonce=nonce, body=body)
         if not verify_hmac_signature(secret=secret, payload=payload, presented=signature):
             boundary["rejected_reason"] = "hmac_signature_invalid"

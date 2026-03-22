@@ -46,6 +46,7 @@ _HOP_BY_HOP_HEADERS = {
 _V2_MAX_MATCH_IDS = 24
 _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
 _STREAM_FLAG_DETECT_MAX_BYTES = 16_384
+_V2_STREAM_PROBE_WINDOW_CHARS = 8_192
 _SSE_DONE_RECOVERY_CHUNK = b"data: [DONE]\n\n"
 _SSE_DONE_DETECT_TAIL_CHARS = 64
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
@@ -550,6 +551,34 @@ def _detect_dangerous_commands(text: str) -> list[str]:
     return raw_matches[:_V2_MAX_MATCH_IDS]
 
 
+def _extend_stream_probe_window(
+    probe_window: str,
+    piece: str,
+    *,
+    inspected_chars: int,
+    max_chars: int,
+    max_window_chars: int,
+) -> tuple[str, int, list[str]]:
+    """Incrementally scan a bounded tail window instead of rescanning the full probe text."""
+    if not piece or inspected_chars >= max_chars:
+        return probe_window, inspected_chars, []
+
+    remain = max_chars - inspected_chars
+    if remain <= 0:
+        return probe_window, inspected_chars, []
+
+    capped_piece = piece[:remain]
+    if not capped_piece:
+        return probe_window, inspected_chars, []
+
+    inspected_chars += len(capped_piece)
+    probe_window = f"{probe_window}{capped_piece}"
+    if len(probe_window) > max_window_chars:
+        probe_window = probe_window[-max_window_chars:]
+
+    return probe_window, inspected_chars, _detect_dangerous_commands(probe_window)
+
+
 _V2_TARGET_URL_HEADER = "x-target-url"
 
 
@@ -737,7 +766,8 @@ async def _proxy_v2_streaming(
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
         if is_sse:
             max_chars = max(256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars)))
-        probe_parts: list[str] = []
+        probe_window = ""
+        max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
         inspected_chars = 0
         matches: list[str] = []
         async for chunk in upstream_response.aiter_bytes():
@@ -745,17 +775,15 @@ async def _proxy_v2_streaming(
                 buffered_chunks.append(chunk)
                 if inspected_chars < max_chars:
                     piece = chunk.decode("utf-8", errors="replace")
-                    if piece:
-                        remain = max_chars - inspected_chars
-                        if remain > 0:
-                            capped = piece[:remain]
-                            if capped:
-                                probe_parts.append(capped)
-                                inspected_chars += len(capped)
-                    if probe_parts:
-                        matches = _detect_dangerous_commands("".join(probe_parts))
-                        if matches:
-                            break
+                    probe_window, inspected_chars, matches = _extend_stream_probe_window(
+                        probe_window,
+                        piece,
+                        inspected_chars=inspected_chars,
+                        max_chars=max_chars,
+                        max_window_chars=max_window_chars,
+                    )
+                    if matches:
+                        break
             if inspected_chars >= max_chars:
                 break
         else:

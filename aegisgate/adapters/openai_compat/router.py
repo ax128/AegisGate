@@ -19,6 +19,15 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_internal_responses,
     to_responses_output,
 )
+from aegisgate.adapters.openai_compat.compat_bridge import (
+    coerce_chat_output_to_responses_output,
+    coerce_chat_stream_to_responses_stream,
+    coerce_responses_output_to_chat_output,
+    coerce_responses_stream_to_chat_stream,
+    passthrough_chat_response,
+    passthrough_responses_output,
+)
+from aegisgate.adapters.openai_compat.offload import run_payload_transform_offloop
 from aegisgate.adapters.openai_compat.payload_compat import (
     sanitize_for_chat,
     sanitize_for_responses,
@@ -93,6 +102,7 @@ from aegisgate.core.dangerous_response_log import mark_text_with_spans, write_da
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.core.semantic import SemanticServiceClient
 from aegisgate.policies.policy_engine import PolicyEngine
+from aegisgate.storage.offload import run_store_io
 from aegisgate.util.debug_excerpt import debug_log_original, info_log_sanitized
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
@@ -419,6 +429,83 @@ def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
     return f"[status={status}]"
 
 
+def _passthrough_chat_response(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
+    return passthrough_chat_response(
+        upstream_body,
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+    )
+
+
+def _passthrough_responses_output(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
+    return passthrough_responses_output(
+        upstream_body,
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+    )
+
+
+def _coerce_responses_output_to_chat_output(
+    result: dict[str, Any] | JSONResponse,
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | JSONResponse:
+    return coerce_responses_output_to_chat_output(
+        result,
+        fallback_request_id=fallback_request_id,
+        fallback_session_id=fallback_session_id,
+        fallback_model=fallback_model,
+        text_extractor=_extract_responses_output_text,
+    )
+
+
+def _coerce_chat_output_to_responses_output(
+    result: dict[str, Any] | JSONResponse,
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | JSONResponse:
+    return coerce_chat_output_to_responses_output(
+        result,
+        fallback_request_id=fallback_request_id,
+        fallback_session_id=fallback_session_id,
+        fallback_model=fallback_model,
+        text_extractor=_extract_chat_output_text,
+    )
+
+
+def _coerce_responses_stream_to_chat_stream(
+    response: StreamingResponse,
+    *,
+    request_id: str,
+    model: str,
+) -> StreamingResponse:
+    return coerce_responses_stream_to_chat_stream(
+        response,
+        request_id=request_id,
+        model=model,
+        response_text_extractor=_extract_responses_output_text,
+    )
+
+
+def _coerce_chat_stream_to_responses_stream(
+    response: StreamingResponse,
+    *,
+    request_id: str,
+    model: str,
+) -> StreamingResponse:
+    return coerce_chat_stream_to_responses_stream(
+        response,
+        request_id=request_id,
+        model=model,
+    )
+
+
 def _is_structured_content(value: Any) -> bool:
     return isinstance(value, (list, dict))
 
@@ -570,19 +657,6 @@ def _render_chat_response(upstream_body: dict[str, Any] | str, final_resp: Inter
     return to_chat_response(final_resp)
 
 
-def _passthrough_chat_response(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
-    if isinstance(upstream_body, dict):
-        return upstream_body
-    return to_chat_response(
-        InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text=str(upstream_body),
-        )
-    )
-
-
 def _render_responses_output(upstream_body: dict[str, Any] | str, final_resp: InternalResponse) -> dict[str, Any]:
     if isinstance(upstream_body, dict):
         out = copy.deepcopy(upstream_body)
@@ -596,125 +670,6 @@ def _render_responses_output(upstream_body: dict[str, Any] | str, final_resp: In
     return to_responses_output(final_resp)
 
 
-def _passthrough_responses_output(upstream_body: dict[str, Any] | str, req: Any) -> dict[str, Any]:
-    if isinstance(upstream_body, dict):
-        return upstream_body
-    return to_responses_output(
-        InternalResponse(
-            request_id=req.request_id,
-            session_id=req.session_id,
-            model=req.model,
-            output_text=str(upstream_body),
-        )
-    )
-
-
-def _coerce_responses_output_to_chat_output(
-    result: dict[str, Any] | JSONResponse,
-    *,
-    fallback_request_id: str,
-    fallback_session_id: str,
-    fallback_model: str,
-) -> dict[str, Any] | JSONResponse:
-    if isinstance(result, JSONResponse):
-        return result
-    text = _extract_responses_output_text(result)
-    resp = InternalResponse(
-        request_id=str(result.get("id") or fallback_request_id),
-        session_id=fallback_session_id,
-        model=str(result.get("model") or fallback_model),
-        output_text=text,
-    )
-    aegis_meta = result.get("aegisgate")
-    if isinstance(aegis_meta, dict):
-        resp.metadata["aegisgate"] = aegis_meta
-    return to_chat_response(resp)
-
-
-def _convert_responses_stream_payload_to_chat_chunk(
-    payload_text: str,
-    *,
-    request_id: str,
-    model: str,
-    role_sent: bool,
-    emitted_text: bool,
-) -> tuple[list[bytes], bool, bool]:
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError:
-        return [], role_sent, emitted_text
-    if not isinstance(payload, dict):
-        return [], role_sent, emitted_text
-
-    event_type = str(payload.get("type") or "").strip().lower()
-    if event_type == "error":
-        return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")], role_sent, emitted_text
-
-    chunks: list[bytes] = []
-    text = ""
-    if event_type == "response.output_text.delta":
-        text = _extract_stream_text_from_event(payload_text)
-    elif event_type == "response.completed" and not emitted_text:
-        response = payload.get("response")
-        if isinstance(response, dict):
-            extracted = _extract_responses_output_text(response)
-            if extracted and not extracted.startswith("[status="):
-                text = extracted
-
-    if not text:
-        return [], role_sent, emitted_text
-
-    delta: dict[str, Any] = {"content": text}
-    if not role_sent:
-        delta["role"] = "assistant"
-        role_sent = True
-    chunk_payload = {
-        "id": request_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": delta,
-                "finish_reason": None,
-            }
-        ],
-    }
-    chunks.append(f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8"))
-    emitted_text = True
-    return chunks, role_sent, emitted_text
-
-
-def _coerce_responses_stream_to_chat_stream(
-    response: StreamingResponse,
-    *,
-    request_id: str,
-    model: str,
-) -> StreamingResponse:
-    async def generator() -> AsyncGenerator[bytes, None]:
-        role_sent = False
-        emitted_text = False
-        async for line in response.body_iterator:
-            raw = line if isinstance(line, bytes) else str(line).encode("utf-8")
-            payload_text = _extract_sse_data_payload(raw)
-            if payload_text is None:
-                continue
-            if payload_text == "[DONE]":
-                yield _stream_done_sse_chunk()
-                continue
-            chunks, role_sent, emitted_text = _convert_responses_stream_payload_to_chat_chunk(
-                payload_text,
-                request_id=request_id,
-                model=model,
-                role_sent=role_sent,
-                emitted_text=emitted_text,
-            )
-            for chunk in chunks:
-                yield chunk
-
-    return _build_streaming_response(generator())
-
-
 def _serialized_payload_size(payload: dict[str, Any]) -> int:
     try:
         return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -722,10 +677,15 @@ def _serialized_payload_size(payload: dict[str, Any]) -> int:
         return 0
 
 
-def _validate_payload_limits(payload: dict[str, Any], route: str) -> tuple[bool, int, str, str]:
+def _validate_payload_limits(
+    payload: dict[str, Any],
+    route: str,
+    *,
+    body_size_bytes: int | None = None,
+) -> tuple[bool, int, str, str]:
     max_body = int(settings.max_request_body_bytes)
     if max_body > 0:
-        body_size = _serialized_payload_size(payload)
+        body_size = body_size_bytes if body_size_bytes is not None else _serialized_payload_size(payload)
         if body_size > max_body:
             return False, 413, "request_body_too_large", f"payload bytes={body_size} exceeds max={max_body}"
 
@@ -1057,6 +1017,11 @@ async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
     return func(*args, **kwargs)
 
 
+async def _run_payload_transform(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Keep payload mapping/sanitization off the event loop."""
+    return await run_payload_transform_offloop(func, *args, **kwargs)
+
+
 def _run_request_pipeline_sync(req: Any, ctx: RequestContext) -> Any:
     """Run request pipeline in pool thread (threading.local binds to THIS thread)."""
     return _get_pipeline().run_request(req, ctx)
@@ -1131,12 +1096,12 @@ async def _run_response_pipeline(
 
 async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
     method = getattr(store, method_name)
-    return await _maybe_offload(method, *args, **kwargs)
+    return await run_store_io(method, *args, **kwargs)
 
 
 async def _delete_pending_confirmation(confirm_id: str) -> bool:
     try:
-        return bool(await _maybe_offload(store.delete_pending_confirmation, confirm_id=confirm_id))
+        return bool(await run_store_io(store.delete_pending_confirmation, confirm_id=confirm_id))
     except Exception as exc:
         logger.warning("delete pending confirmation failed confirm_id=%s error=%s", confirm_id, exc)
         return False
@@ -2669,7 +2634,7 @@ async def _try_transition_pending_status(
     new_status: str,
     now_ts: int,
 ) -> bool:
-    result = await _maybe_offload(
+    result = await run_store_io(
         store.compare_and_update_pending_confirmation_status,
         confirm_id=confirm_id,
         expected_status=expected_status,
@@ -2778,7 +2743,7 @@ async def _execute_chat_stream_once(
     tenant_id: str = "default",
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
-    req = to_internal_chat(payload)
+    req = await _run_payload_transform(to_internal_chat, payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
@@ -2913,7 +2878,7 @@ async def _execute_chat_stream_once(
         logger.info("chat stream request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
+    upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, sanitized_req.messages)
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
@@ -3171,7 +3136,7 @@ async def _execute_responses_stream_once(
     tenant_id: str = "default",
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
-    req = to_internal_responses(payload)
+    req = await _run_payload_transform(to_internal_responses, payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
@@ -3306,9 +3271,13 @@ async def _execute_responses_stream_once(
         logger.info("responses stream request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = _build_responses_upstream_payload(
-        payload, sanitized_req.messages,
-        request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+    upstream_payload = await _run_payload_transform(
+        _build_responses_upstream_payload,
+        payload,
+        sanitized_req.messages,
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+        route=ctx.route,
         whitelist_keys=ctx.redaction_whitelist_keys,
     )
     _input_items = upstream_payload.get("input")
@@ -3658,7 +3627,7 @@ async def _execute_chat_once(
     skip_confirmation: bool = False,
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
-    req = to_internal_chat(payload)
+    req = await _run_payload_transform(to_internal_chat, payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
@@ -3687,7 +3656,12 @@ async def _execute_chat_once(
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
-            on_success=lambda upstream_body: _passthrough_chat_response(upstream_body, req),
+            on_success=lambda upstream_body: passthrough_chat_response(
+                upstream_body,
+                request_id=req.request_id,
+                session_id=req.session_id,
+                model=req.model,
+            ),
             log_label="chat completion",
         )
 
@@ -3719,12 +3693,17 @@ async def _execute_chat_once(
         ctx.security_tags.add("upstream_whitelist_bypass")
         _write_audit_event(ctx, boundary=boundary)
         logger.info("chat completion bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
-        return _passthrough_chat_response(upstream_body, req)
+        return passthrough_chat_response(
+            upstream_body,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+        )
 
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
     pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = _build_chat_upstream_payload(payload, req.messages)
+        upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, req.messages)
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
@@ -3801,7 +3780,7 @@ async def _execute_chat_once(
             logger.info("chat completion request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
             return to_chat_response(confirmation_resp)
 
-        upstream_payload = _build_chat_upstream_payload(payload, sanitized_req.messages)
+        upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, sanitized_req.messages)
 
     try:
         status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)
@@ -3884,7 +3863,12 @@ async def _execute_chat_once(
             return _render_non_confirmation_chat_response(upstream_body, final_resp, ctx)
 
         reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
-        cached_output = _passthrough_chat_response(upstream_body, req)
+        cached_output = passthrough_chat_response(
+            upstream_body,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+        )
         pending_payload = _build_response_pending_payload(
             route=req.route,
             request_id=req.request_id,
@@ -3962,7 +3946,7 @@ async def _execute_responses_once(
     skip_confirmation: bool = False,
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
-    req = to_internal_responses(payload)
+    req = await _run_payload_transform(to_internal_responses, payload)
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
@@ -3991,7 +3975,12 @@ async def _execute_responses_once(
             upstream_url=upstream_url,
             forward_headers=forward_headers,
             boundary=boundary,
-            on_success=lambda upstream_body: _passthrough_responses_output(upstream_body, req),
+            on_success=lambda upstream_body: passthrough_responses_output(
+                upstream_body,
+                request_id=req.request_id,
+                session_id=req.session_id,
+                model=req.model,
+            ),
             log_label="responses endpoint",
         )
 
@@ -4023,14 +4012,23 @@ async def _execute_responses_once(
         ctx.security_tags.add("upstream_whitelist_bypass")
         _write_audit_event(ctx, boundary=boundary)
         logger.info("responses endpoint bypassed filters request_id=%s upstream=%s", ctx.request_id, upstream_base)
-        return _passthrough_responses_output(upstream_body, req)
+        return passthrough_responses_output(
+            upstream_body,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+        )
 
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
     pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = _build_responses_upstream_payload(
-            payload, req.messages,
-            request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+        upstream_payload = await _run_payload_transform(
+            _build_responses_upstream_payload,
+            payload,
+            req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
             whitelist_keys=ctx.redaction_whitelist_keys,
         )
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
@@ -4106,9 +4104,13 @@ async def _execute_responses_once(
             logger.info("responses endpoint request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
             return to_responses_output(confirmation_resp)
 
-        upstream_payload = _build_responses_upstream_payload(
-            payload, sanitized_req.messages,
-            request_id=ctx.request_id, session_id=ctx.session_id, route=ctx.route,
+        upstream_payload = await _run_payload_transform(
+            _build_responses_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
             whitelist_keys=ctx.redaction_whitelist_keys,
         )
 
@@ -4193,7 +4195,12 @@ async def _execute_responses_once(
             return _render_non_confirmation_responses_output(upstream_body, final_resp, ctx)
 
         reason, summary = _confirmation_reason_and_summary(ctx, source_text=final_resp.output_text)
-        cached_output = _passthrough_responses_output(upstream_body, req)
+        cached_output = passthrough_responses_output(
+            upstream_body,
+            request_id=req.request_id,
+            session_id=req.session_id,
+            model=req.model,
+        )
         pending_payload = _build_response_pending_payload(
             route=req.route,
             request_id=req.request_id,
@@ -4378,8 +4385,8 @@ async def _execute_generic_stream_once(
         stream_window = ""
         chunk_count = 0
         try:
-            async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
-                payload_text = _extract_sse_data_payload(line)
+            async for line in _iter_sse_frames(_forward_stream_lines(upstream_url, payload, forward_headers)):
+                payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is not None and payload_text != "[DONE]":
                     chunk_text = _extract_stream_text_from_event(payload_text)
                     if chunk_text:
@@ -4649,18 +4656,20 @@ async def chat_completions(payload: dict, request: Request):
             "redirecting to responses handler"
         )
         redirected = await responses(payload, request)
-        req_preview = to_internal_responses(payload)
+        req_preview = await _run_payload_transform(to_internal_responses, payload)
         if isinstance(redirected, StreamingResponse):
-            return _coerce_responses_stream_to_chat_stream(
+            return coerce_responses_stream_to_chat_stream(
                 redirected,
                 request_id=req_preview.request_id,
                 model=req_preview.model,
+                response_text_extractor=_extract_responses_output_text,
             )
-        return _coerce_responses_output_to_chat_output(
+        return coerce_responses_output_to_chat_output(
             redirected,
             fallback_request_id=req_preview.request_id,
             fallback_session_id=req_preview.session_id,
             fallback_model=req_preview.model,
+            text_extractor=_extract_responses_output_text,
         )
 
     _log_request_if_debug(request, payload, "/v1/chat/completions")
@@ -4675,8 +4684,15 @@ async def chat_completions(payload: dict, request: Request):
         route="/v1/chat/completions",
         tenant_id=tenant_id,
     )
+    body_size_bytes = boundary.get("request_body_size")
+    if not isinstance(body_size_bytes, int):
+        body_size_bytes = None
 
-    ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
+    ok_payload, status_code, reason, detail = _validate_payload_limits(
+        payload,
+        route=ctx_preview.route,
+        body_size_bytes=body_size_bytes,
+    )
     if not ok_payload:
         return _error_response(
             status_code=status_code,
@@ -4686,14 +4702,14 @@ async def chat_completions(payload: dict, request: Request):
             boundary=boundary,
         )
 
-    req_preview = to_internal_chat(payload)
+    req_preview = await _run_payload_transform(to_internal_chat, payload)
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    pending = await _maybe_offload(
+    pending = await run_store_io(
         _resolve_pending_confirmation,
         payload,
         user_text,
@@ -5143,7 +5159,21 @@ async def responses(payload: dict, request: Request):
             "responses format_redirect: payload has 'messages' without 'input', "
             "redirecting to chat handler"
         )
-        return await chat_completions(payload, request)
+        redirected = await chat_completions(payload, request)
+        req_preview = await _run_payload_transform(to_internal_chat, payload)
+        if isinstance(redirected, StreamingResponse):
+            return coerce_chat_stream_to_responses_stream(
+                redirected,
+                request_id=req_preview.request_id,
+                model=req_preview.model,
+            )
+        return coerce_chat_output_to_responses_output(
+            redirected,
+            fallback_request_id=req_preview.request_id,
+            fallback_session_id=req_preview.session_id,
+            fallback_model=req_preview.model,
+            text_extractor=_extract_chat_output_text,
+        )
 
     _log_request_if_debug(request, payload, "/v1/responses")
     boundary = getattr(request.state, "security_boundary", {})
@@ -5157,8 +5187,15 @@ async def responses(payload: dict, request: Request):
         route="/v1/responses",
         tenant_id=tenant_id,
     )
+    body_size_bytes = boundary.get("request_body_size")
+    if not isinstance(body_size_bytes, int):
+        body_size_bytes = None
 
-    ok_payload, status_code, reason, detail = _validate_payload_limits(payload, route=ctx_preview.route)
+    ok_payload, status_code, reason, detail = _validate_payload_limits(
+        payload,
+        route=ctx_preview.route,
+        body_size_bytes=body_size_bytes,
+    )
     if not ok_payload:
         return _error_response(
             status_code=status_code,
@@ -5168,14 +5205,14 @@ async def responses(payload: dict, request: Request):
             boundary=boundary,
         )
 
-    req_preview = to_internal_responses(payload)
+    req_preview = await _run_payload_transform(to_internal_responses, payload)
     ctx_preview.request_id = req_preview.request_id
     ctx_preview.session_id = req_preview.session_id
 
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    pending = await _maybe_offload(
+    pending = await run_store_io(
         _resolve_pending_confirmation,
         payload,
         user_text,

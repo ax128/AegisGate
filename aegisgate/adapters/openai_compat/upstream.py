@@ -239,8 +239,9 @@ async def _forward_stream_lines(
             if resp.status_code >= 400:
                 detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
                 raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
-            async for line in resp.aiter_lines():
-                yield f"{line}\n".encode("utf-8")
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("forward_stream http_error url=%s error=%s", url, detail)

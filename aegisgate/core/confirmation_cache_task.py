@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from aegisgate.config.settings import settings
 from aegisgate.core.security_boundary import now_ts
+from aegisgate.storage.offload import run_store_io
 from aegisgate.util.logger import logger
 
 
@@ -40,10 +41,7 @@ class ConfirmationCacheTask:
         while True:
             try:
                 current_ts = int(now_ts())
-                if settings.enable_thread_offload:
-                    removed = int(await asyncio.to_thread(self._prune_func, current_ts))
-                else:
-                    removed = int(self._prune_func(current_ts))
+                removed = int(await run_store_io(self._prune_func, current_ts))
                 if removed > 0:
                     logger.info("confirmation cache pruned removed=%s now_ts=%s", removed, current_ts)
             except asyncio.CancelledError:

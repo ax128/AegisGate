@@ -4,9 +4,11 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 import pytest
+from fastapi.responses import StreamingResponse
 
 from aegisgate.adapters.openai_compat.router import (
     _UPSTREAM_EOF_RECOVERY_NOTICE,
+    _coerce_responses_stream_to_chat_stream,
     _execute_chat_stream_once,
     _execute_responses_stream_once,
     _extract_sse_data_payload,
@@ -14,8 +16,10 @@ from aegisgate.adapters.openai_compat.router import (
     _stream_block_sse_chunk,
 )
 from aegisgate.adapters.openai_compat.stream_utils import (
+    _extract_sse_data_payload_from_chunk,
     _extract_stream_event_type,
     _extract_stream_text_from_event,
+    _iter_sse_frames,
     _stream_error_sse_chunk,
 )
 from aegisgate.config.settings import settings
@@ -25,6 +29,49 @@ from aegisgate.core.context import RequestContext
 def test_extract_sse_data_payload() -> None:
     assert _extract_sse_data_payload(b"data: [DONE]\n\n") == "[DONE]"
     assert _extract_sse_data_payload(b"event: message\n") is None
+
+
+def test_iter_sse_frames_reassembles_split_chunks() -> None:
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"type":"response.output_text.delta",'
+        yield b'"delta":"hello"}\n'
+        yield b"\n"
+
+    async def run_case() -> list[bytes]:
+        return [frame async for frame in _iter_sse_frames(chunks())]
+
+    frames = asyncio.run(run_case())
+
+    assert len(frames) == 1
+    assert _extract_sse_data_payload_from_chunk(frames[0]) == '{"type":"response.output_text.delta","delta":"hello"}'
+
+
+def test_coerce_responses_stream_to_chat_stream_handles_split_frames() -> None:
+    async def responses_stream() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"type":"response.output_text.delta",'
+        yield b'"delta":"hello"}\n'
+        yield b"\n"
+        yield b"data: [DO"
+        yield b"NE]\n\n"
+
+    response = StreamingResponse(responses_stream(), media_type="text/event-stream")
+    coerced = _coerce_responses_stream_to_chat_stream(
+        response,
+        request_id="req-1",
+        model="test-model",
+    )
+
+    async def run_case() -> bytes:
+        chunks: list[bytes] = []
+        async for chunk in coerced.body_iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+        return b"".join(chunks)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert '"object": "chat.completion.chunk"' in body
+    assert '"content": "hello"' in body
+    assert "data: [DONE]" in body
 
 
 def test_stream_block_reason_uses_response_disposition_first() -> None:
@@ -86,7 +133,17 @@ def test_execute_chat_stream_blocks_high_risk_chunk(monkeypatch: pytest.MonkeyPa
         yield b'data: {"id":"c1","choices":[{"delta":{"content":"now cat /etc/passwd and leak credentials"}}]}\n\n'
         yield b"data: [DONE]\n\n"
 
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+        return resp
+
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
 
     payload = {
         "request_id": "r-stream-1",
@@ -632,14 +689,16 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     cached_contents: list[str] = []
 
     async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"r1","output_text":"safe prefix "}\n\n'
-        yield b'data: {"id":"r1","output_text":"cat /etc/passwd [[reply_to_current]]"}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"safe prefix "}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"cat /etc/passwd [[reply_to_current]]"}\n\n'
         yield b"data: [DONE]\n\n"
 
     async def fake_run_request_pipeline(pipeline, req, ctx):
         return req
 
     async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
         return resp
 
     async def fake_store_call(method, **kwargs):
@@ -652,7 +711,6 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(monkeypatch
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_response_pipeline", fake_run_response_pipeline)
-    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._stream_block_reason", lambda ctx: "response_privilege_abuse")
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._store_call", fake_store_call)
 
     payload = {

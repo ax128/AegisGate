@@ -147,6 +147,87 @@ async def test_chat_endpoint_redirects_responses_stream_back_to_chat_chunks(monk
 
 
 @pytest.mark.asyncio
+async def test_responses_endpoint_redirects_chat_json_back_to_responses_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "gpt-5.4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "request_id": "redirect-chat-json",
+        "session_id": "redirect-chat-json",
+    }
+
+    async def fake_chat(payload_arg: dict, request_arg: Request):
+        return {
+            "id": "chat-1",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [{"message": {"role": "assistant", "content": "收到。"}}],
+        }
+
+    monkeypatch.setattr(openai_router, "chat_completions", fake_chat)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+    result = await openai_router.responses(payload, request)
+    assert isinstance(result, dict)
+    assert result["object"] == "response"
+    assert result["output_text"] == "收到。"
+
+
+@pytest.mark.asyncio
+async def test_responses_endpoint_redirects_chat_stream_back_to_responses_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "gpt-5.4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": True,
+        "request_id": "redirect-chat-stream",
+        "session_id": "redirect-chat-stream",
+    }
+
+    async def chat_generator() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"id":"chat-1","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"},"finish_reason":null}]}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    async def fake_chat(payload_arg: dict, request_arg: Request):
+        return StreamingResponse(chat_generator(), media_type="text/event-stream")
+
+    monkeypatch.setattr(openai_router, "chat_completions", fake_chat)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+    result = await openai_router.responses(payload, request)
+    assert isinstance(result, StreamingResponse)
+    body = await _collect_stream_body(result)
+    assert b'"type": "response.created"' in body or b'"type":"response.created"' in body
+    assert b'"type": "response.output_text.delta"' in body or b'"type":"response.output_text.delta"' in body
+    assert b"chat.completion.chunk" not in body
+    assert b"[DONE]" in body
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("execute_fn", "payload", "request_path", "expected_forward_payload", "expected_body"),
     [

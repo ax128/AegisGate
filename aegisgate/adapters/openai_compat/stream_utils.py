@@ -231,11 +231,15 @@ def _extract_sse_data_payload(line: bytes) -> str | None:
 
 
 def _extract_sse_data_payload_from_chunk(chunk: bytes) -> str | None:
-    for line in chunk.splitlines(keepends=True):
-        payload = _extract_sse_data_payload(line)
+    normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    payload_lines: list[str] = []
+    for raw_line in normalized.split(b"\n"):
+        payload = _extract_sse_data_payload(raw_line)
         if payload is not None:
-            return payload
-    return None
+            payload_lines.append(payload)
+    if not payload_lines:
+        return None
+    return "\n".join(payload_lines)
 
 
 def _build_sse_frame(lines: list[bytes]) -> bytes:
@@ -247,19 +251,27 @@ def _build_sse_frame(lines: list[bytes]) -> bytes:
     return frame
 
 
-async def _iter_sse_frames(lines: AsyncIterable[bytes]) -> AsyncGenerator[bytes, None]:
-    frame_lines: list[bytes] = []
-    async for line in lines:
-        if line.strip():
-            frame_lines.append(line)
+async def _iter_sse_frames(chunks: AsyncIterable[bytes]) -> AsyncGenerator[bytes, None]:
+    buffer = b""
+    async for chunk in chunks:
+        if not chunk:
             continue
+        buffer += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        while True:
+            split_at = buffer.find(b"\n\n")
+            if split_at < 0:
+                break
+            frame_body = buffer[:split_at]
+            buffer = buffer[split_at + 2 :]
+            if not frame_body:
+                continue
+            frame_lines = [line + b"\n" for line in frame_body.split(b"\n") if line]
+            if frame_lines:
+                yield _build_sse_frame(frame_lines)
+    if buffer.strip():
+        frame_lines = [line + b"\n" for line in buffer.split(b"\n") if line]
         if frame_lines:
             yield _build_sse_frame(frame_lines)
-            frame_lines = []
-            continue
-        yield line
-    if frame_lines:
-        yield _build_sse_frame(frame_lines)
 
 
 def _build_streaming_response(generator: Iterable[bytes] | AsyncIterable[bytes]) -> StreamingResponse:
