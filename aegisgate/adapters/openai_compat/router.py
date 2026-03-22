@@ -138,9 +138,13 @@ _DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
 _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
 
 
+def _filter_mode_from_headers(headers: Mapping[str, str]) -> str | None:
+    return headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
+
+
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
     """根据 x-aegis-filter-mode header 调整 ctx.enabled_filters。返回 mode 或 None。"""
-    mode = headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
+    mode = _filter_mode_from_headers(headers)
     if not mode:
         return None
     if mode == "redact":
@@ -152,6 +156,83 @@ def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str |
         ctx.security_tags.add("filter_mode:passthrough")
         logger.info("filter_mode=passthrough applied request_id=%s (all filters skipped)", ctx.request_id)
     return mode
+
+
+async def _forward_json_passthrough(
+    *,
+    ctx: RequestContext,
+    payload: dict[str, Any],
+    upstream_url: str,
+    forward_headers: Mapping[str, str],
+    boundary: dict | None,
+    on_success: Any,
+    log_label: str,
+) -> Any:
+    try:
+        status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
+    except RuntimeError as exc:
+        logger.error("%s upstream unreachable request_id=%s error=%s", log_label, ctx.request_id, exc)
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        logger.warning("%s upstream http error request_id=%s status=%s detail=%s", log_label, ctx.request_id, status_code, detail)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    ctx.enforcement_actions.append("filter_mode:passthrough_direct")
+    _write_audit_event(ctx, boundary=boundary)
+    logger.info("%s bypassed filters request_id=%s mode=passthrough", log_label, ctx.request_id)
+    return on_success(upstream_body)
+
+
+def _build_passthrough_stream_response(
+    *,
+    ctx: RequestContext,
+    payload: dict[str, Any],
+    upstream_url: str,
+    forward_headers: Mapping[str, str],
+    boundary: dict | None,
+    log_label: str,
+) -> StreamingResponse:
+    ctx.enforcement_actions.append("filter_mode:passthrough_direct")
+    logger.info("%s bypassed filters request_id=%s mode=passthrough", log_label, ctx.request_id)
+
+    async def passthrough_generator() -> AsyncGenerator[bytes, None]:
+        try:
+            async for line in _forward_stream_lines(upstream_url, payload, forward_headers):
+                yield line
+        except RuntimeError as exc:
+            detail = str(exc)
+            reason = _stream_runtime_reason(detail)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append(reason)
+            ctx.enforcement_actions.append(f"upstream:{reason}")
+            yield _stream_error_sse_chunk(detail, code=reason)
+            yield _stream_done_sse_chunk()
+        except Exception as exc:  # pragma: no cover - fail-safe
+            detail = f"gateway_internal_error: {exc}"
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("gateway_internal_error")
+            ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            logger.exception("%s unexpected failure request_id=%s", log_label, ctx.request_id)
+            yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+            yield _stream_done_sse_chunk()
+        finally:
+            _write_audit_event(ctx, boundary=boundary)
+
+    return _build_streaming_response(passthrough_generator())
 
 
 async def close_semantic_async_client() -> None:
@@ -2578,7 +2659,7 @@ async def _execute_chat_stream_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -2594,6 +2675,16 @@ async def _execute_chat_stream_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+
+    if filter_mode == "passthrough":
+        return _build_passthrough_stream_response(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            log_label="chat stream",
+        )
 
     if _is_upstream_whitelisted(upstream_base):
         ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
@@ -2967,7 +3058,7 @@ async def _execute_responses_stream_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -2983,6 +3074,16 @@ async def _execute_responses_stream_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+
+    if filter_mode == "passthrough":
+        return _build_passthrough_stream_response(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            log_label="responses stream",
+        )
 
     if _is_upstream_whitelisted(upstream_base):
         ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
@@ -3459,7 +3560,7 @@ async def _execute_chat_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3475,6 +3576,17 @@ async def _execute_chat_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+
+    if filter_mode == "passthrough":
+        return await _forward_json_passthrough(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            on_success=lambda upstream_body: _passthrough_chat_response(upstream_body, req),
+            log_label="chat completion",
+        )
 
     if _is_upstream_whitelisted(upstream_base):
         try:
@@ -3751,7 +3863,7 @@ async def _execute_responses_once(
     ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
 
     try:
         upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
@@ -3767,6 +3879,17 @@ async def _execute_responses_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+
+    if filter_mode == "passthrough":
+        return await _forward_json_passthrough(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            on_success=lambda upstream_body: _passthrough_responses_output(upstream_body, req),
+            log_label="responses endpoint",
+        )
 
     if _is_upstream_whitelisted(upstream_base):
         try:
@@ -4054,7 +4177,7 @@ async def _execute_generic_stream_once(
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
     logger.info("generic proxy stream start request_id=%s route=%s", ctx.request_id, request_path)
 
     try:
@@ -4072,6 +4195,16 @@ async def _execute_generic_stream_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+
+    if filter_mode == "passthrough":
+        return _build_passthrough_stream_response(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            log_label="generic stream",
+        )
 
     if _is_upstream_whitelisted(upstream_base):
         ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
@@ -4227,7 +4360,7 @@ async def _execute_generic_once(
     ctx = RequestContext(request_id=request_id, session_id=session_id, route=request_path, tenant_id=tenant_id)
     ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
     policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
-    _apply_filter_mode(ctx, request_headers)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
     logger.info("generic proxy start request_id=%s route=%s", ctx.request_id, request_path)
 
     try:
@@ -4245,6 +4378,17 @@ async def _execute_generic_once(
         )
 
     forward_headers = _build_forward_headers(request_headers)
+    if filter_mode == "passthrough":
+        return await _forward_json_passthrough(
+            ctx=ctx,
+            payload=payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            on_success=_passthrough_any_response,
+            log_label="generic proxy",
+        )
+
     if _is_upstream_whitelisted(upstream_base):
         try:
             status_code, upstream_body = await _forward_json(upstream_url, payload, forward_headers)
