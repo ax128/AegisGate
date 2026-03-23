@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from aegisgate.core.context import RequestContext
@@ -18,17 +19,22 @@ _init_log_lock = threading.Lock()
 _init_logged: bool = False
 
 
-def _should_log_filter_done(*, phase: str, is_stream: bool, report: dict[str, Any]) -> bool:
+def _should_log_filter_done(
+    *, phase: str, is_stream: bool, report: dict[str, Any]
+) -> bool:
     if phase != "request" and is_stream:
         return False
     return bool(report.get("hit"))
 
 
 class Pipeline:
-
-    def __init__(self, request_filters: list[BaseFilter], response_filters: list[BaseFilter]) -> None:
-        self.request_filters = request_filters
-        self.response_filters = response_filters
+    def __init__(
+        self,
+        request_filters: Sequence[BaseFilter],
+        response_filters: Sequence[BaseFilter],
+    ) -> None:
+        self.request_filters = list(request_filters)
+        self.response_filters = list(response_filters)
         global _init_logged
         if not _init_logged:
             with _init_log_lock:
@@ -53,15 +59,31 @@ class Pipeline:
             if not plugin.enabled(ctx):
                 continue
             t0 = time.monotonic()
-            if phase == "request":
-                current = plugin.process_request(current, ctx)
-            else:
-                current = plugin.process_response(current, ctx)
+            try:
+                if phase == "request":
+                    current = plugin.process_request(current, ctx)
+                else:
+                    current = plugin.process_response(current, ctx)
+            except Exception:
+                elapsed = time.monotonic() - t0
+                logger.exception(
+                    "filter_error phase=%s filter=%s elapsed_s=%.3f request_id=%s",
+                    phase,
+                    plugin.name,
+                    elapsed,
+                    ctx.request_id,
+                )
+                ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
+                continue
             elapsed = time.monotonic() - t0
             report = plugin.report()
             ctx.add_report(report)
             if elapsed >= _SLOW_FILTER_WARN_S:
-                extra = f" output_len={len(current.output_text)}" if phase == "response" else ""
+                extra = (
+                    f" output_len={len(getattr(current, 'output_text', ''))}"
+                    if phase == "response"
+                    else ""
+                )
                 logger.warning(
                     "slow_filter phase=%s filter=%s elapsed_s=%.3f request_id=%s%s",
                     phase,
@@ -70,7 +92,9 @@ class Pipeline:
                     ctx.request_id,
                     extra,
                 )
-            elif _should_log_filter_done(phase=phase, is_stream=is_stream, report=report):
+            elif _should_log_filter_done(
+                phase=phase, is_stream=is_stream, report=report
+            ):
                 logger.debug(
                     "filter_done phase=%s filter=%s elapsed_s=%.3f request_id=%s",
                     phase,
@@ -88,8 +112,12 @@ class Pipeline:
             ctx=ctx,
         )
 
-    def run_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
-        is_stream = resp.raw.get("stream", False) if isinstance(resp.raw, dict) else False
+    def run_response(
+        self, resp: InternalResponse, ctx: RequestContext
+    ) -> InternalResponse:
+        is_stream = (
+            resp.raw.get("stream", False) if isinstance(resp.raw, dict) else False
+        )
         return self._run_phase(
             phase="response",
             current=resp,

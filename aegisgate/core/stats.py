@@ -19,7 +19,7 @@ from aegisgate.util.logger import logger
 _RETENTION_HOURS = 168  # 7 days
 _PERSIST_INTERVAL = 30  # 每 30 次 record 写一次磁盘
 _STATS_FILE = (Path.cwd() / "config" / "stats.json").resolve()
-_STATS_FALLBACK = Path("/tmp/aegisgate/stats.json")
+_STATS_FALLBACK = (Path.cwd() / ".cache" / "aegisgate" / "stats.json").resolve()
 
 _EMPTY_BUCKET = {"requests": 0, "redactions": 0, "dangerous_replaced": 0, "blocked": 0, "passthrough": 0}
 _REDACTION_FILTERS = frozenset({"redaction", "exact_value_redaction"})
@@ -116,6 +116,7 @@ class StatsCollector:
             "hourly": {k: dict(v) for k, v in self._hourly.items()},
         }
         path = self._persist_path
+        tmp_path: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -125,6 +126,11 @@ class StatsCollector:
                 tmp_path = Path(tmp.name)
             tmp_path.replace(path)
         except OSError as exc:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             logger.warning("stats persist failed path=%s error=%s", path, exc)
 
     def record(self, ctx: RequestContext) -> None:

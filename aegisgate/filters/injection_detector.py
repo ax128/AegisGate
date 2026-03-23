@@ -232,7 +232,10 @@ class PromptInjectionDetector(BaseFilter):
             regex = item.get("regex")
             if not regex:
                 continue
-            compiled[rule_id] = re.compile(regex, re.IGNORECASE)
+            try:
+                compiled[rule_id] = re.compile(regex, re.IGNORECASE)
+            except re.error as exc:
+                logger.warning("injection_detector: invalid regex in rule %s: %s", rule_id, exc)
         return compiled
 
     @staticmethod
@@ -241,7 +244,10 @@ class PromptInjectionDetector(BaseFilter):
         for item in items:
             if not item:
                 continue
-            compiled.append(re.compile(str(item), re.IGNORECASE))
+            try:
+                compiled.append(re.compile(str(item), re.IGNORECASE))
+            except re.error as exc:
+                logger.warning("injection_detector: invalid pattern %r: %s", item, exc)
         return compiled
 
     def _normalize_text(self, text: str) -> str:

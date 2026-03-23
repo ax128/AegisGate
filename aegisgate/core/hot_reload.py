@@ -46,6 +46,18 @@ class HotReloader:
         self._watches: list[tuple[_WatchedFile, Callable[[], None]]] = []
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._degraded: bool = False
+        self._last_error_label: str = ""
+
+    @property
+    def is_degraded(self) -> bool:
+        """True if the last hot-reload cycle had a callback failure."""
+        return self._degraded
+
+    @property
+    def degraded_label(self) -> str:
+        """Label of the watch whose callback last failed, or empty string."""
+        return self._last_error_label
 
     def watch(self, path: str | Path, label: str, callback: Callable[[], None]) -> None:
         """Register a file to watch. *callback* is invoked (sync) when mtime changes."""
@@ -58,7 +70,11 @@ class HotReloader:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._poll_loop(), name="aegisgate-hot-reload")
         labels = [w.label for w, _ in self._watches]
-        logger.info("hot_reload watcher started poll_seconds=%.1f watches=%s", self._poll_seconds, labels)
+        logger.info(
+            "hot_reload watcher started poll_seconds=%.1f watches=%s",
+            self._poll_seconds,
+            labels,
+        )
 
     async def stop(self) -> None:
         if self._task is None:
@@ -81,16 +97,29 @@ class HotReloader:
             for watched, callback in self._watches:
                 try:
                     if watched.changed():
-                        logger.info("hot_reload detected change file=%s label=%s", watched.path, watched.label)
+                        logger.info(
+                            "hot_reload detected change file=%s label=%s",
+                            watched.path,
+                            watched.label,
+                        )
                         callback()
+                        # Clear degraded if the previously failed label succeeds
+                        if self._degraded and self._last_error_label == watched.label:
+                            self._degraded = False
+                            self._last_error_label = ""
+                            logger.info("hot_reload recovered from degraded state label=%s", watched.label)
                 except Exception:
-                    logger.exception("hot_reload callback error label=%s", watched.label)
+                    logger.exception(
+                        "hot_reload callback error label=%s", watched.label
+                    )
+                    self._degraded = True
+                    self._last_error_label = watched.label
 
 
 def _watch_label(prefix: str, path: Path) -> str:
     try:
         suffix = path.resolve().relative_to(Path.cwd().resolve()).as_posix()
-    except Exception:
+    except (ValueError, OSError):
         suffix = path.as_posix()
     return f"{prefix}:{suffix}"
 
@@ -100,26 +129,29 @@ def _watch_label(prefix: str, path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 # Fields that must NOT be changed at runtime via hot-reload.
-_IMMUTABLE_FIELDS: frozenset[str] = frozenset({
-    "gateway_key",
-    "enforce_loopback_only",
-    "security_level",
-    "enable_request_hmac_auth",
-    "request_hmac_secret",
-    "v2_block_internal_targets",
-    "trusted_proxy_ips",
-    "local_ui_allow_internal_network",
-})
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "gateway_key",
+        "enforce_loopback_only",
+        "security_level",
+        "enable_request_hmac_auth",
+        "request_hmac_secret",
+        "v2_block_internal_targets",
+        "trusted_proxy_ips",
+        "local_ui_allow_internal_network",
+    }
+)
 
 
 def reload_settings() -> None:
-    """Reload .env into the global settings singleton.
+    """Reload config/.env into the global settings singleton.
 
     Security-critical fields in ``_IMMUTABLE_FIELDS`` are pinned at startup
     and cannot be changed via hot-reload.
     """
     from aegisgate.config.feature_flags import refresh_feature_flags
     from aegisgate.config.settings import Settings, settings
+    from aegisgate.observability.logging import configure_logging
 
     try:
         fresh = Settings()
@@ -132,15 +164,24 @@ def reload_settings() -> None:
         # sqlite_db_path back to the configured default, losing the runtime
         # fallback that was applied at startup when /app/logs is not writable.
         from aegisgate.init_config import ensure_runtime_storage_paths
+
         ensure_runtime_storage_paths()
         # Apply new log level immediately so callers see the change at once.
         from aegisgate.util.logger import apply_log_level
+
         apply_log_level(settings.log_level)
-        from aegisgate.adapters.openai_compat.pipeline_runtime import reload_runtime_dependencies
+        configure_logging(settings.log_level)
+        from aegisgate.adapters.openai_compat.pipeline_runtime import (
+            reload_runtime_dependencies,
+        )
+
         reload_runtime_dependencies()
-        from aegisgate.adapters.openai_compat.router import reload_semantic_client_settings
+        from aegisgate.adapters.openai_compat.router import (
+            reload_semantic_client_settings,
+        )
+
         reload_semantic_client_settings()
-        logger.info("hot_reload settings reloaded from environment / .env")
+        logger.info("hot_reload settings reloaded from environment / config/.env")
     except Exception:
         logger.exception("hot_reload settings reload failed")
 
@@ -151,6 +192,7 @@ def reload_security_rules() -> None:
     #    Force a load now so the YAML is parsed once, not per-thread.
     try:
         from aegisgate.config.security_rules import load_security_rules
+
         load_security_rules()
     except Exception:
         logger.exception("hot_reload security_rules load failed")
@@ -170,6 +212,7 @@ def reload_gw_tokens() -> None:
     """Reload gw_tokens.json into memory."""
     try:
         from aegisgate.core.gw_tokens import load
+
         load(replace=True)
         logger.info("hot_reload gw_tokens reloaded")
     except Exception:
@@ -180,6 +223,7 @@ def reload_policy_cache() -> None:
     """Clear policy engine mtime cache so next resolve re-reads YAML."""
     try:
         from aegisgate.adapters.openai_compat.router import policy_engine
+
         if hasattr(policy_engine, "_cache") and hasattr(policy_engine, "_cache_lock"):
             with policy_engine._cache_lock:
                 policy_engine._cache.clear()
@@ -192,6 +236,7 @@ def reload_policy_cache() -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _clear_openai_lru_caches() -> None:
     try:
         from aegisgate.adapters.openai_compat.router import (
@@ -200,6 +245,7 @@ def _clear_openai_lru_caches() -> None:
             _confirmation_hit_regex_patterns,
             _critical_danger_patterns,
         )
+
         _responses_function_output_redaction_patterns.cache_clear()
         _responses_relaxed_redaction_patterns.cache_clear()
         _confirmation_hit_regex_patterns.cache_clear()
@@ -215,6 +261,7 @@ def _clear_v2_lru_caches() -> None:
             _v2_relaxed_redaction_patterns,
             _v2_dangerous_command_patterns,
         )
+
         _v2_redaction_patterns.cache_clear()
         _v2_relaxed_redaction_patterns.cache_clear()
         _v2_dangerous_command_patterns.cache_clear()
@@ -225,7 +272,9 @@ def _clear_v2_lru_caches() -> None:
 def _reset_filter_pipeline() -> None:
     """Reset cached pipelines so next request rebuilds with fresh rules."""
     try:
-        from aegisgate.adapters.openai_compat.pipeline_runtime import reset_pipeline_cache
+        from aegisgate.adapters.openai_compat.pipeline_runtime import (
+            reset_pipeline_cache,
+        )
 
         reset_pipeline_cache()
     except Exception:
@@ -252,15 +301,15 @@ def get_pipeline_generation() -> int:
 # Factory: build the watcher with standard AegisGate config files
 # ---------------------------------------------------------------------------
 
+
 def build_watcher() -> HotReloader:
     """Create a HotReloader pre-configured for all AegisGate config files."""
     from aegisgate.config.settings import settings
 
     watcher = HotReloader(poll_seconds=_DEFAULT_POLL_SECONDS)
 
-    # .env files
-    for env_candidate in [Path.cwd() / ".env", Path.cwd() / "config" / ".env"]:
-        watcher.watch(env_candidate, _watch_label("env", env_candidate), reload_settings)
+    env_candidate = Path.cwd() / "config" / ".env"
+    watcher.watch(env_candidate, _watch_label("env", env_candidate), reload_settings)
 
     # security_filters.yaml
     rules_path = Path(settings.security_rules_path)

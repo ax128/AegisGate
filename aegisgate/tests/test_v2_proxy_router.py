@@ -31,7 +31,10 @@ def _make_request(
         "raw_path": path.encode("latin-1"),
         "root_path": "",
         "query_string": b"",
-        "headers": [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()],
+        "headers": [
+            (key.lower().encode("latin-1"), value.encode("latin-1"))
+            for key, value in (headers or {}).items()
+        ],
         "client": ("127.0.0.1", 12345),
         "server": ("127.0.0.1", 18080),
     }
@@ -51,11 +54,20 @@ def _make_request(
 
 
 class _FakeResponse:
-    def __init__(self, *, status_code: int = 200, headers: dict[str, str] | None = None, content: bytes = b"", text: str | None = None):
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        content: bytes = b"",
+        text: str | None = None,
+    ):
         self.status_code = status_code
         self.headers = headers or {"content-type": "application/json"}
         self.content = content
-        self.text = text if text is not None else content.decode("utf-8", errors="replace")
+        self.text = (
+            text if text is not None else content.decode("utf-8", errors="replace")
+        )
 
     def json(self):
         return json.loads(self.content.decode("utf-8"))
@@ -76,7 +88,13 @@ class _FakeRequestClient:
 
 
 class _FakeStreamResponse:
-    def __init__(self, chunks: list[bytes], *, status_code: int = 200, headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self.headers = headers or {"content-type": "text/event-stream"}
         self._chunks = list(chunks)
@@ -112,17 +130,24 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, client) -> None:
     async def fake_get_v2_async_client():
         return client
 
-    monkeypatch.setattr("aegisgate.adapters.v2_proxy.router._get_v2_async_client", fake_get_v2_async_client)
+    monkeypatch.setattr(
+        "aegisgate.adapters.v2_proxy.router._get_v2_async_client",
+        fake_get_v2_async_client,
+    )
 
 
-def _patch_resolve(monkeypatch: pytest.MonkeyPatch, values: list[str] | Exception) -> None:
+def _patch_resolve(
+    monkeypatch: pytest.MonkeyPatch, values: list[str] | Exception
+) -> None:
     async def fake_resolve(hostname: str):
         del hostname
         if isinstance(values, Exception):
             raise values
         return {ipaddress.ip_address(value) for value in values}
 
-    monkeypatch.setattr("aegisgate.adapters.v2_proxy.router._resolve_target_ips", fake_resolve)
+    monkeypatch.setattr(
+        "aegisgate.adapters.v2_proxy.router._resolve_target_ips", fake_resolve
+    )
 
 
 def _to_bytes(value) -> bytes:
@@ -155,7 +180,9 @@ def test_proxy_rejects_missing_target_header() -> None:
 
 
 def test_proxy_rejects_invalid_target_url() -> None:
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "not-a-url"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "not-a-url"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -165,7 +192,9 @@ def test_proxy_rejects_invalid_target_url() -> None:
 
 
 def test_proxy_rejects_non_http_scheme() -> None:
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "ftp://example.com/resource"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "ftp://example.com/resource"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -175,7 +204,9 @@ def test_proxy_rejects_non_http_scheme() -> None:
 
 
 def test_proxy_rejects_private_ipv4_target() -> None:
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "http://127.0.0.1/secret"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "http://127.0.0.1/secret"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -186,7 +217,13 @@ def test_proxy_rejects_private_ipv4_target() -> None:
 
 def test_proxy_rejects_metadata_hostname_target() -> None:
     response = asyncio.run(
-        proxy_v2(_make_request(headers={"x-target-url": "http://metadata.google.internal/computeMetadata/v1"}))
+        proxy_v2(
+            _make_request(
+                headers={
+                    "x-target-url": "http://metadata.google.internal/computeMetadata/v1"
+                }
+            )
+        )
     )
 
     assert isinstance(response, JSONResponse)
@@ -197,7 +234,9 @@ def test_proxy_rejects_metadata_hostname_target() -> None:
 
 
 def test_proxy_rejects_internal_ipv6_target() -> None:
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "http://[::1]/secret"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "http://[::1]/secret"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -206,10 +245,16 @@ def test_proxy_rejects_internal_ipv6_target() -> None:
     assert "SSRF protection" in body["error"]["message"]
 
 
-def test_proxy_blocks_dns_rebinding_to_private_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_blocks_dns_rebinding_to_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_resolve(monkeypatch, ["10.0.0.5"])
 
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://public.example.com/api"})))
+    response = asyncio.run(
+        proxy_v2(
+            _make_request(headers={"x-target-url": "https://public.example.com/api"})
+        )
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -221,7 +266,9 @@ def test_proxy_blocks_dns_rebinding_to_private_ip(monkeypatch: pytest.MonkeyPatc
 def test_proxy_blocks_dns_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_resolve(monkeypatch, socket.gaierror("dns timeout"))
 
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://example.com/api"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "https://example.com/api"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 400
@@ -230,19 +277,66 @@ def test_proxy_blocks_dns_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "SSRF protection" in body["error"]["message"]
 
 
+def test_proxy_rejects_target_not_in_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "v2_target_allowlist", "api.example.com")
+
+    response = asyncio.run(
+        proxy_v2(
+            _make_request(headers={"x-target-url": "https://other.example.com/api"})
+        )
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    body = _response_json(response)
+    assert body["error"]["code"] == "missing_target_url_header"
+    assert "allowlist" in body["error"]["message"]
+
+
+def test_proxy_allows_target_matching_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "v2_target_allowlist", "api.example.com")
+    _patch_resolve(monkeypatch, ["93.184.216.34"])
+    _patch_client(
+        monkeypatch, _FakeRequestClient(_FakeResponse(content=b'{"ok":true}'))
+    )
+
+    response = asyncio.run(
+        proxy_v2(
+            _make_request(
+                headers={
+                    "x-target-url": "https://api.example.com/resource",
+                    "content-type": "application/json",
+                },
+                body=b'{"ping":true}',
+            )
+        )
+    )
+
+    assert response.status_code == 200
+    assert _response_json(response) == {"ok": True}
+
+
 def test_proxy_allows_public_ipv6_target(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_resolve(monkeypatch, ["2001:4860:4860::8888"])
     _patch_client(
         monkeypatch,
         _FakeRequestClient(
-            _FakeResponse(content=b'{"ok":true}', headers={"content-type": "application/json", "x-extra": "1"})
+            _FakeResponse(
+                content=b'{"ok":true}',
+                headers={"content-type": "application/json", "x-extra": "1"},
+            )
         ),
     )
 
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://[2001:4860:4860::8888]/resource", "content-type": "application/json"},
+                headers={
+                    "x-target-url": "https://[2001:4860:4860::8888]/resource",
+                    "content-type": "application/json",
+                },
                 body=b'{"ping":true}',
             )
         )
@@ -253,14 +347,21 @@ def test_proxy_allows_public_ipv6_target(monkeypatch: pytest.MonkeyPatch) -> Non
     assert _response_json(response) == {"ok": True}
 
 
-def test_proxy_allows_public_hostname_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_allows_public_hostname_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_resolve(monkeypatch, ["93.184.216.34"])
-    _patch_client(monkeypatch, _FakeRequestClient(_FakeResponse(content=b'{"ok":true}')))
+    _patch_client(
+        monkeypatch, _FakeRequestClient(_FakeResponse(content=b'{"ok":true}'))
+    )
 
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://example.com/api", "content-type": "application/json"},
+                headers={
+                    "x-target-url": "https://example.com/api",
+                    "content-type": "application/json",
+                },
                 body=b'{"ping":true}',
             )
         )
@@ -285,7 +386,10 @@ def test_proxy_forwards_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://example.com/api", "content-type": "application/json"},
+                headers={
+                    "x-target-url": "https://example.com/api",
+                    "content-type": "application/json",
+                },
                 body=b'{"hello":"world"}',
             )
         )
@@ -296,16 +400,22 @@ def test_proxy_forwards_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _response_json(response) == {"ok": True}
 
 
-def test_proxy_blocks_non_streaming_dangerous_text_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_blocks_non_streaming_dangerous_text_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dangerous = b"Content-Length: 1\r\nTransfer-Encoding: chunked"
     _patch_client(
         monkeypatch,
         _FakeRequestClient(
-            _FakeResponse(headers={"content-type": "text/plain; charset=utf-8"}, content=dangerous)
+            _FakeResponse(
+                headers={"content-type": "text/plain; charset=utf-8"}, content=dangerous
+            )
         ),
     )
 
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://example.com/plain"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "https://example.com/plain"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 403
@@ -314,7 +424,9 @@ def test_proxy_blocks_non_streaming_dangerous_text_response(monkeypatch: pytest.
     assert body["aegisgate_v2"]["response_command_filter_enabled"] is True
 
 
-def test_proxy_bypasses_non_streaming_filter_for_bypass_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_bypasses_non_streaming_filter_for_bypass_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = settings.v2_response_filter_bypass_hosts
     settings.v2_response_filter_bypass_hosts = "example.com"
     try:
@@ -322,11 +434,18 @@ def test_proxy_bypasses_non_streaming_filter_for_bypass_host(monkeypatch: pytest
         _patch_client(
             monkeypatch,
             _FakeRequestClient(
-                _FakeResponse(headers={"content-type": "text/plain; charset=utf-8"}, content=dangerous)
+                _FakeResponse(
+                    headers={"content-type": "text/plain; charset=utf-8"},
+                    content=dangerous,
+                )
             ),
         )
 
-        response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://example.com/plain"})))
+        response = asyncio.run(
+            proxy_v2(
+                _make_request(headers={"x-target-url": "https://example.com/plain"})
+            )
+        )
 
         assert response.status_code == 200
         assert response.body == dangerous
@@ -347,18 +466,26 @@ def test_proxy_preserves_binary_response(monkeypatch: pytest.MonkeyPatch) -> Non
         ),
     )
 
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://example.com/blob"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "https://example.com/blob"}))
+    )
 
     assert response.status_code == 202
     assert response.headers["x-extra"] == "1"
     assert response.body == b"\x00\x01\x02"
 
 
-def test_proxy_maps_httpx_error_to_upstream_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    error = httpx.ConnectError("boom", request=httpx.Request("POST", "https://example.com/api"))
+def test_proxy_maps_httpx_error_to_upstream_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = httpx.ConnectError(
+        "boom", request=httpx.Request("POST", "https://example.com/api")
+    )
     _patch_client(monkeypatch, _FakeRequestClient(error))
 
-    response = asyncio.run(proxy_v2(_make_request(headers={"x-target-url": "https://example.com/api"})))
+    response = asyncio.run(
+        proxy_v2(_make_request(headers={"x-target-url": "https://example.com/api"}))
+    )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 502
@@ -366,18 +493,26 @@ def test_proxy_maps_httpx_error_to_upstream_unreachable(monkeypatch: pytest.Monk
     assert body["error"]["code"] == "upstream_unreachable"
 
 
-def test_proxy_blocks_streaming_dangerous_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_blocks_streaming_dangerous_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_client(
         monkeypatch,
         _FakeStreamClient(
-            _FakeStreamResponse([b"Content-Length: 1\r\nTransfer-Encoding: chunked"], headers={"content-type": "text/event-stream"})
+            _FakeStreamResponse(
+                [b"Content-Length: 1\r\nTransfer-Encoding: chunked"],
+                headers={"content-type": "text/event-stream"},
+            )
         ),
     )
 
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://example.com/stream", "accept": "text/event-stream"},
+                headers={
+                    "x-target-url": "https://example.com/stream",
+                    "accept": "text/event-stream",
+                },
                 body=b'{"stream":true}',
             )
         )
@@ -389,7 +524,9 @@ def test_proxy_blocks_streaming_dangerous_probe(monkeypatch: pytest.MonkeyPatch)
     assert body["error"]["code"] == "v2_response_http_attack_blocked"
 
 
-def test_proxy_blocks_streaming_dangerous_probe_split_across_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_blocks_streaming_dangerous_probe_split_across_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_resolve(monkeypatch, ["93.184.216.34"])
     _patch_client(
         monkeypatch,
@@ -404,7 +541,10 @@ def test_proxy_blocks_streaming_dangerous_probe_split_across_chunks(monkeypatch:
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://example.com/stream", "accept": "text/event-stream"},
+                headers={
+                    "x-target-url": "https://example.com/stream",
+                    "accept": "text/event-stream",
+                },
                 body=b'{"stream":true}',
             )
         )
@@ -416,7 +556,9 @@ def test_proxy_blocks_streaming_dangerous_probe_split_across_chunks(monkeypatch:
     assert body["error"]["code"] == "v2_response_http_attack_blocked"
 
 
-def test_proxy_streaming_bypass_host_allows_original_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_streaming_bypass_host_allows_original_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = settings.v2_response_filter_bypass_hosts
     settings.v2_response_filter_bypass_hosts = "example.com"
     try:
@@ -424,7 +566,10 @@ def test_proxy_streaming_bypass_host_allows_original_chunks(monkeypatch: pytest.
             monkeypatch,
             _FakeStreamClient(
                 _FakeStreamResponse(
-                    [b"data: hello\n\n", b"data: Content-Length: 1\r\nTransfer-Encoding: chunked\n\n"],
+                    [
+                        b"data: hello\n\n",
+                        b"data: Content-Length: 1\r\nTransfer-Encoding: chunked\n\n",
+                    ],
                     headers={"content-type": "text/event-stream"},
                 )
             ),
@@ -433,30 +578,45 @@ def test_proxy_streaming_bypass_host_allows_original_chunks(monkeypatch: pytest.
         response = asyncio.run(
             proxy_v2(
                 _make_request(
-                    headers={"x-target-url": "https://example.com/stream", "accept": "text/event-stream"},
+                    headers={
+                        "x-target-url": "https://example.com/stream",
+                        "accept": "text/event-stream",
+                    },
                     body=b'{"stream":true}',
                 )
             )
         )
 
         assert isinstance(response, StreamingResponse)
-        body = asyncio.run(_collect_stream_body(response)).decode("utf-8", errors="replace")
+        body = asyncio.run(_collect_stream_body(response)).decode(
+            "utf-8", errors="replace"
+        )
         assert "Content-Length: 1" in body
         assert "data: [DONE]" in body
     finally:
         settings.v2_response_filter_bypass_hosts = original
 
 
-def test_proxy_streaming_injects_done_when_upstream_ends_without_done(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_streaming_injects_done_when_upstream_ends_without_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_resolve(monkeypatch, ["93.184.216.34"])
     _patch_client(
         monkeypatch,
-        _FakeStreamClient(_FakeStreamResponse([b"data: hello\n\n"], headers={"content-type": "text/event-stream"})),
+        _FakeStreamClient(
+            _FakeStreamResponse(
+                [b"data: hello\n\n"], headers={"content-type": "text/event-stream"}
+            )
+        ),
     )
 
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://stream.example.com/feed", "accept": "text/event-stream"},
+                headers={
+                    "x-target-url": "https://stream.example.com/feed",
+                    "accept": "text/event-stream",
+                },
                 body=b'{"stream":true}',
             )
         )
@@ -468,14 +628,21 @@ def test_proxy_streaming_injects_done_when_upstream_ends_without_done(monkeypatc
     assert body.endswith("data: [DONE]\n\n")
 
 
-def test_proxy_streaming_maps_httpx_error_to_upstream_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    error = httpx.ReadTimeout("boom", request=httpx.Request("POST", "https://example.com/stream"))
+def test_proxy_streaming_maps_httpx_error_to_upstream_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = httpx.ReadTimeout(
+        "boom", request=httpx.Request("POST", "https://example.com/stream")
+    )
     _patch_client(monkeypatch, _FakeStreamClient(error))
 
     response = asyncio.run(
         proxy_v2(
             _make_request(
-                headers={"x-target-url": "https://example.com/stream", "accept": "text/event-stream"},
+                headers={
+                    "x-target-url": "https://example.com/stream",
+                    "accept": "text/event-stream",
+                },
                 body=b'{"stream":true}',
             )
         )

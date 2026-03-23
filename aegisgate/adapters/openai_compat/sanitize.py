@@ -27,7 +27,9 @@ _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
         "computer_call_output",
     }
 )
-_RESPONSES_RELAXED_REDACTION_ROLES = frozenset({"system", "developer", "assistant", "user", "tool"})
+_RESPONSES_RELAXED_REDACTION_ROLES = frozenset(
+    {"system", "developer", "assistant", "user", "tool"}
+)
 _RESPONSES_RELAXED_PII_IDS = frozenset(
     {
         "TOKEN",
@@ -44,7 +46,9 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
         "CRYPTO_SEED_PHRASE",
     }
 )
-_RESPONSES_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_RESPONSES_NON_CONTENT_KEYS = frozenset(
+    {"id", "call_id", "type", "role", "name", "status"}
+)
 _RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
     {
         "encrypted_content",
@@ -71,24 +75,28 @@ _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_UPSTREAM_EOF_RECOVERY_NOTICE = (
-    "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
-)
+_UPSTREAM_EOF_RECOVERY_NOTICE = "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
 
 
-def _looks_like_gateway_confirmation_text(text: str) -> bool:
+def _looks_like_gateway_confirmation_text(text: str | None) -> bool:
     body = str(text or "")
     if not body:
         return False
     lowered = body.lower()
     return (
         ("⚠️ 安全确认（高风险操作）" in body and "确认编号：" in body)
-        or ("safety confirmation (high-risk action)" in lowered and "confirmation id:" in lowered)
-        or ("放行（复制这一行）：yes cfm-" in body and "取消（复制这一行）：no cfm-" in body)
+        or (
+            "safety confirmation (high-risk action)" in lowered
+            and "confirmation id:" in lowered
+        )
+        or (
+            "放行（复制这一行）：yes cfm-" in body
+            and "取消（复制这一行）：no cfm-" in body
+        )
     )
 
 
-def _looks_like_gateway_upstream_recovery_notice_text(text: str) -> bool:
+def _looks_like_gateway_upstream_recovery_notice_text(text: str | None) -> bool:
     body = str(text or "")
     if not body:
         return False
@@ -100,11 +108,13 @@ def _looks_like_gateway_upstream_recovery_notice_text(text: str) -> bool:
     )
 
 
-def _looks_like_gateway_internal_history_text(text: str) -> bool:
-    return _looks_like_gateway_confirmation_text(text) or _looks_like_gateway_upstream_recovery_notice_text(text)
+def _looks_like_gateway_internal_history_text(text: str | None) -> bool:
+    return _looks_like_gateway_confirmation_text(
+        text
+    ) or _looks_like_gateway_upstream_recovery_notice_text(text)
 
 
-def _strip_system_exec_runtime_lines(text: str) -> str:
+def _strip_system_exec_runtime_lines(text: str | None) -> str:
     body = str(text or "")
     if not body:
         return ""
@@ -131,7 +141,9 @@ def _sanitize_payload_for_log(value: Any) -> Any:
 
 
 @lru_cache(maxsize=1)
-def _responses_function_output_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+def _responses_function_output_redaction_patterns() -> tuple[
+    tuple[str, re.Pattern[str]], ...
+]:
     rules = load_security_rules()
     redaction_rules = rules.get("redaction", {})
     compiled: list[tuple[str, re.Pattern[str]]] = []
@@ -265,11 +277,13 @@ def _sanitize_function_output_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_function_output_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: _sanitize_function_output_value(item) for key, item in value.items()}
+        return {
+            key: _sanitize_function_output_value(item) for key, item in value.items()
+        }
     return value
 
 
-def _should_skip_responses_field_redaction(field: str) -> bool:
+def _should_skip_responses_field_redaction(field: str | None) -> bool:
     normalized = str(field or "").strip().lower()
     if not normalized:
         return False
@@ -317,7 +331,9 @@ def _sanitize_responses_input_for_upstream_with_hits(
         if isinstance(node, list):
             out: list[Any] = []
             for idx, item in enumerate(node):
-                sanitized_item = _sanitize(item, path=f"{path}[{idx}]", role=role, field=field)
+                sanitized_item = _sanitize(
+                    item, path=f"{path}[{idx}]", role=role, field=field
+                )
                 if sanitized_item is None:
                     continue
                 out.append(sanitized_item)
@@ -334,7 +350,9 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
             if node_role in {"assistant", "system", "developer"}:
                 content = node.get("content")
-                if isinstance(content, str) and _looks_like_gateway_internal_history_text(content):
+                if isinstance(
+                    content, str
+                ) and _looks_like_gateway_internal_history_text(content):
                     return None
 
             copied: dict[str, Any] = dict(node)
@@ -342,16 +360,28 @@ def _sanitize_responses_input_for_upstream_with_hits(
             for key, item in node.items():
                 child_path = f"{path}.{key}" if path else key
 
-                if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {"output", "content", "result"}:
-                    copied[key] = _sanitize(item, path=child_path, role="tool", field=key)
+                if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {
+                    "output",
+                    "content",
+                    "result",
+                }:
+                    copied[key] = _sanitize(
+                        item, path=child_path, role="tool", field=key
+                    )
                     continue
 
-                if key == "content" and node_role in {"assistant", "system", "developer"} and isinstance(item, list):
+                if (
+                    key == "content"
+                    and node_role in {"assistant", "system", "developer"}
+                    and isinstance(item, list)
+                ):
                     filtered_parts: list[Any] = []
                     for idx, part in enumerate(item):
                         if isinstance(part, dict):
                             text = part.get("text")
-                            if isinstance(text, str) and _looks_like_gateway_internal_history_text(text):
+                            if isinstance(
+                                text, str
+                            ) and _looks_like_gateway_internal_history_text(text):
                                 continue
                         sanitized_part = _sanitize(
                             part,
@@ -367,10 +397,16 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     copied[key] = filtered_parts
                     continue
 
-                copied[key] = _sanitize(item, path=child_path, role=node_role, field=key)
+                copied[key] = _sanitize(
+                    item, path=child_path, role=node_role, field=key
+                )
 
             # Sanitize tool/function name to match upstream pattern ^[a-zA-Z0-9_-]+
-            if node_type in {"function_call", "function", "function_call_output"} and "name" in copied and isinstance(copied["name"], str):
+            if (
+                node_type in {"function_call", "function", "function_call_output"}
+                and "name" in copied
+                and isinstance(copied["name"], str)
+            ):
                 sanitized_name = re.sub(r"[^a-zA-Z0-9_-]", "_", copied["name"])
                 copied["name"] = sanitized_name or "_"
 
@@ -395,6 +431,10 @@ def _sanitize_responses_input_for_upstream_with_hits(
     return sanitized, merged_hits
 
 
-def _sanitize_responses_input_for_upstream(value: Any, *, whitelist_keys: set[str] | None = None) -> Any:
-    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(value, whitelist_keys=whitelist_keys)
+def _sanitize_responses_input_for_upstream(
+    value: Any, *, whitelist_keys: set[str] | None = None
+) -> Any:
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(
+        value, whitelist_keys=whitelist_keys
+    )
     return sanitized

@@ -1,5 +1,5 @@
 """
-首次启动时自动生成必须的配置文件：若 config 目录（或策略目录）缺少 .env 与策略 YAML，
+首次启动时自动生成必须的配置文件：若运行时 config 目录缺少 .env，或策略目录缺少策略 YAML，
 则从内置默认复制，保证 Docker 挂载或本地直接启动都能跑通。
 可在应用 startup 时调用，也可单独执行：python -m aegisgate.init_config
 """
@@ -41,10 +41,13 @@ def _resolve_path(path_str: str) -> Path:
 
 
 def _config_dir() -> Path:
-    """策略/config 目录：环境变量 AEGIS_CONFIG_DIR 或 security_rules_path 的父目录。"""
     if os.environ.get("AEGIS_CONFIG_DIR"):
         return Path(os.environ["AEGIS_CONFIG_DIR"]).resolve()
     return _resolve_path(settings.security_rules_path).parent
+
+
+def _runtime_env_dir() -> Path:
+    return (Path.cwd() / "config").resolve()
 
 
 def _env_example_path() -> Path | None:
@@ -110,14 +113,21 @@ def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
             if not _file_ready(rules_dir / name):
                 missing.append(name)
     elif not _bootstrap_has_all_policy_rules():
-        missing.extend(name for name in _POLICY_YAML if not _file_ready(rules_dir / name))
+        missing.extend(
+            name for name in _POLICY_YAML if not _file_ready(rules_dir / name)
+        )
 
     # security_filters.yaml 单文件独立解析；缺失时允许单独回退到 bootstrap。
-    if not _file_ready(rules_dir / _SECURITY_RULES_YAML) and not _bootstrap_has_security_rules():
+    if (
+        not _file_ready(rules_dir / _SECURITY_RULES_YAML)
+        and not _bootstrap_has_security_rules()
+    ):
         missing.append(_SECURITY_RULES_YAML)
 
     if missing:
-        raise RuntimeError(f"missing required security policy files in {rules_dir}: {', '.join(missing)}")
+        raise RuntimeError(
+            f"missing required security policy files in {rules_dir}: {', '.join(missing)}"
+        )
 
 
 def ensure_config_dir() -> None:
@@ -149,12 +159,13 @@ def ensure_config_dir() -> None:
             _PACKAGE_RULES_DIR,
         )
 
-    # 2. .env：从 config/.env.example 复制（Docker 构建时需 COPY config/.env.example 到镜像）
-    env_dst = config_dir / ".env"
+    env_dir = _runtime_env_dir()
+    env_dst = env_dir / ".env"
     if not env_dst.exists() or env_dst.stat().st_size == 0:
         env_src = _env_example_path()
         if env_src and env_src.is_file():
             try:
+                env_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(env_src, env_dst)
                 logger.info("init_config: created %s from %s", env_dst, env_src.name)
             except OSError as e:
@@ -177,7 +188,9 @@ def _can_use_sqlite_path(path: Path) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path, timeout=1.0) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS __aegisgate_write_probe__(id INTEGER)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS __aegisgate_write_probe__(id INTEGER)"
+            )
             conn.execute("DROP TABLE IF EXISTS __aegisgate_write_probe__")
             conn.commit()
         return True
@@ -232,7 +245,12 @@ def main() -> None:
     """命令行或 one-off 容器执行时调用。"""
     ensure_config_dir()
     ensure_runtime_storage_paths()
-    strict = os.environ.get("AEGIS_INIT_STRICT", "true").strip().lower() not in {"0", "false", "no", "off"}
+    strict = os.environ.get("AEGIS_INIT_STRICT", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     if strict:
         assert_security_bootstrap_ready()
         logger.info("init_config: security bootstrap ready")

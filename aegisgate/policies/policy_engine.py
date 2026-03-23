@@ -23,6 +23,7 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "exact_value_redaction",
         "redaction",
+        "system_prompt_guard",
         "untrusted_content_guard",
         "request_sanitizer",
         "rag_poison_guard",
@@ -95,16 +96,26 @@ class PolicyEngine:
                 if now < next_stat_at:
                     return cached_data
                 if cached_mtime_ns == mtime_ns:
-                    self._cache[policy_name] = (cached_mtime_ns, now + _POLICY_STAT_TTL_SECONDS, cached_data)
+                    self._cache[policy_name] = (
+                        cached_mtime_ns,
+                        now + _POLICY_STAT_TTL_SECONDS,
+                        cached_data,
+                    )
                     return cached_data
 
             loaded = yaml.safe_load(rule_path.read_text(encoding="utf-8")) or {}
             if not isinstance(loaded, dict):
                 raise PolicyResolutionError(f"invalid policy format: {rule_path}")
-            self._cache[policy_name] = (mtime_ns, now + _POLICY_STAT_TTL_SECONDS, loaded)
+            self._cache[policy_name] = (
+                mtime_ns,
+                now + _POLICY_STAT_TTL_SECONDS,
+                loaded,
+            )
             return loaded
 
-    def resolve(self, ctx: RequestContext, policy_name: str = "default") -> dict[str, Any]:
+    def resolve(
+        self, ctx: RequestContext, policy_name: str = "default"
+    ) -> dict[str, Any]:
         data = self._load_policy(policy_name)
         configured = set(data.get("enabled_filters", []))
 

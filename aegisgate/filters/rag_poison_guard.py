@@ -70,19 +70,23 @@ class RagPoisonGuard(BaseFilter):
                 hits.append(signal)
         return hits
 
-    def _extract_text(self, value: Any) -> str:
+    _MAX_EXTRACT_DEPTH = 20
+
+    def _extract_text(self, value: Any, _depth: int = 0) -> str:
+        if _depth >= self._MAX_EXTRACT_DEPTH:
+            return ""
         if isinstance(value, str):
             return value
         if isinstance(value, list):
-            parts = [self._extract_text(item) for item in value]
+            parts = [self._extract_text(item, _depth + 1) for item in value]
             return " ".join(part for part in parts if part).strip()
         if isinstance(value, dict):
             for key in self._TEXT_KEYS:
                 if key in value:
-                    text = self._extract_text(value.get(key))
+                    text = self._extract_text(value.get(key), _depth + 1)
                     if text:
                         return text
-            parts = [self._extract_text(v) for v in value.values()]
+            parts = [self._extract_text(v, _depth + 1) for v in value.values()]
             return " ".join(part for part in parts if part).strip()
         return ""
 

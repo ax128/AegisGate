@@ -73,7 +73,7 @@ def load(*, replace: bool = False) -> None:
                         "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
                     }
             logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
-        except Exception as exc:
+        except (json.JSONDecodeError, OSError, ValueError, KeyError, TypeError) as exc:
             if replace:
                 _tokens.clear()
             logger.warning("gw_tokens load failed path=%s error=%s", path, exc)
@@ -190,12 +190,12 @@ def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _
                     _tokens[existing] = mapping
                     _save()
             return existing, True
-        for _ in range(10):
+        for attempt in range(20):
             token = _generate_alnum_token(_TOKEN_LEN)
             if token not in _tokens:
                 break
         else:
-            token = _generate_alnum_token(_TOKEN_LEN)
+            raise RuntimeError("failed to generate unique gw_token after 20 attempts")
         _tokens[token] = {
             "upstream_base": upstream_base,
             "whitelist_key": whitelist_keys if whitelist_provided else [],

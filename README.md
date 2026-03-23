@@ -68,10 +68,11 @@ flowchart LR
             S2[Anomaly Detector<br/>encoding & command patterns]
             S3[Privilege Guard]
             S4[Tool Call Guard]
-            S5[Output Sanitizer<br/>block / sanitize / pass]
+            S5[Restoration &<br/>Post-Restore Guard]
+            S6[Output Sanitizer<br/>block / sanitize / pass]
         end
 
-        MW --> ReqPipeline --> RespPipeline
+        MW --> ReqPipeline
     end
 
     subgraph Upstream["Upstream LLM Providers"]
@@ -81,7 +82,7 @@ flowchart LR
     end
 
     A1 & A2 -->|"baseUrl → gateway"| MW
-    RespPipeline -->|filtered request| U1 & U2 & U3
+    ReqPipeline -->|filtered request| U1 & U2 & U3
     U1 & U2 & U3 -->|raw response| RespPipeline
     RespPipeline -->|sanitized response| A1 & A2
 ```
@@ -192,9 +193,9 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 
 ### API Endpoints
 
-- **OpenAI-compatible**: `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/{subpath}`
+- **OpenAI-compatible** (full security pipeline): `POST /v1/chat/completions`, `POST /v1/responses`
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` (requires `x-target-url` header)
-- **Claude API** (pass-through): `POST /v1/messages`, `POST /v1/messages/count_tokens`
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path (including `/v1/messages`) to upstream **without** running the security filter pipeline; use this for non-OpenAI providers that need transparent proxying
 
 Compatibility notes:
 
@@ -235,11 +236,19 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_PORT` | `18080` | Listen port |
 | `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL (no token needed) |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
+| `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
 | `AEGIS_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` |
+| `AEGIS_ENFORCE_LOOPBACK_ONLY` | `true` | Restrict access to loopback; set `false` for Docker |
 | `AEGIS_ENABLE_V2_PROXY` | `true` | Enable v2 generic HTTP proxy |
 | `AEGIS_ENABLE_REDACTION` | `true` | Enable PII redaction |
 | `AEGIS_ENABLE_INJECTION_DETECTOR` | `true` | Enable prompt injection detection |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | `false` | Force-block on dangerous command match |
+| `AEGIS_MAX_REQUEST_BODY_BYTES` | `12000000` | Maximum request body size in bytes |
+| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
+| `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |
+| `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | `600` | Upstream request timeout in seconds |
+| `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
+| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For |
 
 Full configuration reference: [`aegisgate/config/settings.py`](aegisgate/config/settings.py) and [`config/.env.example`](config/.env.example).
 
@@ -253,6 +262,16 @@ Agent-executable installation and integration guide: [SKILL.md](SKILL.md)
 pip install -e ".[dev,semantic]"
 pytest -q
 ```
+
+Optional observability support:
+
+```bash
+pip install -e ".[observability]"
+```
+
+With the observability extra installed, AegisGate exposes `/metrics` for Prometheus scraping and initializes the OpenTelemetry provider/exporter during startup.
+Automatic request spans are not enabled by default in this release.
+`/metrics` does not have a dedicated auth layer; it inherits the gateway's normal network and auth controls, so disabling loopback/HMAC protections may expose it more broadly.
 
 ## Troubleshooting
 

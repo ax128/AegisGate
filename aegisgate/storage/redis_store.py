@@ -11,7 +11,7 @@ from aegisgate.storage.kv import KVStore
 
 try:
     import redis
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     redis = None
 
 

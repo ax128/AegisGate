@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import queue
 import threading
@@ -11,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from aegisgate.config.settings import settings
-from aegisgate.core.background_worker import ensure_worker_thread, run_queue_worker, shutdown_queue_worker
+from aegisgate.core.background_worker import (
+    ensure_worker_thread,
+    run_queue_worker,
+    shutdown_queue_worker,
+)
 from aegisgate.util.logger import logger
 
 _FALLBACK_LOG_PATH = Path("/tmp") / "aegisgate" / "dangerous_response_samples.jsonl"
@@ -36,7 +41,9 @@ def _reset_log_path_cache() -> None:
 
 def merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged: list[tuple[int, int]] = []
-    for start, end in sorted((max(0, start), max(0, end)) for start, end in spans if end > start):
+    for start, end in sorted(
+        (max(0, start), max(0, end)) for start, end in spans if end > start
+    ):
         if not merged or start > merged[-1][1]:
             merged.append((start, end))
             continue
@@ -45,7 +52,9 @@ def merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def mark_text_with_spans(text: str, spans: list[tuple[int, int]], *, delimiter: str = "--") -> str:
+def mark_text_with_spans(
+    text: str, spans: list[tuple[int, int]], *, delimiter: str = "--"
+) -> str:
     source = str(text or "")
     if not source:
         return source
@@ -127,7 +136,9 @@ def _prune_old_log_files(base_path: Path, current_date: str) -> None:
         try:
             entry.unlink()
         except OSError as exc:
-            logger.warning("dangerous response log prune failed path=%s error=%s", entry, exc)
+            logger.warning(
+                "dangerous response log prune failed path=%s error=%s", entry, exc
+            )
 
 
 def _resolve_log_path() -> Path | None:
@@ -135,13 +146,21 @@ def _resolve_log_path() -> Path | None:
     configured_path = (settings.dangerous_response_log_path or "").strip()
     current_date = _current_log_date()
 
-    if _LOG_PATH is not None and _LOG_PATH_CONFIG == configured_path and _LOG_PATH_DATE == current_date:
+    if (
+        _LOG_PATH is not None
+        and _LOG_PATH_CONFIG == configured_path
+        and _LOG_PATH_DATE == current_date
+    ):
         return _LOG_PATH
 
     with _LOG_PATH_LOCK:
         configured_path = (settings.dangerous_response_log_path or "").strip()
         current_date = _current_log_date()
-        if _LOG_PATH is not None and _LOG_PATH_CONFIG == configured_path and _LOG_PATH_DATE == current_date:
+        if (
+            _LOG_PATH is not None
+            and _LOG_PATH_CONFIG == configured_path
+            and _LOG_PATH_DATE == current_date
+        ):
             return _LOG_PATH
 
         if not configured_path:
@@ -196,11 +215,57 @@ def _append_payload(payload: dict[str, Any]) -> None:
         logger.warning("dangerous response log write failed: %s", exc)
 
 
+def _digest_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _fragment_metadata(fragments: list[str]) -> list[dict[str, Any]]:
+    metadata: list[dict[str, Any]] = []
+    for fragment in fragments:
+        metadata.append(
+            {
+                "sha256": _digest_text(fragment),
+                "length": len(fragment),
+            }
+        )
+    return metadata
+
+
+def _prepare_event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(event)
+    include_raw_content = bool(payload.pop("include_raw_content", False))
+    include_raw_fragments = bool(payload.pop("include_raw_fragments", False))
+
+    raw_fragments = payload.get("dangerous_fragments")
+    fragments = (
+        [str(fragment) for fragment in raw_fragments if str(fragment)]
+        if isinstance(raw_fragments, list)
+        else []
+    )
+    if fragments and not include_raw_fragments:
+        payload.pop("dangerous_fragments", None)
+        payload["dangerous_fragments_redacted"] = True
+        payload["dangerous_fragments_metadata"] = _fragment_metadata(fragments)
+
+    raw_content = payload.get("content")
+    if isinstance(raw_content, str) and raw_content and not include_raw_content:
+        payload.pop("content", None)
+        payload["content_redacted"] = True
+        payload["content_metadata"] = {
+            "sha256": _digest_text(raw_content),
+            "length": len(raw_content),
+        }
+
+    return payload
+
+
 def _worker_loop() -> None:
     run_queue_worker(
         _LOG_QUEUE,
         _append_payload,
-        on_error=lambda exc: logger.warning("dangerous response log worker failed: %s", exc),
+        on_error=lambda exc: logger.warning(
+            "dangerous response log worker failed: %s", exc
+        ),
     )
 
 
@@ -232,7 +297,7 @@ def write_dangerous_response_sample(event: dict[str, Any]) -> None:
 
     payload = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
-        **event,
+        **_prepare_event_payload(event),
     }
     _ensure_worker()
     try:
@@ -254,8 +319,12 @@ def shutdown_dangerous_response_log_worker(timeout_seconds: float = 1.0) -> None
         _LOG_WORKER,
         work_queue=_LOG_QUEUE,
         timeout_seconds=timeout_seconds,
-        on_queue_full=lambda: logger.warning("dangerous response log shutdown queue full, waiting for worker drain"),
-        on_timeout=lambda timeout: logger.warning("dangerous response log worker did not stop within %.2fs", timeout),
+        on_queue_full=lambda: logger.warning(
+            "dangerous response log shutdown queue full, waiting for worker drain"
+        ),
+        on_timeout=lambda timeout: logger.warning(
+            "dangerous response log worker did not stop within %.2fs", timeout
+        ),
     )
     if _LOG_WORKER is not None:
         return

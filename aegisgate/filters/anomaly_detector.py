@@ -98,7 +98,7 @@ class AnomalyDetector(BaseFilter):
             try:
                 base64.b64decode(token, validate=True)
                 return True
-            except Exception:
+            except (ValueError, UnicodeDecodeError):
                 continue
         return False
 

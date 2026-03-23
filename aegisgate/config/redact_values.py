@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
 from aegisgate.storage.crypto import _get_fernet
@@ -60,8 +61,12 @@ def load_redact_values() -> list[str]:
                 raw = fernet.decrypt(encrypted.encode("utf-8"))
                 data = json.loads(raw.decode("utf-8"))
                 values = list(data.get("values", []))
-        except Exception:
-            logger.warning("redact_values: failed to load %s, treating as empty", path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "redact_values: failed to load %s error=%s, treating as empty",
+                path,
+                exc,
+            )
             values = []
 
         _cached_values = values
@@ -69,7 +74,7 @@ def load_redact_values() -> list[str]:
         return list(values)
 
 
-def save_redact_values(values: list[str]) -> None:
+def save_redact_values(values: Iterable[object]) -> None:
     """Validate, encrypt, and atomically write the values list."""
     clean: list[str] = []
     seen: set[str] = set()
@@ -78,7 +83,9 @@ def save_redact_values(values: list[str]) -> None:
             continue
         v = v.strip()
         if len(v) < _MIN_VALUE_LENGTH:
-            raise ValueError(f"每个值至少 {_MIN_VALUE_LENGTH} 个字符，当前长度 {len(v)}")
+            raise ValueError(
+                f"每个值至少 {_MIN_VALUE_LENGTH} 个字符，当前长度 {len(v)}"
+            )
         if v in seen:
             continue
         seen.add(v)

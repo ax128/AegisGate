@@ -464,9 +464,9 @@ class SemanticServiceClient:
                 cache_hit=False,
                 duration_ms=(time.perf_counter() - start) * 1000.0,
             )
-        except Exception:
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             self._mark_failure(now=time.time())
-            logger.warning("semantic service unavailable")
+            logger.warning("semantic service unavailable error=%s", type(exc).__name__)
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],

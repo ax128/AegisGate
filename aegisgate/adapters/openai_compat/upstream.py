@@ -33,7 +33,7 @@ _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _TRACE_REQUEST_ID_HEADER = "x-aegis-request-id"
 
 _upstream_async_client: httpx.AsyncClient | None = None
-_upstream_client_lock: Any = None
+_upstream_client_lock = asyncio.Lock()
 
 
 def _upstream_http_limits() -> httpx.Limits:
@@ -51,11 +51,9 @@ def _upstream_http_timeout() -> httpx.Timeout:
 
 
 async def _get_upstream_async_client() -> httpx.AsyncClient:
-    global _upstream_async_client, _upstream_client_lock
+    global _upstream_async_client
     if _upstream_async_client is not None:
         return _upstream_async_client
-    if _upstream_client_lock is None:
-        _upstream_client_lock = asyncio.Lock()
     async with _upstream_client_lock:
         if _upstream_async_client is None:
             _upstream_async_client = httpx.AsyncClient(

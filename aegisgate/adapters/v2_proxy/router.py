@@ -51,7 +51,13 @@ _SSE_DONE_RECOVERY_CHUNK = b"data: [DONE]\n\n"
 _SSE_DONE_DETECT_TAIL_CHARS = 64
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _DEBUG_HEADERS_REDACT = frozenset(
-    {"authorization", "gateway-key", "x-aegis-signature", "x-aegis-timestamp", "x-aegis-nonce"}
+    {
+        "authorization",
+        "gateway-key",
+        "x-aegis-signature",
+        "x-aegis-timestamp",
+        "x-aegis-nonce",
+    }
 )
 _DEFAULT_FIELD_VALUE_MIN_LEN = 12
 _DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -166,7 +172,7 @@ _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
 }
 
 _v2_async_client: httpx.AsyncClient | None = None
-_v2_client_lock: asyncio.Lock | None = None
+_v2_client_lock = asyncio.Lock()
 
 
 def _parse_host_allowlist(raw: str) -> tuple[set[str], tuple[str, ...]]:
@@ -196,15 +202,30 @@ def _parse_host_allowlist(raw: str) -> tuple[set[str], tuple[str, ...]]:
     return exact, tuple(suffixes)
 
 
+def _host_matches_allowlist(
+    host: str, *, exact: set[str], suffixes: tuple[str, ...]
+) -> bool:
+    if host in exact:
+        return True
+    if any(host.endswith(f".{domain}") for domain in exact):
+        return True
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+
+
 @lru_cache(maxsize=64)
 def _response_filter_bypass_host_rules(raw: str) -> tuple[set[str], tuple[str, ...]]:
+    return _parse_host_allowlist(raw)
+
+
+@lru_cache(maxsize=64)
+def _v2_target_allowlist_rules(raw: str) -> tuple[set[str], tuple[str, ...]]:
     return _parse_host_allowlist(raw)
 
 
 def _target_host(target_url: str) -> str:
     try:
         return (urlparse(target_url).hostname or "").strip().lower()
-    except Exception:
+    except (ValueError, AttributeError):
         return ""
 
 
@@ -216,17 +237,26 @@ def _should_bypass_v2_response_filter(target_url: str) -> bool:
     if not host:
         return False
     exact, suffixes = _response_filter_bypass_host_rules(raw)
-    if host in exact:
+    return _host_matches_allowlist(host, exact=exact, suffixes=suffixes)
+
+
+def _is_v2_target_allowlisted(hostname: str) -> bool:
+    raw = (settings.v2_target_allowlist or "").strip()
+    if not raw:
         return True
-    if any(host.endswith(f".{domain}") for domain in exact):
-        return True
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+    host = (hostname or "").strip().lower()
+    if not host:
+        return False
+    exact, suffixes = _v2_target_allowlist_rules(raw)
+    return _host_matches_allowlist(host, exact=exact, suffixes=suffixes)
 
 
 def _v2_http_limits() -> httpx.Limits:
     return httpx.Limits(
         max_connections=max(10, int(settings.upstream_max_connections)),
-        max_keepalive_connections=max(5, int(settings.upstream_max_keepalive_connections)),
+        max_keepalive_connections=max(
+            5, int(settings.upstream_max_keepalive_connections)
+        ),
     )
 
 
@@ -237,15 +267,15 @@ def _v2_http_timeout() -> httpx.Timeout:
     # Under burst traffic allow longer pool wait than I/O timeout to reduce false
     # upstream_unreachable caused by short queueing contention.
     pool_timeout = max(timeout + 5.0, timeout * 2.0)
-    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=pool_timeout)
+    return httpx.Timeout(
+        connect=connect, read=timeout, write=timeout, pool=pool_timeout
+    )
 
 
 async def _get_v2_async_client() -> httpx.AsyncClient:
-    global _v2_async_client, _v2_client_lock
+    global _v2_async_client
     if _v2_async_client is not None:
         return _v2_async_client
-    if _v2_client_lock is None:
-        _v2_client_lock = asyncio.Lock()
     async with _v2_client_lock:
         if _v2_async_client is None:
             _v2_async_client = httpx.AsyncClient(
@@ -264,7 +294,9 @@ async def close_v2_async_client() -> None:
         _v2_async_client = None
 
 
-def _compile_patterns(items: list[dict[str, Any]] | None, fallback: tuple[tuple[str, str], ...]) -> list[tuple[str, re.Pattern[str]]]:
+def _compile_patterns(
+    items: list[dict[str, Any]] | None, fallback: tuple[tuple[str, str], ...]
+) -> list[tuple[str, re.Pattern[str]]]:
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for pattern_id, regex in fallback:
         try:
@@ -291,7 +323,10 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
         pii_patterns if isinstance(pii_patterns, list) else None,
         fallback=(),
     )
-    field_min_len = max(_DEFAULT_FIELD_VALUE_MIN_LEN, int(rules.get("field_value_min_len", _DEFAULT_FIELD_VALUE_MIN_LEN)))
+    field_min_len = max(
+        _DEFAULT_FIELD_VALUE_MIN_LEN,
+        int(rules.get("field_value_min_len", _DEFAULT_FIELD_VALUE_MIN_LEN)),
+    )
     field_patterns = rules.get("field_value_patterns")
     fallback_field_patterns = (
         (
@@ -304,7 +339,10 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
         ),
     )
     compiled.extend(
-        _compile_patterns(field_patterns if isinstance(field_patterns, list) else None, fallback=fallback_field_patterns)
+        _compile_patterns(
+            field_patterns if isinstance(field_patterns, list) else None,
+            fallback=fallback_field_patterns,
+        )
     )
     return compiled
 
@@ -499,13 +537,19 @@ def _sanitize_request_body(
         try:
             raw = body.decode("utf-8")
             parsed = json.loads(raw)
-            sanitized, count, hits, markers = _sanitize_json_value(parsed, whitelist_keys=whitelist_keys)
+            sanitized, count, hits, markers = _sanitize_json_value(
+                parsed, whitelist_keys=whitelist_keys
+            )
             total = ev_count + count
             if total <= 0:
                 return body, 0, [], []
-            out_body = json.dumps(sanitized, ensure_ascii=False).encode("utf-8") if count > 0 else body
+            out_body = (
+                json.dumps(sanitized, ensure_ascii=False).encode("utf-8")
+                if count > 0
+                else body
+            )
             return out_body, total, hits, markers
-        except Exception:
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
             pass
 
     text = body.decode("utf-8", errors="replace")
@@ -515,8 +559,6 @@ def _sanitize_request_body(
         return body, 0, [], []
     out_body = sanitized.encode("utf-8") if count > 0 else body
     return out_body, total, hits, markers
-
-
 
 
 def _detect_dangerous_commands(text: str) -> list[str]:
@@ -532,19 +574,31 @@ def _detect_dangerous_commands(text: str) -> list[str]:
     if not raw_matches:
         return []
 
-    xss_matches = [match_id for match_id in raw_matches if any(hint in match_id.lower() for hint in _XSS_RULE_ID_HINTS)]
+    xss_matches = [
+        match_id
+        for match_id in raw_matches
+        if any(hint in match_id.lower() for hint in _XSS_RULE_ID_HINTS)
+    ]
     if xss_matches:
-        high_conf_xss = any(pattern.search(text) for pattern in _XSS_HIGH_CONFIDENCE_PATTERNS)
+        high_conf_xss = any(
+            pattern.search(text) for pattern in _XSS_HIGH_CONFIDENCE_PATTERNS
+        )
         if not high_conf_xss:
             # 普通网页经常包含 <script> 等标记；只有高置信载荷形态才作为注入拦截。
-            raw_matches = [match_id for match_id in raw_matches if match_id not in xss_matches]
+            raw_matches = [
+                match_id for match_id in raw_matches if match_id not in xss_matches
+            ]
 
     if not raw_matches:
         return []
 
     if settings.v2_response_filter_obvious_only:
         # Strictly block only the most dangerous protocol-level signatures.
-        raw_matches = [match_id for match_id in raw_matches if match_id in _V2_OBVIOUS_ONLY_BLOCK_RULE_IDS]
+        raw_matches = [
+            match_id
+            for match_id in raw_matches
+            if match_id in _V2_OBVIOUS_ONLY_BLOCK_RULE_IDS
+        ]
         if not raw_matches:
             return []
 
@@ -582,19 +636,23 @@ def _extend_stream_probe_window(
 _V2_TARGET_URL_HEADER = "x-target-url"
 
 
-_SSRF_METADATA_HOSTS = frozenset({
-    "169.254.169.254",
-    "169.254.170.2",
-    "metadata.google.internal",
-    "metadata.goog",
-})
+_SSRF_METADATA_HOSTS = frozenset(
+    {
+        "169.254.169.254",
+        "169.254.170.2",
+        "metadata.google.internal",
+        "metadata.goog",
+    }
+)
 
 
 def _is_blocked_target_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return not addr.is_global or addr.is_reserved
 
 
-async def _resolve_target_ips(hostname: str) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+async def _resolve_target_ips(
+    hostname: str,
+) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(
         hostname,
@@ -624,7 +682,12 @@ async def _is_ssrf_target(hostname: str) -> bool:
         return True
     try:
         addr = ipaddress.ip_address(lowered)
-        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+        )
     except ValueError:
         pass
     # Block .internal TLD commonly used for cloud metadata
@@ -633,7 +696,9 @@ async def _is_ssrf_target(hostname: str) -> bool:
     try:
         resolved = await _resolve_target_ips(lowered)
     except socket.gaierror:
-        logger.warning("v2 target dns lookup failed host=%s — blocking (fail-closed)", lowered)
+        logger.warning(
+            "v2 target dns lookup failed host=%s — blocking (fail-closed)", lowered
+        )
         return True
     if any(_is_blocked_target_ip(addr) for addr in resolved):
         return True
@@ -646,9 +711,19 @@ async def _extract_target_url(request: Request) -> tuple[str | None, str | None]
         return None, f"missing required header: {_V2_TARGET_URL_HEADER}"
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None, f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https"
-    if settings.v2_block_internal_targets and await _is_ssrf_target(parsed.hostname or ""):
-        return None, "target url points to an internal/private address (SSRF protection)"
+        return (
+            None,
+            f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https",
+        )
+    if not _is_v2_target_allowlisted(parsed.hostname or ""):
+        return None, "target url host is not in v2 target allowlist"
+    if settings.v2_block_internal_targets and await _is_ssrf_target(
+        parsed.hostname or ""
+    ):
+        return (
+            None,
+            "target url points to an internal/private address (SSRF protection)",
+        )
     return value, None
 
 
@@ -688,10 +763,14 @@ def _extract_redaction_whitelist_keys(request: Request) -> set[str]:
     keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
     if keys:
         return set(keys)
-    return set(normalize_whitelist_keys(request.headers.get(_REDACTION_WHITELIST_HEADER, "")))
+    return set(
+        normalize_whitelist_keys(request.headers.get(_REDACTION_WHITELIST_HEADER, ""))
+    )
 
 
-def _request_prefers_streaming(request: Request, body: bytes, content_type: str) -> bool:
+def _request_prefers_streaming(
+    request: Request, body: bytes, content_type: str
+) -> bool:
     accept = (request.headers.get("accept") or "").lower()
     if "text/event-stream" in accept:
         return True
@@ -762,10 +841,16 @@ async def _proxy_v2_streaming(
 
     buffered_chunks: list[bytes] = []
     upstream_exhausted = False
-    if settings.v2_enable_response_command_filter and not response_filter_bypassed and is_textual:
+    if (
+        settings.v2_enable_response_command_filter
+        and not response_filter_bypassed
+        and is_textual
+    ):
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
         if is_sse:
-            max_chars = max(256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars)))
+            max_chars = max(
+                256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars))
+            )
         probe_window = ""
         max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
         inspected_chars = 0
@@ -775,12 +860,14 @@ async def _proxy_v2_streaming(
                 buffered_chunks.append(chunk)
                 if inspected_chars < max_chars:
                     piece = chunk.decode("utf-8", errors="replace")
-                    probe_window, inspected_chars, matches = _extend_stream_probe_window(
-                        probe_window,
-                        piece,
-                        inspected_chars=inspected_chars,
-                        max_chars=max_chars,
-                        max_window_chars=max_window_chars,
+                    probe_window, inspected_chars, matches = (
+                        _extend_stream_probe_window(
+                            probe_window,
+                            piece,
+                            inspected_chars=inspected_chars,
+                            max_chars=max_chars,
+                            max_window_chars=max_window_chars,
+                        )
                     )
                     if matches:
                         break
@@ -838,7 +925,9 @@ async def _proxy_v2_streaming(
                     if not chunk:
                         continue
                     if is_sse:
-                        detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
+                        detected, sse_tail = _sse_done_seen_from_chunk(
+                            chunk, tail=sse_tail
+                        )
                         saw_done = saw_done or detected
                     if settings.enable_exact_value_redaction:
                         chunk_text = chunk.decode("utf-8", errors="replace")
@@ -848,7 +937,9 @@ async def _proxy_v2_streaming(
                     yield chunk
         except httpx.HTTPError as exc:
             detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-            logger.warning("v2 upstream stream interrupted target=%s error=%s", target_url, detail)
+            logger.warning(
+                "v2 upstream stream interrupted target=%s error=%s", target_url, detail
+            )
         finally:
             if is_sse and not saw_done:
                 inject_done = True
@@ -876,7 +967,12 @@ def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
     headers_safe: dict[str, str] = {}
     for key, value in request.headers.items():
         key_lower = key.lower()
-        if key_lower in _DEBUG_HEADERS_REDACT or "key" in key_lower or "secret" in key_lower or "token" in key_lower:
+        if (
+            key_lower in _DEBUG_HEADERS_REDACT
+            or "key" in key_lower
+            or "secret" in key_lower
+            or "token" in key_lower
+        ):
             headers_safe[key] = "***"
         else:
             headers_safe[key] = value
@@ -901,7 +997,7 @@ def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
             try:
                 parsed = json.loads(body_text)
                 body_text = json.dumps(parsed, ensure_ascii=False, indent=2)
-            except Exception:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
     else:
         body_text = f"<non-text body len={body_size}>"
@@ -954,10 +1050,12 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     outbound_body = request_body
     whitelist_keys = _extract_redaction_whitelist_keys(request)
     if settings.v2_enable_request_redaction:
-        outbound_body, redaction_count, redaction_hits, redaction_markers = _sanitize_request_body(
-            request_body,
-            original_content_type,
-            whitelist_keys=whitelist_keys,
+        outbound_body, redaction_count, redaction_hits, redaction_markers = (
+            _sanitize_request_body(
+                request_body,
+                original_content_type,
+                whitelist_keys=whitelist_keys,
+            )
         )
         if redaction_count > 0:
             client_ip = (request.client.host if request.client else None) or "-"
@@ -1013,7 +1111,11 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     response_content_type = upstream_response.headers.get("content-type", "")
 
     # Exact-value redaction on non-streaming response body.
-    if settings.enable_exact_value_redaction and response_body and _looks_textual_content_type(response_content_type):
+    if (
+        settings.enable_exact_value_redaction
+        and response_body
+        and _looks_textual_content_type(response_content_type)
+    ):
         text = response_body.decode("utf-8", errors="replace")
         replaced, ev_count = replace_exact_values(text)
         if ev_count > 0:

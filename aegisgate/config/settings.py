@@ -5,12 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # env_file priority (lowest → highest): .env < config/.env < os.environ
-    # config/.env is written by the UI; os.environ wins for Docker -e flags.
     model_config = SettingsConfigDict(
         env_prefix="AEGIS_",
         extra="ignore",
-        env_file=[".env", "config/.env"],
+        env_file="config/.env",
         env_file_encoding="utf-8",
     )
 
@@ -41,12 +39,16 @@ class Settings(BaseSettings):
     # 编辑器读写 docker-compose 文件的目录。空字符串 = 默认使用 config/compose/
     compose_dir: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
-    sqlite_db_path: str = "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
+    sqlite_db_path: str = (
+        "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
+    )
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_key_prefix: str = "aegisgate"
     redis_pending_scan_batch_size: int = 200
-    redis_pending_scan_max_entries: int = 0  # <=0 表示不限制扫描数量，避免高并发会话漏检较早 pending
-    postgres_dsn: str = "postgresql://postgres:postgres@127.0.0.1:5432/aegisgate"
+    redis_pending_scan_max_entries: int = (
+        0  # <=0 表示不限制扫描数量，避免高并发会话漏检较早 pending
+    )
+    postgres_dsn: str = ""
     postgres_schema: str = "public"
     max_request_body_bytes: int = 12_000_000
     max_messages_count: int = 300
@@ -98,7 +100,7 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
     local_ui_session_ttl_seconds: int = 43_200
     local_ui_login_rate_limit_per_minute: int = 10
-    local_ui_secure_cookie: bool = False
+    local_ui_secure_cookie: bool = True
     local_ui_allow_internal_network: bool = False
     # Block internal/private IPs as v2 target URL (SSRF protection)
     v2_block_internal_targets: bool = True
@@ -117,6 +119,7 @@ class Settings(BaseSettings):
     v2_enable_request_redaction: bool = True
     v2_enable_response_command_filter: bool = True
     v2_response_filter_obvious_only: bool = True
+    v2_target_allowlist: str = ""
     v2_response_filter_bypass_hosts: str = ""
     v2_response_filter_max_chars: int = 200_000
     v2_sse_filter_probe_max_chars: int = 4_000
@@ -124,8 +127,12 @@ class Settings(BaseSettings):
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60
     clear_pending_on_startup: bool = False
-    audit_log_path: str = "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl
-    enable_dangerous_response_log: bool = False  # 保存响应侧危险样本，按日期切分并自动清理 10 天前旧文件
+    audit_log_path: str = (
+        "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl
+    )
+    enable_dangerous_response_log: bool = (
+        False  # 保存响应侧危险样本，按日期切分并自动清理 10 天前旧文件
+    )
     dangerous_response_log_path: str = "logs/dangerous_response_samples.jsonl"  # 危险响应样本日志基路径；Docker 下可设为 /tmp/aegisgate/dangerous_response_samples.jsonl
 
     enable_redaction: bool = True

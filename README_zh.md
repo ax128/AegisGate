@@ -155,11 +155,11 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
     - 默认最小误拦模式：协议层高危特征（HTTP request smuggling / response splitting，如 CL.TE / TE.CL / TE.TE）
     - 可通过规则配置扩展检测模式
     - 命中后直接返回非 200（默认 `403`）格式化错误，不走确认放行链路
-- Claude 系列 API（通用代理）：
-  - `POST /v1/messages`
-  - `POST /v1/messages/count_tokens`
+- 通用透传代理（`POST /v1/{subpath}`）：
+  - 涵盖 `/v1/messages`、`/v1/messages/count_tokens` 等非 Chat/Responses 路径
   - `stream=true` 流式透传
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
+  - **注意**：通用透传路径**不走安全过滤管道**，仅做请求转发
 - 请求侧：redaction、request_sanitizer、rag_poison_guard
 - 响应侧：anomaly/injection/privilege/tool-call/restoration/post-restore/output-sanitizer
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
@@ -615,6 +615,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `1200000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
+| `AEGIS_RISK_SCORE_THRESHOLD` | 全局风险评分阈值（0–1），越低越严格；策略 YAML 的 `risk_threshold` 可按策略覆盖（默认策略为 0.85） | `0.7` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用内置 TF-IDF 语义分类器（无需 GPU） | `true` |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即直接拦截并遮挡，不依赖阈值） | `false` |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | 本地端口自动路由（Docker 部署默认开启） | `false` |

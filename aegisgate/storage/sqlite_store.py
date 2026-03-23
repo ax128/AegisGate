@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -468,14 +469,10 @@ class SqliteKVStore(KVStore):
 
 
 def json_dumps(data: dict[str, Any]) -> str:
-    import json
-
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def json_loads(data: str) -> dict[str, Any]:
-    import json
-
     try:
         loaded = json.loads(data)
     except (TypeError, ValueError) as exc:

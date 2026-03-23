@@ -12,7 +12,7 @@ from aegisgate.config.settings import settings
 
 try:
     import redis
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     redis = None
 
 
@@ -26,12 +26,8 @@ class NonceReplayCache:
 
     def _prune(self, now_ts: int, window_seconds: int) -> None:
         expiry = now_ts - max(1, int(window_seconds))
-        keys_to_drop: list[str] = []
-        for nonce, seen_ts in self._cache.items():
-            if seen_ts >= expiry:
-                break
-            keys_to_drop.append(nonce)
-        for nonce in keys_to_drop:
+        stale = [n for n, ts in self._cache.items() if ts < expiry]
+        for nonce in stale:
             self._cache.pop(nonce, None)
 
         while len(self._cache) > self.max_entries:

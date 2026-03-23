@@ -9,10 +9,7 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
-
-logger = logging.getLogger("aegisgate")
 
 # ─── Chat Completions 专有字段（Responses API 不接受） ──────────────
 _CHAT_ONLY_KEYS: frozenset[str] = frozenset({

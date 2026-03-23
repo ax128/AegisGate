@@ -16,6 +16,7 @@ from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.filters.request_sanitizer import RequestSanitizer
 from aegisgate.filters.restoration import RestorationFilter
 from aegisgate.filters.sanitizer import OutputSanitizer
+from aegisgate.filters.system_prompt_guard import SystemPromptGuard
 from aegisgate.filters.tool_call_guard import ToolCallGuard
 from aegisgate.filters.untrusted_content_guard import UntrustedContentGuard
 from aegisgate.init_config import ensure_runtime_storage_paths
@@ -34,7 +35,11 @@ def _close_store_backend(backend: object) -> None:
         try:
             close_method()
         except Exception as exc:  # pragma: no cover - operational safeguard
-            logger.warning("runtime store close failed backend=%s error=%s", type(backend).__name__, exc)
+            logger.warning(
+                "runtime store close failed backend=%s error=%s",
+                type(backend).__name__,
+                exc,
+            )
 
 
 class RuntimeStoreProxy(KVStore):
@@ -75,7 +80,9 @@ class RuntimeStoreProxy(KVStore):
                 # can finish on the object they already captured.
                 self._retired_backends.append(old_backend)
 
-    def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
+    def set_mapping(
+        self, session_id: str, request_id: str, mapping: dict[str, str]
+    ) -> None:
         self._typed_backend().set_mapping(session_id, request_id, mapping)
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
@@ -136,10 +143,14 @@ class RuntimeStoreProxy(KVStore):
     ) -> dict[str, Any] | None:
         latest: dict[str, Any] | None = None
         for backend in self._backend_candidates():
-            record = backend.get_latest_pending_confirmation(session_id, now_ts, tenant_id=tenant_id)
+            record = backend.get_latest_pending_confirmation(
+                session_id, now_ts, tenant_id=tenant_id
+            )
             if record is None:
                 continue
-            if latest is None or int(record.get("created_at", 0)) > int(latest.get("created_at", 0)):
+            if latest is None or int(record.get("created_at", 0)) > int(
+                latest.get("created_at", 0)
+            ):
                 latest = record
         return latest
 
@@ -202,11 +213,15 @@ class RuntimeStoreProxy(KVStore):
                 return record
         return None
 
-    def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
+    def update_pending_confirmation_status(
+        self, *, confirm_id: str, status: str, now_ts: int
+    ) -> None:
         for backend in self._backend_candidates():
             if backend.get_pending_confirmation(confirm_id) is None:
                 continue
-            backend.update_pending_confirmation_status(confirm_id=confirm_id, status=status, now_ts=now_ts)
+            backend.update_pending_confirmation_status(
+                confirm_id=confirm_id, status=status, now_ts=now_ts
+            )
             return
 
     def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
@@ -250,6 +265,7 @@ def _build_pipeline() -> Pipeline:
     request_filters = [
         ExactValueRedactionFilter(),
         RedactionFilter(store),
+        SystemPromptGuard(),
         UntrustedContentGuard(),
         RequestSanitizer(),
         RagPoisonGuard(),

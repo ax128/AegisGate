@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -14,7 +15,7 @@ MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 BACKUP_COUNT = 10
 
 
-def _normalize_level(raw: str) -> int:
+def _normalize_level(raw: str | None) -> int:
     candidate = str(raw or "INFO").strip().upper()
     return {
         "CRITICAL": logging.CRITICAL,
@@ -43,6 +44,7 @@ class DailyRotatingFileHandler(logging.Handler):
         self._current_date: str = ""
         self._inner: RotatingFileHandler | None = None
         self._use_fallback = False  # 一旦文件写入失败，永久停用文件落盘
+        self._state_lock = threading.Lock()
 
     def _today(self) -> str:
         return datetime.now(timezone.utc).strftime("%y/%m/%d")
@@ -91,15 +93,17 @@ class DailyRotatingFileHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            handler = self._ensure_handler()
+            with self._state_lock:
+                handler = self._ensure_handler()
             if handler is None:
                 return
             handler.emit(record)
         except (OSError, PermissionError):
-            self._use_fallback = True
-            if self._inner is not None:
-                self._inner.close()
-                self._inner = None
+            with self._state_lock:
+                self._use_fallback = True
+                if self._inner is not None:
+                    self._inner.close()
+                    self._inner = None
         except Exception:
             self.handleError(record)
 

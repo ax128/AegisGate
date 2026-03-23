@@ -34,7 +34,10 @@ from aegisgate.adapters.openai_compat.router import (
 from aegisgate.adapters.openai_compat.offload import shutdown_payload_transform_executor
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
 from aegisgate.adapters.relay_compat.router import router as relay_router
-from aegisgate.adapters.v2_proxy.router import close_v2_async_client, router as v2_proxy_router
+from aegisgate.adapters.v2_proxy.router import (
+    close_v2_async_client,
+    router as v2_proxy_router,
+)
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.dangerous_response_log import shutdown_dangerous_response_log_worker
@@ -111,6 +114,11 @@ from aegisgate.core.gw_tokens import (
     update as gw_tokens_update,
 )
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
+from aegisgate.observability.logging import configure_logging
+from aegisgate.observability.metrics import inc_request, observe_request_duration
+from aegisgate.observability.metrics import get_metrics_app
+from aegisgate.observability.tracing import trace_span
+from aegisgate.observability.tracing import init_tracing
 from aegisgate.storage.crypto import ensure_key as _ensure_fernet_key
 from aegisgate.core.security_boundary import (
     build_nonce_cache,
@@ -133,11 +141,106 @@ _confirmation_cache_task: ConfirmationCacheTask | None = None
 _hot_reloader: HotReloader | None = None
 
 
+def _initialize_observability() -> None:
+    configure_logging(settings.log_level)
+    init_tracing(settings.app_name)
+
+
+def _mount_metrics_endpoint(target_app: FastAPI) -> None:
+    metrics_app = get_metrics_app()
+    if metrics_app is not None:
+        target_app.mount("/metrics", metrics_app)
+
+
+def _observability_route_label(path: str) -> str:
+    matched = _GW_TOKEN_PATH_RE.match(path)
+    if matched:
+        return f"token_{matched.group(1)}"
+    if path == "/":
+        return "root"
+    if path == "/health":
+        return "health"
+    if path == "/robots.txt":
+        return "robots"
+    if path == "/favicon.ico":
+        return "favicon"
+    if path == "/metrics":
+        return "metrics"
+    if path.startswith("/__ui__/assets"):
+        return "ui_assets"
+    if path == "/__ui__/login":
+        return "ui_login_page"
+    if path == "/__ui__/api/login":
+        return "ui_login_api"
+    if path.startswith("/__ui__/api/"):
+        return "ui_api"
+    if path.startswith("/__ui__"):
+        return "ui_page"
+    if path.startswith("/__gw__/"):
+        return f"gw_{path.rsplit('/', 1)[-1]}"
+    if path == "/v1/chat/completions":
+        return "v1_chat_completions"
+    if path == "/v1/responses":
+        return "v1_responses"
+    if path.startswith("/v1/") or path == "/v1":
+        return "v1_passthrough"
+    if path == "/v2/proxy":
+        return "v2_proxy"
+    if path.startswith("/v2/") or path == "/v2":
+        return "v2"
+    if path == "/relay/generate":
+        return "relay_generate"
+    if path.startswith("/relay/") or path == "/relay":
+        return "relay"
+    return "other"
+
+
+def _record_request_observability(
+    *,
+    method: str,
+    route_label: str,
+    started_at: float,
+    status_code: int,
+    reject_reason: str | None,
+    span: object,
+) -> None:
+    setter = getattr(span, "set_attribute", None)
+    if callable(setter):
+        setter("http.method", method)
+        setter("http.route", route_label)
+        setter("http.status_code", status_code)
+        if reject_reason:
+            setter("aegis.rejected_reason", reject_reason)
+    inc_request(route_label, status_code)
+    observe_request_duration(route_label, max(time.perf_counter() - started_at, 0.0))
+
+
+def _observe_response(
+    response: Response,
+    *,
+    method: str,
+    route_label: str,
+    started_at: float,
+    reject_reason: str | None,
+    span: object,
+) -> Response:
+    _record_request_observability(
+        method=method,
+        route_label=route_label,
+        started_at=started_at,
+        status_code=response.status_code,
+        reject_reason=reject_reason,
+        span=span,
+    )
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Simple in-memory rate limiter for admin endpoints
 # ---------------------------------------------------------------------------
 class _AdminRateLimiter:
     _EVICT_INTERVAL = 300.0  # 每 5 分钟清理一次过期 bucket
+    _MAX_BUCKETS = 50_000  # 防止唯一 IP 洪水导致内存无限增长
 
     def __init__(self, max_per_minute: int = 30) -> None:
         self._max = max(1, max_per_minute)
@@ -151,10 +254,14 @@ class _AdminRateLimiter:
         with self._lock:
             # Periodically evict stale buckets to prevent unbounded memory growth
             if now - self._last_evict > self._EVICT_INTERVAL:
-                self._buckets = defaultdict(list, {
-                    k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
-                })
+                self._buckets = defaultdict(
+                    list,
+                    {k: v for k, v in self._buckets.items() if v and v[-1] > cutoff},
+                )
                 self._last_evict = now
+            # Hard cap: reject if too many distinct IPs tracked (DoS mitigation)
+            if client_ip not in self._buckets and len(self._buckets) >= self._MAX_BUCKETS:
+                return False
             bucket = self._buckets[client_ip]
             self._buckets[client_ip] = [t for t in bucket if t > cutoff]
             if len(self._buckets[client_ip]) >= self._max:
@@ -177,6 +284,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.error("init_config on startup failed: %s", exc)
         raise
 
+    _initialize_observability()
     _ensure_gateway_key()
     _ensure_proxy_token()
     _ensure_fernet_key()
@@ -210,7 +318,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             logger.warning("clear pending confirmations on startup failed: %s", exc)
     global _confirmation_cache_task, _hot_reloader
     if settings.enable_pending_prune_task and _confirmation_cache_task is None:
-        _confirmation_cache_task = ConfirmationCacheTask(prune_func=prune_pending_confirmations)
+        _confirmation_cache_task = ConfirmationCacheTask(
+            prune_func=prune_pending_confirmations
+        )
         await _confirmation_cache_task.start()
 
     if _hot_reloader is None:
@@ -235,10 +345,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     shutdown_audit_worker()
     shutdown_dangerous_response_log_worker()
     from aegisgate.core.stats import flush as flush_stats
+
     flush_stats()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+_mount_metrics_endpoint(app)
 app.include_router(openai_router, prefix="/v1")
 if settings.enable_v2_proxy:
     app.include_router(v2_proxy_router)
@@ -247,12 +359,26 @@ if settings.enable_relay_endpoint:
 _WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
 _UI_ASSETS_DIR = (_WWW_DIR / "assets").resolve()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_UI_LOGIN_RATE_LIMITER = _AdminRateLimiter(max_per_minute=settings.local_ui_login_rate_limit_per_minute)
+_UI_LOGIN_RATE_LIMITER = _AdminRateLimiter(
+    max_per_minute=settings.local_ui_login_rate_limit_per_minute
+)
 if _UI_ASSETS_DIR.is_dir():
-    app.mount("/__ui__/assets", StaticFiles(directory=str(_UI_ASSETS_DIR)), name="ui-assets")
+    app.mount(
+        "/__ui__/assets", StaticFiles(directory=str(_UI_ASSETS_DIR)), name="ui-assets"
+    )
 _nonce_cache = build_nonce_cache()
-_admin_rate_limiter = _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
-_ADMIN_ENDPOINTS = frozenset({"/__gw__/register", "/__gw__/lookup", "/__gw__/unregister", "/__gw__/add", "/__gw__/remove"})
+_admin_rate_limiter = _AdminRateLimiter(
+    max_per_minute=settings.admin_rate_limit_per_minute
+)
+_ADMIN_ENDPOINTS = frozenset(
+    {
+        "/__gw__/register",
+        "/__gw__/lookup",
+        "/__gw__/unregister",
+        "/__gw__/add",
+        "/__gw__/remove",
+    }
+)
 _PASSTHROUGH_PATHS = frozenset({"/", "/health", "/robots.txt", "/favicon.ico"})
 
 
@@ -276,30 +402,75 @@ class GWTokenRewriteMiddleware:
             await self.app(scope, receive, send)
             return
 
+        route_label = _observability_route_label(path)
+        started_at = time.perf_counter()
+        method = str(scope.get("method") or "GET").upper()
+
         version, token, filter_mode, rest = (
-            matched.group(1), matched.group(2), matched.group(3), matched.group(4),
+            matched.group(1),
+            matched.group(2),
+            matched.group(3),
+            matched.group(4),
         )
         # 验证 filter_mode
         if filter_mode and filter_mode not in _VALID_FILTER_MODES:
-            response = JSONResponse(
-                status_code=400,
-                content={"error": "invalid_filter_mode", "detail": f"unknown mode '{filter_mode}', valid: {sorted(_VALID_FILTER_MODES)}"},
-            )
-            await response(scope, receive, send)
-            return
+            with trace_span(
+                "gateway.request",
+                http_method=method,
+                http_route=route_label,
+            ) as span:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "invalid_filter_mode",
+                        "detail": f"unknown mode '{filter_mode}', valid: {sorted(_VALID_FILTER_MODES)}",
+                    },
+                )
+                _record_request_observability(
+                    method=method,
+                    route_label=route_label,
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    reject_reason="invalid_filter_mode",
+                    span=span,
+                )
+                await response(scope, receive, send)
+                return
 
         mapping = gw_tokens_get(token)
         if not mapping:
             logger.warning("gw_token not found token=%s path=%s", token, path)
-            response = JSONResponse(
-                status_code=404,
-                content={"error": "token_not_found", "detail": "token invalid or expired"},
-            )
-            await response(scope, receive, send)
-            return
+            with trace_span(
+                "gateway.request",
+                http_method=method,
+                http_route=route_label,
+            ) as span:
+                response = JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "token_not_found",
+                        "detail": "token invalid or expired",
+                    },
+                )
+                _record_request_observability(
+                    method=method,
+                    route_label=route_label,
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    reject_reason="token_not_found",
+                    span=span,
+                )
+                await response(scope, receive, send)
+                return
 
         new_path = f"/{version}/{rest}" if rest else f"/{version}"
-        logger.debug("gw_token_rewrite path=%s -> %s token=%s… mode=%s", path, new_path, token[:6], filter_mode or "default")
+        logger.debug(
+            "gw_token_rewrite path=%s -> %s token=%s… mode=%s",
+            path,
+            new_path,
+            token[:6],
+            filter_mode or "default",
+        )
 
         ub = mapping["upstream_base"]
         wk = normalize_whitelist_keys(mapping.get("whitelist_key"))
@@ -319,7 +490,13 @@ class GWTokenRewriteMiddleware:
         rk_name = b"x-aegis-redaction-whitelist"
         ub_alt = settings.upstream_base_header.replace("-", "_").encode("latin-1")
         gk_alt = settings.gateway_key_header.replace("-", "_").encode("latin-1")
-        skip = (ub_name.lower(), gk_name.lower(), rk_name.lower(), ub_alt.lower(), gk_alt.lower())
+        skip = (
+            ub_name.lower(),
+            gk_name.lower(),
+            rk_name.lower(),
+            ub_alt.lower(),
+            gk_alt.lower(),
+        )
         headers = [(k, v) for k, v in headers if k.lower() not in skip]
         new_scope["headers"] = headers
 
@@ -329,6 +506,7 @@ class GWTokenRewriteMiddleware:
 # ---------------------------------------------------------------------------
 # Security boundary middleware
 # ---------------------------------------------------------------------------
+
 
 async def _drain_and_reject(
     request: Request,
@@ -353,250 +531,419 @@ async def security_boundary_middleware(request: Request, call_next):
         "max_request_body_bytes": settings.max_request_body_bytes,
     }
     request.state.security_boundary = boundary
+    route_label = _observability_route_label(request.url.path)
+    started_at = time.perf_counter()
+    method = request.method.upper()
 
-    # --- UI branch (internal network only) ---
-    if request.url.path.startswith("/__ui__"):
-        client_ip = _real_client_ip(request)
-        ui_allowed = _is_internal_ip(client_ip) if settings.local_ui_allow_internal_network else _is_loopback_ip(client_ip)
-        if not ui_allowed:
-            boundary["rejected_reason"] = "local_ui_network_restricted"
-            logger.warning("boundary reject local ui host=%s path=%s", client_ip, request.url.path)
-            detail = (
-                "local ui only allowed from internal network"
+    with trace_span(
+        "gateway.request",
+        http_method=method,
+        http_route=route_label,
+    ) as span:
+
+        def finish(response: Response) -> Response:
+            reject_reason = boundary.get("rejected_reason")
+            return _observe_response(
+                response,
+                method=method,
+                route_label=route_label,
+                started_at=started_at,
+                reject_reason=reject_reason if isinstance(reject_reason, str) else None,
+                span=span,
+            )
+
+        async def finish_drain(
+            reason: str,
+            status_code: int,
+            detail: str | None = None,
+        ) -> Response:
+            response = await _drain_and_reject(
+                request,
+                boundary,
+                reason,
+                status_code,
+                detail,
+            )
+            return finish(response)
+
+        if request.url.path.startswith("/__ui__"):
+            client_ip = _real_client_ip(request)
+            ui_allowed = (
+                _is_internal_ip(client_ip)
                 if settings.local_ui_allow_internal_network
-                else "local ui only allowed from loopback"
+                else _is_loopback_ip(client_ip)
             )
-            return _apply_ui_security_headers(_blocked_response(
-                status_code=403,
-                reason="local_ui_network_restricted",
-                detail=detail,
-            ))
-        if request.url.path == "/__ui__/api/login" and request.method.upper() == "POST":
-            if not _UI_LOGIN_RATE_LIMITER.is_allowed(client_ip):
-                boundary["rejected_reason"] = "ui_login_rate_limited"
-                return _apply_ui_security_headers(
-                    JSONResponse(status_code=429, content={"error": "ui_login_rate_limited", "detail": "too many login attempts"})
+            if not ui_allowed:
+                boundary["rejected_reason"] = "local_ui_network_restricted"
+                logger.warning(
+                    "boundary reject local ui host=%s path=%s",
+                    client_ip,
+                    request.url.path,
                 )
-        if _is_public_ui_path(request.url.path):
+                detail = (
+                    "local ui only allowed from internal network"
+                    if settings.local_ui_allow_internal_network
+                    else "local ui only allowed from loopback"
+                )
+                return finish(
+                    _apply_ui_security_headers(
+                        _blocked_response(
+                            status_code=403,
+                            reason="local_ui_network_restricted",
+                            detail=detail,
+                        )
+                    )
+                )
+            if request.url.path == "/__ui__/api/login" and method == "POST":
+                if not _UI_LOGIN_RATE_LIMITER.is_allowed(client_ip):
+                    boundary["rejected_reason"] = "ui_login_rate_limited"
+                    return finish(
+                        _apply_ui_security_headers(
+                            JSONResponse(
+                                status_code=429,
+                                content={
+                                    "error": "ui_login_rate_limited",
+                                    "detail": "too many login attempts",
+                                },
+                            )
+                        )
+                    )
+            if _is_public_ui_path(request.url.path):
+                response = await call_next(request)
+                return finish(_apply_ui_security_headers(response))
+            if not _is_ui_authenticated(request):
+                boundary["rejected_reason"] = "ui_auth_required"
+                if request.url.path.startswith("/__ui__/api/"):
+                    return finish(
+                        _apply_ui_security_headers(
+                            JSONResponse(
+                                status_code=401,
+                                content={"error": "ui_auth_required"},
+                            )
+                        )
+                    )
+                from fastapi.responses import RedirectResponse
+
+                return finish(
+                    _apply_ui_security_headers(
+                        RedirectResponse(url="/__ui__/login", status_code=303)
+                    )
+                )
+            if method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith(
+                "/__ui__/api/"
+            ):
+                if request.url.path != "/__ui__/api/login" and not _verify_ui_csrf(
+                    request
+                ):
+                    boundary["rejected_reason"] = "ui_csrf_invalid"
+                    return finish(
+                        _apply_ui_security_headers(
+                            JSONResponse(
+                                status_code=403,
+                                content={
+                                    "error": "ui_csrf_invalid",
+                                    "detail": "missing or invalid csrf token",
+                                },
+                            )
+                        )
+                    )
             response = await call_next(request)
-            return _apply_ui_security_headers(response)
-        if not _is_ui_authenticated(request):
-            if request.url.path.startswith("/__ui__/api/"):
-                return _apply_ui_security_headers(JSONResponse(status_code=401, content={"error": "ui_auth_required"}))
-            from fastapi.responses import RedirectResponse
-            return _apply_ui_security_headers(RedirectResponse(url="/__ui__/login", status_code=303))
-        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/__ui__/api/"):
-            if request.url.path != "/__ui__/api/login" and not _verify_ui_csrf(request):
-                return _apply_ui_security_headers(
-                    JSONResponse(status_code=403, content={"error": "ui_csrf_invalid", "detail": "missing or invalid csrf token"})
+            return finish(_apply_ui_security_headers(response))
+
+        if request.url.path in _PASSTHROUGH_PATHS and method in {"GET", "HEAD"}:
+            return finish(await call_next(request))
+
+        logger.debug(
+            "boundary enter method=%s path=%s", request.method, request.url.path
+        )
+
+        if settings.enforce_loopback_only:
+            client_host = request.client.host if request.client else ""
+            if client_host not in _LOOPBACK_HOSTS:
+                logger.warning(
+                    "boundary reject non-loopback host=%s path=%s",
+                    client_host,
+                    request.url.path,
                 )
-        response = await call_next(request)
-        return _apply_ui_security_headers(response)
+                return await finish_drain("loopback_only_reject", 403)
 
-    # --- Passthrough (health, root, robots, favicon) ---
-    if request.url.path in _PASSTHROUGH_PATHS and request.method.upper() in {"GET", "HEAD"}:
-        return await call_next(request)
+        if request.url.path in _ADMIN_ENDPOINTS and method == "POST":
+            client_ip = _real_client_ip(request)
+            if not _admin_rate_limiter.is_allowed(client_ip):
+                logger.warning(
+                    "boundary reject admin rate limit host=%s path=%s",
+                    client_ip,
+                    request.url.path,
+                )
+                return await finish_drain(
+                    "admin_rate_limited",
+                    429,
+                    "too many requests",
+                )
+            if not _is_internal_ip(client_ip):
+                logger.warning(
+                    "boundary reject admin endpoint from non-internal host=%s path=%s",
+                    client_ip,
+                    request.url.path,
+                )
+                return await finish_drain(
+                    "admin_endpoint_network_restricted",
+                    403,
+                    "admin endpoint only allowed from internal network",
+                )
 
-    logger.debug("boundary enter method=%s path=%s", request.method, request.url.path)
+        protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
+        protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
 
-    # --- Loopback enforcement (reject early, before any auth/body processing) ---
-    if settings.enforce_loopback_only:
-        client_host = request.client.host if request.client else ""
-        if client_host not in _LOOPBACK_HOSTS:
-            logger.warning("boundary reject non-loopback host=%s path=%s", client_host, request.url.path)
-            return await _drain_and_reject(request, boundary, "loopback_only_reject", 403)
+        if not bool(request.scope.get("aegis_token_authenticated")) and (
+            protected_v1 or protected_v2
+        ):
+            proxy_token = (request.headers.get(_PROXY_TOKEN_HEADER) or "").strip()
+            proxy_token_value = get_proxy_token_value()
+            if (
+                proxy_token
+                and proxy_token_value
+                and hmac.compare_digest(proxy_token, proxy_token_value)
+            ):
+                default_base = (settings.upstream_base_url or "").strip()
+                if default_base:
+                    request.scope["aegis_upstream_base"] = default_base
+                    request.scope["aegis_token_authenticated"] = True
+                    boundary["auth_verified"] = True
 
-    # --- Admin endpoint guards ---
-    if request.url.path in _ADMIN_ENDPOINTS and request.method.upper() == "POST":
-        client_ip = _real_client_ip(request)
-        if not _admin_rate_limiter.is_allowed(client_ip):
-            logger.warning("boundary reject admin rate limit host=%s path=%s", client_ip, request.url.path)
-            return await _drain_and_reject(request, boundary, "admin_rate_limited", 429, "too many requests")
-        if not _is_internal_ip(client_ip):
-            logger.warning("boundary reject admin endpoint from non-internal host=%s path=%s", client_ip, request.url.path)
-            return await _drain_and_reject(
-                request, boundary, "admin_endpoint_network_restricted", 403,
-                "admin endpoint only allowed from internal network",
-            )
-
-    # --- v1/v2 token authentication ---
-    protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
-    protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
-
-    if not bool(request.scope.get("aegis_token_authenticated")) and (protected_v1 or protected_v2):
-        proxy_token = (request.headers.get(_PROXY_TOKEN_HEADER) or "").strip()
-        proxy_token_value = get_proxy_token_value()
-        if proxy_token and proxy_token_value and hmac.compare_digest(proxy_token, proxy_token_value):
+        if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
             default_base = (settings.upstream_base_url or "").strip()
             if default_base:
                 request.scope["aegis_upstream_base"] = default_base
                 request.scope["aegis_token_authenticated"] = True
-                boundary["auth_verified"] = True
+                logger.debug("using default upstream for v1 path=%s", request.url.path)
+            else:
+                client_ip = _real_client_ip(request)
+                logger.warning(
+                    "boundary reject non-token request path=%s client=%s hint=set AEGIS_UPSTREAM_BASE_URL or use token path",
+                    request.url.path,
+                    client_ip,
+                )
+                return await finish_drain(
+                    "token_route_required",
+                    403,
+                    "no default upstream configured; use /v1/__gw__/t/<token>/... or set AEGIS_UPSTREAM_BASE_URL",
+                )
 
-    if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
-        default_base = (settings.upstream_base_url or "").strip()
-        if default_base:
-            request.scope["aegis_upstream_base"] = default_base
-            request.scope["aegis_token_authenticated"] = True
-            logger.debug("using default upstream for v1 path=%s", request.url.path)
-        else:
-            client_ip = _real_client_ip(request)
+        if protected_v2 and not bool(request.scope.get("aegis_token_authenticated")):
             logger.warning(
-                "boundary reject non-token request path=%s client=%s hint=set AEGIS_UPSTREAM_BASE_URL or use token path",
-                request.url.path, client_ip,
+                "boundary reject non-token v2 request path=%s", request.url.path
             )
-            return await _drain_and_reject(
-                request, boundary, "token_route_required", 403,
-                "no default upstream configured; use /v1/__gw__/t/<token>/... or set AEGIS_UPSTREAM_BASE_URL",
+            return await finish_drain(
+                "token_route_required",
+                403,
+                "use /v2/__gw__/t/<token>/... routes for v2 proxy access",
             )
 
-    if protected_v2 and not bool(request.scope.get("aegis_token_authenticated")):
-        logger.warning("boundary reject non-token v2 request path=%s", request.url.path)
-        return await _drain_and_reject(
-            request, boundary, "token_route_required", 403,
-            "use /v2/__gw__/t/<token>/... routes for v2 proxy access",
-        )
+        cached_body: bytes | None = None
+        content_length_header = request.headers.get("content-length", "").strip()
+        if (
+            settings.max_request_body_bytes > 0
+            and method in {"POST", "PUT", "PATCH"}
+            and content_length_header
+        ):
+            try:
+                content_length = int(content_length_header)
+            except ValueError:
+                logger.warning(
+                    "boundary reject invalid content-length path=%s", request.url.path
+                )
+                return await finish_drain("invalid_content_length", 400)
+            if content_length > settings.max_request_body_bytes:
+                logger.warning(
+                    "boundary reject oversize request content_length=%s max=%s path=%s",
+                    content_length,
+                    settings.max_request_body_bytes,
+                    request.url.path,
+                )
+                return await finish_drain("request_body_too_large", 413)
+            boundary["request_body_size"] = content_length
+        elif settings.max_request_body_bytes > 0 and method in {"POST", "PUT", "PATCH"}:
+            cached_body = await request.body()
+            boundary["request_body_size"] = len(cached_body)
+            if len(cached_body) > settings.max_request_body_bytes:
+                boundary["rejected_reason"] = "request_body_too_large"
+                logger.warning(
+                    "boundary reject oversize request actual_size=%s max=%s path=%s",
+                    len(cached_body),
+                    settings.max_request_body_bytes,
+                    request.url.path,
+                )
+                return finish(
+                    _blocked_response(status_code=413, reason="request_body_too_large")
+                )
 
-    # --- Request body size check ---
-    cached_body: bytes | None = None
-    content_length_header = request.headers.get("content-length", "").strip()
-    if settings.max_request_body_bytes > 0 and request.method.upper() in {"POST", "PUT", "PATCH"} and content_length_header:
+        if settings.enable_request_hmac_auth:
+            secret = settings.request_hmac_secret
+            if not secret:
+                logger.error("request hmac auth enabled but secret is empty")
+                boundary["rejected_reason"] = "hmac_misconfigured"
+                return finish(
+                    _blocked_response(status_code=500, reason="hmac_misconfigured")
+                )
+
+            signature = request.headers.get(settings.request_signature_header)
+            timestamp = request.headers.get(settings.request_timestamp_header)
+            nonce = request.headers.get(settings.request_nonce_header)
+            if not signature or not timestamp or not nonce:
+                boundary["rejected_reason"] = "hmac_header_missing"
+                return finish(
+                    _blocked_response(status_code=401, reason="hmac_header_missing")
+                )
+
+            try:
+                ts_int = int(timestamp)
+            except ValueError:
+                boundary["rejected_reason"] = "hmac_timestamp_invalid"
+                return finish(
+                    _blocked_response(status_code=401, reason="hmac_timestamp_invalid")
+                )
+
+            current_ts = now_ts()
+            if abs(current_ts - ts_int) > settings.request_replay_window_seconds:
+                boundary["rejected_reason"] = "hmac_timestamp_out_of_window"
+                return finish(
+                    _blocked_response(
+                        status_code=401,
+                        reason="hmac_timestamp_out_of_window",
+                    )
+                )
+
+            replayed = _nonce_cache.check_and_store(
+                nonce=nonce,
+                now_ts=current_ts,
+                window_seconds=settings.request_replay_window_seconds,
+            )
+            boundary["replay_checked"] = True
+            if replayed:
+                boundary["rejected_reason"] = "replay_nonce_detected"
+                return finish(
+                    _blocked_response(status_code=409, reason="replay_nonce_detected")
+                )
+
+            body = cached_body if cached_body is not None else await request.body()
+            boundary["request_body_size"] = len(body)
+            payload = build_signature_payload(
+                timestamp=timestamp,
+                nonce=nonce,
+                body=body,
+            )
+            if not verify_hmac_signature(
+                secret=secret,
+                payload=payload,
+                presented=signature,
+            ):
+                boundary["rejected_reason"] = "hmac_signature_invalid"
+                return finish(
+                    _blocked_response(status_code=401, reason="hmac_signature_invalid")
+                )
+
+            boundary["auth_verified"] = True
+            logger.info("boundary hmac verified path=%s", request.url.path)
+
         try:
-            content_length = int(content_length_header)
-        except ValueError:
-            logger.warning("boundary reject invalid content-length path=%s", request.url.path)
-            return await _drain_and_reject(request, boundary, "invalid_content_length", 400)
-        if content_length > settings.max_request_body_bytes:
-            logger.warning(
-                "boundary reject oversize request content_length=%s max=%s path=%s",
-                content_length, settings.max_request_body_bytes, request.url.path,
+            response = await call_next(request)
+        except Exception:  # pragma: no cover - fail-safe
+            logger.exception("gateway unhandled exception path=%s", request.url.path)
+            boundary["rejected_reason"] = "gateway_internal_error"
+            return finish(
+                _blocked_response(
+                    status_code=500,
+                    reason="gateway_internal_error",
+                    detail="an internal error occurred",
+                )
             )
-            return await _drain_and_reject(request, boundary, "request_body_too_large", 413)
-        boundary["request_body_size"] = content_length
-    elif settings.max_request_body_bytes > 0 and request.method.upper() in {"POST", "PUT", "PATCH"}:
-        cached_body = await request.body()
-        boundary["request_body_size"] = len(cached_body)
-        if len(cached_body) > settings.max_request_body_bytes:
-            boundary["rejected_reason"] = "request_body_too_large"
-            logger.warning(
-                "boundary reject oversize request actual_size=%s max=%s path=%s",
-                len(cached_body), settings.max_request_body_bytes, request.url.path,
-            )
-            return _blocked_response(status_code=413, reason="request_body_too_large")
-
-    # --- HMAC authentication ---
-    if settings.enable_request_hmac_auth:
-        secret = settings.request_hmac_secret
-        if not secret:
-            logger.error("request hmac auth enabled but secret is empty")
-            return _blocked_response(status_code=500, reason="hmac_misconfigured")
-
-        signature = request.headers.get(settings.request_signature_header)
-        timestamp = request.headers.get(settings.request_timestamp_header)
-        nonce = request.headers.get(settings.request_nonce_header)
-        if not signature or not timestamp or not nonce:
-            boundary["rejected_reason"] = "hmac_header_missing"
-            return _blocked_response(status_code=401, reason="hmac_header_missing")
-
-        try:
-            ts_int = int(timestamp)
-        except ValueError:
-            boundary["rejected_reason"] = "hmac_timestamp_invalid"
-            return _blocked_response(status_code=401, reason="hmac_timestamp_invalid")
-
-        current_ts = now_ts()
-        if abs(current_ts - ts_int) > settings.request_replay_window_seconds:
-            boundary["rejected_reason"] = "hmac_timestamp_out_of_window"
-            return _blocked_response(status_code=401, reason="hmac_timestamp_out_of_window")
-
-        replayed = _nonce_cache.check_and_store(
-            nonce=nonce,
-            now_ts=current_ts,
-            window_seconds=settings.request_replay_window_seconds,
+        if boundary.get("auth_verified"):
+            response.headers["x-aegis-auth-verified"] = "true"
+        logger.debug(
+            "boundary pass method=%s path=%s auth_verified=%s",
+            request.method,
+            request.url.path,
+            bool(boundary.get("auth_verified")),
         )
-        boundary["replay_checked"] = True
-        if replayed:
-            boundary["rejected_reason"] = "replay_nonce_detected"
-            return _blocked_response(status_code=409, reason="replay_nonce_detected")
-
-        body = cached_body if cached_body is not None else await request.body()
-        boundary["request_body_size"] = len(body)
-        payload = build_signature_payload(timestamp=timestamp, nonce=nonce, body=body)
-        if not verify_hmac_signature(secret=secret, payload=payload, presented=signature):
-            boundary["rejected_reason"] = "hmac_signature_invalid"
-            return _blocked_response(status_code=401, reason="hmac_signature_invalid")
-
-        boundary["auth_verified"] = True
-        logger.info("boundary hmac verified path=%s", request.url.path)
-
-    try:
-        response = await call_next(request)
-    except Exception:  # pragma: no cover - fail-safe
-        logger.exception("gateway unhandled exception path=%s", request.url.path)
-        boundary["rejected_reason"] = "gateway_internal_error"
-        return _blocked_response(
-            status_code=500,
-            reason="gateway_internal_error",
-            detail="an internal error occurred",
-        )
-    if boundary.get("auth_verified"):
-        response.headers["x-aegis-auth-verified"] = "true"
-    logger.debug(
-        "boundary pass method=%s path=%s auth_verified=%s",
-        request.method,
-        request.url.path,
-        bool(boundary.get("auth_verified")),
-    )
-    return response
+        return finish(response)
 
 
 # ---------------------------------------------------------------------------
 # Admin API endpoints (register / add / remove / lookup / unregister)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/__gw__/register")
 async def gw_register(request: Request) -> JSONResponse:
     """一次性注册：返回短 token 与 baseUrl，映射写入 config/gw_tokens.json。"""
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
     gateway_key = _string_field(body.get("gateway_key"))
     whitelist_present = "whitelist_key" in body
-    requested_whitelist = normalize_whitelist_keys(body.get("whitelist_key")) if whitelist_present else None
+    requested_whitelist = (
+        normalize_whitelist_keys(body.get("whitelist_key"))
+        if whitelist_present
+        else None
+    )
     if not upstream_base or not gateway_key:
         return JSONResponse(
             status_code=400,
-            content={"error": "missing_params", "detail": "upstream_base and gateway_key required"},
+            content={
+                "error": "missing_params",
+                "detail": "upstream_base and gateway_key required",
+            },
         )
     if not _verify_admin_gateway_key(body):
         logger.warning("register rejected: gateway_key mismatch")
         return JSONResponse(
             status_code=403,
-            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match the configured key"},
+            content={
+                "error": "gateway_key_invalid",
+                "detail": "gateway_key does not match the configured key",
+            },
         )
     if _is_forbidden_upstream_base_example(upstream_base):
         return JSONResponse(
             status_code=400,
-            content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再注册。"},
+            content={
+                "error": "example_upstream_forbidden",
+                "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再注册。",
+            },
         )
     if whitelist_present:
-        token, already_registered = gw_tokens_register(upstream_base, whitelist_key=requested_whitelist)
+        token, already_registered = gw_tokens_register(
+            upstream_base, whitelist_key=requested_whitelist
+        )
     else:
         token, already_registered = gw_tokens_register(upstream_base)
     stored = gw_tokens_get(token) or {}
-    effective_whitelist = normalize_whitelist_keys(stored.get("whitelist_key")) if stored else (requested_whitelist or [])
+    effective_whitelist = (
+        normalize_whitelist_keys(stored.get("whitelist_key"))
+        if stored
+        else (requested_whitelist or [])
+    )
     base_url = _gateway_token_base_url(request, token)
     if already_registered:
-        return JSONResponse(content={
-            "already_registered": True,
-            "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
+        return JSONResponse(
+            content={
+                "already_registered": True,
+                "detail": "该 upstream_base + gateway_key 已注册过，返回已有 token。",
+                "token": token,
+                "baseUrl": base_url,
+                "whitelist_key": effective_whitelist,
+            }
+        )
+    return JSONResponse(
+        content={
             "token": token,
             "baseUrl": base_url,
             "whitelist_key": effective_whitelist,
-        })
-    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": effective_whitelist})
+        }
+    )
 
 
 @app.post("/__gw__/add")
@@ -604,7 +951,7 @@ async def gw_add(request: Request) -> JSONResponse:
     """对指定 token 追加 whitelist_key；可选替换 upstream_base。"""
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     token = _string_field(body.get("token"))
     gateway_key = _string_field(body.get("gateway_key"))
@@ -612,10 +959,19 @@ async def gw_add(request: Request) -> JSONResponse:
     if not token or not gateway_key or whitelist_add is None or not whitelist_add:
         return JSONResponse(
             status_code=400,
-            content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
+            content={
+                "error": "missing_params",
+                "detail": "token, gateway_key and whitelist_key(list) required",
+            },
         )
     if not _verify_admin_gateway_key(body):
-        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "gateway_key_invalid",
+                "detail": "gateway_key does not match",
+            },
+        )
     upstream_base_input = _normalize_input_upstream_base(body.get("upstream_base"))
     mapping = gw_tokens_get(token)
     if not mapping:
@@ -624,24 +980,43 @@ async def gw_add(request: Request) -> JSONResponse:
     next_upstream_base = current_upstream_base
     if upstream_base_input:
         if _is_forbidden_upstream_base_example(upstream_base_input):
-            return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再更新。"})
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "example_upstream_forbidden",
+                    "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再更新。",
+                },
+            )
         existing = gw_tokens_find_token(upstream_base_input)
         if existing is not None and existing != token:
-            return JSONResponse(status_code=409, content={"error": "upstream_pair_conflict", "detail": "target upstream_base already bound"})
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "upstream_pair_conflict",
+                    "detail": "target upstream_base already bound",
+                },
+            )
         next_upstream_base = upstream_base_input
     current = normalize_whitelist_keys(mapping.get("whitelist_key"))
     current_set = set(current)
     added = [k for k in whitelist_add if k not in current_set]
     next_whitelist = current + added
-    updated = gw_tokens_update(token, upstream_base=next_upstream_base, whitelist_key=next_whitelist)
+    updated = gw_tokens_update(
+        token, upstream_base=next_upstream_base, whitelist_key=next_whitelist
+    )
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
     base_url = _gateway_token_base_url(request, token)
-    return JSONResponse(content={
-        "token": token, "upstream_base": next_upstream_base,
-        "baseUrl": base_url, "whitelist_key": normalize_whitelist_keys(latest), "added": added,
-    })
+    return JSONResponse(
+        content={
+            "token": token,
+            "upstream_base": next_upstream_base,
+            "baseUrl": base_url,
+            "whitelist_key": normalize_whitelist_keys(latest),
+            "added": added,
+        }
+    )
 
 
 @app.post("/__gw__/remove")
@@ -649,7 +1024,7 @@ async def gw_remove(request: Request) -> JSONResponse:
     """仅对指定 token 移除 whitelist_key。"""
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     token = _string_field(body.get("token"))
     gateway_key = _string_field(body.get("gateway_key"))
@@ -657,10 +1032,19 @@ async def gw_remove(request: Request) -> JSONResponse:
     if not token or not gateway_key or whitelist_remove is None or not whitelist_remove:
         return JSONResponse(
             status_code=400,
-            content={"error": "missing_params", "detail": "token, gateway_key and whitelist_key(list) required"},
+            content={
+                "error": "missing_params",
+                "detail": "token, gateway_key and whitelist_key(list) required",
+            },
         )
     if not _verify_admin_gateway_key(body):
-        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "gateway_key_invalid",
+                "detail": "gateway_key does not match",
+            },
+        )
     mapping = gw_tokens_get(token)
     if not mapping:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
@@ -669,15 +1053,21 @@ async def gw_remove(request: Request) -> JSONResponse:
     remove_set = set(whitelist_remove)
     removed = [k for k in current if k in remove_set]
     next_whitelist = [k for k in current if k not in remove_set]
-    updated = gw_tokens_update(token, upstream_base=upstream_base, whitelist_key=next_whitelist)
+    updated = gw_tokens_update(
+        token, upstream_base=upstream_base, whitelist_key=next_whitelist
+    )
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
     base_url = _gateway_token_base_url(request, token)
-    return JSONResponse(content={
-        "token": token, "baseUrl": base_url,
-        "whitelist_key": normalize_whitelist_keys(latest), "removed": removed,
-    })
+    return JSONResponse(
+        content={
+            "token": token,
+            "baseUrl": base_url,
+            "whitelist_key": normalize_whitelist_keys(latest),
+            "removed": removed,
+        }
+    )
 
 
 @app.post("/__gw__/lookup")
@@ -685,23 +1075,49 @@ async def gw_lookup(request: Request) -> JSONResponse:
     """根据 upstream_base 查询已注册的 token。"""
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
     gateway_key = _string_field(body.get("gateway_key"))
     if not upstream_base or not gateway_key:
-        return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "upstream_base and gateway_key required"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_params",
+                "detail": "upstream_base and gateway_key required",
+            },
+        )
     if not _verify_admin_gateway_key(body):
-        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "gateway_key_invalid",
+                "detail": "gateway_key does not match",
+            },
+        )
     if _is_forbidden_upstream_base_example(upstream_base):
-        return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "upstream_base 不能使用文档中的示例地址。"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "example_upstream_forbidden",
+                "detail": "upstream_base 不能使用文档中的示例地址。",
+            },
+        )
     token = gw_tokens_find_token(upstream_base)
     if token is None:
-        return JSONResponse(status_code=404, content={"error": "not_found", "detail": "该 upstream_base 未注册，请先调用 /__gw__/register 注册。"})
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "detail": "该 upstream_base 未注册，请先调用 /__gw__/register 注册。",
+            },
+        )
     base_url = _gateway_token_base_url(request, token)
     mapping = gw_tokens_get(token) or {}
     whitelist_key = normalize_whitelist_keys(mapping.get("whitelist_key"))
-    return JSONResponse(content={"token": token, "baseUrl": base_url, "whitelist_key": whitelist_key})
+    return JSONResponse(
+        content={"token": token, "baseUrl": base_url, "whitelist_key": whitelist_key}
+    )
 
 
 @app.post("/__gw__/unregister")
@@ -709,14 +1125,26 @@ async def gw_unregister(request: Request) -> JSONResponse:
     """删除 token 映射。"""
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
     token = _string_field(body.get("token"))
     gateway_key = _string_field(body.get("gateway_key"))
     if not token or not gateway_key:
-        return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "token and gateway_key required"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "missing_params",
+                "detail": "token and gateway_key required",
+            },
+        )
     if not _verify_admin_gateway_key(body):
-        return JSONResponse(status_code=403, content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"})
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "gateway_key_invalid",
+                "detail": "gateway_key does not match",
+            },
+        )
     mapping = gw_tokens_get(token)
     if not mapping:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
@@ -741,7 +1169,9 @@ def local_ui_index() -> Response:
     if not index_path.is_file():
         return PlainTextResponse("local ui assets not found", status_code=404)
     from fastapi.responses import FileResponse
+
     return FileResponse(index_path, media_type="text/html; charset=utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Info / health / liveness endpoints

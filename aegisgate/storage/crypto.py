@@ -20,7 +20,6 @@ import threading
 _fernet_instance: Fernet | None = None
 _fernet_lock = threading.Lock()
 _FERNET_KEY_FILE = "aegis_fernet.key"
-_FERNET_FALLBACK_DIR = Path("/tmp/aegisgate")
 
 
 def _config_dir() -> Path:
@@ -38,15 +37,12 @@ def _load_or_generate_key() -> bytes:
     if env_key:
         return env_key.encode("utf-8")
 
-    # 2. Try persistent key file (primary then fallback)
     primary_path = _config_dir() / _FERNET_KEY_FILE
-    fallback_path = _FERNET_FALLBACK_DIR / _FERNET_KEY_FILE
-    for candidate in (primary_path, fallback_path):
-        if candidate.is_file():
-            raw = candidate.read_text(encoding="utf-8").strip()
-            if raw:
-                logger.info("crypto: loaded Fernet key from %s", candidate)
-                return raw.encode("utf-8")
+    if primary_path.is_file():
+        raw = primary_path.read_text(encoding="utf-8").strip()
+        if raw:
+            logger.info("crypto: loaded Fernet key from %s", primary_path)
+            return raw.encode("utf-8")
 
     # 3. Auto-generate
     key = Fernet.generate_key()
@@ -58,22 +54,11 @@ def _load_or_generate_key() -> bytes:
         except OSError:
             pass
         logger.info("crypto: generated new Fernet key at %s", primary_path)
-    except PermissionError:
-        fallback_path.parent.mkdir(parents=True, exist_ok=True)
-        fallback_path.write_text(key.decode("utf-8"), encoding="utf-8")
-        try:
-            os.chmod(fallback_path, 0o600)
-        except OSError:
-            pass
-        logger.warning(
-            "crypto: could not write %s, saved to fallback %s — "
-            "WARNING: /tmp is ephemeral; key will be lost on container restart, "
-            "causing previously encrypted data to become unrecoverable. "
-            "Fix: ensure %s is writable (check Docker volume mount permissions).",
-            primary_path,
-            fallback_path,
-            primary_path.parent,
-        )
+    except PermissionError as exc:
+        raise RuntimeError(
+            "crypto: could not write Fernet key file at "
+            f"{primary_path}; refusing insecure fallback and requiring a writable config dir or explicit AEGIS_ENCRYPTION_KEY"
+        ) from exc
     return key
 
 
@@ -101,10 +86,8 @@ def decrypt_mapping(payload: str) -> dict[str, str]:
         raw = _get_fernet().decrypt(payload.encode("utf-8"))
         return json.loads(raw.decode("utf-8"))
     except InvalidToken:
-        # Backwards compat: try base64 decode for pre-encryption data
-        import base64
-        try:
-            raw = base64.b64decode(payload.encode("utf-8"))
-            return json.loads(raw.decode("utf-8"))
-        except Exception:
-            raise
+        logger.warning(
+            "crypto: decrypt_mapping failed with InvalidToken; "
+            "rejecting payload (base64 plaintext fallback removed for security)"
+        )
+        raise

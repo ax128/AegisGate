@@ -5,7 +5,8 @@
 - info_log_sanitized: INFO 级别，记录处理后（遮挡/分割）的内容摘要
 
 环境变量（可选）：
-- AEGIS_DEBUG_EXCERPT_MAX_LEN: 覆盖默认截断长度。设为 0 表示不截断，打印完整内容（日志会很长）。
+- AEGIS_DEBUG_EXCERPT_MAX_LEN: 覆盖默认截断长度。仅接受正整数；
+  非法值、0 或负数都会回退到调用方默认值，避免误输出完整原文。
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ def _resolve_max_len(default: int) -> int:
     env_max = os.environ.get("AEGIS_DEBUG_EXCERPT_MAX_LEN")
     if env_max is not None:
         try:
-            return int(env_max)
+            resolved = int(env_max)
+            if resolved > 0:
+                return resolved
         except ValueError:
             pass
     return default
@@ -53,7 +56,7 @@ def debug_log_original(
     """
     仅当 DEBUG 开启时，打一条「原文」摘要日志。
     label: 如 "request_blocked", "response_sanitized"
-    original_text: 原文内容（会被截断，除非 max_len<=0 或设置了 AEGIS_DEBUG_EXCERPT_MAX_LEN=0）
+    original_text: 原文内容（会被截断；环境变量不能关闭截断）
     reason: 可选，拦截/处理原因
     """
     if not logger.isEnabledFor(logging.DEBUG):
@@ -61,9 +64,16 @@ def debug_log_original(
     max_len = _resolve_max_len(max_len)
     excerpt = excerpt_for_debug(original_text, max_len=max_len)
     if reason:
-        logger.debug("%s original_excerpt request_id=see_context reason=%s excerpt=%s", label, reason, excerpt)
+        logger.debug(
+            "%s original_excerpt request_id=see_context reason=%s excerpt=%s",
+            label,
+            reason,
+            excerpt,
+        )
     else:
-        logger.debug("%s original_excerpt request_id=see_context excerpt=%s", label, excerpt)
+        logger.debug(
+            "%s original_excerpt request_id=see_context excerpt=%s", label, excerpt
+        )
 
 
 # 处理后内容日志默认截断长度（比原文短，因为已遮挡过的内容更安全）
@@ -88,6 +98,12 @@ def info_log_sanitized(
     excerpt = excerpt_for_debug(sanitized_text, max_len=max_len)
     rid = request_id or "see_context"
     if reason:
-        logger.info("%s sanitized_output request_id=%s reason=%s output=%s", label, rid, reason, excerpt)
+        logger.info(
+            "%s sanitized_output request_id=%s reason=%s output=%s",
+            label,
+            rid,
+            reason,
+            excerpt,
+        )
     else:
         logger.info("%s sanitized_output request_id=%s output=%s", label, rid, excerpt)

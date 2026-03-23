@@ -15,7 +15,7 @@ from aegisgate.storage.kv import KVStore
 
 try:
     import psycopg
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     psycopg = None
 
 

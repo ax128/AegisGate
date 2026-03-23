@@ -13,7 +13,10 @@ from typing import Any
 
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from aegisgate.adapters.openai_compat.mapper import to_chat_response, to_responses_output
+from aegisgate.adapters.openai_compat.mapper import (
+    to_chat_response,
+    to_responses_output,
+)
 from aegisgate.adapters.openai_compat.stream_utils import (
     _build_streaming_response,
     _extract_sse_data_payload_from_chunk,
@@ -72,7 +75,9 @@ def _copy_aegis_meta(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _attach_aegis_meta(payload: dict[str, Any], aegis_meta: dict[str, Any] | None) -> dict[str, Any]:
+def _attach_aegis_meta(
+    payload: dict[str, Any], aegis_meta: dict[str, Any] | None
+) -> dict[str, Any]:
     if aegis_meta:
         payload["aegisgate"] = copy.deepcopy(aegis_meta)
     return payload
@@ -124,7 +129,9 @@ def coerce_chat_output_to_responses_output(
     return to_responses_output(resp)
 
 
-async def _iter_stream_body_chunks(response: StreamingResponse) -> AsyncGenerator[bytes, None]:
+async def _iter_stream_body_chunks(
+    response: StreamingResponse,
+) -> AsyncGenerator[bytes, None]:
     async for chunk in response.body_iterator:
         yield chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
 
@@ -206,13 +213,15 @@ def coerce_responses_stream_to_chat_stream(
             if payload_text == "[DONE]":
                 yield _stream_done_sse_chunk()
                 continue
-            chunks, role_sent, emitted_text = _convert_responses_stream_payload_to_chat_chunk(
-                payload_text,
-                request_id=request_id,
-                model=model,
-                role_sent=role_sent,
-                emitted_text=emitted_text,
-                response_text_extractor=response_text_extractor,
+            chunks, role_sent, emitted_text = (
+                _convert_responses_stream_payload_to_chat_chunk(
+                    payload_text,
+                    request_id=request_id,
+                    model=model,
+                    role_sent=role_sent,
+                    emitted_text=emitted_text,
+                    response_text_extractor=response_text_extractor,
+                )
             )
             for chunk in chunks:
                 yield chunk
@@ -227,7 +236,7 @@ def _responses_stream_start_events(
     item_id: str,
     aegis_meta: dict[str, Any] | None,
 ) -> list[bytes]:
-    events = [
+    events: list[dict[str, Any]] = [
         {
             "type": "response.created",
             "response": {
@@ -259,7 +268,10 @@ def _responses_stream_start_events(
             "part": {"type": "output_text", "text": ""},
         },
     ]
-    return [_serialize_sse_payload(_attach_aegis_meta(payload, aegis_meta)) for payload in events]
+    return [
+        _serialize_sse_payload(_attach_aegis_meta(payload, aegis_meta))
+        for payload in events
+    ]
 
 
 def _responses_stream_finish_events(
@@ -277,7 +289,7 @@ def _responses_stream_finish_events(
         "status": "completed",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
-    events = [
+    events: list[dict[str, Any]] = [
         {
             "type": "response.output_text.done",
             "response_id": request_id,
@@ -311,7 +323,10 @@ def _responses_stream_finish_events(
             },
         },
     ]
-    return [_serialize_sse_payload(_attach_aegis_meta(payload, aegis_meta)) for payload in events]
+    return [
+        _serialize_sse_payload(_attach_aegis_meta(payload, aegis_meta))
+        for payload in events
+    ]
 
 
 def _responses_stream_empty_complete(
@@ -407,7 +422,9 @@ def coerce_chat_stream_to_responses_stream(
                 "content_index": 0,
                 "delta": text,
             }
-            yield _serialize_sse_payload(_attach_aegis_meta(delta_payload, pending_meta))
+            yield _serialize_sse_payload(
+                _attach_aegis_meta(delta_payload, pending_meta)
+            )
 
         if not emitted_text and not started:
             return
