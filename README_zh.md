@@ -742,15 +742,24 @@ pytest -q
 
 网关会透传上游错误摘要。请先独立验证上游接口可用，再检查网关策略拦截。
 
-### 8.4 流式日志出现 `upstream_eof_no_done`
+### 8.4 流式日志出现 `upstream_eof_no_done` 或 `terminal_event_no_done_recovered:*`
 
-含义：上游流式连接提前关闭，未按协议发送 `data: [DONE]`。
+这两类日志现在要分开理解：
 
-- 网关会自动执行恢复并补发 `[DONE]`：
-  - `chat/completions`：合成包含恢复提示的可见文本 chunk。
-  - `responses`：合成 `response.completed` 终止事件（不保证回放已输出文本）。
-  - `v2`（SSE 流）：自动补发 `data: [DONE]\n\n`，保证客户端收到终止信号。
-- 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关确认匹配失败。
+- `upstream_eof_no_done`：上游流式连接提前关闭，未按协议发送 `data: [DONE]`。网关会自动恢复并补发终止信号。
+- `terminal_event_no_done_recovered:response.completed|response.failed|error`：网关已经收到了上游明确的终止事件，但上游在发送 `[DONE]` 前就关闭了连接。这类情况不再记成泛化的 EOF 恢复。
+
+自动恢复行为：
+
+- `chat/completions`：合成包含恢复提示的可见文本 chunk。
+- `responses`：补发 `[DONE]`；若没有显式终止事件，必要时合成 `response.completed` 终止事件。
+- `v2`（SSE 流）：自动补发 `data: [DONE]\n\n`，保证客户端收到终止信号。
+
+排查建议：
+
+- 这通常是上游或其中间代理链路（CDN/反代）问题，不是网关把 SSE chunk 拆成了多个请求。
+- `/v1/responses` 现在会把 `x-aegis-request-id` 一起转发到上游，`forward_stream start/connected` 日志也会带同一个 `request_id`。
+- 如果网关里同一时间窗出现很多 `incoming request`，但只有少量匹配 `request_id` 的 `forward_stream start/connected`，说明额外流量是新的 HTTP 请求反复打进网关，而不是单条 SSE 被拆成多次上游调用。
 - 建议同时排查上游超时、代理 `read timeout`、连接重置日志。
 - 2026-03 优化：网关对带 `event:` 头的 Responses SSE 现按完整事件帧缓存和转发，不再按单行拆分，避免 `event:` 与对应 `data:` 错位，导致客户端把 `response.output_text.delta`、`response.output_text.done`、`response.completed` 配对错误。
 

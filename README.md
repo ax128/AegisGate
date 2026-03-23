@@ -265,8 +265,13 @@ Token not registered, deleted, or `AEGIS_GW_TOKENS_PATH` not persisted across re
 ### Upstream returns 4xx/5xx
 Gateway transparently forwards upstream errors. Verify upstream availability independently first.
 
-### Streaming logs show `upstream_eof_no_done`
-Upstream closed the stream without sending `data: [DONE]`. The gateway auto-recovers by synthesizing a completion event. Check upstream timeout and proxy chain configuration.
+### Streaming logs show `upstream_eof_no_done` or `terminal_event_no_done_recovered:*`
+Two different cases are logged separately:
+
+- `upstream_eof_no_done`: upstream closed the stream without sending `data: [DONE]`; the gateway auto-recovers by synthesizing a completion event.
+- `terminal_event_no_done_recovered:response.completed|response.failed|error`: the gateway already received an explicit terminal event from upstream, but upstream closed before sending `[DONE]`. This is no longer logged as a generic EOF recovery.
+
+For `/v1/responses`, forwarded upstream calls now carry `x-aegis-request-id`, and upstream forwarding logs include the same `request_id`. If gateway logs show repeated `incoming request` entries but only one or two `forward_stream start/connected` entries for matching request IDs, the extra traffic is coming into the gateway as new HTTP requests rather than SSE chunks being split into multiple upstream calls.
 
 Optimization note (2026-03): Responses SSE frames that include explicit `event:` headers are now buffered and forwarded as full event frames instead of line-by-line. This prevents `event:` and `data:` lines from being reordered across `response.output_text.delta`, `response.output_text.done`, and `response.completed`.
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -24,6 +26,7 @@ from aegisgate.adapters.openai_compat.stream_utils import (
 )
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
+from aegisgate.util.logger import logger as aegis_logger
 
 
 def test_extract_sse_data_payload() -> None:
@@ -442,6 +445,15 @@ def test_execute_responses_stream_replays_notice_on_upstream_eof_without_done_an
 def test_execute_responses_stream_injects_done_when_terminal_event_seen_without_done(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
 
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_payload_transform", fake_run_payload_transform)
+
     async def fake_forward_stream_lines(url, payload, headers):
         yield b'data: {"type":"response.completed","response":{"id":"r1","object":"response","status":"completed","output":[]}}\n\n'
 
@@ -472,6 +484,110 @@ def test_execute_responses_stream_injects_done_when_terminal_event_seen_without_
     assert text.count('"type":"response.completed"') + text.count('"type": "response.completed"') == 1
     assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
     assert "data: [DONE]" in text
+
+
+def test_execute_responses_stream_uses_terminal_event_reason_without_duplicate_failure_logs(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_payload_transform", fake_run_payload_transform)
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"type":"error","error":{"message":"upstream failed"}}\n\n'
+        yield b'data: {"type":"response.failed","response":{"id":"r1","status":"failed","output":[]}}\n\n'
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+    log_buffer = io.StringIO()
+    log_handler = logging.StreamHandler(log_buffer)
+    log_handler.setLevel(logging.DEBUG)
+    log_handler.setFormatter(logging.Formatter("%(message)s"))
+    previous_level = aegis_logger.level
+    aegis_logger.addHandler(log_handler)
+    aegis_logger.setLevel(logging.DEBUG)
+
+    payload = {
+        "request_id": "r-stream-resp-eof-4",
+        "session_id": "s-stream-resp-eof-4",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        chunks: list[bytes] = []
+        async for chunk in response:
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    try:
+        text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    finally:
+        aegis_logger.removeHandler(log_handler)
+        aegis_logger.setLevel(previous_level)
+
+    log_text = log_buffer.getvalue()
+
+    assert "data: [DONE]" in text
+    assert "upstream_eof_no_done_recovered" not in log_text
+    assert "reason=terminal_event_no_done_recovered:response.failed" in log_text
+    assert log_text.count("responses stream terminal_event request_id=") == 1
+    assert log_text.count("responses stream terminal_event with no text_delta") == 1
+
+
+def test_execute_responses_stream_forwards_trace_request_id_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._build_streaming_response", lambda generator: generator)
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_request_pipeline", fake_run_request_pipeline)
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._run_payload_transform", fake_run_payload_transform)
+    captured_headers: dict[str, str] = {}
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        captured_headers.update(headers)
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr("aegisgate.adapters.openai_compat.router._forward_stream_lines", fake_forward_stream_lines)
+
+    payload = {
+        "request_id": "r-stream-resp-trace-1",
+        "session_id": "s-stream-resp-trace-1",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> None:
+        response = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        async for _chunk in response:
+            pass
+
+    asyncio.run(run_case())
+
+    assert captured_headers["x-aegis-request-id"] == "r-stream-resp-trace-1"
 
 
 def test_chat_stream_returns_confirmation_chunk_when_response_blocked(monkeypatch: pytest.MonkeyPatch) -> None:

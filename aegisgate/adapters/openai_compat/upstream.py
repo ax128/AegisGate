@@ -30,6 +30,7 @@ _HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
+_TRACE_REQUEST_ID_HEADER = "x-aegis-request-id"
 
 _upstream_async_client: httpx.AsyncClient | None = None
 _upstream_client_lock: Any = None
@@ -90,6 +91,11 @@ def _header_value(headers: Mapping[str, str], target: str) -> str:
         if key.lower() == target.lower():
             return value
     return ""
+
+
+def _trace_request_id(headers: Mapping[str, str]) -> str:
+    request_id = _header_value(headers, _TRACE_REQUEST_ID_HEADER).strip()
+    return request_id or "-"
 
 
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
@@ -213,15 +219,16 @@ def _safe_error_detail(payload: dict[str, Any] | str) -> str:
 
 async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str, str]) -> tuple[int, dict[str, Any] | str]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    logger.debug("forward_json start url=%s payload_bytes=%d", url, len(body))
+    trace_request_id = _trace_request_id(headers)
+    logger.debug("forward_json start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
     client = await _get_upstream_async_client()
     try:
         response = await client.post(url=url, content=body, headers=dict(headers))
-        logger.debug("forward_json done url=%s status=%s", url, response.status_code)
+        logger.debug("forward_json done request_id=%s url=%s status=%s", trace_request_id, url, response.status_code)
         return response.status_code, _decode_json_or_text(response.content)
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("forward_json http_error url=%s error=%s", url, detail)
+        logger.warning("forward_json http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
@@ -231,11 +238,12 @@ async def _forward_stream_lines(
     headers: Mapping[str, str],
 ) -> AsyncGenerator[bytes, None]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    logger.debug("forward_stream start url=%s payload_bytes=%d", url, len(body))
+    trace_request_id = _trace_request_id(headers)
+    logger.debug("forward_stream start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
     client = await _get_upstream_async_client()
     try:
         async with client.stream("POST", url=url, content=body, headers=dict(headers)) as resp:
-            logger.debug("forward_stream connected url=%s status=%s", url, resp.status_code)
+            logger.debug("forward_stream connected request_id=%s url=%s status=%s", trace_request_id, url, resp.status_code)
             if resp.status_code >= 400:
                 detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
                 raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
@@ -244,5 +252,5 @@ async def _forward_stream_lines(
                     yield chunk
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("forward_stream http_error url=%s error=%s", url, detail)
+        logger.warning("forward_stream http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
