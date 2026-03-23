@@ -25,7 +25,6 @@ logs/*
 *.log
 使用教程.log
 docker-compose-me.yml
-aegisgate/tests/*
 # Caddy config (local per-deployment)
 Caddyfile
 
