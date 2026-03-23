@@ -197,10 +197,10 @@ function createInputField(item) {
   }
   input.id = fieldId(item);
   input.addEventListener("input", () => {
-    updateFieldValue(item.field, item.type === "int" ? input.value : input.value);
+    updateFieldValue(item.field, item.type === "int" ? Number(input.value) : input.value);
   });
   input.addEventListener("change", () => {
-    updateFieldValue(item.field, item.type === "int" ? input.value : input.value);
+    updateFieldValue(item.field, item.type === "int" ? Number(input.value) : input.value);
   });
   return input;
 }
@@ -352,10 +352,6 @@ async function loadBootstrap() {
 
 // ─── Token Management ────────────────────────
 
-function tokenDisplay(token) {
-  return token;
-}
-
 async function loadTokens() {
   const tbody = document.getElementById("token-tbody");
   const countEl = document.getElementById("token-count");
@@ -379,7 +375,7 @@ async function loadTokens() {
       tr.innerHTML = `
         <td>
           <button class="token-code" title="点击复制完整 Token" data-token="${escapeHtml(item.token)}">
-            ${escapeHtml(tokenDisplay(item.token))}
+            ${escapeHtml(item.token)}
           </button>
         </td>
         <td><div class="token-upstream" title="${escapeHtml(item.upstream_base)}">${escapeHtml(item.upstream_base)}</div></td>
@@ -405,7 +401,7 @@ async function loadTokens() {
         const t = e.currentTarget.dataset.token;
         navigator.clipboard.writeText(t).then(() => {
           e.currentTarget.textContent = "已复制!";
-          setTimeout(() => { e.currentTarget.textContent = tokenDisplay(t); }, 1500);
+          setTimeout(() => { e.currentTarget.textContent = t; }, 1500);
         }).catch(() => {});
       });
       // Edit token
@@ -584,6 +580,7 @@ function bindActions() {
     window.open("/__ui__/health", "_blank", "noopener,noreferrer");
   });
   document.getElementById("logout-button").addEventListener("click", async () => {
+    if (!confirm("确认退出登录？")) return;
     await fetchJson("/__ui__/api/logout", {
       method: "POST",
       headers: { "x-aegis-ui-csrf": uiCsrfToken },
@@ -657,24 +654,65 @@ async function loadRedactValues() {
   }
 }
 
+function openRedactModal() {
+  const modal = document.getElementById("redact-modal");
+  if (!modal) return;
+  document.getElementById("redact-modal-value").value = "";
+  document.getElementById("redact-modal-error").textContent = "";
+  modal.classList.remove("hidden");
+  document.getElementById("redact-modal-value").focus();
+}
+
+function closeRedactModal() {
+  const modal = document.getElementById("redact-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function submitRedactModal() {
+  const value = document.getElementById("redact-modal-value").value.trim();
+  const errEl = document.getElementById("redact-modal-error");
+  errEl.textContent = "";
+  if (!value) { errEl.textContent = "请输入敏感值"; return; }
+  if (value.length < 10) { errEl.textContent = "至少 10 个字符"; return; }
+  const submitBtn = document.getElementById("redact-modal-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "添加中…";
+  try {
+    await fetchJson("/__ui__/api/redact_values", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+      body: JSON.stringify({ value }),
+    });
+    closeRedactModal();
+    loadRedactValues();
+  } catch (err) {
+    errEl.textContent = err.message;
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "添加";
+  }
+}
+
 function bindRedactUI() {
   const addBtn = document.getElementById("redact-add");
   const refreshBtn = document.getElementById("redact-refresh");
-  if (addBtn) addBtn.addEventListener("click", async () => {
-    const value = prompt("输入要精确脱敏的敏感值（至少 10 个字符）：");
-    if (!value) return;
-    try {
-      await fetchJson("/__ui__/api/redact_values", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
-        body: JSON.stringify({ value }),
-      });
-      loadRedactValues();
-    } catch (err) {
-      alert(`添加失败: ${err.message}`);
-    }
-  });
+  if (addBtn) addBtn.addEventListener("click", openRedactModal);
   if (refreshBtn) refreshBtn.addEventListener("click", loadRedactValues);
+
+  const closeBtn = document.getElementById("redact-modal-close");
+  const cancelBtn = document.getElementById("redact-modal-cancel");
+  const submitBtn = document.getElementById("redact-modal-submit");
+  const modal = document.getElementById("redact-modal");
+  if (closeBtn) closeBtn.addEventListener("click", closeRedactModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeRedactModal);
+  if (submitBtn) submitBtn.addEventListener("click", submitRedactModal);
+  if (modal) {
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeRedactModal(); });
+    modal.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeRedactModal();
+      if (e.key === "Enter" && !e.shiftKey && submitBtn && !submitBtn.disabled) submitRedactModal();
+    });
+  }
   loadRedactValues();
 }
 
@@ -1073,11 +1111,108 @@ function bindStatsUI() {
   loadStats();
 }
 
+// ─── Docker Compose Editor ────────────────────
+
+var currentComposeFile = "";
+
+async function loadComposeList() {
+  var selector = document.getElementById("compose-selector");
+  if (!selector) return;
+  selector.innerHTML = "";
+  try {
+    var data = await fetchJson("/__ui__/api/compose");
+    var items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) {
+      selector.innerHTML = '<span style="font-size:0.83rem;color:var(--muted);">未找到 Compose 文件</span>';
+      return;
+    }
+    items.forEach(function(item) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "compose-file-btn" + (item.filename === currentComposeFile ? " active" : "");
+      btn.textContent = item.filename + (item.exists ? "" : " (不存在)");
+      btn.addEventListener("click", function() {
+        currentComposeFile = item.filename;
+        selector.querySelectorAll(".compose-file-btn").forEach(function(b) { b.classList.remove("active"); });
+        btn.classList.add("active");
+        loadComposeContent(item.filename);
+      });
+      selector.appendChild(btn);
+    });
+    if (!currentComposeFile && items.length) {
+      currentComposeFile = items[0].filename;
+      selector.querySelector(".compose-file-btn").classList.add("active");
+      loadComposeContent(items[0].filename);
+    } else if (currentComposeFile) {
+      loadComposeContent(currentComposeFile);
+    }
+  } catch (err) {
+    selector.innerHTML = '<span style="color:var(--error);font-size:0.83rem;">加载失败: ' + escapeHtml(err.message) + '</span>';
+  }
+}
+
+async function loadComposeContent(filename) {
+  var editor = document.getElementById("compose-editor");
+  if (!editor) return;
+  editor.value = "加载中…";
+  try {
+    var data = await fetchJson("/__ui__/api/compose/" + encodeURIComponent(filename));
+    editor.value = data.content || "";
+  } catch (err) {
+    editor.value = "加载失败: " + err.message;
+  }
+}
+
+function bindComposeUI() {
+  var saveBtn = document.getElementById("save-compose");
+  if (saveBtn) saveBtn.addEventListener("click", async function() {
+    if (!currentComposeFile) return;
+    var editor = document.getElementById("compose-editor");
+    setStatus("compose-save-status", "保存中…");
+    try {
+      await fetchJson("/__ui__/api/compose/" + encodeURIComponent(currentComposeFile), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify({ content: editor.value }),
+      });
+      setStatus("compose-save-status", "已保存");
+    } catch (err) {
+      setStatus("compose-save-status", "保存失败: " + err.message, true);
+    }
+  });
+  loadComposeList();
+}
+
+// ─── Restart ──────────────────────────────────
+
+function bindRestartButton() {
+  var btn = document.getElementById("restart-button");
+  if (!btn) return;
+  btn.addEventListener("click", async function() {
+    if (!confirm("确认重启网关？服务将短暂中断约 1.5 秒。")) return;
+    btn.disabled = true;
+    btn.querySelector("svg + span, svg ~ *") || (btn.textContent = "重启中…");
+    try {
+      await fetchJson("/__ui__/api/restart", {
+        method: "POST",
+        headers: { "x-aegis-ui-csrf": uiCsrfToken },
+      });
+      updateHeaderStatus("restarting");
+      setTimeout(function() { window.location.reload(); }, 3000);
+    } catch (err) {
+      alert("重启失败: " + err.message);
+      btn.disabled = false;
+    }
+  });
+}
+
 // ─── Init new UI modules ─────────────────────
 
 bindRulesUI();
 bindKeysUI();
 bindStatsUI();
+bindComposeUI();
+bindRestartButton();
 
 (function initThemeToggle() {
   const btn = document.getElementById('theme-toggle');

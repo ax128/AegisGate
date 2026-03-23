@@ -319,7 +319,7 @@ def register_ui_routes(app: FastAPI) -> None:
             fallback = _key_fallback_path(key_type)
             exists = primary.is_file() or fallback.is_file()
             active_path = str(primary) if primary.is_file() else (str(fallback) if fallback.is_file() else str(primary))
-            result.append({"type": key_type, "filename": filename, "exists": exists, "path": active_path})
+            result.append({"type": key_type, "filename": filename, "exists": exists})
         return JSONResponse(content={"items": result})
 
     @app.get("/__ui__/api/keys/{key_type}")
@@ -620,7 +620,7 @@ def register_ui_routes(app: FastAPI) -> None:
         items = []
         for name in sorted(_COMPOSE_FILES_ALLOWED):
             path = _compose_file_path(name)
-            items.append({"filename": name, "exists": path.is_file(), "path": str(path)})
+            items.append({"filename": name, "exists": path.is_file()})
         return JSONResponse(content={"items": items})
 
     @app.get("/__ui__/api/compose/{filename:path}")
@@ -654,8 +654,8 @@ def register_ui_routes(app: FastAPI) -> None:
                 tmp.write(content)
                 tmp_path = Path(tmp.name)
             tmp_path.replace(path)
-        except OSError as exc:
-            return JSONResponse(status_code=500, content={"error": "write_failed", "detail": str(exc)})
+        except OSError:
+            return JSONResponse(status_code=500, content={"error": "write_failed", "detail": "无法写入文件"})
         return JSONResponse(content={"ok": True, "filename": filename, "save_path": str(path)})
 
     # ------------------------------------------------------------------

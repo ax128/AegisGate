@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
-
 :root {
   color-scheme: light;
   --bg: #f8f9fb;
@@ -1009,11 +1007,11 @@ select:focus {
 /* ─── Login page ─────────────────────────────── */
 
 body.login-page {
-  background: #f0f2f7;
+  background: var(--bg);
   background-image:
     radial-gradient(circle at 80% 10%, rgba(94, 106, 210, 0.1) 0%, transparent 40%),
     radial-gradient(circle at 20% 90%, rgba(118, 56, 209, 0.06) 0%, transparent 40%),
-    linear-gradient(155deg, #f0f2f7 0%, #e8eaf3 100%);
+    linear-gradient(155deg, var(--bg) 0%, var(--panel-2) 100%);
   position: relative;
 }
 
@@ -1040,11 +1038,11 @@ body.login-page {
 }
 
 [data-theme="dark"] body.login-page {
-  background: #030305;
+  background: var(--bg);
   background-image:
     radial-gradient(circle at 80% 10%, rgba(94, 106, 210, 0.15) 0%, transparent 40%),
     radial-gradient(circle at 20% 90%, rgba(118, 56, 209, 0.1) 0%, transparent 40%),
-    linear-gradient(135deg, #030305 0%, #0a0a0f 100%);
+    linear-gradient(135deg, var(--bg) 0%, var(--panel-2) 100%);
 }
 
 [data-theme="dark"] .login-card {
@@ -1421,4 +1419,13 @@ body.login-page {
 }
 .btn-restart:hover {
   background: #d97706;
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
