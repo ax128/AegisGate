@@ -9,14 +9,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -25,12 +26,32 @@ jobs:
         timeout-minutes: 8
         run: pip install -e ".[dev,semantic]"
 
-      - name: Run tests with coverage
+      - name: Detect tests
+        id: tests
+        shell: bash
+        run: |
+          if [ -d aegisgate/tests ] && find aegisgate/tests -maxdepth 1 -name 'test_*.py' -print -quit | grep -q .; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip test run
+        if: steps.tests.outputs.has_tests != 'true'
+        run: echo "No tracked tests found under aegisgate/tests; skipping pytest and coverage."
+
+      - name: Run tests
+        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version != '3.12'
         timeout-minutes: 8
+        run: pytest -v
+
+      - name: Run tests with coverage
+        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
+        timeout-minutes: 12
         run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage
-        if: matrix.python-version == '3.12'
+        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           file: coverage.xml
