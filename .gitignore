@@ -7,9 +7,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-aegisgate/tests/*
-!aegisgate/tests/__init__.py
-!aegisgate/tests/test_*.py
+aegisgate/tests/
 
 # Virtual env
 .venv/
