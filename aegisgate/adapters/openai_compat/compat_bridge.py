@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
@@ -428,5 +429,157 @@ def coerce_chat_stream_to_responses_stream(
 
         if not emitted_text and not started:
             return
+
+    return _build_streaming_response(generator())
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Chat SSE  →  Anthropic Messages SSE
+# ---------------------------------------------------------------------------
+
+def _serialize_anthropic_sse_event(event_type: str, payload: dict[str, Any]) -> bytes:
+    """Serialize as Anthropic-style SSE: event: <type>\ndata: <json>\n\n"""
+    return (
+        f"event: {event_type}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    ).encode("utf-8")
+
+
+def _messages_stream_start_events(
+    *,
+    message_id: str,
+    model: str,
+) -> list[bytes]:
+    """Emit message_start + content_block_start."""
+    events: list[bytes] = []
+    events.append(_serialize_anthropic_sse_event("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        },
+    }))
+    events.append(_serialize_anthropic_sse_event("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    }))
+    return events
+
+
+def _messages_stream_finish_events(
+    *,
+    stop_reason: str,
+    output_tokens: int,
+) -> list[bytes]:
+    """Emit content_block_stop + message_delta + message_stop."""
+    events: list[bytes] = []
+    events.append(_serialize_anthropic_sse_event("content_block_stop", {
+        "type": "content_block_stop",
+        "index": 0,
+    }))
+    events.append(_serialize_anthropic_sse_event("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": output_tokens},
+    }))
+    events.append(_serialize_anthropic_sse_event("message_stop", {
+        "type": "message_stop",
+    }))
+    return events
+
+
+def coerce_chat_stream_to_messages_stream(
+    response: StreamingResponse,
+    *,
+    original_model: str,
+) -> StreamingResponse:
+    """Convert OpenAI chat.completion.chunk SSE → Anthropic Messages SSE stream.
+
+    OpenAI emits:  data: {"choices":[{"delta":{"content":"..."}}]}
+    Anthropic expects: event: content_block_delta\\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+    """
+    async def generator() -> AsyncGenerator[bytes, None]:
+        message_id = f"msg_{uuid.uuid4().hex[:24]}"
+        started = False
+        output_tokens = 0
+
+        async for frame in _iter_sse_frames(_iter_stream_body_chunks(response)):
+            payload_text = _extract_sse_data_payload_from_chunk(frame)
+            if payload_text is None:
+                continue
+            if payload_text == "[DONE]":
+                if started:
+                    for chunk in _messages_stream_finish_events(
+                        stop_reason="end_turn",
+                        output_tokens=output_tokens,
+                    ):
+                        yield chunk
+                return
+
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            # Extract text delta from OpenAI chunk
+            choices = payload.get("choices") or []
+            if not choices:
+                continue
+            first = choices[0]
+            if not isinstance(first, dict):
+                continue
+
+            delta = first.get("delta") or {}
+            text = delta.get("content") or ""
+            finish_reason = first.get("finish_reason")
+
+            if text:
+                if not started:
+                    for chunk in _messages_stream_start_events(
+                        message_id=message_id,
+                        model=original_model,
+                    ):
+                        yield chunk
+                    started = True
+
+                output_tokens += 1  # approximate token count
+                yield _serialize_anthropic_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                })
+
+            if finish_reason and finish_reason != "null":
+                if not started:
+                    for chunk in _messages_stream_start_events(
+                        message_id=message_id,
+                        model=original_model,
+                    ):
+                        yield chunk
+                    started = True
+                stop = "max_tokens" if finish_reason == "length" else "end_turn"
+                for chunk in _messages_stream_finish_events(
+                    stop_reason=stop,
+                    output_tokens=output_tokens,
+                ):
+                    yield chunk
+                return
+
+        # Stream ended without [DONE] or finish_reason
+        if started:
+            for chunk in _messages_stream_finish_events(
+                stop_reason="end_turn",
+                output_tokens=output_tokens,
+            ):
+                yield chunk
 
     return _build_streaming_response(generator())

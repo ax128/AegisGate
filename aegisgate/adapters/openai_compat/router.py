@@ -14,13 +14,18 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat.mapper import (
+    chat_response_to_messages_response,
+    messages_payload_to_chat_payload,
     to_chat_response,
     to_internal_chat,
+    to_internal_messages,
     to_internal_responses,
+    to_messages_response,
     to_responses_output,
 )
 from aegisgate.adapters.openai_compat.compat_bridge import (
     coerce_chat_output_to_responses_output,
+    coerce_chat_stream_to_messages_stream,
     coerce_chat_stream_to_responses_stream,
     coerce_responses_output_to_chat_output,
     coerce_responses_stream_to_chat_stream,
@@ -284,6 +289,11 @@ def _looks_like_responses_payload(payload: dict[str, Any]) -> bool:
 
 def _looks_like_chat_payload(payload: dict[str, Any]) -> bool:
     return "messages" in payload and "input" not in payload
+
+
+def _looks_like_messages_payload(payload: dict[str, Any]) -> bool:
+    """Detect Anthropic /v1/messages format: has 'messages' + 'max_tokens' (required by Anthropic), no 'input'."""
+    return "messages" in payload and "max_tokens" in payload and "input" not in payload
 
 
 def _trim_stream_window(current: str, chunk: str) -> str:
@@ -1165,10 +1175,18 @@ def _extract_responses_user_text(payload: dict[str, Any]) -> str:
     return _extract_latest_user_text_from_responses_input(payload.get("input", ""))
 
 
+def _extract_messages_user_text(payload: dict[str, Any]) -> str:
+    """Extract user text from Anthropic /v1/messages payload for security analysis."""
+    # Same structure as chat — messages is a list with role/content
+    return _extract_chat_user_text(payload)
+
+
 def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
     """取请求侧用户输入文本，用于 debug 原文摘要（截断展示）。"""
     if route == "/v1/responses":
         return _extract_responses_user_text(payload)
+    if route == "/v1/messages":
+        return _extract_messages_user_text(payload)
     return _extract_chat_user_text(payload)
 
 
@@ -5167,6 +5185,152 @@ async def responses(payload: dict, request: Request):
     )
 
 
+@router.post("/messages")
+async def messages(payload: dict, request: Request):
+    """Anthropic /v1/messages endpoint.
+
+    - 无 compat 标记：原样透传到 Anthropic 兼容上游（安全管道照常生效）。
+    - compat=openai_chat（通过 token 配置注入）：
+      Messages → Chat Completions 转换 → 转发上游 → 响应转回 Messages 格式。
+    """
+    _log_request_if_debug(request, payload, "/v1/messages")
+    boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=payload, headers=gateway_headers, boundary=boundary)
+    request_id = str(payload.get("request_id") or "preview-messages")
+    session_id = str(payload.get("session_id") or request_id)
+    ctx_preview = RequestContext(
+        request_id=request_id,
+        session_id=session_id,
+        route="/v1/messages",
+        tenant_id=tenant_id,
+    )
+    body_size_bytes = boundary.get("request_body_size")
+    if not isinstance(body_size_bytes, int):
+        body_size_bytes = None
+
+    ok_payload, status_code, reason, detail = _validate_payload_limits(
+        payload,
+        route=ctx_preview.route,
+        body_size_bytes=body_size_bytes,
+    )
+    if not ok_payload:
+        return _error_response(
+            status_code=status_code,
+            reason=reason,
+            detail=detail,
+            ctx=ctx_preview,
+            boundary=boundary,
+        )
+
+    req_preview = await _run_payload_transform(to_internal_messages, payload)
+    ctx_preview.request_id = req_preview.request_id
+    ctx_preview.session_id = req_preview.session_id
+
+    # --- compat 检测：是否需要 Messages → Chat Completions 转换 ---
+    compat = request.scope.get("aegis_compat")
+    if compat == "openai_chat":
+        return await _messages_compat_openai_chat(
+            payload=payload,
+            request=request,
+            gateway_headers=gateway_headers,
+            boundary=boundary,
+            tenant_id=tenant_id,
+        )
+
+    # --- 原样透传：上游是 Anthropic 兼容 API ---
+    request_path = _request_target_path(request, fallback_path="/v1/messages")
+
+    if _should_stream(payload):
+        return await _execute_generic_stream_once(
+            payload=payload,
+            request_headers=gateway_headers,
+            request_path=request_path,
+            boundary=boundary,
+            tenant_id=tenant_id,
+        )
+
+    return await _execute_generic_once(
+        payload=payload,
+        request_headers=gateway_headers,
+        request_path=request_path,
+        boundary=boundary,
+        tenant_id=tenant_id,
+    )
+
+
+async def _messages_compat_openai_chat(
+    *,
+    payload: dict,
+    request: Request,
+    gateway_headers: dict[str, str],
+    boundary: dict | None,
+    tenant_id: str,
+) -> JSONResponse | StreamingResponse:
+    """Messages → Chat Completions 转换链路。
+
+    1. 将 Anthropic Messages payload 转为 OpenAI Chat payload
+    2. 通过现有 chat 执行链路转发到上游
+    3. 将响应转回 Anthropic Messages 格式
+    """
+    original_model = payload.get("model", "unknown-model")
+    model_map = request.scope.get("aegis_model_map") or {}
+    default_model = request.scope.get("aegis_default_model")
+
+    # 转换请求: Messages → Chat
+    try:
+        chat_payload = messages_payload_to_chat_payload(
+            payload, model_map=model_map, default_model=default_model,
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    logger.info(
+        "messages_compat converting model=%s->%s stream=%s",
+        original_model,
+        chat_payload.get("model"),
+        chat_payload.get("stream"),
+    )
+
+    # 用 /v1/chat/completions 路径转发
+    chat_request_path = "/v1/chat/completions"
+
+    if _should_stream(chat_payload):
+        # 流式：Chat stream → Messages stream
+        chat_stream_resp = await _execute_chat_stream_once(
+            payload=chat_payload,
+            request_headers=gateway_headers,
+            request_path=chat_request_path,
+            boundary=boundary,
+            tenant_id=tenant_id,
+            forced_upstream_base=None,
+        )
+        if isinstance(chat_stream_resp, StreamingResponse):
+            return coerce_chat_stream_to_messages_stream(
+                chat_stream_resp,
+                original_model=original_model,
+            )
+        # 非 StreamingResponse（错误等），直接返回
+        return chat_stream_resp
+
+    # 非流式：Chat response → Messages response
+    chat_resp = await _execute_chat_once(
+        payload=chat_payload,
+        request_headers=gateway_headers,
+        request_path=chat_request_path,
+        boundary=boundary,
+        tenant_id=tenant_id,
+        skip_confirmation=False,
+        forced_upstream_base=None,
+    )
+    if isinstance(chat_resp, (JSONResponse, PlainTextResponse)):
+        return chat_resp
+    if isinstance(chat_resp, dict):
+        return JSONResponse(
+            content=chat_response_to_messages_response(chat_resp, original_model=original_model)
+        )
+    return chat_resp
+
+
 @router.post("/{subpath:path}")
 async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
     normalized = subpath.strip("/")
@@ -5174,7 +5338,7 @@ async def generic_provider_proxy(subpath: str, payload: dict, request: Request):
     route_path = _request_target_path(request, fallback_path=route_base_path)
     _log_request_if_debug(request, payload, route_path)
     logger.info("generic proxy route hit subpath=%s", normalized)
-    if normalized in {"chat/completions", "responses"}:
+    if normalized in {"chat/completions", "responses", "messages"}:
         return JSONResponse(status_code=404, content={"error": "not_found"})
 
     boundary = getattr(request.state, "security_boundary", {})

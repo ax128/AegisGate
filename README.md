@@ -13,7 +13,8 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 - **Prompt Injection Protection** — Multi-layer detection: regex patterns, TF-IDF semantic classifier (bilingual EN/ZH, no GPU required), Unicode/encoding attack detection, typoglycemia defense
 - **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers
 - **Dangerous Response Sanitization** — Automatic obfuscation of high-risk LLM outputs (shell commands, SQL injection payloads, HTTP smuggling) with configurable security levels (low/medium/high)
-- **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/responses`, and generic proxy; works with any OpenAI-compatible provider
+- **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and generic proxy; works with any OpenAI-compatible provider
+- **Anthropic ↔ OpenAI Protocol Conversion** — Token-based `compat` mode converts Anthropic `/v1/messages` requests to OpenAI `/v1/chat/completions` on the fly, enabling Claude Code / Anthropic SDK to talk to OpenAI-compatible upstreams (GPT-5.4, etc.) without code changes
 - **MCP & Agent SKILL Support** — Integrates with Cursor, Claude Code, Codex, Windsurf and other AI coding agents via Model Context Protocol
 - **Token-Based Routing** — Route requests to multiple upstream providers through a single gateway with per-token upstream mapping and whitelist controls
 - **Web Management Console** — Built-in admin UI for configuration, token management, security rules CRUD, key rotation, and real-time request statistics
@@ -194,13 +195,61 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 ### API Endpoints
 
 - **OpenAI-compatible** (full security pipeline): `POST /v1/chat/completions`, `POST /v1/responses`
+- **Anthropic Messages**: `POST /v1/messages` — full security pipeline; supports native pass-through to Anthropic-compatible upstreams, or protocol conversion to OpenAI Chat Completions via token `compat` mode
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` (requires `x-target-url` header)
-- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path (including `/v1/messages`) to upstream **without** running the security filter pipeline; use this for non-OpenAI providers that need transparent proxying
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; use this for non-OpenAI providers that need transparent proxying
 
 Compatibility notes:
 
 - If a client accidentally sends a Responses-style payload (`input`) to `/v1/chat/completions`, AegisGate forwards it upstream as `/v1/responses` but converts the result back to Chat Completions JSON/SSE for the client.
 - If a client accidentally sends a Chat-style payload (`messages`) to `/v1/responses`, AegisGate applies the inverse compatibility mapping and returns Responses-shaped output.
+
+### Protocol Conversion (Anthropic → OpenAI)
+
+When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.json`, the gateway automatically converts Anthropic `/v1/messages` requests to OpenAI `/v1/chat/completions` format and converts responses back. This enables Claude Code and the Anthropic SDK to use OpenAI-compatible upstreams transparently.
+
+**Setup:**
+
+1. Register a compat token in `config/gw_tokens.json`:
+   ```json
+   {
+     "tokens": {
+       "claude-to-gpt": {
+         "compat": "openai_chat"
+       }
+     }
+   }
+   ```
+
+2. Configure global model mapping in `config/model_map.json`:
+   ```json
+   {
+     "map": {
+       "claude-opus-4-20250514": "gpt-5.4",
+       "claude-sonnet-4-20250514": "gpt-5.4",
+       "claude-haiku-4-5-20251001": "gpt-5.4-mini"
+     }
+   }
+   ```
+
+3. Point your client at the compat token with a local port:
+   ```bash
+   # Claude Code / Anthropic SDK
+   export ANTHROPIC_BASE_URL=http://gateway:18080/v1/__gw__/t/claude-to-gpt/8317
+   ```
+
+**URL patterns:**
+
+| URL | Behavior |
+|-----|----------|
+| `/v1/__gw__/t/claude-to-gpt/8317/messages` | Messages → Chat Completions → `:8317` → response converted back |
+| `/v1/__gw__/t/claude-to-gpt/8317__redact/messages` | Same + PII redaction only |
+| `/v1/__gw__/t/claude-to-gpt/8317__passthrough/messages` | Same + skip all filters |
+| `/v1/__gw__/t/8317/messages` | Native pass-through (no conversion) |
+
+**Model mapping priority:** token-level `model_map` > global `config/model_map.json` > token-level `default_model` > `gpt-5.4` (default)
+
+**Allowed target models:** `gpt-5`, `gpt-5.2`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2-codex`, `gpt-5.3-codex`
 
 ### Security Pipeline
 

@@ -67,11 +67,23 @@ def load(*, replace: bool = False) -> None:
                 return
             _tokens.clear()
             for k, v in tokens.items():
-                if isinstance(v, dict) and "upstream_base" in v:
-                    _tokens[str(k)] = {
-                        "upstream_base": str(v["upstream_base"]),
-                        "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
-                    }
+                if not isinstance(v, dict):
+                    continue
+                # compat token 允许省略 upstream_base（走端口路径时动态覆盖）
+                if "upstream_base" not in v and not v.get("compat"):
+                    continue
+                entry: dict[str, Any] = {
+                    "upstream_base": str(v.get("upstream_base") or ""),
+                    "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
+                }
+                # 协议兼容层：compat 模式 + 模型映射
+                if v.get("compat"):
+                    entry["compat"] = str(v["compat"])
+                if v.get("default_model"):
+                    entry["default_model"] = str(v["default_model"])
+                if isinstance(v.get("model_map"), dict):
+                    entry["model_map"] = dict(v["model_map"])
+                _tokens[str(k)] = entry
             logger.info("gw_tokens loaded path=%s count=%d", path, len(_tokens))
         except (json.JSONDecodeError, OSError, ValueError, KeyError, TypeError) as exc:
             if replace:

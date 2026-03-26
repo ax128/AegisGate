@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     gw_tokens_path: str = "config/gw_tokens.json"
     # 本地端口自动路由：token 为纯数字端口（1024-65535）时自动转发到 host.docker.internal:{port}/v1
     # 开启后 /v1/__gw__/t/8080/chat/completions → http://host.docker.internal:8080/v1/chat/completions
+    # 全局模型映射配置（config/model_map.json），compat 转换时使用
+    compat_model_map_path: str = "config/model_map.json"
     enable_local_port_routing: bool = False
     # 自定义 host（Docker 环境默认 host.docker.internal，裸机可改为 127.0.0.1）
     local_port_routing_host: str = "host.docker.internal"

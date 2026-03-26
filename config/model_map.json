@@ -1,0 +1,11 @@
+{
+  "_说明": "全局模型映射：compat=openai_chat 时，将 Anthropic 模型名转为 OpenAI 模型名。",
+  "_优先级": "此映射全局生效。token 级 model_map 可覆盖。未命中时走 default_model 或默认 gpt-5.4。",
+  "map": {
+    "claude-opus-4-20250514": "gpt-5.4",
+    "claude-opus-4-6": "gpt-5.4",
+    "claude-sonnet-4-20250514": "gpt-5.4",
+    "claude-sonnet-4-6": "gpt-5.4",
+    "claude-haiku-4-5-20251001": "gpt-5.4-mini"
+  }
+}

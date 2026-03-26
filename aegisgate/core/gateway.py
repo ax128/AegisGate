@@ -182,6 +182,8 @@ def _observability_route_label(path: str) -> str:
         return "v1_chat_completions"
     if path == "/v1/responses":
         return "v1_responses"
+    if path == "/v1/messages":
+        return "v1_messages"
     if path.startswith("/v1/") or path == "/v1":
         return "v1_passthrough"
     if path == "/v2/proxy":
@@ -309,6 +311,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gw_tokens_inject_docker_upstreams()
     except Exception as exc:  # pragma: no cover
         logger.warning("docker_upstreams inject failed: %s", exc)
+    try:
+        from aegisgate.adapters.openai_compat.mapper import load_global_model_map
+        load_global_model_map()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("global model_map load on startup failed: %s", exc)
     if settings.clear_pending_on_startup:
         try:
             n = await run_store_io(clear_pending_confirmations_on_startup)
@@ -463,6 +470,48 @@ class GWTokenRewriteMiddleware:
                 await response(scope, receive, send)
                 return
 
+        # --- compat + 本地端口: /v1/__gw__/t/claude-to-gpt/8317__redact/messages
+        # 当 token 有 compat 配置且 rest 第一段是 {port} 或 {port}__{mode} 时，
+        # 用端口覆盖 upstream_base，用 mode 覆盖 filter_mode。
+        _COMPAT_PORT_RE = re.compile(r"^(\d+)(?:__([a-z]+))?(?:/(.*))?$")
+        if mapping.get("compat") and rest:
+            port_match = _COMPAT_PORT_RE.match(rest)
+            if port_match:
+                port_str, port_mode, port_rest = (
+                    port_match.group(1),
+                    port_match.group(2),
+                    port_match.group(3),
+                )
+                port = int(port_str)
+                if 1024 <= port <= 65535:
+                    host = (settings.local_port_routing_host or "host.docker.internal").strip()
+                    mapping = dict(mapping)
+                    mapping["upstream_base"] = f"http://{host}:{port}/v1"
+                    # 端口级 filter_mode 覆盖 token 级
+                    if port_mode:
+                        if port_mode not in _VALID_FILTER_MODES:
+                            with trace_span("gateway.request", http_method=method, http_route=route_label) as span:
+                                response = JSONResponse(
+                                    status_code=400,
+                                    content={
+                                        "error": "invalid_filter_mode",
+                                        "detail": f"unknown mode '{port_mode}', valid: {sorted(_VALID_FILTER_MODES)}",
+                                    },
+                                )
+                                _record_request_observability(
+                                    method=method, route_label=route_label,
+                                    started_at=started_at, status_code=response.status_code,
+                                    reject_reason="invalid_filter_mode", span=span,
+                                )
+                                await response(scope, receive, send)
+                                return
+                        filter_mode = port_mode
+                    rest = port_rest  # 剩余路径，如 "messages"
+                    logger.debug(
+                        "compat_port_rewrite token=%s… port=%d mode=%s rest=%s",
+                        token[:6], port, filter_mode or "default", rest,
+                    )
+
         # When rest carries its own version prefix, use it and drop the gateway version
         # e.g. /v1/__gw__/t/tok/v2/messages -> /v2/messages (not /v1/v2/messages)
         _API_VERSIONS = ("v1", "v2")
@@ -482,7 +531,24 @@ class GWTokenRewriteMiddleware:
             filter_mode or "default",
         )
 
-        ub = mapping["upstream_base"]
+        ub = mapping.get("upstream_base") or ""
+        # compat token 省略 upstream_base 且未走端口路径时，拒绝请求
+        if not ub and mapping.get("compat"):
+            with trace_span("gateway.request", http_method=method, http_route=route_label) as span:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "missing_upstream",
+                        "detail": "compat token requires a port path (e.g. /claude-to-gpt/8317/messages) or upstream_base config",
+                    },
+                )
+                _record_request_observability(
+                    method=method, route_label=route_label,
+                    started_at=started_at, status_code=response.status_code,
+                    reject_reason="missing_upstream", span=span,
+                )
+                await response(scope, receive, send)
+                return
         wk = normalize_whitelist_keys(mapping.get("whitelist_key"))
         new_scope = dict(scope)
         new_scope["path"] = new_path
@@ -493,6 +559,16 @@ class GWTokenRewriteMiddleware:
         new_scope["aegis_upstream_base"] = ub
         new_scope["aegis_redaction_whitelist_keys"] = wk
         new_scope["aegis_filter_mode"] = filter_mode  # None | "redact" | "passthrough"
+        # 协议兼容层
+        compat = mapping.get("compat")
+        if compat:
+            new_scope["aegis_compat"] = str(compat)
+        default_model = mapping.get("default_model")
+        if default_model:
+            new_scope["aegis_default_model"] = str(default_model)
+        model_map = mapping.get("model_map")
+        if isinstance(model_map, dict):
+            new_scope["aegis_model_map"] = dict(model_map)
 
         headers = list(new_scope.get("headers") or [])
         ub_name = settings.upstream_base_header.encode("latin-1")
