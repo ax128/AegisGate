@@ -489,9 +489,16 @@ class GWTokenRewriteMiddleware:
                 )
                 port = int(port_str)
                 if 1024 <= port <= 65535:
-                    host = (settings.local_port_routing_host or "host.docker.internal").strip()
+                    # 优先复用已注册的端口 token（如 docker_upstreams 注入的），
+                    # 否则用 local_port_routing_host 构造
+                    port_mapping = gw_tokens_get(port_str)
+                    if port_mapping and port_mapping.get("upstream_base"):
+                        resolved_ub = port_mapping["upstream_base"]
+                    else:
+                        host = (settings.local_port_routing_host or "host.docker.internal").strip()
+                        resolved_ub = f"http://{host}:{port}/v1"
                     mapping = dict(mapping)
-                    mapping["upstream_base"] = f"http://{host}:{port}/v1"
+                    mapping["upstream_base"] = resolved_ub
                     # 端口级 filter_mode 覆盖 token 级
                     if port_mode:
                         if port_mode not in _VALID_FILTER_MODES:
