@@ -463,7 +463,17 @@ class GWTokenRewriteMiddleware:
                 await response(scope, receive, send)
                 return
 
-        new_path = f"/{version}/{rest}" if rest else f"/{version}"
+        # When rest carries its own version prefix, use it and drop the gateway version
+        # e.g. /v1/__gw__/t/tok/v2/messages -> /v2/messages (not /v1/v2/messages)
+        _API_VERSIONS = ("v1", "v2")
+        if rest:
+            head = rest.split("/", 1)[0]
+            if head in _API_VERSIONS:
+                new_path = f"/{rest}"
+            else:
+                new_path = f"/{version}/{rest}"
+        else:
+            new_path = f"/{version}"
         logger.debug(
             "gw_token_rewrite path=%s -> %s token=%s… mode=%s",
             path,
