@@ -583,3 +583,95 @@ def coerce_chat_stream_to_messages_stream(
                 yield chunk
 
     return _build_streaming_response(generator())
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses SSE  →  Anthropic Messages SSE
+# ---------------------------------------------------------------------------
+
+def coerce_responses_stream_to_messages_stream(
+    response: StreamingResponse,
+    *,
+    original_model: str,
+) -> StreamingResponse:
+    """Convert OpenAI Responses SSE → Anthropic Messages SSE stream.
+
+    Responses emits: data: {"type":"response.output_text.delta","delta":"..."}
+    Anthropic expects: event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+    """
+    async def generator() -> AsyncGenerator[bytes, None]:
+        message_id = f"msg_{uuid.uuid4().hex[:24]}"
+        started = False
+        output_tokens = 0
+
+        async for frame in _iter_sse_frames(_iter_stream_body_chunks(response)):
+            payload_text = _extract_sse_data_payload_from_chunk(frame)
+            if payload_text is None:
+                continue
+            if payload_text == "[DONE]":
+                if started:
+                    for chunk in _messages_stream_finish_events(
+                        stop_reason="end_turn",
+                        output_tokens=output_tokens,
+                    ):
+                        yield chunk
+                return
+
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            event_type = str(payload.get("type") or "").strip().lower()
+
+            # Extract text delta
+            text = ""
+            if event_type == "response.output_text.delta":
+                text = str(payload.get("delta") or "")
+            elif event_type == "response.completed":
+                # Final response — extract full text if we haven't started streaming
+                if not started:
+                    resp_obj = payload.get("response") or {}
+                    text = str(resp_obj.get("output_text") or "")
+
+            if text:
+                if not started:
+                    for chunk in _messages_stream_start_events(
+                        message_id=message_id,
+                        model=original_model,
+                    ):
+                        yield chunk
+                    started = True
+
+                output_tokens += 1
+                yield _serialize_anthropic_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                })
+
+            if event_type in ("response.completed", "response.failed"):
+                if not started:
+                    for chunk in _messages_stream_start_events(
+                        message_id=message_id,
+                        model=original_model,
+                    ):
+                        yield chunk
+                    started = True
+                for chunk in _messages_stream_finish_events(
+                    stop_reason="end_turn",
+                    output_tokens=output_tokens,
+                ):
+                    yield chunk
+                return
+
+        if started:
+            for chunk in _messages_stream_finish_events(
+                stop_reason="end_turn",
+                output_tokens=output_tokens,
+            ):
+                yield chunk
+
+    return _build_streaming_response(generator())

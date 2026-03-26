@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from aegisgate.adapters.openai_compat.mapper import (
     chat_response_to_messages_response,
     messages_payload_to_chat_payload,
+    messages_payload_to_responses_payload,
+    responses_response_to_messages_response,
     to_chat_response,
     to_internal_chat,
     to_internal_messages,
@@ -29,6 +31,7 @@ from aegisgate.adapters.openai_compat.compat_bridge import (
     coerce_chat_stream_to_responses_stream,
     coerce_responses_output_to_chat_output,
     coerce_responses_stream_to_chat_stream,
+    coerce_responses_stream_to_messages_stream,
     passthrough_chat_response,
     passthrough_responses_output,
 )
@@ -5267,19 +5270,19 @@ async def _messages_compat_openai_chat(
     boundary: dict | None,
     tenant_id: str,
 ) -> JSONResponse | StreamingResponse:
-    """Messages → Chat Completions 转换链路。
+    """Messages → Responses 转换链路。
 
-    1. 将 Anthropic Messages payload 转为 OpenAI Chat payload
-    2. 通过现有 chat 执行链路转发到上游
+    1. 将 Anthropic Messages payload 转为 OpenAI Responses payload
+    2. 通过现有 responses 执行链路转发到上游
     3. 将响应转回 Anthropic Messages 格式
     """
     original_model = payload.get("model", "unknown-model")
     model_map = request.scope.get("aegis_model_map") or {}
     default_model = request.scope.get("aegis_default_model")
 
-    # 转换请求: Messages → Chat
+    # 转换请求: Messages → Responses
     try:
-        chat_payload = messages_payload_to_chat_payload(
+        resp_payload = messages_payload_to_responses_payload(
             payload, model_map=model_map, default_model=default_model,
         )
     except ValueError as exc:
@@ -5287,48 +5290,47 @@ async def _messages_compat_openai_chat(
     logger.info(
         "messages_compat converting model=%s->%s stream=%s",
         original_model,
-        chat_payload.get("model"),
-        chat_payload.get("stream"),
+        resp_payload.get("model"),
+        resp_payload.get("stream"),
     )
 
-    # 用 /v1/chat/completions 路径转发
-    chat_request_path = "/v1/chat/completions"
+    # 用 /v1/responses 路径转发
+    responses_request_path = "/v1/responses"
 
-    if _should_stream(chat_payload):
-        # 流式：Chat stream → Messages stream
-        chat_stream_resp = await _execute_chat_stream_once(
-            payload=chat_payload,
+    if _should_stream(resp_payload):
+        # 流式：Responses stream → Messages stream
+        resp_stream = await _execute_responses_stream_once(
+            payload=resp_payload,
             request_headers=gateway_headers,
-            request_path=chat_request_path,
+            request_path=responses_request_path,
             boundary=boundary,
             tenant_id=tenant_id,
             forced_upstream_base=None,
         )
-        if isinstance(chat_stream_resp, StreamingResponse):
-            return coerce_chat_stream_to_messages_stream(
-                chat_stream_resp,
+        if isinstance(resp_stream, StreamingResponse):
+            return coerce_responses_stream_to_messages_stream(
+                resp_stream,
                 original_model=original_model,
             )
-        # 非 StreamingResponse（错误等），直接返回
-        return chat_stream_resp
+        return resp_stream
 
-    # 非流式：Chat response → Messages response
-    chat_resp = await _execute_chat_once(
-        payload=chat_payload,
+    # 非流式：Responses response → Messages response
+    resp_result = await _execute_responses_once(
+        payload=resp_payload,
         request_headers=gateway_headers,
-        request_path=chat_request_path,
+        request_path=responses_request_path,
         boundary=boundary,
         tenant_id=tenant_id,
         skip_confirmation=False,
         forced_upstream_base=None,
     )
-    if isinstance(chat_resp, (JSONResponse, PlainTextResponse)):
-        return chat_resp
-    if isinstance(chat_resp, dict):
+    if isinstance(resp_result, (JSONResponse, PlainTextResponse)):
+        return resp_result
+    if isinstance(resp_result, dict):
         return JSONResponse(
-            content=chat_response_to_messages_response(chat_resp, original_model=original_model)
+            content=responses_response_to_messages_response(resp_result, original_model=original_model)
         )
-    return chat_resp
+    return resp_result
 
 
 @router.post("/{subpath:path}")

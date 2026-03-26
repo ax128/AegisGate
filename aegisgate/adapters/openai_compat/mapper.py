@@ -434,3 +434,118 @@ def chat_response_to_messages_response(
         result["aegisgate"] = chat_resp["aegisgate"]
 
     return result
+
+
+def messages_payload_to_responses_payload(
+    payload: dict,
+    model_map: dict[str, str] | None = None,
+    default_model: str | None = None,
+) -> dict:
+    """Convert Anthropic /v1/messages request → OpenAI /v1/responses request.
+
+    Responses API uses 'input' (str or list of messages) instead of 'messages'.
+    System prompt goes into 'instructions' (top-level).
+    """
+    input_messages: list[dict] = []
+
+    for msg in payload.get("messages", []):
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, str):
+                    text_parts.append(block)
+                elif isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        text_parts.append(f"[tool_use: {block.get('name', '')}]")
+                    elif block.get("type") == "tool_result":
+                        text_parts.append(str(block.get("content", "")))
+                    else:
+                        text_parts.append(_flatten_part(block))
+            content = " ".join(text_parts).strip()
+        input_messages.append({"role": role, "content": str(content)})
+
+    # Model mapping
+    original_model = payload.get("model", "unknown-model")
+    if model_map and original_model in model_map:
+        model = model_map[original_model]
+    elif original_model in _global_model_map:
+        model = _global_model_map[original_model]
+    elif default_model:
+        model = default_model
+    else:
+        model = COMPAT_DEFAULT_MODEL
+    if model not in COMPAT_ALLOWED_MODELS:
+        raise ValueError(
+            f"compat target model '{model}' not allowed, "
+            f"valid: {sorted(COMPAT_ALLOWED_MODELS)}"
+        )
+
+    result: dict = {
+        "model": model,
+        "input": input_messages,
+        "stream": payload.get("stream", False),
+    }
+
+    # system → instructions
+    system = payload.get("system")
+    if system:
+        if isinstance(system, str):
+            result["instructions"] = system
+        elif isinstance(system, list):
+            result["instructions"] = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in system
+            ).strip()
+
+    if "max_tokens" in payload:
+        result["max_output_tokens"] = payload["max_tokens"]
+    if "temperature" in payload:
+        result["temperature"] = payload["temperature"]
+    if "top_p" in payload:
+        result["top_p"] = payload["top_p"]
+
+    return result
+
+
+def responses_response_to_messages_response(
+    resp: dict,
+    *,
+    original_model: str,
+) -> dict:
+    """Convert OpenAI /v1/responses response → Anthropic /v1/messages response."""
+    # Extract text from responses output
+    output_text = resp.get("output_text") or ""
+    if not output_text:
+        for item in resp.get("output") or []:
+            if isinstance(item, dict):
+                for block in item.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "output_text":
+                        output_text = block.get("text", "")
+                        break
+                if output_text:
+                    break
+
+    usage = resp.get("usage") or {}
+
+    result: dict = {
+        "id": f"msg_{resp.get('id', str(uuid.uuid4()))}",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": output_text}],
+        "model": original_model,
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+        },
+    }
+
+    if resp.get("aegisgate"):
+        result["aegisgate"] = resp["aegisgate"]
+
+    return result
