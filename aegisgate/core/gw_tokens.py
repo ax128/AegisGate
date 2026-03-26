@@ -291,6 +291,29 @@ def list_tokens() -> dict[str, dict[str, Any]]:
         return copy.deepcopy(_tokens)
 
 
+def inject_builtin_compat_tokens() -> None:
+    """注入系统内置的 compat token。启动时自动调用，无需配置。
+
+    若用户已在 gw_tokens.json 中自定义了同名 token，保留用户配置不覆盖。
+    """
+    _BUILTIN_COMPAT = {
+        "claude-to-gpt": {
+            "upstream_base": "",
+            "whitelist_key": [],
+            "compat": "openai_chat",
+        },
+    }
+    with _lock:
+        injected = []
+        for token, mapping in _BUILTIN_COMPAT.items():
+            if token not in _tokens:
+                _tokens[token] = dict(mapping)
+                injected.append(token)
+        if injected:
+            _save()
+            logger.info("builtin compat tokens injected: %s", ", ".join(injected))
+
+
 def inject_docker_upstreams() -> int:
     """解析 AEGIS_DOCKER_UPSTREAMS 环境变量，自动注入 Docker 服务名 token 映射。
 

@@ -107,6 +107,7 @@ from aegisgate.core.gateway_ui_routes import (  # noqa: F401
 from aegisgate.core.gw_tokens import (
     find_token as gw_tokens_find_token,
     get as gw_tokens_get,
+    inject_builtin_compat_tokens as gw_tokens_inject_builtin_compat,
     inject_docker_upstreams as gw_tokens_inject_docker_upstreams,
     load as gw_tokens_load,
     register as gw_tokens_register,
@@ -307,6 +308,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_tokens load on startup failed: %s", exc)
+    try:
+        gw_tokens_inject_builtin_compat()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("builtin compat tokens inject failed: %s", exc)
     try:
         gw_tokens_inject_docker_upstreams()
     except Exception as exc:  # pragma: no cover
