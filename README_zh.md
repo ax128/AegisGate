@@ -150,15 +150,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - 若客户端把 `Chat Completions` 风格请求（`messages`）误发到 `/v1/responses`，网关会做反向兼容转换，并返回 Responses 风格结果
   - 对 `/v1/chat/completions`、`/v1/responses` 的 benign 或低风险响应，网关应保持原生协议/原生 schema，不因误触发而退化成整段 fallback；如需响应侧处理，也只在原结构内替换危险片段，并继续通过既有 `aegisgate` 元数据与审计链路做风险标记
   - 对直连 `/v1/messages` 的非流式响应，sanitize 后仍保持 Anthropic `type/message/content[]` 结构，不再退化成 `sanitized_text` 包装；风险标记继续走既有 `aegisgate` 元数据与审计链路
+  - 对直连 `/v1/messages` 的流式响应，sanitize 后仍保持 Anthropic 原生 SSE 事件序列，只替换危险文本片段；风险标记继续通过既有 `aegisgate` 元数据与审计链路暴露，不会回退成 chat chunk 或 `[DONE]` 终止帧
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
   - 生产建议使用 token 路径：`/v2/__gw__/t/<token>/...`
   - 必须携带 `x-target-url` 请求头指定原始目标地址
   - 请求侧：请求体脱敏（可开关，默认开）
-  - 响应侧仅做 HTTP 注入攻击识别拦截（可开关，默认开）
+  - 响应侧仅做 HTTP 注入攻击识别与危险片段替换（可开关，默认开）
     - 默认最小误拦模式：协议层高危特征（HTTP request smuggling / response splitting，如 CL.TE / TE.CL / TE.TE）
     - 可通过规则配置扩展检测模式
-    - 命中后直接返回非 200（默认 `403`）格式化错误，不走确认放行链路
+    - 对非流式文本/JSON 响应，命中后默认保留原响应状态码与结构，只替换危险片段，并通过 `x-aegis-v2-response-*` 响应头做风险标记
+    - 对流式文本/SSE 响应，当前会在既有探测窗口内对命中片段做替换并继续透传；超过探测窗口的内容仍按原流式透传策略处理
 - 通用透传代理（`POST /v1/{subpath}`）：
   - 涵盖 `/v1/messages/count_tokens` 等非 Chat/Responses/Messages 路径
   - `stream=true` 流式透传
@@ -248,8 +250,9 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 1. 读取 `x-target-url` 请求头获取原始目标 URL（必须是 `http://` 或 `https://` 完整 URL，含 query string）
 2. 请求侧：仅做请求体脱敏（可选，默认开启），不做其他拦截
 3. 转发到目标 HTTP(S) 地址（`follow_redirects=false`：不自动跟随 3xx 重定向，直接透传给客户端）
-4. 响应侧：仅对响应正文做高危代码检测（HTTP 走私、响应拆分等嵌入式攻击特征），命中返回 `403`
-5. 正常响应（含 CDN/Nginx 的 CL+TE 并存头）直接透传，不做干预
+4. 响应侧：仅对响应正文做高危代码检测（HTTP 走私、响应拆分等嵌入式攻击特征）
+5. 非流式文本/JSON 命中时：保留原响应状态码与 JSON/文本结构，只替换危险片段，并在响应头输出 `x-aegis-v2-response-sanitized`、`x-aegis-v2-response-rule-ids`
+6. 流式文本/SSE 命中时：在当前探测窗口内替换危险片段并继续透传；正常 SSE 透传仍支持提前断流自动补 `[DONE]`
 
 > **安全边界提示**：v2 代理默认启用 SSRF 防护（`AEGIS_V2_BLOCK_INTERNAL_TARGETS=true`），会阻止请求到内网 IP（RFC1918/loopback/link-local）和云元数据端点（169.254.169.254 等）。如需访问内网服务，可设为 `false` 并在网络层（防火墙、出口 ACL）做补偿控制。`AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` 仅用于跳过响应拦截，不是目标主机访问白名单。
 
@@ -259,9 +262,9 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 | 维度       | v1                                                  | v2                                                                           |
 | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
 | 请求体过滤    | 脱敏 + 非可信来源隔离 + 请求清洗 + RAG 投毒检测                      | 仅脱敏（文本/JSON，可选）                                                              |
-| 响应过滤     | 异常评分、注入检测、权限防护、恢复后防护、输出清洗                           | 仅正文高危代码检测（HTTP smuggling/splitting 嵌入正文）                                     |
+| 响应过滤     | 异常评分、注入检测、权限防护、恢复后防护、输出清洗                           | 仅正文高危代码检测与危险片段替换（HTTP smuggling/splitting 嵌入正文）                            |
 | 可识别攻击/风险 | 系统提示词泄露、规则绕过、越权、编码混淆、危险 tool call 参数、投毒传播等          | 响应正文中嵌入的 HTTP smuggling/splitting 特征（CL.TE/TE.CL/TE.TE）；可扩展更多规则              |
-| 处置动作     | `allow`、`sanitize`、`block`（自动遮挡/分割，无确认流程）           | `allow`、`block(403)`                                                         |
+| 处置动作     | `allow`、`sanitize`、`block`（自动遮挡/分割，无确认流程）           | `allow`、`sanitize`（非流式文本/JSON + 当前流式探测窗口） 、`block(403)`（其余显式阻断场景）        |
 | 流式处理     | 支持（含流式窗口检测、提前断流恢复）                                  | 支持 SSE 透传（自动检测 `Accept: text/event-stream` 或 `"stream":true`；断流时补齐 `[DONE]`） |
 | 审计       | 完整安全审计链路（`audit.jsonl` + 安全标签/处置记录 + 处理后内容 INFO 日志） | 运行日志与阻断元信息                                                                   |
 
@@ -273,6 +276,40 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 3. `block`：高风险拦截，危险片段±20 字符上下文自动变形（轻度：chunked-hyphen 分割；重度：完全替换为网关提示）后返回。
 
 > **注意**：yes/no 确认放行流程已永久移除。`AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` 设置已废弃，无论值为何均等同 `false`。
+
+### 1.6 错误响应格式
+
+当网关拒绝请求（认证失败、无效 token、速率限制、内容拦截）时，返回结构化 JSON 错误：
+
+```json
+{
+  "error": {
+    "code": "<error_code>",
+    "message": "<人类可读的原因说明>",
+    "aegisgate": { ... }
+  }
+}
+```
+
+常见错误码：
+
+| 错误码 | 含义 |
+|--------|------|
+| `unauthorized` | 缺少或无效的网关密钥 / token |
+| `forbidden` | 请求被安全边界或策略拦截 |
+| `invalid_filter_mode` | 无法识别的 `x-aegis-filter-mode` 值 |
+| `rate_limited` | 同一来源请求过多 |
+| `request_too_large` | 请求体超过 `AEGIS_MAX_REQUEST_BODY_BYTES` 限制 |
+
+过滤管道的处理结果也可能在成功响应中包含 `aegisgate` 元数据对象，其中包含风险评分和处置信息。
+
+### 1.7 自定义 HTTP 头
+
+| Header | 方向 | 说明 |
+|--------|------|------|
+| `x-aegis-filter-mode` | 客户端 -> 网关 | 设为 `passthrough` 跳过脱敏/过滤，或 `redact`（默认）。也可通过 token 路径后缀设置：`token__passthrough` / `token__redact`。 |
+| `x-aegis-redaction-whitelist` | 客户端 -> 网关 | 逗号分隔的脱敏豁免键列表（例如看起来像密钥但实际安全的字段名）。 |
+| `x-aegis-request-id` | 网关 -> 上游 | 网关注入到上游请求中的追踪关联 ID。客户端无需设置，出现在上游请求头和网关日志中。 |
 
 补充：
 

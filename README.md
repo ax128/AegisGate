@@ -205,6 +205,8 @@ Compatibility notes:
 - If a client accidentally sends a Chat-style payload (`messages`) to `/v1/responses`, AegisGate applies the inverse compatibility mapping and returns Responses-shaped output.
 - benign or low-risk /v1/chat/completions and /v1/responses outputs should stay in their native client schema. When response-side sanitization is needed, AegisGate keeps operator-visible risk marking in existing `aegisgate` metadata and audit paths instead of switching to a whole-response fallback envelope.
 - For direct `/v1/messages`, sanitized non-stream JSON responses preserve Anthropic-native `type/message/content[]` structure and keep risk marks in the existing aegisgate metadata and audit paths instead of returning a `sanitized_text` wrapper.
+- For direct `/v1/messages` streaming, sanitized responses keep Anthropic-native SSE events, replace only dangerous text fragments, and continue surfacing operator-visible risk marks through the existing aegisgate metadata and audit paths instead of emitting chat chunks or `[DONE]` fallbacks.
+- For `/v2` textual responses, high-risk HTTP attack fragments detected inside the current non-stream path or streaming probe window are replaced in-place and surfaced via response headers instead of forcing a whole-response `403` for every hit. The response-side toggle remains `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER`.
 
 ### Protocol Conversion (Anthropic → OpenAI)
 
@@ -258,6 +260,40 @@ When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.j
 **Request side:** PII redaction → exact-value redaction → request sanitizer → RAG poison guard
 
 **Response side:** injection detector → anomaly detector → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
+
+### Error Response Format
+
+When the gateway rejects a request (authentication failure, invalid token, rate limit, blocked content), it returns a structured JSON error:
+
+```json
+{
+  "error": {
+    "code": "<error_code>",
+    "message": "<human-readable reason>",
+    "aegisgate": { ... }
+  }
+}
+```
+
+Common error codes:
+
+| Code | Meaning |
+|------|---------|
+| `unauthorized` | Missing or invalid gateway key / token |
+| `forbidden` | Request blocked by security boundary or policy |
+| `invalid_filter_mode` | Unrecognized `x-aegis-filter-mode` value |
+| `rate_limited` | Too many requests from the same source |
+| `request_too_large` | Request body exceeds `AEGIS_MAX_REQUEST_BODY_BYTES` |
+
+Filter pipeline results may also include an `aegisgate` metadata object in successful responses, containing risk scores and disposition information.
+
+### Custom HTTP Headers
+
+| Header | Direction | Description |
+|--------|-----------|-------------|
+| `x-aegis-filter-mode` | Client -> Gateway | Set to `passthrough` to skip redaction/sanitization, or `redact` (default). Also settable via token path suffix: `token__passthrough` / `token__redact`. |
+| `x-aegis-redaction-whitelist` | Client -> Gateway | Comma-separated list of redaction keys to exempt from redaction (e.g., field names that look like secrets but are safe). |
+| `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
 
 ### Dangerous Content Handling
 
