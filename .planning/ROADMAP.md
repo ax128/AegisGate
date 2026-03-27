@@ -30,7 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Agent user can send prompts through `/v1/responses` and `/v1/messages` and get the same request-side redaction outcome for equivalent content.
   3. Agent user can send benign prompts through supported `/v1` routes without excessive false-positive redaction making the request unusable.
   4. Redacted `/v1` requests still reach upstream providers in a valid protocol shape.
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] `01-01-PLAN.md` - Reuse the `/v1/responses` rewrite pattern for chat structured-content redaction and lock it with focused regressions.
+- [ ] `01-02-PLAN.md` - Add a dedicated direct `/v1/messages` request rewrite path that preserves Anthropic shape for JSON and streaming.
+- [ ] `01-03-PLAN.md` - Align low-false-positive request redaction behavior across chat, responses, and direct messages.
 
 ### Phase 2: Response Sanitization Integrity
 **Goal**: Users receive `/v1` responses that stay structurally valid while only dangerous fragments are replaced and risk-marked.
@@ -92,7 +97,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Request Redaction Precision | 0/TBD | Not started | - |
+| 1. Request Redaction Precision | 0/3 | Not started | - |
 | 2. Response Sanitization Integrity | 0/TBD | Not started | - |
 | 3. /v1 Compatibility Completion | 0/TBD | Not started | - |
 | 4. Streaming & Passthrough Fidelity | 0/TBD | Not started | - |
