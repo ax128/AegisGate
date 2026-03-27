@@ -1928,6 +1928,28 @@ def _patch_responses_body(upstream_body: dict[str, Any], ctx: RequestContext) ->
     return out
 
 
+def _patch_messages_content_block(block: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
+    patched = copy.deepcopy(block)
+    if isinstance(patched.get("text"), str):
+        patched["text"] = _sanitize_hit_fragments(str(patched["text"]), ctx)
+    return patched
+
+
+def _patch_messages_response_body(upstream_body: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
+    out = copy.deepcopy(upstream_body)
+    content = out.get("content")
+    if isinstance(content, list):
+        out["content"] = [
+            _patch_messages_content_block(block, ctx) if isinstance(block, dict)
+            else _sanitize_hit_fragments(block, ctx) if isinstance(block, str)
+            else block
+            for block in content
+        ]
+    elif isinstance(content, str):
+        out["content"] = _sanitize_hit_fragments(content, ctx)
+    return out
+
+
 def _patch_chat_stream_payload(payload: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
     patched = copy.deepcopy(payload)
     choices = patched.get("choices")
@@ -2119,6 +2141,28 @@ def _render_non_confirmation_responses_output(
 
     final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
     return to_responses_output(final_resp)
+
+
+def _render_non_confirmation_messages_output(
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
+) -> dict[str, Any]:
+    if isinstance(upstream_body, dict):
+        out = _patch_messages_response_body(upstream_body, ctx)
+        out.setdefault("id", final_resp.request_id)
+        out.setdefault("type", "message")
+        out.setdefault("role", "assistant")
+        out.setdefault("model", final_resp.model)
+        out.setdefault("stop_reason", "end_turn")
+        out.setdefault("stop_sequence", None)
+        out.setdefault("usage", {"input_tokens": 0, "output_tokens": 0})
+        if final_resp.metadata.get("aegisgate"):
+            out["aegisgate"] = final_resp.metadata["aegisgate"]
+        return out
+
+    final_resp.output_text = _build_sanitized_full_response(ctx, source_text=final_resp.output_text)
+    return to_messages_response(final_resp)
 
 def _semantic_gray_zone_enabled(ctx: RequestContext) -> bool:
     if not settings.enable_semantic_module:
@@ -4735,10 +4779,11 @@ async def _execute_messages_once(
         await _apply_semantic_review(ctx, internal_resp.output_text, phase="response")
     if ctx.response_disposition == "sanitize":
         sanitized_text = internal_resp.output_text
+        _attach_security_metadata(internal_resp, ctx, boundary=boundary)
         _write_audit_event(ctx, boundary=boundary)
         logger.info("messages sanitized request_id=%s route=%s", ctx.request_id, request_path)
         return _passthrough_any_response(
-            {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
+            _render_non_confirmation_messages_output(upstream_body, internal_resp, ctx)
         )
 
     if _needs_confirmation(ctx):
@@ -4752,13 +4797,16 @@ async def _execute_messages_once(
                 log_key="messages_auto_sanitize",
             )
             sanitized_text = _build_sanitized_full_response(ctx, source_text=capped_upstream_text)
+            if not isinstance(upstream_body, dict):
+                internal_resp.output_text = sanitized_text
             ctx.response_disposition = "sanitize"
             ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info("messages auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
             info_log_sanitized("messages_sanitized", sanitized_text, request_id=ctx.request_id)
+            _attach_security_metadata(internal_resp, ctx, boundary=boundary)
             _write_audit_event(ctx, boundary=boundary)
             return _passthrough_any_response(
-                {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
+                _render_non_confirmation_messages_output(upstream_body, internal_resp, ctx)
             )
 
         return _error_response(

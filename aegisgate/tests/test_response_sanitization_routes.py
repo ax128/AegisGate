@@ -356,3 +356,108 @@ async def test_sanitized_outputs_use_aegisgate_metadata_channel(monkeypatch: pyt
     assert "sanitized_text" not in responses_result
     assert responses_audit_calls[0]["action"] == "sanitize"
     assert responses_audit_calls[0]["response_disposition"] == "sanitize"
+
+
+@pytest.mark.asyncio
+async def test_messages_json_sanitize_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    dangerous_fragment = "rm -rf /tmp/messages"
+    safe_prefix = "safe prefix text that should remain in the Anthropic response. "
+    safe_suffix = " Safe suffix text should also remain in the Anthropic response."
+
+    result, audit_calls = await _run_route_once(
+        monkeypatch,
+        route_name="messages",
+        upstream_body={
+            "id": "msg-upstream-1",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": [{"type": "text", "text": "safe tool output"}],
+                },
+            ],
+            "model": "claude-sonnet-4.5",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 4, "output_tokens": 12},
+            "x_extra": {"preserved": True},
+        },
+        response_pipeline=_sanitize_pipeline(dangerous_fragment),
+    )
+
+    text_block = result["content"][0]["text"]
+
+    assert result["id"] == "msg-upstream-1"
+    assert result["type"] == "message"
+    assert result["role"] == "assistant"
+    assert result["model"] == "claude-sonnet-4.5"
+    assert result["stop_reason"] == "end_turn"
+    assert result["usage"]["output_tokens"] == 12
+    assert result["x_extra"]["preserved"] is True
+    assert "safe prefix text that should remain" in text_block
+    assert "Anthropic response." in text_block
+    assert openai_router._DANGER_FRAGMENT_NOTICE in text_block
+    assert dangerous_fragment not in text_block
+    assert result["content"][1]["tool_use_id"] == "toolu_1"
+    assert result["content"][1]["content"][0]["text"] == "safe tool output"
+    assert result["aegisgate"]["action"] == "sanitize"
+    assert "sanitized_text" not in result
+    assert audit_calls[0]["request_id"] == "messages-response-route"
+
+
+@pytest.mark.asyncio
+async def test_messages_json_auto_sanitize_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    dangerous_fragment = "cat /etc/shadow"
+    safe_prefix = "safe prefix text that should survive auto sanitize. "
+    safe_suffix = " Safe suffix text should also survive auto sanitize."
+
+    async def auto_sanitize_pipeline(pipeline, resp: InternalResponse, ctx):
+        ctx.disposition_reasons.append("response_high_risk")
+        ctx.security_tags.add("response_high_risk_fragment")
+        ctx.report_items = [_dangerous_report_item(dangerous_fragment)]
+        return resp
+
+    result, audit_calls = await _run_route_once(
+        monkeypatch,
+        route_name="messages",
+        upstream_body={
+            "id": "msg-upstream-2",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
+                }
+            ],
+            "model": "claude-sonnet-4.5",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 5, "output_tokens": 9},
+            "x_extra": {"preserved": True},
+        },
+        response_pipeline=auto_sanitize_pipeline,
+    )
+
+    text_block = result["content"][0]["text"]
+
+    assert result["id"] == "msg-upstream-2"
+    assert result["type"] == "message"
+    assert result["role"] == "assistant"
+    assert result["model"] == "claude-sonnet-4.5"
+    assert result["usage"]["input_tokens"] == 5
+    assert result["x_extra"]["preserved"] is True
+    assert "safe prefix text that should" in text_block
+    assert "also survive auto sanitize." in text_block
+    assert openai_router._DANGER_FRAGMENT_NOTICE in text_block
+    assert dangerous_fragment not in text_block
+    assert result["aegisgate"]["action"] == "sanitize"
+    assert result["aegisgate"]["response_disposition"] == "sanitize"
+    assert "sanitized_text" not in result
+    assert audit_calls[0]["request_id"] == "messages-response-route"
