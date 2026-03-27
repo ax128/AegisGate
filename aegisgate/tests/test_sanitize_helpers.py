@@ -7,7 +7,9 @@ from aegisgate.adapters.openai_compat.sanitize import (
     _looks_like_gateway_internal_history_text,
     _looks_like_gateway_upstream_recovery_notice_text,
     _sanitize_chat_messages_for_upstream_with_hits,
+    _sanitize_messages_system_for_upstream_with_hits,
     _sanitize_payload_for_log,
+    _sanitize_responses_input_for_upstream_with_hits,
     _should_skip_responses_field_redaction,
     _strip_system_exec_runtime_lines,
 )
@@ -203,3 +205,80 @@ class TestSanitizeChatStructuredContent:
 
         assert sanitized == messages
         assert hits == []
+
+
+def _explicit_secret_text() -> str:
+    return "Authorization: Bearer " + "sk-live-" + "secretvalue123456"
+
+
+def test_benign_examples_preserve_supported_route_helpers() -> None:
+    benign_text = (
+        "Review this infra note without redacting it: host api.service.internal resolves to 10.24.8.9, "
+        "and the sample docs line is address: 123 Example Lane."
+    )
+
+    chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
+        [{"role": "user", "content": [{"type": "text", "text": benign_text}]}]
+    )
+    responses_sanitized, responses_hits = _sanitize_responses_input_for_upstream_with_hits(
+        [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
+    )
+    messages_sanitized, messages_hits = _sanitize_messages_system_for_upstream_with_hits(
+        [{"type": "text", "text": benign_text}]
+    )
+
+    assert chat_sanitized == [{"role": "user", "content": [{"type": "text", "text": benign_text}]}]
+    assert responses_sanitized == [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
+    assert messages_sanitized == [{"type": "text", "text": benign_text}]
+    assert chat_hits == []
+    assert responses_hits == []
+    assert messages_hits == []
+
+
+def test_explicit_secret_still_redacts() -> None:
+    secret_text = _explicit_secret_text()
+
+    chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
+        [{"role": "user", "content": [{"type": "text", "text": secret_text}]}]
+    )
+    responses_sanitized, responses_hits = _sanitize_responses_input_for_upstream_with_hits(
+        [{"role": "user", "content": [{"type": "input_text", "text": secret_text}]}]
+    )
+    messages_sanitized, messages_hits = _sanitize_messages_system_for_upstream_with_hits(
+        [{"type": "text", "text": secret_text}]
+    )
+
+    assert chat_sanitized == [
+        {"role": "user", "content": [{"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]}
+    ]
+    assert responses_sanitized == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]}
+    ]
+    assert messages_sanitized == [{"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]
+    assert chat_hits == [
+        {
+            "path": "messages[0].content[0].text",
+            "field": "text",
+            "role": "user",
+            "pattern": "TOKEN",
+            "count": 1,
+        }
+    ]
+    assert responses_hits == [
+        {
+            "path": "input[0].content[0].text",
+            "field": "text",
+            "role": "user",
+            "pattern": "TOKEN",
+            "count": 1,
+        }
+    ]
+    assert messages_hits == [
+        {
+            "path": "system[0].text",
+            "field": "text",
+            "role": "system",
+            "pattern": "TOKEN",
+            "count": 1,
+        }
+    ]
