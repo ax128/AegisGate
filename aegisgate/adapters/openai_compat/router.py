@@ -83,6 +83,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _looks_like_gateway_upstream_recovery_notice_text,
     _responses_function_output_redaction_patterns,
     _responses_relaxed_redaction_patterns,
+    _sanitize_chat_messages_for_upstream_with_hits,
     _sanitize_function_output_value,
     _sanitize_payload_for_log,
     _sanitize_responses_input_for_upstream,
@@ -537,30 +538,52 @@ def _is_structured_content(value: Any) -> bool:
 _GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy", "metadata"})
 
 
-def _build_chat_upstream_payload(payload: dict[str, Any], sanitized_req_messages: list) -> dict[str, Any]:
+def _build_chat_upstream_payload(
+    payload: dict[str, Any],
+    sanitized_req_messages: list,
+    *,
+    request_id: str = "-",
+    session_id: str = "-",
+    route: str = "-",
+    whitelist_keys: set[str] | None = None,
+) -> dict[str, Any]:
     upstream_payload = sanitize_for_chat(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS},
     )
     original_messages = payload.get("messages", [])
+    sanitized_original_messages, redaction_hits = _sanitize_chat_messages_for_upstream_with_hits(
+        original_messages,
+        whitelist_keys=whitelist_keys,
+    )
     updated_messages: list[dict[str, Any]] = []
     for idx, message in enumerate(sanitized_req_messages):
-        if idx < len(original_messages) and isinstance(original_messages[idx], dict):
+        if idx < len(sanitized_original_messages) and isinstance(sanitized_original_messages[idx], dict):
             # Start from the original message dict — preserves all upstream-
             # specific fields (name, tool_call_id, etc.) we don't know about.
-            merged: dict[str, Any] = dict(original_messages[idx])
+            merged = dict(sanitized_original_messages[idx])
         else:
             merged = {"role": message.role}
         merged["role"] = message.role
-        original_content = merged.get("content")
+        original_content = original_messages[idx].get("content") if idx < len(original_messages) and isinstance(original_messages[idx], dict) else merged.get("content")
         if _is_structured_content(original_content):
-            # Preserve multimodal structure (image/audio/video/file parts).
-            merged["content"] = original_content
+            merged["content"] = merged.get("content", original_content)
         else:
             merged["content"] = message.content
         # Do NOT inject non-standard fields (source, metadata) into upstream
         # messages — unknown fields may cause upstream API rejections.
         updated_messages.append(merged)
     upstream_payload["messages"] = updated_messages
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        logger.warning(
+            "chat input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            session_id,
+            route,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
     return upstream_payload
 
 
@@ -2910,7 +2933,15 @@ async def _execute_chat_stream_once(
         logger.info("chat stream request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, sanitized_req.messages)
+    upstream_payload = await _run_payload_transform(
+        _build_chat_upstream_payload,
+        payload,
+        sanitized_req.messages,
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+        route=ctx.route,
+        whitelist_keys=ctx.redaction_whitelist_keys,
+    )
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
@@ -3747,7 +3778,15 @@ async def _execute_chat_once(
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
     pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, req.messages)
+        upstream_payload = await _run_payload_transform(
+            _build_chat_upstream_payload,
+            payload,
+            req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
@@ -3824,7 +3863,15 @@ async def _execute_chat_once(
             logger.info("chat completion request blocked, confirmation required request_id=%s confirm_id=%s", ctx.request_id, confirm_id)
             return to_chat_response(confirmation_resp)
 
-        upstream_payload = await _run_payload_transform(_build_chat_upstream_payload, payload, sanitized_req.messages)
+        upstream_payload = await _run_payload_transform(
+            _build_chat_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
 
     try:
         status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)

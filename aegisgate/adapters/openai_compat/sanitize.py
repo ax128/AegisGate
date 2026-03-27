@@ -283,6 +283,106 @@ def _sanitize_function_output_value(value: Any) -> Any:
     return value
 
 
+def _sanitize_chat_messages_for_upstream_with_hits(
+    messages: list[Any],
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Sanitize structured chat message content without flattening payload shape."""
+    hits: list[dict[str, Any]] = []
+
+    def _sanitize_chat_part(node: Any, *, path: str, role: str, field: str) -> Any:
+        if isinstance(node, str):
+            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+                node,
+                role=role,
+                path=path,
+                field=field,
+                whitelist_keys=whitelist_keys,
+            )
+            hits.extend(node_hits)
+            return cleaned
+
+        if isinstance(node, list):
+            return [
+                _sanitize_chat_part(
+                    item,
+                    path=f"{path}[{idx}]",
+                    role=role,
+                    field=field,
+                )
+                for idx, item in enumerate(node)
+            ]
+
+        if not isinstance(node, dict):
+            return node
+
+        copied: dict[str, Any] = dict(node)
+        node_type = str(node.get("type", "")).strip().lower()
+        for key, item in node.items():
+            child_path = f"{path}.{key}" if path else key
+            if key == "text" and isinstance(item, str):
+                copied[key] = _sanitize_chat_part(
+                    item,
+                    path=child_path,
+                    role=role,
+                    field="text",
+                )
+                continue
+            if key == "content" and isinstance(item, (list, dict)):
+                copied[key] = _sanitize_chat_part(
+                    item,
+                    path=child_path,
+                    role=role,
+                    field="content",
+                )
+                continue
+            if (
+                key == "content"
+                and isinstance(item, str)
+                and node_type in {"text", "input_text", "output_text"}
+            ):
+                copied[key] = _sanitize_chat_part(
+                    item,
+                    path=child_path,
+                    role=role,
+                    field="content",
+                )
+        return copied
+
+    sanitized_messages: list[Any] = []
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict):
+            sanitized_messages.append(message)
+            continue
+        copied_message = dict(message)
+        role = str(message.get("role", "")).strip().lower() or "user"
+        content = message.get("content")
+        if isinstance(content, (list, dict)):
+            copied_message["content"] = _sanitize_chat_part(
+                content,
+                path=f"messages[{idx}].content",
+                role=role,
+                field="content",
+            )
+        sanitized_messages.append(copied_message)
+
+    dedup: dict[tuple[str, str, str, str], int] = {}
+    for item in hits:
+        key = (
+            str(item.get("path") or ""),
+            str(item.get("field") or ""),
+            str(item.get("role") or ""),
+            str(item.get("pattern") or ""),
+        )
+        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
+    merged_hits = [
+        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
+        for (path, field, role, pattern), count in dedup.items()
+    ]
+    return sanitized_messages, merged_hits
+
+
 def _should_skip_responses_field_redaction(field: str | None) -> bool:
     normalized = str(field or "").strip().lower()
     if not normalized:

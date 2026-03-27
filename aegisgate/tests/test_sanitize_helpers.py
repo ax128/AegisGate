@@ -167,7 +167,7 @@ class TestSanitizeChatStructuredContent:
                 "role": "user",
                 "name": "alice",
                 "content": [
-                    {"type": "text", "text": "[REDACTED:AUTH_BEARER]"},
+                    {"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"},
                     {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
                     {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
                 ],
@@ -179,7 +179,7 @@ class TestSanitizeChatStructuredContent:
                 "path": "messages[0].content[0].text",
                 "field": "text",
                 "role": "user",
-                "pattern": "AUTH_BEARER",
+                "pattern": "TOKEN",
                 "count": 1,
             }
         ]

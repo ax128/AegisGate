@@ -18,6 +18,9 @@ def _seed_policy(ctx, policy_name: str = "default") -> dict[str, object]:
 def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     audit_calls: list[str] = []
 
+    async def _inline_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
     async def _identity_response_pipeline(pipeline, resp: InternalResponse, ctx):
         return resp
 
@@ -28,6 +31,7 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(openai_router, "_resolve_upstream_base", lambda headers: "http://upstream.test")
     monkeypatch.setattr(openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}")
     monkeypatch.setattr(openai_router, "_build_forward_headers", lambda headers: {"x-forwarded-for": "test"})
+    monkeypatch.setattr(openai_router, "_run_payload_transform", _inline_payload_transform)
     monkeypatch.setattr(openai_router, "_run_response_pipeline", _identity_response_pipeline)
     monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
     monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
@@ -107,17 +111,15 @@ async def test_chat_request_redaction_preserves_shape(monkeypatch: pytest.Monkey
     assert forwarded_message["role"] == "user"
     assert forwarded_message["name"] == "alice"
     assert forwarded_message["provider_meta"] == {"channel": "alpha"}
-    assert forwarded_message["content"] == [
-        {
-            "type": "text",
-            "text": "[REDACTED:AWS_SECRET_ACCESS_KEY]",
-            "cache_control": {"type": "ephemeral"},
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://example.com/cat.png"},
-        },
-    ]
+    assert forwarded_message["content"][0] == {
+        "type": "text",
+        "text": "token=[REDACTED:TOKEN]",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert forwarded_message["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://example.com/cat.png"},
+    }
 
 
 @pytest.mark.asyncio
@@ -234,7 +236,7 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
         {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "[REDACTED:AUTH_BEARER]"},
+                {"type": "input_text", "text": "Authorization: Bearer [REDACTED:TOKEN]"},
                 {"type": "input_image", "image_url": "https://example.com/cat.png"},
             ],
             "provider_field": {"keep": True},
