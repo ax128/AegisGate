@@ -44,6 +44,7 @@ created: 2026-03-27
 | 2-02-02 | 02 | 2 | RESP-03 | helper + route | `pytest -q aegisgate/tests/test_response_sanitization_routes.py -k "fragment" -x` | ❌ W0 | ⬜ pending |
 | 2-03-01 | 03 | 3 | RESP-02 | stream route | `pytest -q aegisgate/tests/test_streaming_router.py -k "messages and sanitize" -x` | ❌ W0 | ⬜ pending |
 | 2-03-02 | 03 | 3 | RESP-03 | stream route | `pytest -q aegisgate/tests/test_streaming_router.py -k "sanitize and structure" -x` | ❌ W0 | ⬜ pending |
+| 2-03-03 | 03 | 3 | RESP-04 | stream route + audit | `pytest -q aegisgate/tests/test_streaming_router.py -k "messages and metadata" -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
