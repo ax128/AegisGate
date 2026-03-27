@@ -143,6 +143,43 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def _parse_runtime_env_values() -> dict[str, str]:
+    runtime_env_path = (Path.cwd() / "config" / ".env").resolve()
+    values: dict[str, str] = {}
+    if not runtime_env_path.exists():
+        return values
+    for raw_line in runtime_env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = raw_line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _settings_from_runtime_env_file():
+    from aegisgate.config.settings import Settings, settings
+
+    runtime_values = _parse_runtime_env_values()
+    merged: dict[str, object] = {
+        field_name: getattr(settings, field_name)
+        for field_name in Settings.model_fields
+    }
+    for field_name in Settings.model_fields:
+        env_name = f"AEGIS_{field_name.upper()}"
+        if env_name in runtime_values:
+            merged[field_name] = runtime_values[env_name]
+    return Settings.model_validate(merged)
+
+
 def reload_settings() -> None:
     """Reload config/.env into the global settings singleton.
 
@@ -154,7 +191,7 @@ def reload_settings() -> None:
     from aegisgate.observability.logging import configure_logging
 
     try:
-        fresh = Settings()
+        fresh = _settings_from_runtime_env_file()
         for field_name in Settings.model_fields:
             if field_name in _IMMUTABLE_FIELDS:
                 continue
@@ -181,7 +218,7 @@ def reload_settings() -> None:
         )
 
         reload_semantic_client_settings()
-        logger.info("hot_reload settings reloaded from environment / config/.env")
+        logger.info("hot_reload settings reloaded from config/.env")
     except Exception:
         logger.exception("hot_reload settings reload failed")
 

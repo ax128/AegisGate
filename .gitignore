@@ -7,7 +7,16 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-aegisgate/tests/
+# Keep the curated CI test subset and shared cleanup hook tracked.
+aegisgate/tests/*
+!aegisgate/tests/conftest.py
+!aegisgate/tests/test_openai_request_mapping.py
+!aegisgate/tests/test_passthrough_filter_mode.py
+!aegisgate/tests/test_request_redaction_routes.py
+!aegisgate/tests/test_response_sanitization_routes.py
+!aegisgate/tests/test_sanitize_helpers.py
+!aegisgate/tests/test_streaming_router.py
+!aegisgate/tests/test_hot_reload_unit.py
 
 # Virtual env
 .venv/
