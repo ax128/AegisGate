@@ -203,7 +203,7 @@ Compatibility notes:
 
 - If a client accidentally sends a Responses-style payload (`input`) to `/v1/chat/completions`, AegisGate forwards it upstream as `/v1/responses` but converts the result back to Chat Completions JSON/SSE for the client.
 - If a client accidentally sends a Chat-style payload (`messages`) to `/v1/responses`, AegisGate applies the inverse compatibility mapping and returns Responses-shaped output.
-- Benign or low-risk /v1/chat/completions and /v1/responses outputs should stay in their native client schema. When response-side sanitization is needed, AegisGate keeps operator-visible risk marking in existing `aegisgate` metadata and audit paths instead of switching to a whole-response fallback envelope.
+- benign or low-risk /v1/chat/completions and /v1/responses outputs should stay in their native client schema. When response-side sanitization is needed, AegisGate keeps operator-visible risk marking in existing `aegisgate` metadata and audit paths instead of switching to a whole-response fallback envelope.
 
 ### Protocol Conversion (Anthropic → OpenAI)
 
