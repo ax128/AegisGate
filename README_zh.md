@@ -149,6 +149,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - 若客户端把 `Responses API` 风格请求（仅 `input`）误发到 `/v1/chat/completions`，网关会转发到上游 `/v1/responses`，并把返回结果重新包装成 Chat Completions 的 JSON/SSE 形状
   - 若客户端把 `Chat Completions` 风格请求（`messages`）误发到 `/v1/responses`，网关会做反向兼容转换，并返回 Responses 风格结果
   - 对 `/v1/chat/completions`、`/v1/responses` 的 benign 或低风险响应，网关应保持原生协议/原生 schema，不因误触发而退化成整段 fallback；如需响应侧处理，也只在原结构内替换危险片段，并继续通过既有 `aegisgate` 元数据与审计链路做风险标记
+  - 对直连 `/v1/messages` 的非流式响应，sanitize 后仍保持 Anthropic `type/message/content[]` 结构，不再退化成 `sanitized_text` 包装；风险标记继续走既有 `aegisgate` 元数据与审计链路
 - v2 通用 HTTP 代理（独立安全链路）：
   - `ANY /v2` / `ANY /v2/{subpath}`
   - 生产建议使用 token 路径：`/v2/__gw__/t/<token>/...`
