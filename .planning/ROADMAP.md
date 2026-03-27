@@ -46,7 +46,12 @@ Plans:
   2. Agent user receives high-risk responses with only the dangerous fragments replaced by a safe notice instead of the entire response being denied.
   3. Response-side processing preserves valid JSON or event structure after sanitization.
   4. Operator can identify sanitized responses through risk marking or equivalent audit signals without changing the client protocol contract.
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] `02-01-PLAN.md` - Create the Phase 2 regression baseline for chat/responses sanitize behavior, metadata/audit channels, and the direct messages streaming harness.
+- [ ] `02-02-PLAN.md` - Replace direct `/v1/messages` JSON sanitize fallback with Anthropic-native fragment patching.
+- [ ] `02-03-PLAN.md` - Replace direct `/v1/messages` streaming sanitize fallback with Anthropic-native SSE sanitization.
 
 ### Phase 3: /v1 Compatibility Completion
 **Goal**: Users can rely on every supported `/v1` protocol shape working end-to-end through the hardened gateway path.
@@ -98,7 +103,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Request Redaction Precision | 3/3 | Complete | 2026-03-27 |
-| 2. Response Sanitization Integrity | 0/TBD | Not started | - |
+| 2. Response Sanitization Integrity | 0/3 | Not started | - |
 | 3. /v1 Compatibility Completion | 0/TBD | Not started | - |
 | 4. Streaming & Passthrough Fidelity | 0/TBD | Not started | - |
 | 5. /v2 Proxy Hardening | 0/TBD | Not started | - |
