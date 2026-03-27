@@ -40,6 +40,13 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
         "CRYPTO_SEED_PHRASE",
     }
 )
+_LOW_FALSE_POSITIVE_V1_ROUTES = frozenset(
+    {
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/messages",
+    }
+)
 
 
 class RedactionFilter(BaseFilter):
@@ -130,8 +137,8 @@ class RedactionFilter(BaseFilter):
         return (token[: self._prefix_max_len] or "REQ").upper()
 
     @staticmethod
-    def _is_responses_route(route: str) -> bool:
-        return str(route or "").strip().lower() == "/v1/responses"
+    def _is_low_false_positive_v1_route(route: str) -> bool:
+        return str(route or "").strip().lower() in _LOW_FALSE_POSITIVE_V1_ROUTES
 
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "replacements": 0}
@@ -143,7 +150,9 @@ class RedactionFilter(BaseFilter):
         serial = 0
         request_prefix = self._request_prefix(ctx.request_id)
         active_pii_patterns = (
-            self._responses_relaxed_pii_patterns if self._is_responses_route(ctx.route) else self._pii_patterns
+            self._responses_relaxed_pii_patterns
+            if self._is_low_false_positive_v1_route(ctx.route)
+            else self._pii_patterns
         )
 
         # Mutable container so the inner closure can reference the current message role.
