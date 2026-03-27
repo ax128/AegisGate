@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 from fastapi import Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.core import pipeline as pipeline_module
@@ -463,7 +463,6 @@ async def test_messages_passthrough_preserves_payload(monkeypatch: pytest.Monkey
         "policy": "default",
     }
     audit_calls = _install_common_passthrough_mocks(monkeypatch)
-    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {"x-aegis-filter-mode": "passthrough"})
 
     async def fake_forward_json(url: str, forwarded_payload: dict[str, object], headers: dict[str, str]):
         assert forwarded_payload == {
@@ -492,13 +491,16 @@ async def test_messages_passthrough_preserves_payload(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
 
-    result = await openai_router.messages(
-        payload,
-        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+    result = await openai_router._execute_messages_once(
+        payload=payload,
+        request_headers={"x-aegis-filter-mode": "passthrough"},
+        request_path="/v1/messages",
+        boundary={},
+        tenant_id="default",
     )
 
-    assert isinstance(result, dict)
-    assert result["content"][0]["text"] == "ok"
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 200
     assert audit_calls == ["messages-pass-structured"]
 
 
@@ -512,7 +514,6 @@ async def test_messages_compat_openai_chat_delegates_to_responses_path(monkeypat
         "session_id": "messages-compat-json",
     }
     delegated_payloads: list[dict[str, object]] = []
-    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
 
     def fake_messages_payload_to_responses_payload(
         payload_arg: dict,
@@ -557,15 +558,15 @@ async def test_messages_compat_openai_chat_delegates_to_responses_path(monkeypat
 
     monkeypatch.setattr(openai_router, "_execute_generic_once", fail_generic_once)
 
-    response = await openai_router.messages(
-        payload,
-        _build_request(
+    response = await openai_router._messages_compat_openai_chat(
+        payload=payload,
+        request=_build_request(
             path="/v1/messages",
-            scope_updates={
-                "aegis_compat": "openai_chat",
-                "aegis_upstream_route_path": "/v1/messages",
-            },
+            scope_updates={"aegis_compat": "openai_chat"},
         ),
+        gateway_headers={},
+        boundary={},
+        tenant_id="default",
     )
 
     assert delegated_payloads == [

@@ -84,6 +84,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _responses_function_output_redaction_patterns,
     _responses_relaxed_redaction_patterns,
     _sanitize_chat_messages_for_upstream_with_hits,
+    _sanitize_messages_system_for_upstream_with_hits,
     _sanitize_function_output_value,
     _sanitize_payload_for_log,
     _sanitize_responses_input_for_upstream,
@@ -624,12 +625,79 @@ def _build_responses_upstream_payload(
     return upstream_payload
 
 
+def _build_messages_upstream_payload(
+    payload: dict[str, Any],
+    sanitized_req_messages: list,
+    *,
+    request_id: str = "-",
+    session_id: str = "-",
+    route: str = "-",
+    whitelist_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    upstream_payload = {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
+    redaction_hits: list[dict[str, Any]] = []
+    remaining_messages = list(sanitized_req_messages)
+    system_value = payload.get("system")
+    if system_value is not None and remaining_messages and remaining_messages[0].role == "system":
+        system_message = remaining_messages.pop(0)
+        if _is_structured_content(system_value):
+            sanitized_system, system_hits = _sanitize_messages_system_for_upstream_with_hits(
+                system_value,
+                whitelist_keys=whitelist_keys,
+            )
+            upstream_payload["system"] = sanitized_system
+            redaction_hits.extend(system_hits)
+        else:
+            upstream_payload["system"] = _strip_system_exec_runtime_lines(str(system_message.content))
+
+    original_messages = payload.get("messages", [])
+    sanitized_original_messages, message_hits = _sanitize_chat_messages_for_upstream_with_hits(
+        original_messages,
+        whitelist_keys=whitelist_keys,
+    )
+    redaction_hits.extend(message_hits)
+    updated_messages: list[dict[str, Any]] = []
+    for idx, message in enumerate(remaining_messages):
+        if idx < len(sanitized_original_messages) and isinstance(sanitized_original_messages[idx], dict):
+            merged = dict(sanitized_original_messages[idx])
+        else:
+            merged = {"role": message.role}
+        merged["role"] = message.role
+        original_content = (
+            original_messages[idx].get("content")
+            if idx < len(original_messages) and isinstance(original_messages[idx], dict)
+            else merged.get("content")
+        )
+        if _is_structured_content(original_content):
+            merged["content"] = merged.get("content", original_content)
+        else:
+            merged["content"] = message.content
+        updated_messages.append(merged)
+    upstream_payload["messages"] = updated_messages
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        logger.warning(
+            "messages input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            session_id,
+            route,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
+    return upstream_payload
+
+
 def _build_chat_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return sanitize_for_chat({k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS})
 
 
 def _build_responses_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return sanitize_for_responses({k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS})
+
+
+def _build_messages_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
 
 
 def _extract_generic_analysis_text(value: Any) -> str:
@@ -4365,6 +4433,347 @@ def _passthrough_any_response(body: dict[str, Any] | str) -> JSONResponse | Plai
     return PlainTextResponse(status_code=200, content=str(body))
 
 
+async def _execute_messages_stream_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    tenant_id: str = "default",
+) -> StreamingResponse | JSONResponse:
+    req = await _run_payload_transform(to_internal_messages, payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_messages_passthrough_payload(payload) if filter_mode == "passthrough" else payload
+    logger.info("messages stream start request_id=%s route=%s", ctx.request_id, request_path)
+
+    try:
+        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _with_trace_forward_headers(_build_forward_headers(request_headers), ctx.request_id)
+
+    if filter_mode == "passthrough":
+        return _build_passthrough_stream_response(
+            ctx=ctx,
+            payload=passthrough_payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            log_label="messages stream",
+        )
+
+    if _is_upstream_whitelisted(upstream_base):
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+
+        async def whitelist_generator() -> AsyncGenerator[bytes, None]:
+            try:
+                async for line in _forward_stream_lines(upstream_url, passthrough_payload, forward_headers):
+                    yield line
+            except RuntimeError as exc:
+                detail = str(exc)
+                reason = _stream_runtime_reason(detail)
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append(reason)
+                ctx.enforcement_actions.append(f"upstream:{reason}")
+                logger.error("messages stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+                yield _stream_error_sse_chunk(detail, code=reason)
+                yield _stream_done_sse_chunk()
+            except Exception as exc:  # pragma: no cover - fail-safe
+                detail = f"gateway_internal_error: {exc}"
+                ctx.response_disposition = "block"
+                ctx.disposition_reasons.append("gateway_internal_error")
+                ctx.enforcement_actions.append("upstream:gateway_internal_error")
+                logger.exception("messages stream unexpected failure request_id=%s", ctx.request_id)
+                yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+                yield _stream_done_sse_chunk()
+            finally:
+                _write_audit_event(ctx, boundary=boundary)
+
+        return _build_streaming_response(whitelist_generator())
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    if ctx.request_disposition == "block":
+        block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
+        debug_log_original("request_blocked", _extract_generic_analysis_text(payload), reason=block_reason)
+        return _error_response(
+            status_code=403,
+            reason="request_blocked",
+            detail="messages request blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_payload = await _run_payload_transform(
+        _build_messages_upstream_payload,
+        payload,
+        sanitized_req.messages,
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+        route=ctx.route,
+        whitelist_keys=ctx.redaction_whitelist_keys,
+    )
+    base_reports = list(ctx.report_items)
+
+    async def guarded_generator() -> AsyncGenerator[bytes, None]:
+        stream_window = ""
+        chunk_count = 0
+        try:
+            async for line in _iter_sse_frames(_forward_stream_lines(upstream_url, upstream_payload, forward_headers)):
+                payload_text = _extract_sse_data_payload_from_chunk(line)
+                if payload_text is not None and payload_text != "[DONE]":
+                    chunk_text = _extract_stream_text_from_event(payload_text)
+                    if chunk_text:
+                        stream_window = _trim_stream_window(stream_window, chunk_text)
+                        chunk_count += 1
+
+                        if chunk_count <= _STREAM_FILTER_CHECK_INTERVAL or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0:
+                            ctx.report_items = list(base_reports)
+                            probe_resp = InternalResponse(
+                                request_id=req.request_id,
+                                session_id=req.session_id,
+                                model=req.model,
+                                output_text=stream_window,
+                                raw={"stream": True, "generic": True},
+                            )
+                            await _run_response_pipeline(pipeline, probe_resp, ctx)
+
+                            if settings.enable_semantic_module and chunk_count % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL) == 0:
+                                await _apply_semantic_review(ctx, stream_window, phase="response")
+
+                        block_reason = _stream_block_reason(ctx)
+                        if block_reason:
+                            debug_log_original("response_stream_blocked", stream_window, reason=block_reason)
+                            ctx.response_disposition = "block"
+                            if block_reason not in ctx.disposition_reasons:
+                                ctx.disposition_reasons.append(block_reason)
+                            if not _confirmation_approval_enabled():
+                                ctx.enforcement_actions.append("stream:auto_sanitize")
+                                _maybe_log_dangerous_response_sample(
+                                    ctx,
+                                    stream_window,
+                                    route=request_path,
+                                    model=req.model,
+                                    source="messages_stream_auto_sanitize",
+                                    log_key="messages_stream_auto_sanitize",
+                                )
+                                sanitized_response = _build_sanitized_full_response(ctx, source_text=stream_window)
+                                logger.info("messages stream auto-sanitized request_id=%s reason=%s", ctx.request_id, block_reason)
+                                info_log_sanitized(
+                                    "messages_stream_sanitized",
+                                    sanitized_response,
+                                    request_id=ctx.request_id,
+                                    reason=block_reason,
+                                )
+                                yield _stream_confirmation_sse_chunk(ctx, req.model, request_path, sanitized_response, None)
+                                yield _stream_done_sse_chunk()
+                                return
+                            ctx.enforcement_actions.append("stream:block")
+                            logger.info("messages stream blocked request_id=%s reason=%s", ctx.request_id, block_reason)
+                            break
+
+                yield line
+        except RuntimeError as exc:
+            detail = str(exc)
+            reason = _stream_runtime_reason(detail)
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append(reason)
+            ctx.enforcement_actions.append(f"upstream:{reason}")
+            logger.error("messages stream upstream failure request_id=%s error=%s", ctx.request_id, detail)
+            yield _stream_error_sse_chunk(detail, code=reason)
+            yield _stream_done_sse_chunk()
+        except Exception as exc:  # pragma: no cover - fail-safe
+            detail = f"gateway_internal_error: {exc}"
+            ctx.response_disposition = "block"
+            ctx.disposition_reasons.append("gateway_internal_error")
+            ctx.enforcement_actions.append("upstream:gateway_internal_error")
+            logger.exception("messages stream unexpected failure request_id=%s", ctx.request_id)
+            yield _stream_error_sse_chunk(detail, code="gateway_internal_error")
+            yield _stream_done_sse_chunk()
+        finally:
+            _write_audit_event(ctx, boundary=boundary)
+
+    return _build_streaming_response(guarded_generator())
+
+
+async def _execute_messages_once(
+    *,
+    payload: dict[str, Any],
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    tenant_id: str = "default",
+) -> JSONResponse | PlainTextResponse:
+    req = await _run_payload_transform(to_internal_messages, payload)
+    ctx = RequestContext(request_id=req.request_id, session_id=req.session_id, route=req.route, tenant_id=tenant_id)
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
+    policy_engine.resolve(ctx, policy_name=payload.get("policy", settings.default_policy))
+    filter_mode = _apply_filter_mode(ctx, request_headers)
+    passthrough_payload = _build_messages_passthrough_payload(payload) if filter_mode == "passthrough" else payload
+    logger.info("messages start request_id=%s route=%s", ctx.request_id, request_path)
+
+    try:
+        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    forward_headers = _with_trace_forward_headers(_build_forward_headers(request_headers), ctx.request_id)
+    if filter_mode == "passthrough":
+        return await _forward_json_passthrough(
+            ctx=ctx,
+            payload=passthrough_payload,
+            upstream_url=upstream_url,
+            forward_headers=forward_headers,
+            boundary=boundary,
+            on_success=_passthrough_any_response,
+            log_label="messages endpoint",
+        )
+
+    if _is_upstream_whitelisted(upstream_base):
+        try:
+            status_code, upstream_body = await _forward_json(upstream_url, passthrough_payload, forward_headers)
+        except RuntimeError as exc:
+            logger.error("messages upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+            return _error_response(
+                status_code=502,
+                reason="upstream_unreachable",
+                detail=str(exc),
+                ctx=ctx,
+                boundary=boundary,
+            )
+        if status_code >= 400:
+            detail = _safe_error_detail(upstream_body)
+            return _error_response(
+                status_code=status_code,
+                reason="upstream_http_error",
+                detail=detail,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        _write_audit_event(ctx, boundary=boundary)
+        return _passthrough_any_response(upstream_body)
+
+    pipeline = _get_pipeline()
+    sanitized_req = await _run_request_pipeline(pipeline, req, ctx)
+    if ctx.request_disposition == "block":
+        block_reason = ctx.disposition_reasons[-1] if ctx.disposition_reasons else "request_blocked"
+        debug_log_original("request_blocked", _extract_generic_analysis_text(payload), reason=block_reason)
+        return _error_response(
+            status_code=403,
+            reason="request_blocked",
+            detail="messages request blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_payload = await _run_payload_transform(
+        _build_messages_upstream_payload,
+        payload,
+        sanitized_req.messages,
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+        route=ctx.route,
+        whitelist_keys=ctx.redaction_whitelist_keys,
+    )
+
+    try:
+        status_code, upstream_body = await _forward_json(upstream_url, upstream_payload, forward_headers)
+    except RuntimeError as exc:
+        logger.error("messages upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    upstream_text = _extract_generic_analysis_text(upstream_body)
+    capped_upstream_text = _cap_response_text(upstream_text, ctx)
+    internal_resp = InternalResponse(
+        request_id=req.request_id,
+        session_id=req.session_id,
+        model=req.model,
+        output_text=capped_upstream_text,
+        raw=upstream_body if isinstance(upstream_body, dict) else {"raw_text": str(upstream_body)},
+    )
+    await _run_response_pipeline(pipeline, internal_resp, ctx)
+    if settings.enable_semantic_module:
+        await _apply_semantic_review(ctx, internal_resp.output_text, phase="response")
+    if ctx.response_disposition == "sanitize":
+        sanitized_text = internal_resp.output_text
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info("messages sanitized request_id=%s route=%s", ctx.request_id, request_path)
+        return _passthrough_any_response(
+            {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
+        )
+
+    if _needs_confirmation(ctx):
+        if not _confirmation_approval_enabled():
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                capped_upstream_text,
+                route=request_path,
+                model=req.model,
+                source="messages_auto_sanitize",
+                log_key="messages_auto_sanitize",
+            )
+            sanitized_text = _build_sanitized_full_response(ctx, source_text=capped_upstream_text)
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+            logger.info("messages auto-sanitized (no confirmation) request_id=%s", ctx.request_id)
+            info_log_sanitized("messages_sanitized", sanitized_text, request_id=ctx.request_id)
+            _write_audit_event(ctx, boundary=boundary)
+            return _passthrough_any_response(
+                {"sanitized_text": sanitized_text} if isinstance(upstream_body, dict) else sanitized_text
+            )
+
+        return _error_response(
+            status_code=403,
+            reason="messages_response_blocked",
+            detail="messages response blocked by security policy",
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    _write_audit_event(ctx, boundary=boundary)
+    logger.info("messages completed request_id=%s route=%s", ctx.request_id, request_path)
+    return _passthrough_any_response(upstream_body)
+
+
 async def _execute_generic_stream_once(
     *,
     payload: dict[str, Any],
@@ -5292,7 +5701,7 @@ async def messages(payload: dict, request: Request):
     request_path = _request_target_path(request, fallback_path="/v1/messages")
 
     if _should_stream(payload):
-        return await _execute_generic_stream_once(
+        return await _execute_messages_stream_once(
             payload=payload,
             request_headers=gateway_headers,
             request_path=request_path,
@@ -5300,7 +5709,7 @@ async def messages(payload: dict, request: Request):
             tenant_id=tenant_id,
         )
 
-    return await _execute_generic_once(
+    return await _execute_messages_once(
         payload=payload,
         request_headers=gateway_headers,
         request_path=request_path,
