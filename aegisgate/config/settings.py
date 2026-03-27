@@ -63,9 +63,10 @@ class Settings(BaseSettings):
     pending_data_ttl_seconds: int = 86400
     # 是否在确认文案中展示「命中片段（安全变形）」预览，默认开启
     confirmation_show_hit_preview: bool = True
-    # [已废弃] 放行确认流程已移除，所有危险内容统一走自动遮挡/分割。
+    # [DEPRECATED] require_confirmation_on_block — 此字段已废弃，保留仅为配置兼容。
     # 无论该值设为 True 或 False，行为均等同 False：拦截时直接将危险片段
     # 变形后返回结果，不再支持 yes/no 放行指令。
+    # UI (.env.example, config/README.md) 已标注废弃；未来版本可能移除此字段。
     require_confirmation_on_block: bool = False
     # 开启后：命中「强制拦截命令」规则即直接拦截（不依赖 security_level/risk 阈值）
     strict_command_block_enabled: bool = False

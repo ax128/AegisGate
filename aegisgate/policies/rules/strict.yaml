@@ -1,3 +1,12 @@
+# strict.yaml — 严格检测策略
+#
+# 设计意图：
+# - risk_threshold 比 default (0.85) 更低 (0.50)，意味着更低置信度的检测也会触发拦截，
+#   因此 "strict" 指的是更严格的阈值，而非更多的过滤器。
+# - 故意省略 system_prompt_guard 和 untrusted_content_guard，因为这两个过滤器更适用于
+#   多租户场景；strict 策略聚焦于收紧核心检测管道的阈值。
+# - 如需同时启用额外过滤器，请在此列表中添加并确保对应 feature flag 已开启。
+
 enabled_filters:
   - exact_value_redaction
   - redaction
