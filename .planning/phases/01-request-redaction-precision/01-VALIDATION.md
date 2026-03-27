@@ -19,18 +19,18 @@ created: 2026-03-27
 |----------|-------|
 | **Framework** | `pytest` |
 | **Config file** | `pyproject.toml` |
-| **Quick run command** | `pytest -q aegisgate/tests/test_request_redaction_routes.py -x` |
+| **Quick run command** | `pytest -q aegisgate/tests/test_request_redaction_routes.py -k "chat_request_redaction_preserves_shape or messages_request_redaction_preserves_anthropic_shape or benign_examples_avoid_false_positives" -x` |
 | **Full suite command** | `pytest -q` |
-| **Estimated runtime** | ~60 seconds |
+| **Estimated runtime** | ~20 seconds |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `pytest -q aegisgate/tests/test_request_redaction_routes.py -x`
+- **After every task commit:** Run `pytest -q aegisgate/tests/test_request_redaction_routes.py -k "chat_request_redaction_preserves_shape or messages_request_redaction_preserves_anthropic_shape or benign_examples_avoid_false_positives" -x`
 - **After every plan wave:** Run `pytest -q aegisgate/tests/test_request_redaction_routes.py aegisgate/tests/test_payload_compat.py aegisgate/tests/test_sanitize_helpers.py -x`
 - **Before `$gsd-verify-work`:** Full suite must be green
-- **Max feedback latency:** 90 seconds
+- **Max feedback latency:** 30 seconds
 
 ---
 
@@ -40,8 +40,8 @@ created: 2026-03-27
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
 | 1-01-01 | 01 | 1 | SAFE-01 | integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_chat_request_redaction_preserves_shape -x` | ❌ W0 | ⬜ pending |
 | 1-01-02 | 01 | 1 | SAFE-02 | integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_responses_request_redaction_structured_input -x` | ❌ W0 | ⬜ pending |
-| 1-02-01 | 02 | 1 | SAFE-03 | integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_messages_request_redaction_preserves_anthropic_shape -x` | ❌ W0 | ⬜ pending |
-| 1-03-01 | 03 | 2 | SAFE-04 | unit/integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_benign_examples_avoid_false_positives -x` | ❌ W0 | ⬜ pending |
+| 1-02-01 | 02 | 2 | SAFE-03 | integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_messages_request_redaction_preserves_anthropic_shape -x` | ❌ W0 | ⬜ pending |
+| 1-03-01 | 03 | 3 | SAFE-04 | unit/integration | `pytest -q aegisgate/tests/test_request_redaction_routes.py::test_benign_examples_avoid_false_positives -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -70,7 +70,7 @@ created: 2026-03-27
 - [ ] Sampling continuity: no 3 consecutive tasks without automated verify
 - [ ] Wave 0 covers all MISSING references
 - [ ] No watch-mode flags
-- [ ] Feedback latency < 90s
+- [ ] Feedback latency < 30s
 - [ ] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending
