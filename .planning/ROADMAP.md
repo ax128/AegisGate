@@ -12,7 +12,7 @@ This roadmap treats AegisGate as a brownfield hardening milestone. The existing 
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Request Redaction Precision** - Harden `/v1` request-side redaction so sensitive input is scrubbed without breaking benign prompts.
+- [x] **Phase 1: Request Redaction Precision** - Harden `/v1` request-side redaction so sensitive input is scrubbed without breaking benign prompts. Completed 2026-03-27
 - [ ] **Phase 2: Response Sanitization Integrity** - Preserve response structure while replacing only dangerous fragments and surfacing audit/risk marks.
 - [ ] **Phase 3: /v1 Compatibility Completion** - Make the main `/v1` protocol shapes behave consistently through the full security pipeline.
 - [ ] **Phase 4: Streaming & Passthrough Fidelity** - Keep SSE, passthrough, and gateway-only rewrites correct after sanitization and compatibility handling.
@@ -34,8 +34,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] `01-01-PLAN.md` - Reuse the `/v1/responses` rewrite pattern for chat structured-content redaction and lock it with focused regressions.
-- [ ] `01-02-PLAN.md` - Add a dedicated direct `/v1/messages` request rewrite path that preserves Anthropic shape for JSON and streaming.
-- [ ] `01-03-PLAN.md` - Align low-false-positive request redaction behavior across chat, responses, and direct messages.
+- [x] `01-02-PLAN.md` - Add a dedicated direct `/v1/messages` request rewrite path that preserves Anthropic shape for JSON and streaming.
+- [x] `01-03-PLAN.md` - Align low-false-positive request redaction behavior across chat, responses, and direct messages.
 
 ### Phase 2: Response Sanitization Integrity
 **Goal**: Users receive `/v1` responses that stay structurally valid while only dangerous fragments are replaced and risk-marked.
@@ -97,7 +97,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Request Redaction Precision | 1/3 | In Progress | - |
+| 1. Request Redaction Precision | 3/3 | Complete | 2026-03-27 |
 | 2. Response Sanitization Integrity | 0/TBD | Not started | - |
 | 3. /v1 Compatibility Completion | 0/TBD | Not started | - |
 | 4. Streaming & Passthrough Fidelity | 0/TBD | Not started | - |
