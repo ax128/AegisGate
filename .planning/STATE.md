@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-27T14:50:41.341Z"
+last_updated: "2026-03-27T14:58:21.045Z"
 last_activity: 2026-03-27
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
   percent: 67
 ---
 
@@ -78,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 01-request-redaction-precision]: Field-value secret detection stays unchanged so benign infrastructure examples pass without reopening explicit secret leaks.
 - [Phase 02-response-sanitization-integrity]: Chat, responses, and benign direct messages now have focused response-side route regressions that pin protocol shape and existing aegisgate metadata/audit behavior.
 - [Phase 02-response-sanitization-integrity]: Direct /v1/messages streaming regressions use inline payload-transform and streaming stubs so later sanitize-path fixes do not depend on the flaky offload executor path.
+- [Phase 02-response-sanitization-integrity]: Direct /v1/messages non-stream sanitize responses now preserve Anthropic message JSON instead of returning sanitized_text envelopes.
+- [Phase 02-response-sanitization-integrity]: Dict-based auto-sanitize on /v1/messages now patches the original upstream body once and leaves operator risk signaling in existing aegisgate metadata and audit logs.
 
 ### Pending Todos
 
