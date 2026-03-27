@@ -14,10 +14,10 @@
 
 ### Response Safety
 
-- [ ] **RESP-01**: Agent user receives benign responses without unnecessary blocking or loss of valid content
-- [ ] **RESP-02**: Agent user receives responses whose JSON/event structure remains valid after response-side processing
-- [ ] **RESP-03**: Agent user receives high-risk responses with only dangerous fragments replaced by a safe default notice instead of the entire response being blocked
-- [ ] **RESP-04**: Operator can see risk marking or equivalent audit/reporting for sanitized responses without changing the client protocol contract
+- [x] **RESP-01**: Agent user receives benign responses without unnecessary blocking or loss of valid content
+- [x] **RESP-02**: Agent user receives responses whose JSON/event structure remains valid after response-side processing
+- [x] **RESP-03**: Agent user receives high-risk responses with only dangerous fragments replaced by a safe default notice instead of the entire response being blocked
+- [x] **RESP-04**: Operator can see risk marking or equivalent audit/reporting for sanitized responses without changing the client protocol contract
 
 ### Protocol Compatibility
 
@@ -74,10 +74,10 @@
 | SAFE-02 | Phase 1 | Complete |
 | SAFE-03 | Phase 1 | Complete |
 | SAFE-04 | Phase 1 | Complete |
-| RESP-01 | Phase 2 | Pending |
-| RESP-02 | Phase 2 | Pending |
-| RESP-03 | Phase 2 | Pending |
-| RESP-04 | Phase 2 | Pending |
+| RESP-01 | Phase 2 | Complete |
+| RESP-02 | Phase 2 | Complete |
+| RESP-03 | Phase 2 | Complete |
+| RESP-04 | Phase 2 | Complete |
 | COMP-01 | Phase 3 | Pending |
 | COMP-02 | Phase 3 | Pending |
 | COMP-03 | Phase 3 | Pending |
