@@ -18,10 +18,12 @@ Agents can route all LLM traffic through one gateway that reduces leakage and da
 - ✓ Request/response security pipeline, policy loading, token-based routing, and upstream forwarding are already implemented in the current gateway — existing
 - ✓ Anthropic Messages compatibility bridging, streaming support, passthrough modes, and generic `/v2` proxy foundations already exist in the codebase — existing
 - ✓ Local admin and runtime configuration surfaces already exist for operators to manage keys, tokens, rules, and runtime settings — existing
+- ✓ Supported `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` now apply request-side redaction with route parity and protocol-shape preservation — Phase 1
+- ✓ Supported `/v1` request routes now use a lower-false-positive request redaction policy for benign infrastructure and security-review prompts while still redacting explicit secrets — Phase 1
 
 ### Active
 
-- [ ] Reduce false positives in request-side redaction and response-side handling so normal prompts and normal responses pass cleanly
+- [ ] Reduce false positives in response-side handling so normal responses pass cleanly
 - [ ] Preserve response payload structure while replacing only dangerous fragments instead of blocking entire high-risk responses
 - [ ] Make `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, compatibility conversion, streaming, and passthrough behave consistently through the full security path
 - [ ] Bring `/v2` request redaction plus response-side risk marking/replacement to a production-usable level with explicit switches
@@ -55,11 +57,17 @@ The codebase map already highlights that the main `/v1` and `/v2` paths exist bu
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Optimize for low false-positive security behavior | Overblocking harms trust and makes the gateway unusable for real agent workflows | — Pending |
+| Optimize for low false-positive security behavior | Overblocking harms trust and makes the gateway unusable for real agent workflows | ✓ Good in Phase 1 for supported `/v1` request routes |
 | Replace dangerous response fragments instead of hard-blocking entire high-risk responses | Users still need usable outputs and stable protocol shapes | — Pending |
 | Treat response-structure preservation as a hard requirement | Broken JSON/SSE/protocol framing is a functional regression, not an acceptable tradeoff | — Pending |
 | Keep this milestone brownfield-friendly and avoid a major rewrite | The repo already has broad coverage of the target surface; the main need is hardening and completion | — Pending |
 | Include `/v2` in scope with switchable request and response controls | `/v2` is part of the product promise and cannot remain a second-class path | — Pending |
+
+## Current State
+
+Phase 1 is complete at the code and automated-test level. The gateway now has route-parity request-side redaction across the three supported `/v1` routes, with schema-safe rewriting for structured chat and direct messages payloads and a lower-false-positive policy for benign prompts.
+
+One human smoke-test item remains recorded in `01-HUMAN-UAT.md`: validating live upstream acceptance against real OpenAI/Anthropic-compatible providers. The next implementation focus is Phase 2, which moves from request-side precision to response-side sanitization integrity.
 
 ## Evolution
 
@@ -79,4 +87,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-27 after initialization*
+*Last updated: 2026-03-27 after Phase 1 completion*
