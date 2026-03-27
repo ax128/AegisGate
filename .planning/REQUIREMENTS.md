@@ -7,8 +7,8 @@
 
 ### Request Safety
 
-- [ ] **SAFE-01**: Agent user can send prompts through `/v1/chat/completions` and have request-side secret/PII redaction applied before upstream forwarding
-- [ ] **SAFE-02**: Agent user can send prompts through `/v1/responses` and have the same request-side redaction behavior applied before upstream forwarding
+- [x] **SAFE-01**: Agent user can send prompts through `/v1/chat/completions` and have request-side secret/PII redaction applied before upstream forwarding
+- [x] **SAFE-02**: Agent user can send prompts through `/v1/responses` and have the same request-side redaction behavior applied before upstream forwarding
 - [ ] **SAFE-03**: Agent user can send prompts through `/v1/messages` and have the same request-side redaction behavior applied before upstream forwarding
 - [ ] **SAFE-04**: Agent user can send normal benign prompts through supported `/v1` routes without excessive false-positive redaction that makes the request unusable
 
@@ -70,8 +70,8 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SAFE-01 | Phase 1 | Pending |
-| SAFE-02 | Phase 1 | Pending |
+| SAFE-01 | Phase 1 | Complete |
+| SAFE-02 | Phase 1 | Complete |
 | SAFE-03 | Phase 1 | Pending |
 | SAFE-04 | Phase 1 | Pending |
 | RESP-01 | Phase 2 | Pending |
