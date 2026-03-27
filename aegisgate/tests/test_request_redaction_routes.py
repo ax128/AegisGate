@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi.responses import JSONResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
@@ -41,6 +42,27 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         lambda ctx, boundary=None: audit_calls.append(ctx.request_id),
     )
     return audit_calls
+
+
+def _build_request(
+    *,
+    path: str,
+    headers: list[tuple[bytes, bytes]] | None = None,
+    scope_updates: dict[str, Any] | None = None,
+) -> Request:
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "headers": headers or [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    }
+    if scope_updates:
+        scope.update(scope_updates)
+    return Request(scope)
 
 
 @pytest.mark.asyncio
@@ -242,3 +264,223 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
             "provider_field": {"keep": True},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "system": [
+            {"type": "text", "text": "Authorization: Bearer sk-live-system-secret", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "Keep this guidance."},
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "token=sk-live-user-secret"},
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                ],
+                "metadata": {"segment": "alpha"},
+            }
+        ],
+        "max_tokens": 256,
+        "tool_choice": {"type": "auto"},
+        "provider_meta": {"channel": "anthropic"},
+        "request_id": "messages-redaction-shape",
+        "session_id": "messages-redaction-shape",
+    }
+    forwarded_payloads: list[dict[str, Any]] = []
+    audit_calls = _install_route_mocks(monkeypatch)
+
+    async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
+        assert req.route == "/v1/messages"
+        assert [message.role for message in req.messages] == ["system", "user"]
+        assert req.messages[0].content == "Authorization: Bearer sk-live-system-secret Keep this guidance."
+        assert req.messages[1].content == "token=sk-live-user-secret [IMAGE_CONTENT]"
+        return req.model_copy(
+            update={
+                "messages": [
+                    InternalMessage(
+                        role="system",
+                        content="[REDACTED:AUTH_BEARER] Keep this guidance.",
+                        source="system",
+                    ),
+                    InternalMessage(
+                        role="user",
+                        content="[REDACTED:AWS_SECRET_ACCESS_KEY] [IMAGE_CONTENT]",
+                        source="user",
+                    ),
+                ]
+            }
+        )
+
+    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+        forwarded_payloads.append(forwarded_payload)
+        return 200, {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4.5",
+        }
+
+    monkeypatch.setattr(openai_router, "_run_request_pipeline", fake_request_pipeline)
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+
+    result = await openai_router.messages(
+        payload,
+        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+    )
+
+    assert isinstance(result, (dict, JSONResponse))
+    assert audit_calls == ["messages-redaction-shape"]
+    assert len(forwarded_payloads) == 1
+    assert forwarded_payloads[0]["system"] == [
+        {
+            "type": "text",
+            "text": "Authorization: Bearer [REDACTED:TOKEN]",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "Keep this guidance."},
+    ]
+    assert forwarded_payloads[0]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "token=[REDACTED:TOKEN]"},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+            ],
+            "metadata": {"segment": "alpha"},
+        }
+    ]
+    assert forwarded_payloads[0]["max_tokens"] == 256
+    assert forwarded_payloads[0]["tool_choice"] == {"type": "auto"}
+    assert forwarded_payloads[0]["provider_meta"] == {"channel": "anthropic"}
+
+
+@pytest.mark.asyncio
+async def test_messages_stream_request_redaction_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "token=sk-live-user-secret"},
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                ],
+            }
+        ],
+        "max_tokens": 256,
+        "stream": True,
+        "request_id": "messages-redaction-stream",
+        "session_id": "messages-redaction-stream",
+    }
+    forwarded_payloads: list[dict[str, Any]] = []
+    audit_calls = _install_route_mocks(monkeypatch)
+
+    async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
+        return req.model_copy(
+            update={
+                "messages": [
+                    InternalMessage(
+                        role="system",
+                        content="[REDACTED:AUTH_BEARER]",
+                        source="system",
+                    ),
+                    InternalMessage(
+                        role="user",
+                        content="[REDACTED:AWS_SECRET_ACCESS_KEY] [IMAGE_CONTENT]",
+                        source="user",
+                    ),
+                ]
+            }
+        )
+
+    async def fake_forward_stream_lines(
+        url: str,
+        forwarded_payload: dict[str, Any],
+        headers: dict[str, str],
+    ):
+        forwarded_payloads.append(forwarded_payload)
+        yield b"data: {\"type\":\"message_start\"}\n\n"
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(openai_router, "_run_request_pipeline", fake_request_pipeline)
+    monkeypatch.setattr(openai_router, "_forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+
+    response = await openai_router.messages(
+        payload,
+        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+    )
+
+    assert isinstance(response, StreamingResponse)
+    body = b""
+    async for chunk in response.body_iterator:
+        body += bytes(chunk)
+    assert b"message_start" in body
+    assert len(forwarded_payloads) == 1
+    assert forwarded_payloads[0]["system"] == [
+        {"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}
+    ]
+    assert forwarded_payloads[0]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "token=[REDACTED:TOKEN]"},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+            ],
+        }
+    ]
+    assert audit_calls == ["messages-redaction-stream"]
+
+
+@pytest.mark.asyncio
+async def test_messages_request_redaction_avoids_generic_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "token=sk-live-user-secret"}]}],
+        "max_tokens": 256,
+        "request_id": "messages-redaction-allow",
+        "session_id": "messages-redaction-allow",
+    }
+    forwarded_payloads: list[dict[str, Any]] = []
+    _install_route_mocks(monkeypatch)
+
+    async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
+        ctx.request_disposition = "sanitize"
+        return req.model_copy(
+            update={
+                "messages": [
+                    InternalMessage(role="system", content="[REDACTED:AUTH_BEARER]", source="system"),
+                    InternalMessage(role="user", content="[REDACTED:AWS_SECRET_ACCESS_KEY]", source="user"),
+                ]
+            }
+        )
+
+    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+        forwarded_payloads.append(forwarded_payload)
+        return 200, {
+            "id": "msg-allow",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4.5",
+        }
+
+    monkeypatch.setattr(openai_router, "_run_request_pipeline", fake_request_pipeline)
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+
+    result = await openai_router.messages(
+        payload,
+        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+    )
+
+    assert forwarded_payloads
+    assert not isinstance(result, JSONResponse) or result.status_code != 403

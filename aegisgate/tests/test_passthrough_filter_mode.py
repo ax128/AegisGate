@@ -55,6 +55,27 @@ def _install_common_passthrough_mocks(monkeypatch: pytest.MonkeyPatch) -> list[s
     return audit_calls
 
 
+def _build_request(
+    *,
+    path: str,
+    headers: list[tuple[bytes, bytes]] | None = None,
+    scope_updates: dict[str, object] | None = None,
+) -> Request:
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "headers": headers or [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    }
+    if scope_updates:
+        scope.update(scope_updates)
+    return Request(scope)
+
+
 def test_responses_stream_debug_log_filter() -> None:
     assert openai_router._should_log_responses_stream_event("response.created") is False
     assert openai_router._should_log_responses_stream_event("response.completed") is False
@@ -419,6 +440,143 @@ async def test_chat_passthrough_preserves_structured_content(monkeypatch: pytest
 
     assert result["choices"][0]["message"]["content"] == "ok"
     assert audit_calls == ["chat-pass-structured"]
+
+
+@pytest.mark.asyncio
+async def test_messages_passthrough_preserves_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "token=sk-live-user-secret"},
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                ],
+                "metadata": {"segment": "alpha"},
+            }
+        ],
+        "max_tokens": 256,
+        "request_id": "messages-pass-structured",
+        "session_id": "messages-pass-structured",
+        "policy": "default",
+    }
+    audit_calls = _install_common_passthrough_mocks(monkeypatch)
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {"x-aegis-filter-mode": "passthrough"})
+
+    async def fake_forward_json(url: str, forwarded_payload: dict[str, object], headers: dict[str, str]):
+        assert forwarded_payload == {
+            "model": "claude-sonnet-4.5",
+            "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "token=sk-live-user-secret"},
+                        {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                    ],
+                    "metadata": {"segment": "alpha"},
+                }
+            ],
+            "max_tokens": 256,
+        }
+        assert url == "http://upstream.test/v1/messages"
+        return 200, {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4.5",
+        }
+
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+
+    result = await openai_router.messages(
+        payload,
+        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+    )
+
+    assert isinstance(result, dict)
+    assert result["content"][0]["text"] == "ok"
+    assert audit_calls == ["messages-pass-structured"]
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_openai_chat_delegates_to_responses_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 128,
+        "request_id": "messages-compat-json",
+        "session_id": "messages-compat-json",
+    }
+    delegated_payloads: list[dict[str, object]] = []
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+
+    def fake_messages_payload_to_responses_payload(
+        payload_arg: dict,
+        *,
+        model_map: dict[str, str] | None = None,
+        default_model: str | None = None,
+    ) -> dict:
+        return {
+            "model": "gpt-5.4",
+            "input": "hello",
+            "request_id": payload_arg["request_id"],
+            "session_id": payload_arg["session_id"],
+        }
+
+    async def fake_execute_responses_once(
+        *,
+        payload: dict[str, object],
+        request_headers: dict[str, str],
+        request_path: str,
+        boundary: dict | None,
+        tenant_id: str = "default",
+        skip_confirmation: bool = False,
+        forced_upstream_base: str | None = None,
+    ) -> dict:
+        delegated_payloads.append(payload)
+        assert request_path == "/v1/responses"
+        return {
+            "id": "resp-1",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": "ok",
+        }
+
+    monkeypatch.setattr(
+        openai_router,
+        "messages_payload_to_responses_payload",
+        fake_messages_payload_to_responses_payload,
+    )
+    monkeypatch.setattr(openai_router, "_execute_responses_once", fake_execute_responses_once)
+    async def fail_generic_once(*args, **kwargs):
+        raise AssertionError("compat path 不应走 generic direct rewrite")
+
+    monkeypatch.setattr(openai_router, "_execute_generic_once", fail_generic_once)
+
+    response = await openai_router.messages(
+        payload,
+        _build_request(
+            path="/v1/messages",
+            scope_updates={
+                "aegis_compat": "openai_chat",
+                "aegis_upstream_route_path": "/v1/messages",
+            },
+        ),
+    )
+
+    assert delegated_payloads == [
+        {
+            "model": "gpt-5.4",
+            "input": "hello",
+            "request_id": "messages-compat-json",
+            "session_id": "messages-compat-json",
+        }
+    ]
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio
