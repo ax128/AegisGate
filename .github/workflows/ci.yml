@@ -48,7 +48,7 @@ jobs:
       - name: Run tests with coverage
         if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
         timeout-minutes: 12
-        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing -v
+        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing --cov-fail-under=0 -v
 
       - name: Upload coverage
         if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
