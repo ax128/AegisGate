@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import queue
 import tempfile
 import threading
 from collections import defaultdict
@@ -13,6 +15,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+from aegisgate.core.background_worker import (
+    ensure_worker_thread,
+    run_queue_worker,
+    shutdown_queue_worker,
+)
 from aegisgate.core.context import RequestContext
 from aegisgate.util.logger import logger
 
@@ -68,6 +75,10 @@ class StatsCollector:
         self._since: str = datetime.now(timezone.utc).isoformat()
         self._record_count = 0
         self._persist_path = _resolve_stats_path()
+        self._persist_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=8)
+        self._persist_worker: threading.Thread | None = None
+        self._persist_worker_lock = threading.Lock()
+        self._persist_atexit_registered = False
         self._load()
 
     def _load(self) -> None:
@@ -108,13 +119,25 @@ class StatsCollector:
                 continue
         logger.info("stats no persisted data found, starting fresh")
 
-    def _save(self) -> None:
-        """将当前数据写入磁盘（原子写入）。"""
-        data = {
+    def _ensure_persist_runtime(self) -> None:
+        if not hasattr(self, "_persist_queue"):
+            self._persist_queue = queue.Queue(maxsize=8)
+        if not hasattr(self, "_persist_worker"):
+            self._persist_worker = None
+        if not hasattr(self, "_persist_worker_lock"):
+            self._persist_worker_lock = threading.Lock()
+        if not hasattr(self, "_persist_atexit_registered"):
+            self._persist_atexit_registered = False
+
+    def _serialize_state_unlocked(self) -> dict[str, Any]:
+        return {
             "since": self._since,
             "totals": dict(self._totals),
             "hourly": {k: dict(v) for k, v in self._hourly.items()},
         }
+
+    def _save_payload(self, data: dict[str, Any]) -> None:
+        """将当前数据写入磁盘（原子写入）。"""
         path = self._persist_path
         tmp_path: Path | None = None
         try:
@@ -133,6 +156,53 @@ class StatsCollector:
                     pass
             logger.warning("stats persist failed path=%s error=%s", path, exc)
 
+    def _stats_worker_loop(self) -> None:
+        run_queue_worker(
+            self._persist_queue,
+            self._save_payload,
+            on_error=lambda exc: logger.warning("stats persist failed path=%s error=%s", self._persist_path, exc),
+        )
+
+    def _register_shutdown_handler(self) -> None:
+        self._ensure_persist_runtime()
+        if self._persist_atexit_registered:
+            return
+        atexit.register(self.shutdown_worker)
+        self._persist_atexit_registered = True
+
+    def _ensure_worker(self) -> None:
+        self._ensure_persist_runtime()
+        self._register_shutdown_handler()
+        self._persist_worker = ensure_worker_thread(
+            self._persist_worker,
+            lock=self._persist_worker_lock,
+            build_thread=lambda: threading.Thread(
+                target=self._stats_worker_loop,
+                name="aegisgate-stats-writer",
+                daemon=False,
+            ),
+        )
+
+    def _persist_async(self, data: dict[str, Any]) -> None:
+        self._ensure_worker()
+        try:
+            self._persist_queue.put_nowait(data)
+            return
+        except queue.Full:
+            pass
+        # Queue is full — discard the oldest pending snapshot so we can enqueue
+        # the latest one. Do NOT call task_done() here because the discarded
+        # item was never processed by the worker thread; calling task_done()
+        # would corrupt the join counter and may raise ValueError.
+        try:
+            self._persist_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._persist_queue.put_nowait(data)
+        except queue.Full:
+            self._save_payload(data)
+
     def record(self, ctx: RequestContext) -> None:
         """从已完成的请求上下文中提取计数并累加。"""
         redactions = 0
@@ -149,6 +219,7 @@ class StatsCollector:
         passthrough = 1 if "filter_mode:passthrough" in ctx.security_tags else 0
 
         hour = _hour_key(datetime.now(timezone.utc))
+        persist_payload: dict[str, Any] | None = None
 
         with self._lock:
             self._totals["requests"] += 1
@@ -168,7 +239,10 @@ class StatsCollector:
             self._record_count += 1
             if self._record_count >= _PERSIST_INTERVAL:
                 self._record_count = 0
-                self._save()
+                persist_payload = self._serialize_state_unlocked()
+
+        if persist_payload is not None:
+            self._persist_async(persist_payload)
 
     def snapshot(self) -> dict[str, Any]:
         """返回当前统计快照。"""
@@ -212,8 +286,21 @@ class StatsCollector:
 
     def flush(self) -> None:
         """强制写盘（用于优雅关闭）。"""
+        self._ensure_persist_runtime()
+        self._persist_queue.join()
         with self._lock:
-            self._save()
+            payload = self._serialize_state_unlocked()
+        self._save_payload(payload)
+
+    def shutdown_worker(self, timeout_seconds: float = 1.0) -> None:
+        self._ensure_persist_runtime()
+        self._persist_worker = shutdown_queue_worker(
+            self._persist_worker,
+            work_queue=self._persist_queue,
+            timeout_seconds=timeout_seconds,
+            on_queue_full=lambda: logger.warning("stats shutdown: queue full, sentinel could not be sent"),
+            on_timeout=lambda timeout: logger.warning("stats worker did not stop within %.2fs", timeout),
+        )
 
     def _prune(self) -> None:
         """删除超过 7 天的小时桶（需在锁内调用）。"""
