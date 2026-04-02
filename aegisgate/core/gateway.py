@@ -31,7 +31,10 @@ from aegisgate.adapters.openai_compat.router import (
     reload_runtime_dependencies,
     router as openai_router,
 )
-from aegisgate.adapters.openai_compat.offload import shutdown_payload_transform_executor
+from aegisgate.adapters.openai_compat.offload import (
+    shutdown_filter_pipeline_executor,
+    shutdown_payload_transform_executor,
+)
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
 from aegisgate.adapters.relay_compat.router import router as relay_router
 from aegisgate.adapters.v2_proxy.router import (
@@ -263,7 +266,10 @@ class _AdminRateLimiter:
                 )
                 self._last_evict = now
             # Hard cap: reject if too many distinct IPs tracked (DoS mitigation)
-            if client_ip not in self._buckets and len(self._buckets) >= self._MAX_BUCKETS:
+            if (
+                client_ip not in self._buckets
+                and len(self._buckets) >= self._MAX_BUCKETS
+            ):
                 return False
             bucket = self._buckets[client_ip]
             self._buckets[client_ip] = [t for t in bucket if t > cutoff]
@@ -279,6 +285,7 @@ class _AdminRateLimiter:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     # --- startup ---
+    app.state.ready = False
     try:
         ensure_config_dir()
         assert_security_bootstrap_ready()
@@ -318,6 +325,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.warning("docker_upstreams inject failed: %s", exc)
     try:
         from aegisgate.adapters.openai_compat.mapper import load_global_model_map
+
         load_global_model_map()
     except Exception as exc:  # pragma: no cover
         logger.warning("global model_map load on startup failed: %s", exc)
@@ -339,9 +347,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         _hot_reloader = build_watcher()
         await _hot_reloader.start()
 
+    app.state.ready = True
     yield
 
     # --- shutdown ---
+    app.state.ready = False
     if _hot_reloader is not None:
         await _hot_reloader.stop()
         _hot_reloader = None
@@ -350,6 +360,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         _confirmation_cache_task = None
     close_runtime_dependencies()
     shutdown_store_io_executor()
+    shutdown_filter_pipeline_executor()
     shutdown_payload_transform_executor()
     await close_upstream_async_client()
     await close_v2_async_client()
@@ -362,6 +373,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.state.ready = False
 _mount_metrics_endpoint(app)
 app.include_router(openai_router, prefix="/v1")
 if settings.enable_v2_proxy:
@@ -391,7 +403,9 @@ _ADMIN_ENDPOINTS = frozenset(
         "/__gw__/remove",
     }
 )
-_PASSTHROUGH_PATHS = frozenset({"/", "/health", "/robots.txt", "/favicon.ico"})
+_PASSTHROUGH_PATHS = frozenset(
+    {"/", "/health", "/ready", "/robots.txt", "/favicon.ico"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -495,14 +509,20 @@ class GWTokenRewriteMiddleware:
                     if port_mapping and port_mapping.get("upstream_base"):
                         resolved_ub = port_mapping["upstream_base"]
                     else:
-                        host = (settings.local_port_routing_host or "host.docker.internal").strip()
+                        host = (
+                            settings.local_port_routing_host or "host.docker.internal"
+                        ).strip()
                         resolved_ub = f"http://{host}:{port}/v1"
                     mapping = dict(mapping)
                     mapping["upstream_base"] = resolved_ub
                     # 端口级 filter_mode 覆盖 token 级
                     if port_mode:
                         if port_mode not in _VALID_FILTER_MODES:
-                            with trace_span("gateway.request", http_method=method, http_route=route_label) as span:
+                            with trace_span(
+                                "gateway.request",
+                                http_method=method,
+                                http_route=route_label,
+                            ) as span:
                                 response = JSONResponse(
                                     status_code=400,
                                     content={
@@ -511,9 +531,12 @@ class GWTokenRewriteMiddleware:
                                     },
                                 )
                                 _record_request_observability(
-                                    method=method, route_label=route_label,
-                                    started_at=started_at, status_code=response.status_code,
-                                    reject_reason="invalid_filter_mode", span=span,
+                                    method=method,
+                                    route_label=route_label,
+                                    started_at=started_at,
+                                    status_code=response.status_code,
+                                    reject_reason="invalid_filter_mode",
+                                    span=span,
                                 )
                                 await response(scope, receive, send)
                                 return
@@ -521,7 +544,10 @@ class GWTokenRewriteMiddleware:
                     rest = port_rest  # 剩余路径，如 "messages"
                     logger.debug(
                         "compat_port_rewrite token=%s… port=%d mode=%s rest=%s",
-                        token[:6], port, filter_mode or "default", rest,
+                        token[:6],
+                        port,
+                        filter_mode or "default",
+                        rest,
                     )
 
         # When rest carries its own version prefix, use it and drop the gateway version
@@ -546,7 +572,9 @@ class GWTokenRewriteMiddleware:
         ub = mapping.get("upstream_base") or ""
         # compat token 省略 upstream_base 且未走端口路径时，拒绝请求
         if not ub and mapping.get("compat"):
-            with trace_span("gateway.request", http_method=method, http_route=route_label) as span:
+            with trace_span(
+                "gateway.request", http_method=method, http_route=route_label
+            ) as span:
                 response = JSONResponse(
                     status_code=400,
                     content={
@@ -555,9 +583,12 @@ class GWTokenRewriteMiddleware:
                     },
                 )
                 _record_request_observability(
-                    method=method, route_label=route_label,
-                    started_at=started_at, status_code=response.status_code,
-                    reject_reason="missing_upstream", span=span,
+                    method=method,
+                    route_label=route_label,
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    reject_reason="missing_upstream",
+                    span=span,
                 )
                 await response(scope, receive, send)
                 return
@@ -617,6 +648,56 @@ async def _drain_and_reject(
     await request.body()
     boundary["rejected_reason"] = reason
     return _blocked_response(status_code=status_code, reason=reason, detail=detail)
+
+
+def _raw_header_values(request: Request, header_name: str) -> list[str]:
+    target = header_name.lower().encode("latin-1")
+    values: list[str] = []
+    for raw_name, raw_value in request.scope.get("headers", []):
+        if raw_name.lower() != target:
+            continue
+        values.append(raw_value.decode("latin-1", errors="ignore").strip())
+    return values
+
+
+def _header_smuggling_conflict(request: Request) -> tuple[str | None, str | None]:
+    content_length_values = [
+        value for value in _raw_header_values(request, "content-length") if value
+    ]
+    transfer_encoding_values = [
+        value for value in _raw_header_values(request, "transfer-encoding") if value
+    ]
+
+    if len(content_length_values) > 1:
+        if len(set(content_length_values)) > 1:
+            return (
+                "conflicting_content_length",
+                "conflicting content-length headers are not allowed",
+            )
+        return (
+            "duplicate_content_length",
+            "multiple content-length headers are not allowed",
+        )
+
+    if content_length_values and transfer_encoding_values:
+        return (
+            "content_length_transfer_encoding_conflict",
+            "content-length with transfer-encoding is not allowed",
+        )
+
+    normalized_transfer_encodings = [
+        item.strip().lower()
+        for value in transfer_encoding_values
+        for item in value.split(",")
+        if item.strip()
+    ]
+    if len(transfer_encoding_values) > 1 or len(normalized_transfer_encodings) > 1:
+        return (
+            "duplicate_transfer_encoding",
+            "multiple transfer-encoding values are not allowed",
+        )
+
+    return None, None
 
 
 @app.middleware("http")
@@ -836,6 +917,21 @@ async def security_boundary_middleware(request: Request, call_next):
                 "token_route_required",
                 403,
                 "use /v2/__gw__/t/<token>/... routes for v2 proxy access",
+            )
+
+        header_conflict_reason, header_conflict_detail = _header_smuggling_conflict(
+            request
+        )
+        if header_conflict_reason is not None:
+            logger.warning(
+                "boundary reject raw header conflict path=%s reason=%s",
+                request.url.path,
+                header_conflict_reason,
+            )
+            return await finish_drain(
+                header_conflict_reason,
+                400,
+                header_conflict_detail,
             )
 
         cached_body: bytes | None = None
@@ -1282,6 +1378,14 @@ _BOOT_TIME = time.time()
 def health() -> dict:
     """Liveness probe — lightweight, no logging."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+@app.head("/ready")
+def ready() -> JSONResponse:
+    if getattr(app.state, "ready", False):
+        return JSONResponse(status_code=200, content={"status": "ready"})
+    return JSONResponse(status_code=503, content={"status": "starting"})
 
 
 @app.api_route("/", methods=["GET", "HEAD"])
