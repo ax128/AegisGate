@@ -13,10 +13,14 @@ from aegisgate.config.settings import settings
 from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
 from aegisgate.storage.kv import KVStore
 
+psycopg_module: Any
+psycopg_sql_module: Any
 try:
-    import psycopg
+    import psycopg as psycopg_module
+    from psycopg import sql as psycopg_sql_module
 except ImportError:  # pragma: no cover - optional dependency
-    psycopg = None
+    psycopg_module = None
+    psycopg_sql_module = None
 
 
 def _json_dumps(data: dict[str, Any]) -> str:
@@ -45,7 +49,7 @@ class PostgresKVStore(KVStore):
         schema: str = "public",
         max_cache_entries: int = 5000,
     ) -> None:
-        if psycopg is None:  # pragma: no cover - optional dependency
+        if psycopg_module is None:  # pragma: no cover - optional dependency
             raise RuntimeError("psycopg package is not installed, cannot use PostgresKVStore")
         if not dsn.strip():
             raise RuntimeError("postgres dsn is empty")
@@ -58,10 +62,21 @@ class PostgresKVStore(KVStore):
         self._cache: OrderedDict[tuple[str, str], dict[str, str]] = OrderedDict()
         self._cache_lock = threading.Lock()
 
+        # Pre-build SQL-safe qualified table identifiers.
+        if psycopg_sql_module is not None:
+            _id = psycopg_sql_module.Identifier
+            self._mapping_table = psycopg_sql_module.SQL("{}.{}").format(_id(schema), _id("mapping_store"))
+            self._pending_table = psycopg_sql_module.SQL("{}.{}").format(_id(schema), _id("pending_confirmation"))
+            self._schema_id = _id(schema)
+        else:  # pragma: no cover - fallback when psycopg.sql unavailable
+            self._mapping_table = psycopg_sql_module  # will fail at _init_db
+            self._pending_table = psycopg_sql_module
+            self._schema_id = psycopg_sql_module
+
         self._init_db()
 
     def _connect(self):
-        return psycopg.connect(self.dsn)
+        return psycopg_module.connect(self.dsn)
 
     def _cache_set(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
         key = (session_id, request_id)
@@ -87,25 +102,32 @@ class PostgresKVStore(KVStore):
             data = self._cache.pop(key, None)
             return dict(data) if data is not None else None
 
+    def _sql(self, template: str) -> Any:
+        """Build a SQL composable by substituting {mt}/{pt}/{schema} placeholders."""
+        S = psycopg_sql_module.SQL
+        return S(template).format(
+            mt=self._mapping_table,
+            pt=self._pending_table,
+            schema=self._schema_id,
+        )
+
     def _init_db(self) -> None:
-        mapping_table = f"{self.schema}.mapping_store"
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
-                cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {mapping_table} (
+                cur.execute(self._sql("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                cur.execute(self._sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS {mt} (
                       session_id TEXT NOT NULL,
                       request_id TEXT NOT NULL,
                       payload TEXT NOT NULL,
                       PRIMARY KEY (session_id, request_id)
                     )
                     """
-                )
-                cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {pending_table} (
+                ))
+                cur.execute(self._sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS {pt} (
                       confirm_id TEXT PRIMARY KEY,
                       session_id TEXT NOT NULL,
                       route TEXT NOT NULL,
@@ -124,46 +146,47 @@ class PostgresKVStore(KVStore):
                       tenant_id TEXT NOT NULL DEFAULT 'default'
                     )
                     """
-                )
-                cur.execute(
-                    f"""
-                    ALTER TABLE {pending_table}
+                ))
+                cur.execute(self._sql(
+                    """
+                    ALTER TABLE {pt}
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'
                     """
-                )
-                cur.execute(
-                    f"""
+                ))
+                cur.execute(self._sql(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_pending_session_status
-                    ON {pending_table} (session_id, status, created_at DESC)
+                    ON {pt} (session_id, status, created_at DESC)
                     """
-                )
-                cur.execute(
-                    f"""
+                ))
+                cur.execute(self._sql(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
-                    ON {pending_table} (tenant_id, session_id, route, status, created_at DESC)
+                    ON {pt} (tenant_id, session_id, route, status, created_at DESC)
                     """
-                )
-                cur.execute(
-                    f"""
+                ))
+                cur.execute(self._sql(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_pending_retained_until
-                    ON {pending_table} (retained_until)
+                    ON {pt} (retained_until)
                     """
-                )
+                ))
             conn.commit()
 
     def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
         self._cache_set(session_id, request_id, mapping)
         payload = encrypt_mapping(mapping)
-        mapping_table = f"{self.schema}.mapping_store"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    INSERT INTO {mapping_table} (session_id, request_id, payload)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (session_id, request_id)
-                    DO UPDATE SET payload = EXCLUDED.payload
-                    """,
+                    self._sql(
+                        """
+                        INSERT INTO {mt} (session_id, request_id, payload)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (session_id, request_id)
+                        DO UPDATE SET payload = EXCLUDED.payload
+                        """
+                    ),
                     (session_id, request_id, payload),
                 )
             conn.commit()
@@ -173,11 +196,10 @@ class PostgresKVStore(KVStore):
         if cached is not None:
             return cached
 
-        mapping_table = f"{self.schema}.mapping_store"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT payload FROM {mapping_table} WHERE session_id = %s AND request_id = %s",
+                    self._sql("SELECT payload FROM {mt} WHERE session_id = %s AND request_id = %s"),
                     (session_id, request_id),
                 )
                 row = cur.fetchone()
@@ -189,12 +211,11 @@ class PostgresKVStore(KVStore):
 
     def consume_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
         cached = self._cache_pop(session_id, request_id)
-        mapping_table = f"{self.schema}.mapping_store"
         if cached is not None:
             with self._connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"DELETE FROM {mapping_table} WHERE session_id = %s AND request_id = %s",
+                        self._sql("DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"),
                         (session_id, request_id),
                     )
                 conn.commit()
@@ -203,17 +224,19 @@ class PostgresKVStore(KVStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    SELECT payload FROM {mapping_table}
-                    WHERE session_id = %s AND request_id = %s
-                    FOR UPDATE
-                    """,
+                    self._sql(
+                        """
+                        SELECT payload FROM {mt}
+                        WHERE session_id = %s AND request_id = %s
+                        FOR UPDATE
+                        """
+                    ),
                     (session_id, request_id),
                 )
                 row = cur.fetchone()
                 if row:
                     cur.execute(
-                        f"DELETE FROM {mapping_table} WHERE session_id = %s AND request_id = %s",
+                        self._sql("DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"),
                         (session_id, request_id),
                     )
             conn.commit()
@@ -239,35 +262,36 @@ class PostgresKVStore(KVStore):
         retained_until: int,
         tenant_id: str = "default",
     ) -> None:
-        pending_table = f"{self.schema}.pending_confirmation"
         payload = _json_dumps(pending_request_payload)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    INSERT INTO {pending_table} (
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (confirm_id)
-                    DO UPDATE SET
-                      status = EXCLUDED.status,
-                      route = EXCLUDED.route,
-                      request_id = EXCLUDED.request_id,
-                      model = EXCLUDED.model,
-                      upstream_base = EXCLUDED.upstream_base,
-                      pending_request_payload = EXCLUDED.pending_request_payload,
-                      pending_request_hash = EXCLUDED.pending_request_hash,
-                      reason = EXCLUDED.reason,
-                      summary = EXCLUDED.summary,
-                      created_at = EXCLUDED.created_at,
-                      expires_at = EXCLUDED.expires_at,
-                      retained_until = EXCLUDED.retained_until,
-                      updated_at = EXCLUDED.updated_at,
-                      tenant_id = EXCLUDED.tenant_id
-                    """,
+                    self._sql(
+                        """
+                        INSERT INTO {pt} (
+                          confirm_id, session_id, route, request_id, model, upstream_base,
+                          pending_request_payload, pending_request_hash, reason, summary,
+                          status, created_at, expires_at, retained_until, updated_at, tenant_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (confirm_id)
+                        DO UPDATE SET
+                          status = EXCLUDED.status,
+                          route = EXCLUDED.route,
+                          request_id = EXCLUDED.request_id,
+                          model = EXCLUDED.model,
+                          upstream_base = EXCLUDED.upstream_base,
+                          pending_request_payload = EXCLUDED.pending_request_payload,
+                          pending_request_hash = EXCLUDED.pending_request_hash,
+                          reason = EXCLUDED.reason,
+                          summary = EXCLUDED.summary,
+                          created_at = EXCLUDED.created_at,
+                          expires_at = EXCLUDED.expires_at,
+                          retained_until = EXCLUDED.retained_until,
+                          updated_at = EXCLUDED.updated_at,
+                          tenant_id = EXCLUDED.tenant_id
+                        """
+                    ),
                     (
                         confirm_id,
                         session_id,
@@ -296,20 +320,21 @@ class PostgresKVStore(KVStore):
         *,
         tenant_id: str = "default",
     ) -> dict[str, Any] | None:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
-                    FROM {pending_table}
-                    WHERE session_id = %s AND tenant_id = %s AND status = 'pending'
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
+                    self._sql(
+                        """
+                        SELECT
+                          confirm_id, session_id, route, request_id, model, upstream_base,
+                          pending_request_payload, pending_request_hash, reason, summary,
+                          status, created_at, expires_at, retained_until, updated_at, tenant_id
+                        FROM {pt}
+                        WHERE session_id = %s AND tenant_id = %s AND status = 'pending'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    ),
                     (session_id, tenant_id),
                 )
                 row = cur.fetchone()
@@ -334,20 +359,21 @@ class PostgresKVStore(KVStore):
         tenant_id: str = "default",
         recover_executing_before: int | None = None,
     ) -> dict[str, Any] | None:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
-                    FROM {pending_table}
-                    WHERE session_id = %s AND route = %s AND tenant_id = %s AND expires_at > %s
-                      AND status IN ('pending', 'executing')
-                    ORDER BY created_at DESC
-                    """,
+                    self._sql(
+                        """
+                        SELECT
+                          confirm_id, session_id, route, request_id, model, upstream_base,
+                          pending_request_payload, pending_request_hash, reason, summary,
+                          status, created_at, expires_at, retained_until, updated_at, tenant_id
+                        FROM {pt}
+                        WHERE session_id = %s AND route = %s AND tenant_id = %s AND expires_at > %s
+                          AND status IN ('pending', 'executing')
+                        ORDER BY created_at DESC
+                        """
+                    ),
                     (session_id, route, tenant_id, int(now_ts)),
                 )
                 rows = cur.fetchall()
@@ -385,15 +411,16 @@ class PostgresKVStore(KVStore):
         new_status: str,
         now_ts: int,
     ) -> bool:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    UPDATE {pending_table}
-                    SET status = %s, updated_at = %s
-                    WHERE confirm_id = %s AND status = %s
-                    """,
+                    self._sql(
+                        """
+                        UPDATE {pt}
+                        SET status = %s, updated_at = %s
+                        WHERE confirm_id = %s AND status = %s
+                        """
+                    ),
                     (new_status, int(now_ts), confirm_id, expected_status),
                 )
                 changed = int(cur.rowcount or 0)
@@ -401,18 +428,19 @@ class PostgresKVStore(KVStore):
         return changed == 1
 
     def get_pending_confirmation(self, confirm_id: str) -> dict[str, Any] | None:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    SELECT
-                      confirm_id, session_id, route, request_id, model, upstream_base,
-                      pending_request_payload, pending_request_hash, reason, summary,
-                      status, created_at, expires_at, retained_until, updated_at, tenant_id
-                    FROM {pending_table}
-                    WHERE confirm_id = %s
-                    """,
+                    self._sql(
+                        """
+                        SELECT
+                          confirm_id, session_id, route, request_id, model, upstream_base,
+                          pending_request_payload, pending_request_hash, reason, summary,
+                          status, created_at, expires_at, retained_until, updated_at, tenant_id
+                        FROM {pt}
+                        WHERE confirm_id = %s
+                        """
+                    ),
                     (confirm_id,),
                 )
                 row = cur.fetchone()
@@ -441,25 +469,25 @@ class PostgresKVStore(KVStore):
         }
 
     def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    UPDATE {pending_table}
-                    SET status = %s, updated_at = %s
-                    WHERE confirm_id = %s
-                    """,
+                    self._sql(
+                        """
+                        UPDATE {pt}
+                        SET status = %s, updated_at = %s
+                        WHERE confirm_id = %s
+                        """
+                    ),
                     (status, int(now_ts), confirm_id),
                 )
             conn.commit()
 
     def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"DELETE FROM {pending_table} WHERE confirm_id = %s",
+                    self._sql("DELETE FROM {pt} WHERE confirm_id = %s"),
                     (confirm_id,),
                 )
                 removed = int(cur.rowcount or 0)
@@ -467,11 +495,10 @@ class PostgresKVStore(KVStore):
         return removed > 0
 
     def prune_pending_confirmations(self, now_ts: int) -> int:
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"DELETE FROM {pending_table} WHERE retained_until <= %s",
+                    self._sql("DELETE FROM {pt} WHERE retained_until <= %s"),
                     (int(now_ts),),
                 )
                 removed = int(cur.rowcount or 0)
@@ -480,8 +507,10 @@ class PostgresKVStore(KVStore):
                 if timeout > 0:
                     recover_before = int(now_ts) - max(5, timeout)
                     cur.execute(
-                        f"UPDATE {pending_table} SET status = 'pending', updated_at = %s"
-                        f" WHERE status = 'executing' AND updated_at <= %s",
+                        self._sql(
+                            "UPDATE {pt} SET status = 'pending', updated_at = %s"
+                            " WHERE status = 'executing' AND updated_at <= %s"
+                        ),
                         (now_ts, recover_before),
                     )
             conn.commit()
@@ -489,10 +518,9 @@ class PostgresKVStore(KVStore):
 
     def clear_all_pending_confirmations(self) -> int:
         """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
-        pending_table = f"{self.schema}.pending_confirmation"
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"DELETE FROM {pending_table}")
+                cur.execute(self._sql("DELETE FROM {pt}"))
                 removed = int(cur.rowcount or 0)
             conn.commit()
         return removed
