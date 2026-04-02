@@ -9,10 +9,11 @@ from aegisgate.config.settings import settings
 from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
 from aegisgate.storage.kv import KVStore
 
+redis_module: Any
 try:
-    import redis
+    import redis as redis_module
 except ImportError:  # pragma: no cover - optional dependency
-    redis = None
+    redis_module = None
 
 
 def _json_dumps(data: dict[str, Any]) -> str:
@@ -41,9 +42,9 @@ def _to_str(value: Any) -> str:
 
 class RedisKVStore(KVStore):
     def __init__(self, *, redis_url: str, key_prefix: str = "aegisgate") -> None:
-        if redis is None:  # pragma: no cover - depends on optional package
+        if redis_module is None:  # pragma: no cover - depends on optional package
             raise RuntimeError("redis package is not installed, cannot use RedisKVStore")
-        self.client = redis.Redis.from_url(redis_url, decode_responses=False)
+        self.client: Any = redis_module.Redis.from_url(redis_url, decode_responses=False)
         self.key_prefix = key_prefix.strip() or "aegisgate"
 
     def close(self) -> None:
@@ -117,7 +118,7 @@ class RedisKVStore(KVStore):
                 if not payload:
                     return {}
                 return decrypt_mapping(_to_str(payload))
-            except redis.WatchError:
+            except redis_module.WatchError:
                 continue
             finally:
                 pipe.reset()
@@ -280,7 +281,7 @@ class RedisKVStore(KVStore):
                     pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
                 pipe.execute()
                 return True
-            except redis.WatchError:
+            except redis_module.WatchError:
                 continue
             finally:
                 pipe.reset()

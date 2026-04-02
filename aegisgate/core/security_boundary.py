@@ -7,13 +7,16 @@ import time
 from collections import OrderedDict
 from hashlib import sha256
 from threading import Lock
+from typing import Any
 
 from aegisgate.config.settings import settings
+from aegisgate.util.logger import logger
 
+redis_module: Any
 try:
-    import redis
+    import redis as redis_module
 except ImportError:  # pragma: no cover - optional dependency
-    redis = None
+    redis_module = None
 
 
 class NonceReplayCache:
@@ -52,9 +55,9 @@ class RedisNonceReplayCache:
     """Redis-backed nonce replay cache for multi-instance deployments."""
 
     def __init__(self, redis_url: str, key_prefix: str = "aegisgate") -> None:
-        if redis is None:  # pragma: no cover - depends on optional package
+        if redis_module is None:  # pragma: no cover - depends on optional package
             raise RuntimeError("redis package is not installed, cannot use RedisNonceReplayCache")
-        self.client = redis.Redis.from_url(redis_url, decode_responses=True)
+        self.client: Any = redis_module.Redis.from_url(redis_url, decode_responses=True)
         self.key_prefix = key_prefix.strip() or "aegisgate"
 
     def _key(self, nonce: str) -> str:
@@ -64,7 +67,13 @@ class RedisNonceReplayCache:
         ttl = max(1, int(window_seconds))
         key = self._key(nonce)
         # NX ensures first writer succeeds; repeated nonce in window indicates replay.
-        created = self.client.set(name=key, value=str(now_ts), ex=ttl, nx=True)
+        try:
+            created = self.client.set(name=key, value=str(now_ts), ex=ttl, nx=True)
+        except Exception as exc:
+            # Redis outage must not crash the request path; treat as "not replayed"
+            # so legitimate traffic is not blocked during transient failures.
+            logger.warning("redis nonce cache unavailable, allowing request nonce=%s error=%s", nonce, exc)
+            return False
         return not bool(created)
 
 
