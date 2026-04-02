@@ -64,7 +64,7 @@ class Pipeline:
                     current = plugin.process_request(current, ctx)
                 else:
                     current = plugin.process_response(current, ctx)
-            except Exception:
+            except Exception as exc:
                 elapsed = time.monotonic() - t0
                 logger.exception(
                     "filter_error phase=%s filter=%s elapsed_s=%.3f request_id=%s",
@@ -74,7 +74,32 @@ class Pipeline:
                     ctx.request_id,
                 )
                 ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
-                continue
+                if phase == "request":
+                    from aegisgate.config.settings import settings as _settings
+
+                    if _settings.storage_failure_action == "forward":
+                        logger.warning(
+                            "filter_error_degraded phase=%s filter=%s request_id=%s — forwarding due to storage_failure_action=forward",
+                            phase,
+                            plugin.name,
+                            ctx.request_id,
+                        )
+                        ctx.enforcement_actions.append(
+                            f"request_pipeline:degraded:{plugin.name}"
+                        )
+                        continue
+                    ctx.request_disposition = "block"
+                    ctx.enforcement_actions.append(
+                        f"request_pipeline:error:{plugin.name}"
+                    )
+                    ctx.disposition_reasons.append("request_filter_error")
+                else:
+                    ctx.response_disposition = "block"
+                    ctx.enforcement_actions.append(
+                        f"response_pipeline:error:{plugin.name}"
+                    )
+                    ctx.disposition_reasons.append("response_filter_error")
+                break
             elapsed = time.monotonic() - t0
             report = plugin.report()
             ctx.add_report(report)

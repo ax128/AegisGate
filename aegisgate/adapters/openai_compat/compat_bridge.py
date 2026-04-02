@@ -95,7 +95,9 @@ def _responses_function_calls_to_chat_tool_calls(
             continue
         if str(item.get("type", "")).strip().lower() != "function_call":
             continue
-        call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+        call_id = str(
+            item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+        )
         tool_calls.append(
             {
                 "id": call_id,
@@ -215,7 +217,9 @@ def coerce_chat_output_to_responses_output(
                     "id": f"msg_{str(result.get('id') or fallback_request_id)}",
                     "role": "assistant",
                     "status": "completed",
-                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                    "content": [
+                        {"type": "output_text", "text": text, "annotations": []}
+                    ],
                 },
                 *output_items,
             ]
@@ -283,7 +287,9 @@ def _responses_output_items_to_chat_tool_calls(output: object) -> list[dict[str,
             continue
         if str(item.get("type", "")).strip().lower() != "function_call":
             continue
-        call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+        call_id = str(
+            item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+        )
         tool_calls.append(
             {
                 "id": call_id,
@@ -336,7 +342,11 @@ def _accumulate_chat_stream_tool_calls(
                 }
             )
         current = acc[idx]
-        call_id = str(tool_call.get("id") or current.get("call_id") or f"call_{uuid.uuid4().hex[:12]}")
+        call_id = str(
+            tool_call.get("id")
+            or current.get("call_id")
+            or f"call_{uuid.uuid4().hex[:12]}"
+        )
         current["id"] = call_id
         current["call_id"] = call_id
         function = tool_call.get("function") or {}
@@ -344,7 +354,9 @@ def _accumulate_chat_stream_tool_calls(
             if function.get("name"):
                 current["name"] = str(function["name"])
             if function.get("arguments"):
-                current["arguments"] = f"{current.get('arguments', '')}{function['arguments']}"
+                current["arguments"] = (
+                    f"{current.get('arguments', '')}{function['arguments']}"
+                )
 
 
 def _convert_responses_stream_payload_to_chat_chunk(
@@ -366,14 +378,21 @@ def _convert_responses_stream_payload_to_chat_chunk(
 
     event_type = str(payload.get("type") or "").strip().lower()
     if event_type == "error":
-        return [_serialize_sse_payload(payload)], role_sent, emitted_text, emitted_tool_calls
+        return (
+            [_serialize_sse_payload(payload)],
+            role_sent,
+            emitted_text,
+            emitted_tool_calls,
+        )
 
     chunks: list[bytes] = []
     aegis_meta = _copy_aegis_meta(payload)
     if event_type == "response.completed" and not emitted_tool_calls:
         response = payload.get("response")
         if isinstance(response, dict):
-            tool_calls = _responses_output_items_to_chat_tool_calls(response.get("output"))
+            tool_calls = _responses_output_items_to_chat_tool_calls(
+                response.get("output")
+            )
             if tool_calls:
                 tool_call_delta: dict[str, Any] = {"tool_calls": tool_calls}
                 if not role_sent:
@@ -465,7 +484,11 @@ def coerce_responses_stream_to_chat_stream(
                 for chunk in chunks:
                     yield chunk
         except Exception as exc:
-            logger.warning("stream coerce responses→chat error request_id=%s error=%s", request_id, exc)
+            logger.warning(
+                "stream coerce responses→chat error request_id=%s error=%s",
+                request_id,
+                exc,
+            )
             yield _stream_error_sse_chunk(str(exc), "stream_error")
 
         if not saw_done:
@@ -804,7 +827,10 @@ def coerce_chat_stream_to_responses_stream(
                 try:
                     payload = json.loads(payload_text)
                 except json.JSONDecodeError:
-                    logger.debug("stream chat→responses json decode failed text=%s", payload_text[:200])
+                    logger.debug(
+                        "stream chat→responses json decode failed text=%s",
+                        payload_text[:200],
+                    )
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -847,7 +873,11 @@ def coerce_chat_stream_to_responses_stream(
                     _attach_aegis_meta(delta_payload, pending_meta)
                 )
         except Exception as exc:
-            logger.warning("stream coerce chat→responses error request_id=%s error=%s", request_id, exc)
+            logger.warning(
+                "stream coerce chat→responses error request_id=%s error=%s",
+                request_id,
+                exc,
+            )
             yield _stream_error_sse_chunk(str(exc), "stream_error")
             yield _stream_done_sse_chunk()
             return
@@ -881,12 +911,82 @@ def coerce_chat_stream_to_responses_stream(
 # OpenAI Chat SSE  →  Anthropic Messages SSE
 # ---------------------------------------------------------------------------
 
+
 def _serialize_anthropic_sse_event(event_type: str, payload: dict[str, Any]) -> bytes:
     """Serialize as Anthropic-style SSE: event: <type>\ndata: <json>\n\n"""
     return (
-        f"event: {event_type}\n"
-        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
     ).encode("utf-8")
+
+
+def _messages_message_start_event(*, message_id: str, model: str) -> bytes:
+    return _serialize_anthropic_sse_event(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": model,
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        },
+    )
+
+
+def _messages_text_block_start_event(*, index: int) -> bytes:
+    return _serialize_anthropic_sse_event(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "text", "text": ""},
+        },
+    )
+
+
+def _messages_tool_use_block_events(
+    *,
+    index: int,
+    call_id: str,
+    name: str,
+    input_data: Any,
+) -> list[bytes]:
+    return [
+        _serialize_anthropic_sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "input": input_data,
+                },
+            },
+        ),
+        _serialize_anthropic_sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": index},
+        ),
+    ]
+
+
+def _parse_tool_use_input(arguments: Any) -> Any:
+    if isinstance(arguments, str):
+        stripped = arguments.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return stripped
+        return stripped
+    return arguments if arguments is not None else {}
 
 
 def _messages_stream_start_events(
@@ -894,48 +994,47 @@ def _messages_stream_start_events(
     message_id: str,
     model: str,
 ) -> list[bytes]:
-    """Emit message_start + content_block_start."""
-    events: list[bytes] = []
-    events.append(_serialize_anthropic_sse_event("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": message_id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": model,
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
-        },
-    }))
-    events.append(_serialize_anthropic_sse_event("content_block_start", {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    }))
-    return events
+    return [
+        _messages_message_start_event(message_id=message_id, model=model),
+        _messages_text_block_start_event(index=0),
+    ]
 
 
 def _messages_stream_finish_events(
     *,
     stop_reason: str,
     output_tokens: int,
+    include_block_stop: bool = True,
 ) -> list[bytes]:
-    """Emit content_block_stop + message_delta + message_stop."""
     events: list[bytes] = []
-    events.append(_serialize_anthropic_sse_event("content_block_stop", {
-        "type": "content_block_stop",
-        "index": 0,
-    }))
-    events.append(_serialize_anthropic_sse_event("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens},
-    }))
-    events.append(_serialize_anthropic_sse_event("message_stop", {
-        "type": "message_stop",
-    }))
+    if include_block_stop:
+        events.append(
+            _serialize_anthropic_sse_event(
+                "content_block_stop",
+                {
+                    "type": "content_block_stop",
+                    "index": 0,
+                },
+            )
+        )
+    events.append(
+        _serialize_anthropic_sse_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            },
+        )
+    )
+    events.append(
+        _serialize_anthropic_sse_event(
+            "message_stop",
+            {
+                "type": "message_stop",
+            },
+        )
+    )
     return events
 
 
@@ -949,6 +1048,7 @@ def coerce_chat_stream_to_messages_stream(
     OpenAI emits:  data: {"choices":[{"delta":{"content":"..."}}]}
     Anthropic expects: event: content_block_delta\\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
     """
+
     async def generator() -> AsyncGenerator[bytes, None]:
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         started = False
@@ -971,12 +1071,14 @@ def coerce_chat_stream_to_messages_stream(
                 try:
                     payload = json.loads(payload_text)
                 except json.JSONDecodeError:
-                    logger.debug("stream chat→messages json decode failed text=%s", payload_text[:200])
+                    logger.debug(
+                        "stream chat→messages json decode failed text=%s",
+                        payload_text[:200],
+                    )
                     continue
                 if not isinstance(payload, dict):
                     continue
 
-                # Extract text delta from OpenAI chunk
                 choices = payload.get("choices") or []
                 if not choices:
                     continue
@@ -998,11 +1100,14 @@ def coerce_chat_stream_to_messages_stream(
                         started = True
 
                     output_tokens += 1  # approximate token count
-                    yield _serialize_anthropic_sse_event("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": text},
-                    })
+                    yield _serialize_anthropic_sse_event(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": text},
+                        },
+                    )
 
                 if finish_reason and finish_reason != "null":
                     if not started:
@@ -1022,7 +1127,6 @@ def coerce_chat_stream_to_messages_stream(
         except Exception as exc:
             logger.warning("stream coerce chat→messages error error=%s", exc)
 
-        # Stream ended without [DONE] or finish_reason (or after exception)
         if started:
             for chunk in _messages_stream_finish_events(
                 stop_reason="end_turn",
@@ -1037,6 +1141,7 @@ def coerce_chat_stream_to_messages_stream(
 # OpenAI Responses SSE  →  Anthropic Messages SSE
 # ---------------------------------------------------------------------------
 
+
 def coerce_responses_stream_to_messages_stream(
     response: StreamingResponse,
     *,
@@ -1047,10 +1152,77 @@ def coerce_responses_stream_to_messages_stream(
     Responses emits: data: {"type":"response.output_text.delta","delta":"..."}
     Anthropic expects: event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
     """
+
     async def generator() -> AsyncGenerator[bytes, None]:
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         started = False
+        text_block_open = False
+        next_content_index = 0
+        current_text_index: int | None = None
         output_tokens = 0
+        saw_tool_use = False
+        emitted_tool_call_ids: set[str] = set()
+
+        def _start_message_only() -> list[bytes]:
+            nonlocal started
+            if started:
+                return []
+            started = True
+            return [
+                _messages_message_start_event(
+                    message_id=message_id,
+                    model=original_model,
+                )
+            ]
+
+        def _open_text_block() -> list[bytes]:
+            nonlocal text_block_open, next_content_index, current_text_index
+            chunks = _start_message_only()
+            if text_block_open:
+                return chunks
+            current_text_index = next_content_index
+            next_content_index += 1
+            text_block_open = True
+            chunks.append(_messages_text_block_start_event(index=current_text_index))
+            return chunks
+
+        def _close_text_block() -> list[bytes]:
+            nonlocal text_block_open, current_text_index
+            if not text_block_open or current_text_index is None:
+                return []
+            index = current_text_index
+            text_block_open = False
+            current_text_index = None
+            return [
+                _serialize_anthropic_sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": index},
+                )
+            ]
+
+        def _tool_call_chunks(item: dict[str, Any]) -> list[bytes]:
+            nonlocal next_content_index, saw_tool_use
+            call_id = str(
+                item.get("call_id")
+                or item.get("id")
+                or f"toolu_{uuid.uuid4().hex[:12]}"
+            )
+            if call_id in emitted_tool_call_ids:
+                return []
+            emitted_tool_call_ids.add(call_id)
+            saw_tool_use = True
+            chunks = _start_message_only()
+            chunks.extend(_close_text_block())
+            chunks.extend(
+                _messages_tool_use_block_events(
+                    index=next_content_index,
+                    call_id=call_id,
+                    name=str(item.get("name") or "function_call"),
+                    input_data=_parse_tool_use_input(item.get("arguments")),
+                )
+            )
+            next_content_index += 1
+            return chunks
 
         try:
             async for frame in _iter_sse_frames(_iter_stream_body_chunks(response)):
@@ -1059,9 +1231,12 @@ def coerce_responses_stream_to_messages_stream(
                     continue
                 if payload_text == "[DONE]":
                     if started:
+                        for chunk in _close_text_block():
+                            yield chunk
                         for chunk in _messages_stream_finish_events(
-                            stop_reason="end_turn",
+                            stop_reason="tool_use" if saw_tool_use else "end_turn",
                             output_tokens=output_tokens,
+                            include_block_stop=False,
                         ):
                             yield chunk
                     return
@@ -1069,50 +1244,76 @@ def coerce_responses_stream_to_messages_stream(
                 try:
                     payload = json.loads(payload_text)
                 except json.JSONDecodeError:
-                    logger.debug("stream responses→messages json decode failed text=%s", payload_text[:200])
+                    logger.debug(
+                        "stream responses→messages json decode failed text=%s",
+                        payload_text[:200],
+                    )
                     continue
                 if not isinstance(payload, dict):
                     continue
 
                 event_type = str(payload.get("type") or "").strip().lower()
 
-                # Extract text delta
+                if event_type in {
+                    "response.output_item.added",
+                    "response.output_item.done",
+                }:
+                    item = payload.get("item")
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("type") or "").strip().lower()
+                        == "function_call"
+                    ):
+                        for chunk in _tool_call_chunks(item):
+                            yield chunk
+                        continue
+
                 text = ""
                 if event_type == "response.output_text.delta":
                     text = str(payload.get("delta") or "")
-                elif event_type == "response.completed":
-                    # Final response — extract full text if we haven't started streaming
-                    if not started:
-                        resp_obj = payload.get("response") or {}
-                        text = str(resp_obj.get("output_text") or "")
+                elif event_type == "response.completed" and not started:
+                    resp_obj = payload.get("response") or {}
+                    text = str(resp_obj.get("output_text") or "")
 
                 if text:
-                    if not started:
-                        for chunk in _messages_stream_start_events(
-                            message_id=message_id,
-                            model=original_model,
-                        ):
-                            yield chunk
-                        started = True
-
+                    for chunk in _open_text_block():
+                        yield chunk
                     output_tokens += 1
-                    yield _serialize_anthropic_sse_event("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "text_delta", "text": text},
-                    })
+                    yield _serialize_anthropic_sse_event(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 0
+                            if current_text_index is None
+                            else current_text_index,
+                            "delta": {"type": "text_delta", "text": text},
+                        },
+                    )
+
+                if event_type == "response.completed":
+                    resp_obj = payload.get("response") or {}
+                    if isinstance(resp_obj, dict):
+                        for output_item in resp_obj.get("output") or []:
+                            if not isinstance(output_item, dict):
+                                continue
+                            if (
+                                str(output_item.get("type") or "").strip().lower()
+                                != "function_call"
+                            ):
+                                continue
+                            for chunk in _tool_call_chunks(output_item):
+                                yield chunk
 
                 if event_type in ("response.completed", "response.failed"):
                     if not started:
-                        for chunk in _messages_stream_start_events(
-                            message_id=message_id,
-                            model=original_model,
-                        ):
+                        for chunk in _start_message_only():
                             yield chunk
-                        started = True
+                    for chunk in _close_text_block():
+                        yield chunk
                     for chunk in _messages_stream_finish_events(
-                        stop_reason="end_turn",
+                        stop_reason="tool_use" if saw_tool_use else "end_turn",
                         output_tokens=output_tokens,
+                        include_block_stop=False,
                     ):
                         yield chunk
                     return
@@ -1120,9 +1321,12 @@ def coerce_responses_stream_to_messages_stream(
             logger.warning("stream coerce responses→messages error error=%s", exc)
 
         if started:
+            for chunk in _close_text_block():
+                yield chunk
             for chunk in _messages_stream_finish_events(
-                stop_reason="end_turn",
+                stop_reason="tool_use" if saw_tool_use else "end_turn",
                 output_tokens=output_tokens,
+                include_block_stop=False,
             ):
                 yield chunk
 

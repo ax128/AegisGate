@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from aegisgate.config.settings import settings
-from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
+from aegisgate.storage._helpers import to_int
+from aegisgate.storage.crypto import (
+    decrypt_mapping,
+    decrypt_pending_payload,
+    encrypt_mapping,
+    encrypt_pending_payload,
+)
 from aegisgate.storage.kv import KVStore
 
 redis_module: Any
@@ -14,24 +19,6 @@ try:
     import redis as redis_module
 except ImportError:  # pragma: no cover - optional dependency
     redis_module = None
-
-
-def _json_dumps(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _json_loads(data: str) -> dict[str, Any]:
-    loaded = json.loads(data)
-    if isinstance(loaded, dict):
-        return loaded
-    return {}
-
-
-def _to_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
 
 
 def _to_str(value: Any) -> str:
@@ -43,8 +30,12 @@ def _to_str(value: Any) -> str:
 class RedisKVStore(KVStore):
     def __init__(self, *, redis_url: str, key_prefix: str = "aegisgate") -> None:
         if redis_module is None:  # pragma: no cover - depends on optional package
-            raise RuntimeError("redis package is not installed, cannot use RedisKVStore")
-        self.client: Any = redis_module.Redis.from_url(redis_url, decode_responses=False)
+            raise RuntimeError(
+                "redis package is not installed, cannot use RedisKVStore"
+            )
+        self.client: Any = redis_module.Redis.from_url(
+            redis_url, decode_responses=False
+        )
         self.key_prefix = key_prefix.strip() or "aegisgate"
 
     def close(self) -> None:
@@ -95,7 +86,9 @@ class RedisKVStore(KVStore):
             if got < size:
                 break
 
-    def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
+    def set_mapping(
+        self, session_id: str, request_id: str, mapping: dict[str, str]
+    ) -> None:
         payload = encrypt_mapping(mapping)
         self.client.set(self._mapping_key(session_id, request_id), payload)
 
@@ -150,7 +143,7 @@ class RedisKVStore(KVStore):
         key = self._pending_key(confirm_id)
         session_idx = self._pending_session_key(tenant_id, session_id)
         retention_idx = self._pending_retention_key()
-        payload = _json_dumps(pending_request_payload)
+        payload = encrypt_pending_payload(pending_request_payload)
         mapping = {
             "confirm_id": confirm_id,
             "session_id": session_id,
@@ -183,22 +176,27 @@ class RedisKVStore(KVStore):
         tenant_id: str = "default",
         recover_executing_before: int | None = None,
     ) -> dict[str, Any] | None:
-        for confirm_id in self._iter_pending_session_ids(tenant_id=tenant_id, session_id=session_id):
+        for confirm_id in self._iter_pending_session_ids(
+            tenant_id=tenant_id, session_id=session_id
+        ):
             record = self.get_pending_confirmation(confirm_id)
             if not record:
                 continue
             if str(record.get("tenant_id", "default")) != tenant_id:
                 continue
             status = str(record.get("status", ""))
-            if _to_int(record.get("expires_at", 0)) <= int(now_ts):
-                self.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
+            if to_int(record.get("expires_at", 0)) <= int(now_ts):
+                self.update_pending_confirmation_status(
+                    confirm_id=confirm_id, status="expired", now_ts=now_ts
+                )
                 continue
             if status == "pending":
                 return record
             if (
                 status == "executing"
                 and recover_executing_before is not None
-                and _to_int(record.get("updated_at", 0)) <= int(recover_executing_before)
+                and to_int(record.get("updated_at", 0))
+                <= int(recover_executing_before)
             ):
                 changed = self.compare_and_update_pending_confirmation_status(
                     confirm_id=confirm_id,
@@ -222,7 +220,9 @@ class RedisKVStore(KVStore):
         recover_executing_before: int | None = None,
     ) -> dict[str, Any] | None:
         matches: list[dict[str, Any]] = []
-        for confirm_id in self._iter_pending_session_ids(tenant_id=tenant_id, session_id=session_id):
+        for confirm_id in self._iter_pending_session_ids(
+            tenant_id=tenant_id, session_id=session_id
+        ):
             record = self.get_pending_confirmation(confirm_id)
             if not record:
                 continue
@@ -230,8 +230,10 @@ class RedisKVStore(KVStore):
                 continue
             if str(record.get("route", "")) != route:
                 continue
-            if _to_int(record.get("expires_at", 0)) <= int(now_ts):
-                self.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
+            if to_int(record.get("expires_at", 0)) <= int(now_ts):
+                self.update_pending_confirmation_status(
+                    confirm_id=confirm_id, status="expired", now_ts=now_ts
+                )
                 continue
             status = str(record.get("status", ""))
             if status == "pending":
@@ -239,7 +241,8 @@ class RedisKVStore(KVStore):
             elif (
                 status == "executing"
                 and recover_executing_before is not None
-                and _to_int(record.get("updated_at", 0)) <= int(recover_executing_before)
+                and to_int(record.get("updated_at", 0))
+                <= int(recover_executing_before)
             ):
                 changed = self.compare_and_update_pending_confirmation_status(
                     confirm_id=confirm_id,
@@ -276,9 +279,13 @@ class RedisKVStore(KVStore):
                 session_id = _to_str(pipe.hget(key, "session_id") or "")
                 tenant_id = _to_str(pipe.hget(key, "tenant_id") or "default")
                 pipe.multi()
-                pipe.hset(key, mapping={"status": new_status, "updated_at": str(now_ts)})
+                pipe.hset(
+                    key, mapping={"status": new_status, "updated_at": str(now_ts)}
+                )
                 if new_status in {"executed", "canceled", "expired"} and session_id:
-                    pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
+                    pipe.zrem(
+                        self._pending_session_key(tenant_id, session_id), confirm_id
+                    )
                 pipe.execute()
                 return True
             except redis_module.WatchError:
@@ -301,18 +308,22 @@ class RedisKVStore(KVStore):
             "request_id": row.get("request_id", ""),
             "model": row.get("model", ""),
             "upstream_base": row.get("upstream_base", ""),
-            "pending_request_payload": _json_loads(row.get("pending_request_payload", "{}")),
+            "pending_request_payload": decrypt_pending_payload(
+                row.get("pending_request_payload", "{}")
+            ),
             "pending_request_hash": row.get("pending_request_hash", ""),
             "reason": row.get("reason", ""),
             "summary": row.get("summary", ""),
             "status": row.get("status", ""),
-            "created_at": _to_int(row.get("created_at", 0)),
-            "expires_at": _to_int(row.get("expires_at", 0)),
-            "retained_until": _to_int(row.get("retained_until", 0)),
-            "updated_at": _to_int(row.get("updated_at", 0)),
+            "created_at": to_int(row.get("created_at", 0)),
+            "expires_at": to_int(row.get("expires_at", 0)),
+            "retained_until": to_int(row.get("retained_until", 0)),
+            "updated_at": to_int(row.get("updated_at", 0)),
         }
 
-    def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
+    def update_pending_confirmation_status(
+        self, *, confirm_id: str, status: str, now_ts: int
+    ) -> None:
         key = self._pending_key(confirm_id)
         session_id = _to_str(self.client.hget(key, "session_id") or "")
         tenant_id = _to_str(self.client.hget(key, "tenant_id") or "default")
@@ -329,7 +340,9 @@ class RedisKVStore(KVStore):
         removed = int(self.client.delete(key) or 0)
         self.client.zrem(self._pending_retention_key(), confirm_id)
         if session_id:
-            self.client.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
+            self.client.zrem(
+                self._pending_session_key(tenant_id, session_id), confirm_id
+            )
         return removed > 0
 
     def prune_pending_confirmations(self, now_ts: int) -> int:
@@ -347,7 +360,9 @@ class RedisKVStore(KVStore):
                 pipe.delete(key)
                 pipe.zrem(retention_idx, confirm_id)
                 if session_id:
-                    pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
+                    pipe.zrem(
+                        self._pending_session_key(tenant_id, session_id), confirm_id
+                    )
                 removed += 1
             pipe.execute()
 
@@ -369,11 +384,16 @@ class RedisKVStore(KVStore):
                     if status != "executing":
                         continue
                     try:
-                        updated_at = int(_to_str(self.client.hget(key, "updated_at") or "0"))
+                        updated_at = int(
+                            _to_str(self.client.hget(key, "updated_at") or "0")
+                        )
                     except Exception:
                         continue
                     if updated_at <= recover_before:
-                        self.client.hset(key, mapping={"status": "pending", "updated_at": str(now_ts)})
+                        self.client.hset(
+                            key,
+                            mapping={"status": "pending", "updated_at": str(now_ts)},
+                        )
                 if cursor == 0:
                     break
 

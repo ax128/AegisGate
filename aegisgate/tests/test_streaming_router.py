@@ -33,6 +33,26 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.util.logger import logger as aegis_logger
 
 
+async def _async_resolve_upstream_example(headers):
+    return ("https://upstream.example.com", (), "")
+
+
+@pytest.fixture(autouse=True)
+def _patch_upstream_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_resolve(headers):
+        base = str(
+            headers.get("X-Upstream-Base")
+            or headers.get("x-upstream-base")
+            or "https://upstream.example.com/v1"
+        )
+        return (base, (), "")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
+        _fake_resolve,
+    )
+
+
 def _to_bytes(value: bytes | str | memoryview[int]) -> bytes:
     if isinstance(value, bytes):
         return value
@@ -308,7 +328,7 @@ def test_messages_stream_harness_avoids_offload_timeout_pattern(
 
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
-        lambda headers: "https://upstream.example.com",
+        _async_resolve_upstream_example,
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_upstream_url",
@@ -421,7 +441,7 @@ def _install_messages_stream_sanitize_mocks(
 
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
-        lambda headers: "https://upstream.example.com",
+        _async_resolve_upstream_example,
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_upstream_url",
@@ -709,7 +729,7 @@ def test_messages_stream_runtime_error_uses_anthropic_error_event(
 
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
-        lambda headers: "https://upstream.example.com",
+        _async_resolve_upstream_example,
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_upstream_url",
@@ -1376,7 +1396,8 @@ def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_erro
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
 
     assert '"code": "gateway_internal_error"' in text
-    assert "unexpected parser failure" in text
+    assert "internal gateway error" in text
+    assert "unexpected parser failure" not in text
     assert "data: [DONE]" in text
 
 

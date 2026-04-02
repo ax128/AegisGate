@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # 编辑器读写 docker-compose 文件的目录。空字符串 = 默认使用 config/compose/
     compose_dir: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
+    # 存储后端故障时的行为：block = 拒绝请求（默认）, forward = 降级转发（无审计/脱敏持久化）
+    storage_failure_action: str = "block"
     sqlite_db_path: str = (
         "logs/aegisgate.db"  # Docker 下若 logs 不可写可设为 /tmp/aegisgate.db
     )

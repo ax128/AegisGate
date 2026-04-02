@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
-import threading
 import time
-from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
 from aegisgate.config.settings import settings
 
-from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
+from aegisgate.storage._helpers import LRUMappingCache
+from aegisgate.storage.crypto import (
+    decrypt_mapping,
+    decrypt_pending_payload,
+    encrypt_mapping,
+    encrypt_pending_payload,
+)
 from aegisgate.storage.kv import KVStore
 from aegisgate.util.logger import logger
 
@@ -27,13 +30,14 @@ status, created_at, expires_at, retained_until, updated_at, tenant_id
 
 
 class SqliteKVStore(KVStore):
-    def __init__(self, db_path: str = "logs/aegisgate.db", max_cache_entries: int = 5000) -> None:
+    def __init__(
+        self, db_path: str = "logs/aegisgate.db", max_cache_entries: int = 5000
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.max_cache_entries = max_cache_entries
-        self._cache: OrderedDict[tuple[str, str], dict[str, str]] = OrderedDict()
-        self._cache_lock = threading.Lock()
+        self._cache = LRUMappingCache(max_cache_entries)
 
         self._init_db()
 
@@ -90,9 +94,16 @@ class SqliteKVStore(KVStore):
                 )
                 """
             )
-            columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_info(pending_confirmation)").fetchall()}
+            columns = {
+                str(row[1]).lower()
+                for row in conn.execute(
+                    "PRAGMA table_info(pending_confirmation)"
+                ).fetchall()
+            }
             if "tenant_id" not in columns:
-                conn.execute("ALTER TABLE pending_confirmation ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
+                conn.execute(
+                    "ALTER TABLE pending_confirmation ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
+                )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pending_session_status
@@ -125,32 +136,10 @@ class SqliteKVStore(KVStore):
                 time.sleep(sleep_seconds)
         raise RuntimeError("unreachable retry state")
 
-    def _cache_set(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            self._cache[key] = dict(mapping)
-            while len(self._cache) > self.max_cache_entries:
-                self._cache.popitem(last=False)
-
-    def _cache_get(self, session_id: str, request_id: str) -> dict[str, str] | None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            data = self._cache.get(key)
-            if data is None:
-                return None
-            self._cache.move_to_end(key)
-            return dict(data)
-
-    def _cache_pop(self, session_id: str, request_id: str) -> dict[str, str] | None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            data = self._cache.pop(key, None)
-            return dict(data) if data is not None else None
-
-    def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
-        self._cache_set(session_id, request_id, mapping)
+    def set_mapping(
+        self, session_id: str, request_id: str, mapping: dict[str, str]
+    ) -> None:
+        self._cache.set(session_id, request_id, mapping)
         payload = encrypt_mapping(mapping)
 
         def _write() -> None:
@@ -169,7 +158,7 @@ class SqliteKVStore(KVStore):
         self._with_retry(_write)
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
-        cached = self._cache_get(session_id, request_id)
+        cached = self._cache.get(session_id, request_id)
         if cached is not None:
             return cached
 
@@ -183,11 +172,11 @@ class SqliteKVStore(KVStore):
             return {}
 
         mapping = decrypt_mapping(row[0])
-        self._cache_set(session_id, request_id, mapping)
+        self._cache.set(session_id, request_id, mapping)
         return mapping
 
     def consume_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
-        cached = self._cache_pop(session_id, request_id)
+        cached = self._cache.pop(session_id, request_id)
         if cached is not None:
 
             def _delete_cached_row() -> None:
@@ -239,7 +228,7 @@ class SqliteKVStore(KVStore):
         retained_until: int,
         tenant_id: str = "default",
     ) -> None:
-        payload = json_dumps(pending_request_payload)
+        payload = encrypt_pending_payload(pending_request_payload)
 
         def _write() -> None:
             with self._managed_connection() as conn:
@@ -287,7 +276,9 @@ class SqliteKVStore(KVStore):
                 row = conn.execute(
                     """
                     SELECT
-                      """ + _PENDING_CONFIRMATION_COLUMNS + """
+                      """
+                    + _PENDING_CONFIRMATION_COLUMNS
+                    + """
                     FROM pending_confirmation
                     WHERE session_id = ? AND tenant_id = ? AND status = 'pending'
                     ORDER BY created_at DESC
@@ -302,7 +293,9 @@ class SqliteKVStore(KVStore):
             return None
         record = _pending_row_to_dict(row)
         if int(record["expires_at"]) <= int(now_ts):
-            self.update_pending_confirmation_status(confirm_id=str(record["confirm_id"]), status="expired", now_ts=now_ts)
+            self.update_pending_confirmation_status(
+                confirm_id=str(record["confirm_id"]), status="expired", now_ts=now_ts
+            )
             return None
         return record
 
@@ -320,7 +313,9 @@ class SqliteKVStore(KVStore):
                 rows = conn.execute(
                     """
                     SELECT
-                      """ + _PENDING_CONFIRMATION_COLUMNS + """
+                      """
+                    + _PENDING_CONFIRMATION_COLUMNS
+                    + """
                     FROM pending_confirmation
                     WHERE session_id = ? AND route = ? AND tenant_id = ? AND expires_at > ?
                       AND status IN ('pending', 'executing')
@@ -386,7 +381,9 @@ class SqliteKVStore(KVStore):
                 row = conn.execute(
                     """
                     SELECT
-                      """ + _PENDING_CONFIRMATION_COLUMNS + """
+                      """
+                    + _PENDING_CONFIRMATION_COLUMNS
+                    + """
                     FROM pending_confirmation
                     WHERE confirm_id = ?
                     LIMIT 1
@@ -400,7 +397,9 @@ class SqliteKVStore(KVStore):
             return None
         return _pending_row_to_dict(row)
 
-    def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
+    def update_pending_confirmation_status(
+        self, *, confirm_id: str, status: str, now_ts: int
+    ) -> None:
         def _write() -> None:
             with self._managed_connection() as conn:
                 conn.execute(
@@ -460,27 +459,14 @@ class SqliteKVStore(KVStore):
 
     def clear_all_pending_confirmations(self) -> int:
         """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+
         def _delete() -> int:
             with self._managed_connection() as conn:
                 cursor = conn.execute("DELETE FROM pending_confirmation")
                 conn.commit()
                 return int(cursor.rowcount or 0)
+
         return self._with_retry(_delete)
-
-
-def json_dumps(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def json_loads(data: str) -> dict[str, Any]:
-    try:
-        loaded = json.loads(data)
-    except (TypeError, ValueError) as exc:
-        logger.warning("sqlite pending_confirmation payload decode failed: %s", exc)
-        return {}
-    if isinstance(loaded, dict):
-        return loaded
-    return {}
 
 
 def _pending_row_to_dict(row: tuple) -> dict[str, Any]:
@@ -491,7 +477,7 @@ def _pending_row_to_dict(row: tuple) -> dict[str, Any]:
         "request_id": row[3],
         "model": row[4],
         "upstream_base": row[5],
-        "pending_request_payload": json_loads(row[6]),
+        "pending_request_payload": decrypt_pending_payload(row[6]),
         "pending_request_hash": row[7],
         "reason": row[8],
         "summary": row[9],

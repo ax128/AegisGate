@@ -56,7 +56,9 @@ class RedisNonceReplayCache:
 
     def __init__(self, redis_url: str, key_prefix: str = "aegisgate") -> None:
         if redis_module is None:  # pragma: no cover - depends on optional package
-            raise RuntimeError("redis package is not installed, cannot use RedisNonceReplayCache")
+            raise RuntimeError(
+                "redis package is not installed, cannot use RedisNonceReplayCache"
+            )
         self.client: Any = redis_module.Redis.from_url(redis_url, decode_responses=True)
         self.key_prefix = key_prefix.strip() or "aegisgate"
 
@@ -70,17 +72,21 @@ class RedisNonceReplayCache:
         try:
             created = self.client.set(name=key, value=str(now_ts), ex=ttl, nx=True)
         except Exception as exc:
-            # Redis outage must not crash the request path; treat as "not replayed"
-            # so legitimate traffic is not blocked during transient failures.
-            logger.warning("redis nonce cache unavailable, allowing request nonce=%s error=%s", nonce, exc)
-            return False
+            logger.warning(
+                "redis nonce cache unavailable, rejecting request nonce=%s error=%s",
+                nonce,
+                exc,
+            )
+            return True
         return not bool(created)
 
 
 def build_nonce_cache():
     backend = settings.nonce_cache_backend.strip().lower()
     if backend == "redis":
-        return RedisNonceReplayCache(redis_url=settings.redis_url, key_prefix=settings.redis_key_prefix)
+        return RedisNonceReplayCache(
+            redis_url=settings.redis_url, key_prefix=settings.redis_key_prefix
+        )
     return NonceReplayCache(max_entries=settings.request_nonce_cache_size)
 
 

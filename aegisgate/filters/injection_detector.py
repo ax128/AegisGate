@@ -197,6 +197,10 @@ class PromptInjectionDetector(BaseFilter):
         self._invisible_chars = set(detector_rules.get("unicode_invisible_chars", [])) or set(_DEFAULT_INVISIBLE_CHARS)
         self._bidi_chars = set(detector_rules.get("unicode_bidi_chars", [])) or set(_DEFAULT_BIDI_CHARS)
 
+        # Build combined translation table for normalize: confusable mapping + invisible/bidi removal
+        _strip_chars: dict[str, None] = {ch: None for ch in (self._invisible_chars | self._bidi_chars)}
+        self._norm_table = str.maketrans({**self._confusable_map, **_strip_chars})
+
         scoring_model = detector_rules.get("scoring_model", {})
         level = normalize_security_level()
         self._nonlinear_k = float(scoring_model.get("nonlinear_k", 2.2))
@@ -252,9 +256,7 @@ class PromptInjectionDetector(BaseFilter):
 
     def _normalize_text(self, text: str) -> str:
         normalized = unicodedata.normalize("NFKC", text)
-        if self._confusable_map:
-            normalized = "".join(self._confusable_map.get(char, char) for char in normalized)
-        normalized = "".join(char for char in normalized if char not in self._invisible_chars and char not in self._bidi_chars)
+        normalized = normalized.translate(self._norm_table)
         normalized = normalized.lower()
         return _WHITESPACE_RE.sub(" ", normalized).strip()
 

@@ -84,6 +84,8 @@ class RedactionFilter(BaseFilter):
             (pattern_id, pattern) for pattern_id, pattern in compiled_patterns if pattern_id in _RESPONSES_RELAXED_PII_IDS
         ]
 
+        self._strip_table = str.maketrans("", "", "".join(self._invisible_chars | self._bidi_chars))
+
         self._field_patterns = self._build_field_patterns(redaction_rules.get("field_value_patterns", []))
 
     def _build_field_patterns(self, items: list[dict] | list[str]) -> list[tuple[str, re.Pattern[str]]]:
@@ -129,7 +131,7 @@ class RedactionFilter(BaseFilter):
         if self._normalize_nfkc:
             normalized = unicodedata.normalize("NFKC", normalized)
         if self._strip_invisible_chars and normalized:
-            normalized = "".join(ch for ch in normalized if ch not in self._invisible_chars and ch not in self._bidi_chars)
+            normalized = normalized.translate(self._strip_table)
         return normalized
 
     def _request_prefix(self, request_id: str) -> str:

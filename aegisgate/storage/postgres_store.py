@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import re
-import threading
-from collections import OrderedDict
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from aegisgate.config.settings import settings
+from aegisgate.util.logger import logger
 
-from aegisgate.storage.crypto import decrypt_mapping, encrypt_mapping
+from aegisgate.storage._helpers import to_int, LRUMappingCache
+from aegisgate.storage.crypto import (
+    decrypt_mapping,
+    decrypt_pending_payload,
+    encrypt_mapping,
+    encrypt_pending_payload,
+)
 from aegisgate.storage.kv import KVStore
 
 psycopg_module: Any
@@ -22,23 +27,11 @@ except ImportError:  # pragma: no cover - optional dependency
     psycopg_module = None
     psycopg_sql_module = None
 
-
-def _json_dumps(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _json_loads(data: str) -> dict[str, Any]:
-    loaded = json.loads(data)
-    if isinstance(loaded, dict):
-        return loaded
-    return {}
-
-
-def _to_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
+_ConnectionPool: Any
+try:
+    from psycopg_pool import ConnectionPool as _ConnectionPool
+except ImportError:
+    _ConnectionPool = None
 
 
 class PostgresKVStore(KVStore):
@@ -50,7 +43,9 @@ class PostgresKVStore(KVStore):
         max_cache_entries: int = 5000,
     ) -> None:
         if psycopg_module is None:  # pragma: no cover - optional dependency
-            raise RuntimeError("psycopg package is not installed, cannot use PostgresKVStore")
+            raise RuntimeError(
+                "psycopg package is not installed, cannot use PostgresKVStore"
+            )
         if not dsn.strip():
             raise RuntimeError("postgres dsn is empty")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
@@ -59,48 +54,61 @@ class PostgresKVStore(KVStore):
         self.dsn = dsn
         self.schema = schema
         self.max_cache_entries = max_cache_entries
-        self._cache: OrderedDict[tuple[str, str], dict[str, str]] = OrderedDict()
-        self._cache_lock = threading.Lock()
+        self._cache = LRUMappingCache(max_cache_entries)
 
         # Pre-build SQL-safe qualified table identifiers.
         if psycopg_sql_module is not None:
             _id = psycopg_sql_module.Identifier
-            self._mapping_table = psycopg_sql_module.SQL("{}.{}").format(_id(schema), _id("mapping_store"))
-            self._pending_table = psycopg_sql_module.SQL("{}.{}").format(_id(schema), _id("pending_confirmation"))
+            self._mapping_table = psycopg_sql_module.SQL("{}.{}").format(
+                _id(schema), _id("mapping_store")
+            )
+            self._pending_table = psycopg_sql_module.SQL("{}.{}").format(
+                _id(schema), _id("pending_confirmation")
+            )
             self._schema_id = _id(schema)
         else:  # pragma: no cover - fallback when psycopg.sql unavailable
             self._mapping_table = psycopg_sql_module  # will fail at _init_db
             self._pending_table = psycopg_sql_module
             self._schema_id = psycopg_sql_module
 
+        self._pool = None
+        if _ConnectionPool is not None:
+            try:
+                self._pool = _ConnectionPool(
+                    dsn,
+                    min_size=2,
+                    max_size=10,
+                    max_idle=300.0,
+                )
+            except Exception:
+                logger.warning(
+                    "postgres: connection pool creation failed, falling back to per-call connections"
+                )
+                self._pool = None
+
         self._init_db()
 
-    def _connect(self):
-        return psycopg_module.connect(self.dsn)
+    @contextmanager
+    def _connect(self) -> Iterator[Any]:
+        """Yield a psycopg connection from the pool or a fresh one."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                yield conn
+        else:
+            conn = psycopg_module.connect(self.dsn)
+            try:
+                yield conn
+            finally:
+                conn.close()
 
-    def _cache_set(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            self._cache[key] = dict(mapping)
-            while len(self._cache) > self.max_cache_entries:
-                self._cache.popitem(last=False)
-
-    def _cache_get(self, session_id: str, request_id: str) -> dict[str, str] | None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            data = self._cache.get(key)
-            if data is None:
-                return None
-            self._cache.move_to_end(key)
-            return dict(data)
-
-    def _cache_pop(self, session_id: str, request_id: str) -> dict[str, str] | None:
-        key = (session_id, request_id)
-        with self._cache_lock:
-            data = self._cache.pop(key, None)
-            return dict(data) if data is not None else None
+    def close(self) -> None:
+        """Shut down the connection pool if one is active."""
+        if self._pool is not None:
+            try:
+                self._pool.close()
+            except Exception:
+                pass
+            self._pool = None
 
     def _sql(self, template: str) -> Any:
         """Build a SQL composable by substituting {mt}/{pt}/{schema} placeholders."""
@@ -115,8 +123,9 @@ class PostgresKVStore(KVStore):
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(self._sql("CREATE SCHEMA IF NOT EXISTS {schema}"))
-                cur.execute(self._sql(
-                    """
+                cur.execute(
+                    self._sql(
+                        """
                     CREATE TABLE IF NOT EXISTS {mt} (
                       session_id TEXT NOT NULL,
                       request_id TEXT NOT NULL,
@@ -124,9 +133,11 @@ class PostgresKVStore(KVStore):
                       PRIMARY KEY (session_id, request_id)
                     )
                     """
-                ))
-                cur.execute(self._sql(
-                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
                     CREATE TABLE IF NOT EXISTS {pt} (
                       confirm_id TEXT PRIMARY KEY,
                       session_id TEXT NOT NULL,
@@ -146,35 +157,46 @@ class PostgresKVStore(KVStore):
                       tenant_id TEXT NOT NULL DEFAULT 'default'
                     )
                     """
-                ))
-                cur.execute(self._sql(
-                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
                     ALTER TABLE {pt}
                     ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'
                     """
-                ))
-                cur.execute(self._sql(
-                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
                     CREATE INDEX IF NOT EXISTS idx_pending_session_status
                     ON {pt} (session_id, status, created_at DESC)
                     """
-                ))
-                cur.execute(self._sql(
-                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
                     CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
                     ON {pt} (tenant_id, session_id, route, status, created_at DESC)
                     """
-                ))
-                cur.execute(self._sql(
-                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
                     CREATE INDEX IF NOT EXISTS idx_pending_retained_until
                     ON {pt} (retained_until)
                     """
-                ))
+                    )
+                )
             conn.commit()
 
-    def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
-        self._cache_set(session_id, request_id, mapping)
+    def set_mapping(
+        self, session_id: str, request_id: str, mapping: dict[str, str]
+    ) -> None:
+        self._cache.set(session_id, request_id, mapping)
         payload = encrypt_mapping(mapping)
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -192,30 +214,34 @@ class PostgresKVStore(KVStore):
             conn.commit()
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
-        cached = self._cache_get(session_id, request_id)
+        cached = self._cache.get(session_id, request_id)
         if cached is not None:
             return cached
 
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    self._sql("SELECT payload FROM {mt} WHERE session_id = %s AND request_id = %s"),
+                    self._sql(
+                        "SELECT payload FROM {mt} WHERE session_id = %s AND request_id = %s"
+                    ),
                     (session_id, request_id),
                 )
                 row = cur.fetchone()
         if not row:
             return {}
         mapping = decrypt_mapping(str(row[0]))
-        self._cache_set(session_id, request_id, mapping)
+        self._cache.set(session_id, request_id, mapping)
         return mapping
 
     def consume_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
-        cached = self._cache_pop(session_id, request_id)
+        cached = self._cache.pop(session_id, request_id)
         if cached is not None:
             with self._connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        self._sql("DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"),
+                        self._sql(
+                            "DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"
+                        ),
                         (session_id, request_id),
                     )
                 conn.commit()
@@ -236,7 +262,9 @@ class PostgresKVStore(KVStore):
                 row = cur.fetchone()
                 if row:
                     cur.execute(
-                        self._sql("DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"),
+                        self._sql(
+                            "DELETE FROM {mt} WHERE session_id = %s AND request_id = %s"
+                        ),
                         (session_id, request_id),
                     )
             conn.commit()
@@ -262,7 +290,7 @@ class PostgresKVStore(KVStore):
         retained_until: int,
         tenant_id: str = "default",
     ) -> None:
-        payload = _json_dumps(pending_request_payload)
+        payload = encrypt_pending_payload(pending_request_payload)
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -456,19 +484,21 @@ class PostgresKVStore(KVStore):
             "request_id": str(row[3]),
             "model": str(row[4]),
             "upstream_base": str(row[5]),
-            "pending_request_payload": _json_loads(str(row[6])),
+            "pending_request_payload": decrypt_pending_payload(str(row[6])),
             "pending_request_hash": str(row[7]),
             "reason": str(row[8]),
             "summary": str(row[9]),
             "status": str(row[10]),
-            "created_at": _to_int(row[11]),
-            "expires_at": _to_int(row[12]),
-            "retained_until": _to_int(row[13]),
-            "updated_at": _to_int(row[14]),
+            "created_at": to_int(row[11]),
+            "expires_at": to_int(row[12]),
+            "retained_until": to_int(row[13]),
+            "updated_at": to_int(row[14]),
             "tenant_id": str(row[15]) if len(row) > 15 else "default",
         }
 
-    def update_pending_confirmation_status(self, *, confirm_id: str, status: str, now_ts: int) -> None:
+    def update_pending_confirmation_status(
+        self, *, confirm_id: str, status: str, now_ts: int
+    ) -> None:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(

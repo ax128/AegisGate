@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 from typing import Any, AsyncGenerator, Mapping
 from urllib.parse import urlparse, urlunparse
@@ -13,6 +14,11 @@ import httpx
 from fastapi import Request
 
 from aegisgate.config.settings import settings
+from aegisgate.util.ip_safety import (
+    bound_connect_url,
+    resolve_public_ips,
+    request_host_header as _ip_request_host_header,
+)
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
@@ -31,7 +37,9 @@ _HOP_BY_HOP_HEADERS = {
 }
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _TRACE_REQUEST_ID_HEADER = "x-aegis-request-id"
-
+_UPSTREAM_SOURCE_HEADER = "x-aegis-upstream-source"
+_SCOPE_UPSTREAM_SOURCE = "scope"
+_CLIENT_UPSTREAM_SOURCE = "client"
 _upstream_async_client: httpx.AsyncClient | None = None
 _upstream_client_lock = asyncio.Lock()
 
@@ -39,7 +47,9 @@ _upstream_client_lock = asyncio.Lock()
 def _upstream_http_limits() -> httpx.Limits:
     return httpx.Limits(
         max_connections=max(10, int(settings.upstream_max_connections)),
-        max_keepalive_connections=max(5, int(settings.upstream_max_keepalive_connections)),
+        max_keepalive_connections=max(
+            5, int(settings.upstream_max_keepalive_connections)
+        ),
     )
 
 
@@ -84,6 +94,25 @@ def _normalize_upstream_base(raw_base: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, cleaned_path, "", "", ""))
 
 
+async def _resolve_public_upstream_ips(
+    hostname: str,
+) -> tuple[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...], str | None]:
+    """Resolve hostname via shared async DNS with SSRF protection."""
+    return await resolve_public_ips(hostname)
+
+
+async def _validate_client_upstream_base(
+    upstream_base: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Validate upstream base and return resolved IPs for DNS pinning."""
+    parsed = urlparse(upstream_base)
+    hostname = (parsed.hostname or "").strip().lower()
+    resolved, error = await resolve_public_ips(hostname)
+    if error is not None:
+        raise ValueError(error)
+    return resolved
+
+
 def _header_value(headers: Mapping[str, str], target: str) -> str:
     for key, value in headers.items():
         if key.lower() == target.lower():
@@ -102,7 +131,10 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()
-    injected_whitelist_keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
+        headers[_UPSTREAM_SOURCE_HEADER] = _SCOPE_UPSTREAM_SOURCE
+    injected_whitelist_keys = normalize_whitelist_keys(
+        request.scope.get("aegis_redaction_whitelist_keys")
+    )
     if injected_whitelist_keys:
         headers[_REDACTION_WHITELIST_HEADER] = ",".join(injected_whitelist_keys)
     injected_filter_mode = request.scope.get("aegis_filter_mode")
@@ -111,15 +143,35 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     return headers
 
 
-def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
+async def _resolve_upstream_base(
+    headers: Mapping[str, str],
+) -> tuple[str, tuple[str, ...], str]:
+    """Resolve upstream base URL with DNS pinning for SSRF protection.
+
+    Returns (base_url, connect_urls, host_header).
+    connect_urls: tuple of URLs with hostnames replaced by resolved IPs.
+                  Empty tuple means no pinning needed (trusted/scope source or default).
+    host_header:  original Host header to set when using pinned connect_urls.
+    """
     raw = _header_value(headers, settings.upstream_base_header)
     if raw.strip():
-        return _normalize_upstream_base(raw)
+        normalized = _normalize_upstream_base(raw)
+        source = _header_value(headers, _UPSTREAM_SOURCE_HEADER).strip().lower()
+        if source != _SCOPE_UPSTREAM_SOURCE:
+            resolved_ips = await _validate_client_upstream_base(normalized)
+            if resolved_ips:
+                parsed = urlparse(normalized)
+                connect_urls = tuple(
+                    bound_connect_url(parsed, addr) for addr in resolved_ips
+                )
+                host_hdr = _ip_request_host_header(parsed)
+                return normalized, connect_urls, host_hdr
+        return normalized, (), ""
     # 未提供 x-upstream-base 时使用默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1）
     default = (settings.upstream_base_url or "").strip()
     if not default:
         raise ValueError("missing_upstream_base")
-    return _normalize_upstream_base(default)
+    return _normalize_upstream_base(default), (), ""
 
 
 def _resolve_gateway_key(headers: Mapping[str, str]) -> str:
@@ -138,7 +190,7 @@ def _build_upstream_url(request_path: str, upstream_base: str) -> str:
     if route_path == GATEWAY_PREFIX:
         route_path = "/"
     elif route_path.startswith(f"{GATEWAY_PREFIX}/"):
-        route_path = route_path[len(GATEWAY_PREFIX):]
+        route_path = route_path[len(GATEWAY_PREFIX) :]
     if not route_path.startswith("/"):
         route_path = f"/{route_path}"
     url = f"{upstream_base}{route_path}"
@@ -215,18 +267,35 @@ def _safe_error_detail(payload: dict[str, Any] | str) -> str:
     return json.dumps(payload, ensure_ascii=False)[:600]
 
 
-async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str, str]) -> tuple[int, dict[str, Any] | str]:
+async def _forward_json(
+    url: str, payload: dict[str, Any], headers: Mapping[str, str]
+) -> tuple[int, dict[str, Any] | str]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     trace_request_id = _trace_request_id(headers)
-    logger.debug("forward_json start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
+    logger.debug(
+        "forward_json start request_id=%s url=%s payload_bytes=%d",
+        trace_request_id,
+        url,
+        len(body),
+    )
     client = await _get_upstream_async_client()
     try:
         response = await client.post(url=url, content=body, headers=dict(headers))
-        logger.debug("forward_json done request_id=%s url=%s status=%s", trace_request_id, url, response.status_code)
+        logger.debug(
+            "forward_json done request_id=%s url=%s status=%s",
+            trace_request_id,
+            url,
+            response.status_code,
+        )
         return response.status_code, _decode_json_or_text(response.content)
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("forward_json http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
+        logger.warning(
+            "forward_json http_error request_id=%s url=%s error=%s",
+            trace_request_id,
+            url,
+            detail,
+        )
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
@@ -237,11 +306,23 @@ async def _forward_stream_lines(
 ) -> AsyncGenerator[bytes, None]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     trace_request_id = _trace_request_id(headers)
-    logger.debug("forward_stream start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
+    logger.debug(
+        "forward_stream start request_id=%s url=%s payload_bytes=%d",
+        trace_request_id,
+        url,
+        len(body),
+    )
     client = await _get_upstream_async_client()
     try:
-        async with client.stream("POST", url=url, content=body, headers=dict(headers)) as resp:
-            logger.debug("forward_stream connected request_id=%s url=%s status=%s", trace_request_id, url, resp.status_code)
+        async with client.stream(
+            "POST", url=url, content=body, headers=dict(headers)
+        ) as resp:
+            logger.debug(
+                "forward_stream connected request_id=%s url=%s status=%s",
+                trace_request_id,
+                url,
+                resp.status_code,
+            )
             if resp.status_code >= 400:
                 detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
                 raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
@@ -250,5 +331,10 @@ async def _forward_stream_lines(
                     yield chunk
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("forward_stream http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
+        logger.warning(
+            "forward_stream http_error request_id=%s url=%s error=%s",
+            trace_request_id,
+            url,
+            detail,
+        )
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc

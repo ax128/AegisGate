@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -20,6 +21,7 @@ import threading
 _fernet_instance: Fernet | None = None
 _fernet_lock = threading.Lock()
 _FERNET_KEY_FILE = "aegis_fernet.key"
+_PENDING_PAYLOAD_PREFIX = "encjson:v1:"
 
 
 def _config_dir() -> Path:
@@ -91,3 +93,32 @@ def decrypt_mapping(payload: str) -> dict[str, str]:
             "rejecting payload (base64 plaintext fallback removed for security)"
         )
         raise
+
+
+def encrypt_pending_payload(payload: dict[str, Any]) -> str:
+    raw = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    token = _get_fernet().encrypt(raw).decode("utf-8")
+    return f"{_PENDING_PAYLOAD_PREFIX}{token}"
+
+
+def decrypt_pending_payload(payload: str) -> dict[str, Any]:
+    raw_payload = str(payload or "")
+    if not raw_payload:
+        return {}
+    if not raw_payload.startswith(_PENDING_PAYLOAD_PREFIX):
+        loaded = json.loads(raw_payload)
+        if isinstance(loaded, dict):
+            return loaded
+        return {}
+    token = raw_payload[len(_PENDING_PAYLOAD_PREFIX) :]
+    try:
+        raw = _get_fernet().decrypt(token.encode("utf-8"))
+    except InvalidToken:
+        logger.warning("crypto: decrypt_pending_payload failed with InvalidToken")
+        raise
+    loaded = json.loads(raw.decode("utf-8"))
+    if isinstance(loaded, dict):
+        return loaded
+    return {}

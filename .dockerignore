@@ -5,3 +5,12 @@ __pycache__/
 .git/
 .gitignore
 logs/
+config/*.key
+config/.env
+config/gw_tokens.json
+config/stats.json
+config/.admin_initialized
+*.key
+.env
+.planning/
+coverage.xml

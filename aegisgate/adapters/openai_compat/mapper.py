@@ -229,14 +229,60 @@ def to_messages_response(resp: InternalResponse) -> dict:
 
 
 def to_internal_responses(payload: dict) -> InternalRequest:
+    """Convert a ``/v1/responses`` payload into an :class:`InternalRequest`.
+
+    Unlike the previous implementation that only extracted the *last* user
+    message, this version converts **all** input items so that earlier
+    messages are not silently skipped by the redaction pipeline.
+    """
     request_id = payload.get("request_id") or str(uuid.uuid4())
     session_id = payload.get("session_id") or request_id
     route = "/v1/responses"
     model = payload.get("model", "unknown-model")
 
-    content = _extract_latest_user_text_from_responses_input(payload.get("input", ""))
-    content = _cap_text(content, settings.max_content_length_per_message)
-    messages = [InternalMessage(role="user", content=content, source="user")]
+    raw_input = payload.get("input", "")
+    messages: list[InternalMessage] = []
+
+    if isinstance(raw_input, str):
+        content = _strip_system_exec_runtime_lines(raw_input)
+        content = _cap_text(content, settings.max_content_length_per_message)
+        messages.append(InternalMessage(role="user", content=content, source="user"))
+    elif isinstance(raw_input, list):
+        for item in raw_input:
+            if isinstance(item, str):
+                text = _strip_system_exec_runtime_lines(item)
+                text = _cap_text(text, settings.max_content_length_per_message)
+                messages.append(InternalMessage(role="user", content=text, source="user"))
+            elif isinstance(item, dict):
+                role = str(item.get("role", "user")).strip().lower()
+                source = "system" if role == "system" else "user"
+                content = _flatten_content(item.get("content", ""))
+                content = _strip_system_exec_runtime_lines(content)
+                content = _cap_text(content, settings.max_content_length_per_message)
+                messages.append(
+                    InternalMessage(
+                        role=role,
+                        content=content,
+                        source=source,
+                        metadata=item.get("metadata", {}),
+                    )
+                )
+    elif isinstance(raw_input, dict):
+        role = str(raw_input.get("role", "user")).strip().lower()
+        source = "system" if role == "system" else "user"
+        content = _flatten_content(raw_input.get("content", ""))
+        content = _strip_system_exec_runtime_lines(content)
+        content = _cap_text(content, settings.max_content_length_per_message)
+        messages.append(
+            InternalMessage(role=role, content=content, source=source, metadata=raw_input.get("metadata", {}))
+        )
+    else:
+        content = _strip_system_exec_runtime_lines(str(raw_input or ""))
+        content = _cap_text(content, settings.max_content_length_per_message)
+        messages.append(InternalMessage(role="user", content=content, source="user"))
+
+    if not messages:
+        messages.append(InternalMessage(role="user", content="", source="user"))
 
     return InternalRequest(
         request_id=request_id,

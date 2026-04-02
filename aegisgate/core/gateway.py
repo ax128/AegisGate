@@ -1383,9 +1383,40 @@ def health() -> dict:
 @app.get("/ready")
 @app.head("/ready")
 def ready() -> JSONResponse:
-    if getattr(app.state, "ready", False):
-        return JSONResponse(status_code=200, content={"status": "ready"})
-    return JSONResponse(status_code=503, content={"status": "starting"})
+    if not getattr(app.state, "ready", False):
+        return JSONResponse(status_code=503, content={"status": "starting"})
+
+    checks: dict[str, str] = {}
+
+    # Storage backend probe — lightweight get_mapping with non-existent keys
+    try:
+        from aegisgate.adapters.openai_compat.pipeline_runtime import store as _rt_store
+
+        if _rt_store is not None:
+            _rt_store.get_mapping("__readiness_probe__", "__readiness_probe__")
+            checks["storage"] = "ok"
+        else:
+            checks["storage"] = "not_initialized"
+    except Exception as exc:
+        checks["storage"] = f"error: {type(exc).__name__}"
+
+    # Hot-reload watcher health
+    try:
+        if _hot_reloader is not None:
+            checks["hot_reload"] = (
+                "degraded" if getattr(_hot_reloader, "_degraded", False) else "ok"
+            )
+        else:
+            checks["hot_reload"] = "disabled"
+    except Exception:
+        checks["hot_reload"] = "unknown"
+
+    all_ok = all(v in ("ok", "disabled") for v in checks.values())
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "ready" if all_ok else "degraded", "checks": checks},
+    )
 
 
 @app.api_route("/", methods=["GET", "HEAD"])

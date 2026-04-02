@@ -12,21 +12,53 @@ from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 
 
-# 编码工具：参数是代码/diff 内容，跳过 dangerous_param 扫描避免误报
-_CODE_CONTENT_TOOLS = frozenset({
-    # 文件操作
-    "apply_patch", "write", "edit", "read", "glob", "grep", "patch",
-    "str_replace_editor", "file_editor", "create_file", "replace_in_file",
-    "insert_code_block", "write_file", "read_file", "delete_file",
-    # 终端/执行
-    "bash", "shell", "terminal", "computer_call", "run_command", "execute",
-    # Notebook
-    "notebook_edit", "notebookedit",
-    # 搜索/浏览
-    "web_search", "webfetch", "web_fetch", "browser", "search",
-    # 通用 Agent 工具
-    "todowrite", "task", "submit", "multi_tool_use.parallel",
-})
+_READ_ONLY_CONTENT_TOOLS = frozenset(
+    {
+        # 只读文件操作
+        "read",
+        "read_file",
+        "glob",
+        "grep",
+        # 只读搜索/浏览
+        "web_search",
+        "webfetch",
+        "web_fetch",
+        "browser",
+        "search",
+        # 通用 Agent 工具（非执行类）
+        "todowrite",
+        "task",
+        "submit",
+        "multi_tool_use.parallel",
+        # Notebook（只读查看）
+        "notebook_edit",
+        "notebookedit",
+    }
+)
+
+# 文件写入工具：内容为代码/文档，可能引用敏感路径但不构成实际攻击。
+# 对这些工具仅检查注入链模式（shell_injection 等），跳过路径引用模式
+# （sensitive_file_access、ssh_key_access、path_traversal）以避免误拦。
+_FILE_WRITE_CONTENT_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "apply_patch",
+        "patch",
+        "str_replace_editor",
+        "file_editor",
+        "create_file",
+        "replace_in_file",
+        "insert_code_block",
+        "write_file",
+        "delete_file",
+    }
+)
+
+# 路径引用类规则 ID — 在文件写入工具的参数中这些是 false positive 高发区
+_PATH_REFERENCE_PATTERN_IDS = frozenset(
+    {"sensitive_file_access", "path_traversal", "ssh_key_access"}
+)
 
 
 class ToolCallGuard(BaseFilter):
@@ -44,7 +76,9 @@ class ToolCallGuard(BaseFilter):
         guard_rules = rules.get(self.name, {})
         action_map = rules.get("action_map", {}).get(self.name, {})
 
-        self._tool_whitelist = {str(item) for item in guard_rules.get("tool_whitelist", [])}
+        self._tool_whitelist = {
+            str(item) for item in guard_rules.get("tool_whitelist", [])
+        }
         self._default_action = str(guard_rules.get("default_action", "block"))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
@@ -57,11 +91,17 @@ class ToolCallGuard(BaseFilter):
                 continue
             self._param_rules[(tool, param)] = re.compile(regex)
 
-        self._dangerous_param_patterns = [
-            re.compile(item.get("regex"), re.IGNORECASE)
-            for item in guard_rules.get("dangerous_param_patterns", [])
-            if item.get("regex")
-        ]
+        self._dangerous_param_patterns: list[tuple[str, re.Pattern[str]]] = []
+        self._dangerous_param_patterns_exec_only: list[tuple[str, re.Pattern[str]]] = []
+        for item in guard_rules.get("dangerous_param_patterns", []):
+            regex = item.get("regex")
+            if not regex:
+                continue
+            rule_id = str(item.get("id", ""))
+            compiled = re.compile(regex, re.IGNORECASE)
+            self._dangerous_param_patterns.append((rule_id, compiled))
+            if rule_id not in _PATH_REFERENCE_PATTERN_IDS:
+                self._dangerous_param_patterns_exec_only.append((rule_id, compiled))
         self._semantic_patterns = [
             re.compile(item.get("regex"), re.IGNORECASE)
             for item in guard_rules.get("semantic_approval_patterns", [])
@@ -105,9 +145,21 @@ class ToolCallGuard(BaseFilter):
         if item_type == "function_call":
             tool_name = str(tool_call.get("name", tool_name)).strip()
             arguments = tool_call.get("arguments", arguments)
-        elif item_type in {"bash", "computer_call"}:
+        elif item_type in {
+            "bash",
+            "computer_call",
+            "shell",
+            "terminal",
+            "run_command",
+            "execute",
+        }:
             tool_name = tool_name or item_type
-            arguments = tool_call.get("action", arguments)
+            arguments = (
+                tool_call.get("action")
+                or tool_call.get("command")
+                or tool_call.get("arguments")
+                or arguments
+            )
 
         if isinstance(arguments, str):
             stripped = arguments.strip()
@@ -124,7 +176,11 @@ class ToolCallGuard(BaseFilter):
     def _extract_tool_calls(self, resp: InternalResponse) -> list[dict[str, object]]:
         raw_tool_calls = resp.metadata.get("tool_calls")
         if isinstance(raw_tool_calls, list):
-            normalized = [item for item in (self._normalize_tool_call(tc) for tc in raw_tool_calls) if item]
+            normalized = [
+                item
+                for item in (self._normalize_tool_call(tc) for tc in raw_tool_calls)
+                if item
+            ]
             if normalized:
                 return normalized
 
@@ -142,19 +198,29 @@ class ToolCallGuard(BaseFilter):
                 tool_calls = message.get("tool_calls")
                 if not isinstance(tool_calls, list):
                     continue
-                extracted.extend(item for item in (self._normalize_tool_call(tc) for tc in tool_calls) if item)
+                extracted.extend(
+                    item
+                    for item in (self._normalize_tool_call(tc) for tc in tool_calls)
+                    if item
+                )
             if extracted:
                 return extracted
 
         output = raw.get("output")
         if isinstance(output, list):
-            extracted = [item for item in (self._normalize_tool_call(tc) for tc in output) if item]
+            extracted = [
+                item
+                for item in (self._normalize_tool_call(tc) for tc in output)
+                if item
+            ]
             if extracted:
                 return extracted
 
         return []
 
-    def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+    def process_response(
+        self, resp: InternalResponse, ctx: RequestContext
+    ) -> InternalResponse:
         self._report = {
             "filter": self.name,
             "hit": False,
@@ -177,17 +243,30 @@ class ToolCallGuard(BaseFilter):
             args = tool_call.get("arguments", {})
             args_text = self._as_text(args)
 
-            if self._tool_whitelist and tool_name and tool_name not in self._tool_whitelist:
+            if (
+                self._tool_whitelist
+                and tool_name
+                and tool_name not in self._tool_whitelist
+            ):
                 violations.append(f"disallowed_tool:{tool_name}")
                 action = self._apply_action(ctx, "disallowed_tool")
                 blocked = blocked or action == "block"
                 logger.debug(
                     "disallowed_tool hit request_id=%s tool=%s action=%s",
-                    ctx.request_id, tool_name, action,
+                    ctx.request_id,
+                    tool_name,
+                    action,
                 )
 
-            if tool_name.lower() not in _CODE_CONTENT_TOOLS:
-                for pattern in self._dangerous_param_patterns:
+            lowered_name = tool_name.lower()
+            if lowered_name not in _READ_ONLY_CONTENT_TOOLS:
+                # 文件写入工具仅检查注入链规则，跳过路径引用规则以降低误拦
+                patterns = (
+                    self._dangerous_param_patterns_exec_only
+                    if lowered_name in _FILE_WRITE_CONTENT_TOOLS
+                    else self._dangerous_param_patterns
+                )
+                for _rule_id, pattern in patterns:
                     match = pattern.search(args_text)
                     if match:
                         matched_text = match.group(0)[:120]
@@ -196,7 +275,10 @@ class ToolCallGuard(BaseFilter):
                         blocked = blocked or action == "block"
                         logger.debug(
                             "dangerous_param hit request_id=%s tool=%s pattern=%s matched=%s",
-                            ctx.request_id, tool_name, pattern.pattern[:60], matched_text,
+                            ctx.request_id,
+                            tool_name,
+                            pattern.pattern[:60],
+                            matched_text,
                         )
                         break
 
@@ -222,7 +304,10 @@ class ToolCallGuard(BaseFilter):
                     blocked = blocked or action == "block"
                     logger.debug(
                         "semantic_review hit request_id=%s tool=%s pattern=%s matched=%s",
-                        ctx.request_id, tool_name, pattern.pattern[:60], matched_text,
+                        ctx.request_id,
+                        tool_name,
+                        pattern.pattern[:60],
+                        matched_text,
                     )
                     break
 

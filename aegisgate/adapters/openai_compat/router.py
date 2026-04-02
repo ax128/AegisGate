@@ -1339,6 +1339,9 @@ async def _run_request_pipeline(
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
         return await run_filter_pipeline_offloop(_run_request_pipeline_sync, req, ctx)
+    # Snapshot the request before the pipeline mutates it in-place so
+    # that the "pass" timeout action can return the truly untouched original.
+    original_req = copy.deepcopy(req)
     try:
         return await asyncio.wait_for(
             run_filter_pipeline_offloop(_run_request_pipeline_sync, req, ctx),
@@ -1354,7 +1357,7 @@ async def _run_request_pipeline(
         ctx.security_tags.add("filter_pipeline_timeout")
         ctx.enforcement_actions.append("request_pipeline:timeout")
         if settings.request_pipeline_timeout_action == "pass":
-            return req
+            return original_req
         # Default "block": reject the request instead of passing unfiltered content.
         ctx.response_disposition = "block"
         ctx.disposition_reasons.append("request_filter_timeout")
@@ -3401,7 +3404,7 @@ async def _execute_chat_stream_once(
     )
 
     try:
-        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -4176,7 +4179,7 @@ async def _execute_responses_stream_once(
     )
 
     try:
-        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -5006,7 +5009,7 @@ async def _execute_chat_once(
     )
 
     try:
-        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -5438,7 +5441,7 @@ async def _execute_responses_once(
     )
 
     try:
-        upstream_base = forced_upstream_base or _resolve_upstream_base(request_headers)
+        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -5871,7 +5874,7 @@ async def _execute_messages_stream_once(
     )
 
     try:
-        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_base = (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -6367,7 +6370,7 @@ async def _execute_messages_once(
     logger.info("messages start request_id=%s route=%s", ctx.request_id, request_path)
 
     try:
-        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_base = (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
     except ValueError as exc:
         logger.warning(
@@ -6585,7 +6588,7 @@ async def _execute_generic_stream_once(
     )
 
     try:
-        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_base = (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
         logger.debug(
             "generic stream upstream request_id=%s base=%s url=%s",
@@ -6851,7 +6854,7 @@ async def _execute_generic_once(
     )
 
     try:
-        upstream_base = _resolve_upstream_base(request_headers)
+        upstream_base = (await _resolve_upstream_base(request_headers))[0]
         upstream_url = _build_upstream_url(request_path, upstream_base)
         logger.debug(
             "generic proxy upstream request_id=%s base=%s url=%s",

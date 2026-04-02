@@ -7,11 +7,10 @@ from dataclasses import dataclass
 import json
 import logging
 import re
-import socket
 from contextlib import AsyncExitStack
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Mapping
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import ipaddress
 
@@ -20,6 +19,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
+from aegisgate.util.ip_safety import (
+    is_blocked_ip as _is_blocked_ip,
+    resolve_public_ips,
+    bound_connect_url,
+    request_host_header,
+)
 from aegisgate.config.redact_values import replace_exact_values
 from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
@@ -758,26 +763,6 @@ def _extend_stream_probe_window(
 _V2_TARGET_URL_HEADER = "x-target-url"
 
 
-_SSRF_METADATA_HOSTS = frozenset(
-    {
-        "169.254.169.254",
-        "169.254.170.2",
-        "metadata.google.internal",
-        "metadata.goog",
-    }
-)
-
-
-def _is_blocked_target_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return not addr.is_global or addr.is_reserved
-
-
-def _ip_sort_key(
-    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> tuple[int, int]:
-    return (addr.version, int(addr))
-
-
 def _is_ip_literal(hostname: str) -> bool:
     try:
         ipaddress.ip_address(hostname)
@@ -786,118 +771,11 @@ def _is_ip_literal(hostname: str) -> bool:
     return True
 
 
-def _format_connect_host(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
-    text = str(addr)
-    return f"[{text}]" if addr.version == 6 else text
-
-
-def _request_host_header(parsed: Any) -> str:
-    host = parsed.hostname or ""
-    if not host:
-        return ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    if parsed.port is not None:
-        return f"{host}:{parsed.port}"
-    return host
-
-
-def _netloc_with_host(parsed: Any, host: str) -> str:
-    auth = ""
-    if parsed.username:
-        auth = parsed.username
-        if parsed.password is not None:
-            auth = f"{auth}:{parsed.password}"
-        auth = f"{auth}@"
-    return f"{auth}{host}"
-
-
-def _bound_connect_url(
-    parsed: Any,
-    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> str:
-    connect_host = _format_connect_host(addr)
-    if parsed.port is not None:
-        connect_host = f"{connect_host}:{parsed.port}"
-    return urlunparse(
-        (
-            parsed.scheme,
-            _netloc_with_host(parsed, connect_host),
-            parsed.path,
-            parsed.params,
-            parsed.query,
-            "",
-        )
-    )
-
-
-async def _resolve_target_ips(
-    hostname: str,
-) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(
-        hostname,
-        None,
-        type=socket.SOCK_STREAM,
-    )
-    resolved: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
-    for family, _socktype, _proto, _canonname, sockaddr in infos:
-        candidate = sockaddr[0]
-        try:
-            addr = ipaddress.ip_address(candidate)
-        except ValueError:
-            continue
-        if family in {socket.AF_INET, socket.AF_INET6}:
-            resolved.add(addr)
-    return resolved
-
-
 async def _resolve_public_target_ips(
     hostname: str,
 ) -> tuple[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...], str | None]:
-    if not hostname:
-        return (), "target url points to an internal/private address (SSRF protection)"
-
-    lowered = hostname.lower().strip(".")
-    if lowered in _SSRF_METADATA_HOSTS or lowered in {
-        "localhost",
-        "localhost.localdomain",
-    }:
-        return (), "target url points to an internal/private address (SSRF protection)"
-    if lowered.endswith(".internal"):
-        return (), "target url points to an internal/private address (SSRF protection)"
-
-    try:
-        literal_addr = ipaddress.ip_address(lowered)
-    except ValueError:
-        literal_addr = None
-
-    if literal_addr is not None:
-        if _is_blocked_target_ip(literal_addr):
-            return (
-                (),
-                "target url points to an internal/private address (SSRF protection)",
-            )
-        return (literal_addr,), None
-
-    try:
-        resolved = await _resolve_target_ips(lowered)
-    except socket.gaierror:
-        logger.warning(
-            "v2 target dns lookup failed host=%s — blocking (fail-closed)", lowered
-        )
-        return (), "target url points to an internal/private address (SSRF protection)"
-
-    if not resolved:
-        logger.warning(
-            "v2 target dns resolved empty host=%s — blocking (fail-closed)", lowered
-        )
-        return (), "target url points to an internal/private address (SSRF protection)"
-
-    if any(_is_blocked_target_ip(addr) for addr in resolved):
-        return (), "target url points to an internal/private address (SSRF protection)"
-
-    return tuple(sorted(resolved, key=_ip_sort_key)), None
+    """Resolve target hostname via shared async DNS with SSRF protection."""
+    return await resolve_public_ips(hostname)
 
 
 async def _extract_target_url(
@@ -922,14 +800,14 @@ async def _extract_target_url(
         if error is not None:
             return None, error
         if resolved and not _is_ip_literal(hostname):
-            connect_urls = tuple(_bound_connect_url(parsed, addr) for addr in resolved)
+            connect_urls = tuple(bound_connect_url(parsed, addr) for addr in resolved)
             if parsed.scheme == "https":
                 sni_hostname = hostname
     return (
         _V2ValidatedTarget(
             original_url=value,
             connect_urls=connect_urls,
-            request_host=_request_host_header(parsed),
+            request_host=request_host_header(parsed),
             sni_hostname=sni_hostname,
         ),
         None,
@@ -1138,7 +1016,9 @@ async def _proxy_v2_streaming(
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
         if is_sse:
             max_chars = max(
-                256, min(max_chars, int(settings.v2_sse_filter_probe_max_chars))
+                256,
+                max_chars,
+                int(settings.v2_sse_filter_probe_max_chars),
             )
         probe_window = ""
         max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))

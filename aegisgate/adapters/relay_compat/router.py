@@ -15,6 +15,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _effective_gateway_headers,
     _header_value,
     _resolve_gateway_key,
+    _resolve_upstream_base,
 )
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
@@ -54,18 +55,38 @@ def _relay_to_chat_payload(payload: dict) -> dict:
 @router.post("/generate")
 async def relay_generate(payload: dict, request: Request):
     headers = _effective_gateway_headers(request)
-    upstream_base = (_header_value(headers, settings.upstream_base_header) or "").strip()
+    upstream_base = (
+        _header_value(headers, settings.upstream_base_header) or ""
+    ).strip()
     gateway_key = _resolve_gateway_key(headers).strip()
     if not upstream_base:
-        return JSONResponse(status_code=400, content={"error": "invalid_parameters", "detail": "missing upstream base header"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_parameters",
+                "detail": "missing upstream base header",
+            },
+        )
     if not settings.gateway_key:
         return JSONResponse(status_code=500, content={"error": "gateway_misconfigured"})
-    if not hmac.compare_digest(gateway_key.encode("utf-8"), settings.gateway_key.encode("utf-8")):
+    if not hmac.compare_digest(
+        gateway_key.encode("utf-8"), settings.gateway_key.encode("utf-8")
+    ):
         return JSONResponse(status_code=401, content={"error": "gateway_auth_failed"})
+    try:
+        await _resolve_upstream_base(headers)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_upstream_base", "detail": str(exc)},
+        )
 
     mapped_payload = _relay_to_chat_payload(payload)
     boundary = getattr(request.state, "security_boundary", {})
-    logger.info("relay generate request_id=%s routed_to=/v1/chat/completions", mapped_payload.get("request_id"))
+    logger.info(
+        "relay generate request_id=%s routed_to=/v1/chat/completions",
+        mapped_payload.get("request_id"),
+    )
 
     if bool(mapped_payload.get("stream")):
         return await _execute_chat_stream_once(

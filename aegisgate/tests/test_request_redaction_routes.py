@@ -34,7 +34,9 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return None
 
     monkeypatch.setattr(openai_router.policy_engine, "resolve", _seed_policy)
-    monkeypatch.setattr(openai_router, "_resolve_upstream_base", lambda headers: "http://upstream.test")
+    async def _fake_resolve(headers):
+        return ("http://upstream.test", (), "")
+    monkeypatch.setattr(openai_router, "_resolve_upstream_base", _fake_resolve)
     monkeypatch.setattr(openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}")
     monkeypatch.setattr(openai_router, "_build_forward_headers", lambda headers: {"x-forwarded-for": "test"})
     monkeypatch.setattr(openai_router, "_run_payload_transform", _inline_payload_transform)

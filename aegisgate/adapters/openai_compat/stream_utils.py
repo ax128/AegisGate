@@ -180,8 +180,10 @@ def _stream_block_sse_chunk(
 
 def _stream_error_sse_chunk(message: str, code: str | None = None) -> bytes:
     """SSE chunk 携带上游失败原因，兼容 error.message / error.code 解析。"""
-    detail = (message or "upstream_error").strip() or "upstream_error"
     error_code = (code or "upstream_error").strip() or "upstream_error"
+    detail = (message or "upstream_error").strip() or "upstream_error"
+    if error_code in {"gateway_internal_error", "stream_error"}:
+        detail = "internal gateway error"
     payload: dict[str, Any] = {
         "type": "error",
         "error": {
@@ -203,8 +205,10 @@ def _stream_messages_error_sse_chunk(
     code: str | None = None,
     error_type: str = "api_error",
 ) -> bytes:
-    detail = (message or "upstream_error").strip() or "upstream_error"
     reason = (code or error_type).strip() or error_type
+    detail = (message or "upstream_error").strip() or "upstream_error"
+    if reason in {"gateway_internal_error", "stream_error"}:
+        detail = "internal gateway error"
     payload: dict[str, Any] = {
         "type": "error",
         "error": {
