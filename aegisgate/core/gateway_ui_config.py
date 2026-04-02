@@ -476,7 +476,7 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     {
         "env": "AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER",
         "field": "v2_enable_response_command_filter",
-        "label": "v2 响应指令过滤",
+        "label": "v2 响应风险替换",
         "type": "bool",
         "section": "v2",
     },
