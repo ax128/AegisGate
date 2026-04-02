@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import logging
 import re
@@ -10,7 +11,7 @@ import socket
 from contextlib import AsyncExitStack
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import ipaddress
 
@@ -170,9 +171,18 @@ _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_http_response_splitting": "检测到响应正文中嵌入的 HTTP 响应拆分特征",
     "web_http_obs_fold_header": "检测到响应正文中嵌入的 HTTP 头折叠/混淆特征",
 }
+_V2_DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
 
 _v2_async_client: httpx.AsyncClient | None = None
 _v2_client_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True)
+class _V2ValidatedTarget:
+    original_url: str
+    connect_urls: tuple[str, ...]
+    request_host: str
+    sni_hostname: str | None
 
 
 def _parse_host_allowlist(raw: str) -> tuple[set[str], tuple[str, ...]]:
@@ -207,9 +217,7 @@ def _host_matches_allowlist(
 ) -> bool:
     if host in exact:
         return True
-    if any(host.endswith(f".{domain}") for domain in exact):
-        return True
-    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+    return any(host.endswith(f".{suffix}") for suffix in suffixes)
 
 
 @lru_cache(maxsize=64)
@@ -562,13 +570,21 @@ def _sanitize_request_body(
 
 
 def _detect_dangerous_commands(text: str) -> list[str]:
+    return [
+        pattern_id for pattern_id, _pattern in _matching_v2_dangerous_patterns(text)
+    ]
+
+
+def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, re.Pattern[str]]]:
     raw_matches: list[str] = []
+    raw_patterns: list[tuple[str, re.Pattern[str]]] = []
     seen: set[str] = set()
     for pattern_id, pattern in _v2_dangerous_command_patterns():
         if pattern.search(text):
             if pattern_id not in seen:
                 seen.add(pattern_id)
                 raw_matches.append(pattern_id)
+                raw_patterns.append((pattern_id, pattern))
             if len(raw_matches) >= _V2_MAX_MATCH_IDS:
                 break
     if not raw_matches:
@@ -585,24 +601,130 @@ def _detect_dangerous_commands(text: str) -> list[str]:
         )
         if not high_conf_xss:
             # 普通网页经常包含 <script> 等标记；只有高置信载荷形态才作为注入拦截。
-            raw_matches = [
-                match_id for match_id in raw_matches if match_id not in xss_matches
+            raw_patterns = [
+                (match_id, pattern)
+                for match_id, pattern in raw_patterns
+                if match_id not in xss_matches
             ]
 
-    if not raw_matches:
+    if not raw_patterns:
         return []
 
     if settings.v2_response_filter_obvious_only:
         # Strictly block only the most dangerous protocol-level signatures.
-        raw_matches = [
-            match_id
-            for match_id in raw_matches
+        raw_patterns = [
+            (match_id, pattern)
+            for match_id, pattern in raw_patterns
             if match_id in _V2_OBVIOUS_ONLY_BLOCK_RULE_IDS
         ]
-        if not raw_matches:
+        if not raw_patterns:
             return []
 
-    return raw_matches[:_V2_MAX_MATCH_IDS]
+    return raw_patterns[:_V2_MAX_MATCH_IDS]
+
+
+def _sanitize_v2_response_text(text: str) -> tuple[str, int, list[str]]:
+    sanitized = text
+    replacements = 0
+    matched_rules: list[str] = []
+
+    for pattern_id, pattern in _matching_v2_dangerous_patterns(text):
+        rule_replacements = 0
+
+        def _replace(_match: re.Match[str]) -> str:
+            nonlocal replacements, rule_replacements
+            replacements += 1
+            rule_replacements += 1
+            return _V2_DANGER_FRAGMENT_NOTICE
+
+        sanitized = pattern.sub(_replace, sanitized)
+        if rule_replacements > 0:
+            matched_rules.append(pattern_id)
+
+    return sanitized, replacements, matched_rules
+
+
+def _sanitize_v2_response_json_value(value: Any) -> tuple[Any, int, list[str]]:
+    if isinstance(value, str):
+        sanitized, replacements, matched_rules = _sanitize_v2_response_text(value)
+        return sanitized, replacements, matched_rules
+    if isinstance(value, list):
+        out_list: list[Any] = []
+        total = 0
+        list_matched_rules: list[str] = []
+        list_seen_rules: set[str] = set()
+        for item in value:
+            next_value, next_count, next_rules = _sanitize_v2_response_json_value(item)
+            out_list.append(next_value)
+            total += next_count
+            for rule in next_rules:
+                if rule not in list_seen_rules:
+                    list_seen_rules.add(rule)
+                    list_matched_rules.append(rule)
+        return out_list, total, list_matched_rules
+    if isinstance(value, dict):
+        out_dict: dict[str, Any] = {}
+        total = 0
+        dict_matched_rules: list[str] = []
+        dict_seen_rules: set[str] = set()
+        for key, item in value.items():
+            next_value, next_count, next_rules = _sanitize_v2_response_json_value(item)
+            out_dict[key] = next_value
+            total += next_count
+            for rule in next_rules:
+                if rule not in dict_seen_rules:
+                    dict_seen_rules.add(rule)
+                    dict_matched_rules.append(rule)
+        return out_dict, total, dict_matched_rules
+    return value, 0, []
+
+
+def _sanitize_v2_response_body(
+    body: bytes,
+    content_type: str,
+) -> tuple[bytes, int, list[str]]:
+    if not body or not _looks_textual_content_type(content_type):
+        return body, 0, []
+
+    lowered = content_type.lower()
+    if "json" in lowered:
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+            sanitized, replacements, matched_rules = _sanitize_v2_response_json_value(
+                parsed
+            )
+            if replacements <= 0:
+                return body, 0, []
+            return (
+                json.dumps(sanitized, ensure_ascii=False).encode("utf-8"),
+                replacements,
+                matched_rules,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+            pass
+
+    text = body.decode("utf-8", errors="replace")
+    sanitized_text, replacements, matched_rules = _sanitize_v2_response_text(text)
+    if replacements <= 0:
+        return body, 0, []
+    return sanitized_text.encode("utf-8"), replacements, matched_rules
+
+
+def _apply_v2_response_sanitize_headers(
+    response_headers: dict[str, str],
+    *,
+    replacements: int,
+    matched_rules: list[str],
+) -> None:
+    if replacements <= 0:
+        return
+    response_headers["x-aegis-v2-response-sanitized"] = "true"
+    response_headers["x-aegis-v2-response-sanitized-count"] = str(replacements)
+    response_headers["x-aegis-v2-response-rule-count"] = str(len(matched_rules))
+    if matched_rules:
+        response_headers["x-aegis-v2-response-rule-ids"] = ",".join(
+            matched_rules[:_V2_MAX_MATCH_IDS]
+        )
 
 
 def _extend_stream_probe_window(
@@ -650,6 +772,65 @@ def _is_blocked_target_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -
     return not addr.is_global or addr.is_reserved
 
 
+def _ip_sort_key(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[int, int]:
+    return (addr.version, int(addr))
+
+
+def _is_ip_literal(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def _format_connect_host(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    text = str(addr)
+    return f"[{text}]" if addr.version == 6 else text
+
+
+def _request_host_header(parsed: Any) -> str:
+    host = parsed.hostname or ""
+    if not host:
+        return ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _netloc_with_host(parsed: Any, host: str) -> str:
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password is not None:
+            auth = f"{auth}:{parsed.password}"
+        auth = f"{auth}@"
+    return f"{auth}{host}"
+
+
+def _bound_connect_url(
+    parsed: Any,
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> str:
+    connect_host = _format_connect_host(addr)
+    if parsed.port is not None:
+        connect_host = f"{connect_host}:{parsed.port}"
+    return urlunparse(
+        (
+            parsed.scheme,
+            _netloc_with_host(parsed, connect_host),
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+
+
 async def _resolve_target_ips(
     hostname: str,
 ) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -671,41 +852,57 @@ async def _resolve_target_ips(
     return resolved
 
 
-async def _is_ssrf_target(hostname: str) -> bool:
-    """Check if the hostname resolves to an internal/private IP or cloud metadata endpoint."""
+async def _resolve_public_target_ips(
+    hostname: str,
+) -> tuple[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...], str | None]:
     if not hostname:
-        return True
+        return (), "target url points to an internal/private address (SSRF protection)"
+
     lowered = hostname.lower().strip(".")
-    if lowered in _SSRF_METADATA_HOSTS:
-        return True
-    if lowered in {"localhost", "localhost.localdomain"}:
-        return True
-    try:
-        addr = ipaddress.ip_address(lowered)
-        return (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-        )
-    except ValueError:
-        pass
-    # Block .internal TLD commonly used for cloud metadata
+    if lowered in _SSRF_METADATA_HOSTS or lowered in {
+        "localhost",
+        "localhost.localdomain",
+    }:
+        return (), "target url points to an internal/private address (SSRF protection)"
     if lowered.endswith(".internal"):
-        return True
+        return (), "target url points to an internal/private address (SSRF protection)"
+
+    try:
+        literal_addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        literal_addr = None
+
+    if literal_addr is not None:
+        if _is_blocked_target_ip(literal_addr):
+            return (
+                (),
+                "target url points to an internal/private address (SSRF protection)",
+            )
+        return (literal_addr,), None
+
     try:
         resolved = await _resolve_target_ips(lowered)
     except socket.gaierror:
         logger.warning(
             "v2 target dns lookup failed host=%s — blocking (fail-closed)", lowered
         )
-        return True
+        return (), "target url points to an internal/private address (SSRF protection)"
+
+    if not resolved:
+        logger.warning(
+            "v2 target dns resolved empty host=%s — blocking (fail-closed)", lowered
+        )
+        return (), "target url points to an internal/private address (SSRF protection)"
+
     if any(_is_blocked_target_ip(addr) for addr in resolved):
-        return True
-    return False
+        return (), "target url points to an internal/private address (SSRF protection)"
+
+    return tuple(sorted(resolved, key=_ip_sort_key)), None
 
 
-async def _extract_target_url(request: Request) -> tuple[str | None, str | None]:
+async def _extract_target_url(
+    request: Request,
+) -> tuple[_V2ValidatedTarget | None, str | None]:
     value = request.headers.get(_V2_TARGET_URL_HEADER, "").strip()
     if not value:
         return None, f"missing required header: {_V2_TARGET_URL_HEADER}"
@@ -715,16 +912,105 @@ async def _extract_target_url(request: Request) -> tuple[str | None, str | None]
             None,
             f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https",
         )
-    if not _is_v2_target_allowlisted(parsed.hostname or ""):
+    hostname = (parsed.hostname or "").strip().lower()
+    if not _is_v2_target_allowlisted(hostname):
         return None, "target url host is not in v2 target allowlist"
-    if settings.v2_block_internal_targets and await _is_ssrf_target(
-        parsed.hostname or ""
-    ):
-        return (
-            None,
-            "target url points to an internal/private address (SSRF protection)",
-        )
-    return value, None
+    connect_urls = (value,)
+    sni_hostname: str | None = None
+    if settings.v2_block_internal_targets:
+        resolved, error = await _resolve_public_target_ips(hostname)
+        if error is not None:
+            return None, error
+        if resolved and not _is_ip_literal(hostname):
+            connect_urls = tuple(_bound_connect_url(parsed, addr) for addr in resolved)
+            if parsed.scheme == "https":
+                sni_hostname = hostname
+    return (
+        _V2ValidatedTarget(
+            original_url=value,
+            connect_urls=connect_urls,
+            request_host=_request_host_header(parsed),
+            sni_hostname=sni_hostname,
+        ),
+        None,
+    )
+
+
+def _bound_request_headers(
+    headers: Mapping[str, str],
+    *,
+    request_host: str,
+) -> dict[str, str]:
+    bound_headers = dict(headers)
+    if request_host:
+        bound_headers["Host"] = request_host
+    return bound_headers
+
+
+def _bound_request_extensions(
+    *,
+    sni_hostname: str | None,
+) -> dict[str, str] | None:
+    if not sni_hostname:
+        return None
+    return {"sni_hostname": sni_hostname}
+
+
+async def _request_v2_upstream(
+    *,
+    client: httpx.AsyncClient,
+    method: str,
+    target: _V2ValidatedTarget,
+    headers: Mapping[str, str],
+    content: bytes,
+) -> httpx.Response:
+    last_error: httpx.HTTPError | None = None
+    bound_headers = _bound_request_headers(headers, request_host=target.request_host)
+    extensions = _bound_request_extensions(sni_hostname=target.sni_hostname)
+    for connect_url in target.connect_urls:
+        try:
+            return await client.request(
+                method=method,
+                url=connect_url,
+                headers=bound_headers,
+                content=content,
+                extensions=extensions,
+            )
+        except httpx.HTTPError as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
+async def _open_v2_stream(
+    *,
+    client: httpx.AsyncClient,
+    method: str,
+    target: _V2ValidatedTarget,
+    headers: Mapping[str, str],
+    content: bytes,
+) -> tuple[AsyncExitStack, httpx.Response]:
+    last_error: httpx.HTTPError | None = None
+    bound_headers = _bound_request_headers(headers, request_host=target.request_host)
+    extensions = _bound_request_extensions(sni_hostname=target.sni_hostname)
+    for connect_url in target.connect_urls:
+        exit_stack = AsyncExitStack()
+        try:
+            response = await exit_stack.enter_async_context(
+                client.stream(
+                    method,
+                    connect_url,
+                    headers=bound_headers,
+                    content=content,
+                    extensions=extensions,
+                )
+            )
+            return exit_stack, response
+        except httpx.HTTPError as exc:
+            last_error = exc
+            await exit_stack.aclose()
+    assert last_error is not None
+    raise last_error
 
 
 def _build_forward_headers(request: Request) -> dict[str, str]:
@@ -791,25 +1077,26 @@ async def _proxy_v2_streaming(
     *,
     request: Request,
     client: httpx.AsyncClient,
-    target_url: str,
+    target: _V2ValidatedTarget,
     forward_headers: dict[str, str],
     outbound_body: bytes,
     redaction_count: int,
 ) -> Response:
-    exit_stack = AsyncExitStack()
     try:
-        upstream_response = await exit_stack.enter_async_context(
-            client.stream(
-                request.method,
-                target_url,
-                headers=forward_headers,
-                content=outbound_body,
-            )
+        exit_stack, upstream_response = await _open_v2_stream(
+            client=client,
+            method=request.method,
+            target=target,
+            headers=forward_headers,
+            content=outbound_body,
         )
     except httpx.HTTPError as exc:
-        await exit_stack.aclose()
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("v2 upstream unreachable target=%s error=%s", target_url, detail)
+        logger.warning(
+            "v2 upstream unreachable target=%s error=%s",
+            target.original_url,
+            detail,
+        )
         return JSONResponse(
             status_code=502,
             content={
@@ -829,18 +1116,20 @@ async def _proxy_v2_streaming(
     response_content_type = upstream_response.headers.get("content-type", "")
     is_textual = _looks_textual_content_type(response_content_type)
     is_sse = "text/event-stream" in response_content_type.lower()
-    response_filter_bypassed = _should_bypass_v2_response_filter(target_url)
+    response_filter_bypassed = _should_bypass_v2_response_filter(target.original_url)
     if response_filter_bypassed:
         logger.info(
             "v2 response filter bypass method=%s path=%s target=%s host=%s",
             request.method,
             request.url.path,
-            target_url,
-            _target_host(target_url),
+            target.original_url,
+            _target_host(target.original_url),
         )
 
     buffered_chunks: list[bytes] = []
     upstream_exhausted = False
+    sanitized_stream_matches: list[str] = []
+    upstream_iter = upstream_response.aiter_bytes()
     if (
         settings.v2_enable_response_command_filter
         and not response_filter_bypassed
@@ -855,7 +1144,7 @@ async def _proxy_v2_streaming(
         max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
         inspected_chars = 0
         matches: list[str] = []
-        async for chunk in upstream_response.aiter_bytes():
+        async for chunk in upstream_iter:
             if chunk:
                 buffered_chunks.append(chunk)
                 if inspected_chars < max_chars:
@@ -877,30 +1166,36 @@ async def _proxy_v2_streaming(
             upstream_exhausted = True
 
         if matches:
-            await exit_stack.aclose()
+            buffered_body = b"".join(buffered_chunks)
+            sanitized_body, replacements, sanitized_stream_matches = (
+                _sanitize_v2_response_body(buffered_body, response_content_type)
+            )
+            if replacements > 0:
+                buffered_chunks = [sanitized_body]
+                _apply_v2_response_sanitize_headers(
+                    response_headers,
+                    replacements=replacements,
+                    matched_rules=sanitized_stream_matches,
+                )
+                logger.warning(
+                    "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
+                    request.method,
+                    request.url.path,
+                    target.original_url,
+                    upstream_response.status_code,
+                    replacements,
+                    sanitized_stream_matches,
+                )
+            else:
+                sanitized_stream_matches = matches
             logger.warning(
-                "v2 response blocked method=%s path=%s target=%s status=%s matches=%s",
+                "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
                 request.method,
                 request.url.path,
-                target_url,
+                target.original_url,
                 upstream_response.status_code,
                 matches,
-            )
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "message": "该请求已被安全网关拦截，可能携带注入攻击。",
-                        "type": "aegisgate_v2_security_block",
-                        "code": "v2_response_http_attack_blocked",
-                        "details": _v2_http_attack_reasons(matches),
-                    },
-                    "aegisgate_v2": {
-                        "request_redaction_enabled": settings.v2_enable_request_redaction,
-                        "response_command_filter_enabled": settings.v2_enable_response_command_filter,
-                        "matched_rules": matches,
-                    },
-                },
+                bool(replacements > 0),
             )
 
     async def _iter_body() -> AsyncGenerator[bytes, None]:
@@ -921,7 +1216,7 @@ async def _proxy_v2_streaming(
                         chunk = replaced.encode("utf-8")
                 yield chunk
             if not upstream_exhausted:
-                async for chunk in upstream_response.aiter_bytes():
+                async for chunk in upstream_iter:
                     if not chunk:
                         continue
                     if is_sse:
@@ -938,7 +1233,9 @@ async def _proxy_v2_streaming(
         except httpx.HTTPError as exc:
             detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
             logger.warning(
-                "v2 upstream stream interrupted target=%s error=%s", target_url, detail
+                "v2 upstream stream interrupted target=%s error=%s",
+                target.original_url,
+                detail,
             )
         finally:
             if is_sse and not saw_done:
@@ -949,7 +1246,7 @@ async def _proxy_v2_streaming(
                 "v2 sse upstream closed without DONE method=%s path=%s target=%s inject_done=true",
                 request.method,
                 request.url.path,
-                target_url,
+                target.original_url,
             )
             yield _SSE_DONE_RECOVERY_CHUNK
 
@@ -1028,7 +1325,7 @@ def _log_v2_request_if_debug(request: Request, body: bytes) -> None:
 async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     del proxy_path
 
-    target_url, err = await _extract_target_url(request)
+    target, err = await _extract_target_url(request)
     if err:
         return JSONResponse(
             status_code=400,
@@ -1040,7 +1337,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 }
             },
         )
-    assert target_url is not None
+    assert target is not None
 
     request_body = await request.body()
     _log_v2_request_if_debug(request, request_body)
@@ -1065,7 +1362,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 "v2 redaction method=%s path=%s target=%s client_ip=%s user_agent=%s replacements=%d hit_ids=%s markers=%s",
                 request.method,
                 request.url.path,
-                target_url,
+                target.original_url,
                 client_ip,
                 user_agent,
                 redaction_count,
@@ -1079,22 +1376,27 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
         return await _proxy_v2_streaming(
             request=request,
             client=client,
-            target_url=target_url,
+            target=target,
             forward_headers=forward_headers,
             outbound_body=outbound_body,
             redaction_count=redaction_count,
         )
 
     try:
-        upstream_response = await client.request(
+        upstream_response = await _request_v2_upstream(
+            client=client,
             method=request.method,
-            url=target_url,
+            target=target,
             headers=forward_headers,
             content=outbound_body,
         )
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
-        logger.warning("v2 upstream unreachable target=%s error=%s", target_url, detail)
+        logger.warning(
+            "v2 upstream unreachable target=%s error=%s",
+            target.original_url,
+            detail,
+        )
         return JSONResponse(
             status_code=502,
             content={
@@ -1121,14 +1423,14 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
         if ev_count > 0:
             response_body = replaced.encode("utf-8")
 
-    response_filter_bypassed = _should_bypass_v2_response_filter(target_url)
+    response_filter_bypassed = _should_bypass_v2_response_filter(target.original_url)
     if response_filter_bypassed:
         logger.info(
             "v2 response filter bypass method=%s path=%s target=%s host=%s",
             request.method,
             request.url.path,
-            target_url,
-            _target_host(target_url),
+            target.original_url,
+            _target_host(target.original_url),
         )
     if (
         settings.v2_enable_response_command_filter
@@ -1136,33 +1438,27 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
         and response_body
         and _looks_textual_content_type(response_content_type)
     ):
-        text = response_body.decode("utf-8", errors="replace")
         max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
-        matches = _detect_dangerous_commands(text[:max_chars])
-        if matches:
+        probe_body = response_body[: max_chars * 4]
+        sanitized_body, replacements, matches = _sanitize_v2_response_body(
+            probe_body if len(probe_body) == len(response_body) else response_body,
+            response_content_type,
+        )
+        if replacements > 0:
+            response_body = sanitized_body
+            _apply_v2_response_sanitize_headers(
+                response_headers,
+                replacements=replacements,
+                matched_rules=matches,
+            )
             logger.warning(
-                "v2 response blocked method=%s path=%s target=%s status=%s matches=%s",
+                "v2 response sanitized method=%s path=%s target=%s status=%s replacements=%s matches=%s",
                 request.method,
                 request.url.path,
-                target_url,
+                target.original_url,
                 upstream_response.status_code,
+                replacements,
                 matches,
-            )
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "message": "该请求已被安全网关拦截，可能携带注入攻击。",
-                        "type": "aegisgate_v2_security_block",
-                        "code": "v2_response_http_attack_blocked",
-                        "details": _v2_http_attack_reasons(matches),
-                    },
-                    "aegisgate_v2": {
-                        "request_redaction_enabled": settings.v2_enable_request_redaction,
-                        "response_command_filter_enabled": settings.v2_enable_response_command_filter,
-                        "matched_rules": matches,
-                    },
-                },
             )
 
     if redaction_count > 0:

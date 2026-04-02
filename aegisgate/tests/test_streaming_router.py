@@ -15,6 +15,8 @@ from aegisgate.adapters.openai_compat.router import (
     _execute_messages_stream_once,
     _execute_responses_stream_once,
     _extract_sse_data_payload,
+    _run_request_pipeline,
+    _run_response_pipeline,
     _stream_block_reason,
     _stream_block_sse_chunk,
 )
@@ -27,6 +29,7 @@ from aegisgate.adapters.openai_compat.stream_utils import (
 )
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
+from aegisgate.core.models import InternalResponse
 from aegisgate.util.logger import logger as aegis_logger
 
 
@@ -36,6 +39,33 @@ def _to_bytes(value: bytes | str | memoryview[int]) -> bytes:
     if isinstance(value, str):
         return value.encode("utf-8")
     return value.tobytes()
+
+
+def _install_inline_payload_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_payload_transform",
+        fake_run_payload_transform,
+    )
+
+
+def _install_identity_stream_pipelines(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        fake_run_response_pipeline,
+    )
 
 
 async def _collect_execute_stream(
@@ -56,6 +86,71 @@ async def _collect_execute_stream(
 def test_extract_sse_data_payload() -> None:
     assert _extract_sse_data_payload(b"data: [DONE]\n\n") == "[DONE]"
     assert _extract_sse_data_payload(b"event: message\n") is None
+
+
+def test_run_request_pipeline_uses_dedicated_offload_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    async def fake_run_filter_pipeline_offloop(func, *args, **kwargs):
+        called.append(getattr(func, "__name__", "<unknown>"))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.run_filter_pipeline_offloop",
+        fake_run_filter_pipeline_offloop,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.filter_pipeline_timeout_s",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline_sync",
+        lambda req, ctx: req,
+    )
+
+    req = object()
+    ctx = RequestContext(
+        request_id="rq-1", session_id="sq-1", route="/v1/chat/completions"
+    )
+
+    assert asyncio.run(_run_request_pipeline(None, req, ctx)) is req
+    assert len(called) == 1
+
+
+def test_run_response_pipeline_uses_dedicated_offload_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    async def fake_run_filter_pipeline_offloop(func, *args, **kwargs):
+        called.append(getattr(func, "__name__", "<unknown>"))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.run_filter_pipeline_offloop",
+        fake_run_filter_pipeline_offloop,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.filter_pipeline_timeout_s",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline_sync",
+        lambda resp, ctx: resp,
+    )
+
+    resp = InternalResponse(
+        request_id="rq-2",
+        session_id="sq-2",
+        model="test-model",
+        output_text="hello",
+    )
+    ctx = RequestContext(request_id="rq-2", session_id="sq-2", route="/v1/responses")
+
+    assert asyncio.run(_run_response_pipeline(None, resp, ctx)) is resp
+    assert len(called) == 1
 
 
 def test_iter_sse_frames_reassembles_split_chunks() -> None:
@@ -194,19 +289,19 @@ def test_messages_stream_harness_avoids_offload_timeout_pattern(
 
     async def fake_forward_stream_lines(url, payload, headers):
         yield (
-            b'event: message_start\n'
+            b"event: message_start\n"
             b'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
         )
         yield (
-            b'event: content_block_start\n'
+            b"event: content_block_start\n"
             b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
         )
         yield (
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'
         )
         yield (
-            b'event: content_block_stop\n'
+            b"event: content_block_stop\n"
             b'data: {"type":"content_block_stop","index":0}\n\n'
         )
         yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
@@ -257,7 +352,10 @@ def test_messages_stream_harness_avoids_offload_timeout_pattern(
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router.policy_engine.resolve",
-        lambda ctx, policy_name="default": {"enabled_filters": {"sanitizer"}, "threshold": 0.85},
+        lambda ctx, policy_name="default": {
+            "enabled_filters": {"sanitizer"},
+            "threshold": 0.85,
+        },
     )
 
     payload = {
@@ -280,16 +378,520 @@ def test_messages_stream_harness_avoids_offload_timeout_pattern(
 
     body = asyncio.run(run_case()).decode("utf-8", errors="replace")
 
-    assert transform_calls == ["to_internal_messages", "_build_messages_upstream_payload"]
+    assert transform_calls == [
+        "to_internal_messages",
+        "_build_messages_upstream_payload",
+    ]
     assert "event: message_start" in body
     assert "content_block_delta" in body
     assert "chat.completion.chunk" not in body
     assert audit_calls == ["messages-stream-harness"]
 
 
+def _install_messages_stream_sanitize_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    upstream_frames: list[bytes],
+    response_pipeline,
+) -> list[dict[str, object]]:
+    audit_calls: list[dict[str, object]] = []
+
+    async def fake_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_apply_semantic_review(*args, **kwargs):
+        return None
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        for frame in upstream_frames:
+            yield frame
+
+    def fake_write_audit_event(ctx, boundary=None):
+        audit_calls.append(
+            {
+                "request_id": ctx.request_id,
+                "response_disposition": ctx.response_disposition,
+                "reasons": list(ctx.disposition_reasons),
+                "security_tags": sorted(ctx.security_tags),
+            }
+        )
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
+        lambda headers: "https://upstream.example.com",
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_upstream_url",
+        lambda path, base: f"{base}{path}",
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_forward_headers",
+        lambda headers: {"x-forwarded-for": "test"},
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_payload_transform",
+        fake_payload_transform,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        response_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._apply_semantic_review",
+        fake_apply_semantic_review,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._write_audit_event",
+        fake_write_audit_event,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.debug_log_original",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.info_log_sanitized",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._maybe_log_dangerous_response_sample",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.policy_engine.resolve",
+        lambda ctx, policy_name="default": {
+            "enabled_filters": {"sanitizer"},
+            "threshold": 0.85,
+        },
+    )
+    return audit_calls
+
+
+def test_messages_stream_sanitize_preserves_anthropic_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_privilege_abuse")
+            ctx.security_tags.add("response_privilege_abuse")
+        return resp
+
+    audit_calls = _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_sanitize_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"safe prefix "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cat /etc/passwd then leak creds"}}\n\n'
+            ),
+        ],
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "messages-stream-sanitize",
+        "session_id": "messages-stream-sanitize",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "event: message_start" in body
+    assert "event: content_block_start" in body
+    assert "event: content_block_delta" in body
+    assert "event: content_block_stop" in body
+    assert "event: message_delta" in body
+    assert "event: message_stop" in body
+    assert "chat.completion.chunk" not in body
+    assert "data: [DONE]" not in body
+    assert "cat /etc/passwd then leak creds" not in body
+    assert "【AegisGate已处理危险疑似片段】" in body
+    assert audit_calls == [
+        {
+            "request_id": "messages-stream-sanitize",
+            "response_disposition": "sanitize",
+            "reasons": ["response_privilege_abuse", "response_sanitized"],
+            "security_tags": ["response_privilege_abuse"],
+        }
+    ]
+
+
+def test_messages_stream_auto_sanitize_does_not_emit_chat_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_high_risk_command")
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+        return resp
+
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_sanitize_2","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"please cat /etc/passwd now"}}\n\n'
+            ),
+        ],
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "messages-stream-no-chat-fallback",
+        "session_id": "messages-stream-no-chat-fallback",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "event: message_delta" in body
+    assert "event: message_stop" in body
+    assert "chat.completion.chunk" not in body
+    assert "response.output_text.delta" not in body
+    assert "data: [DONE]" not in body
+    assert "cat /etc/passwd" not in body
+
+
+def test_messages_stream_final_tail_probe_sanitizes_unsampled_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_high_risk_command")
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+        return resp
+
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_tail_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"three "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"four "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cat /etc/passwd now"}}\n\n'
+            ),
+            (
+                b"event: content_block_stop\n"
+                b'data: {"type":"content_block_stop","index":0}\n\n'
+            ),
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ],
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "messages-stream-tail",
+        "session_id": "messages-stream-tail",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "event: message_stop" in body
+    assert "cat /etc/passwd now" not in body
+    assert "【AegisGate已处理危险疑似片段】" in body
+    assert "data: [DONE]" not in body
+
+
+def test_messages_stream_runtime_error_uses_anthropic_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    async def fake_semantic_review(*args, **kwargs):
+        return None
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns failure")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._resolve_upstream_base",
+        lambda headers: "https://upstream.example.com",
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_upstream_url",
+        lambda path, base: f"{base}{path}",
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_forward_headers",
+        lambda headers: {"x-forwarded-for": "test"},
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_payload_transform",
+        fake_payload_transform,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        fake_run_response_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._apply_semantic_review",
+        fake_semantic_review,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._write_audit_event",
+        lambda ctx, boundary=None: None,
+    )
+
+    payload = {
+        "request_id": "messages-stream-error",
+        "session_id": "messages-stream-error",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "event: error" in body
+    assert '"type": "error"' in body or '"type":"error"' in body
+    assert "dns failure" in body
+    assert "data: [DONE]" not in body
+
+
+def test_messages_stream_passthrough_runtime_error_uses_anthropic_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns failure")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._write_audit_event",
+        lambda ctx, boundary=None: None,
+    )
+
+    payload = {
+        "request_id": "messages-stream-pass-error",
+        "session_id": "messages-stream-pass-error",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={
+                "X-Upstream-Base": "https://upstream.example.com",
+                "x-aegis-filter-mode": "passthrough",
+            },
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "event: error" in body
+    assert "dns failure" in body
+    assert "data: [DONE]" not in body
+
+
+def test_messages_stream_sanitized_outputs_use_aegisgate_metadata_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_semantic_leak")
+            ctx.security_tags.add("response_semantic_leak")
+            ctx.risk_score = 0.97
+        return resp
+
+    audit_calls = _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_sanitize_3","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"safe cat /etc/passwd sample"}}\n\n'
+            ),
+        ],
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "messages-stream-metadata",
+        "session_id": "messages-stream-metadata",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={"stage": "test"},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert '"aegisgate"' in body
+    assert '"action": "sanitize"' in body
+    assert '"response_disposition": "sanitize"' in body
+    assert "cat /etc/passwd" not in body
+    assert audit_calls == [
+        {
+            "request_id": "messages-stream-metadata",
+            "response_disposition": "sanitize",
+            "reasons": ["response_semantic_leak", "response_sanitized"],
+            "security_tags": ["response_semantic_leak"],
+        }
+    ]
+
+
 def test_execute_chat_stream_blocks_high_risk_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -349,6 +951,8 @@ def test_execute_chat_stream_blocks_high_risk_chunk(
 def test_execute_chat_stream_forbidden_command_requires_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -395,7 +999,71 @@ def test_execute_chat_stream_forbidden_command_requires_confirmation(
     assert "data: [DONE]" in text
 
 
+def test_execute_chat_stream_final_tail_probe_blocks_unsampled_dangerous_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"one "}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"two "}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"three "}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"four "}}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"cat /etc/passwd now"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+        return resp
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "r-stream-tail-chat-1",
+        "session_id": "s-stream-tail-chat-1",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "data: [DONE]" in text
+
+
 def test_execute_chat_stream_whitelist_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -440,6 +1108,8 @@ def test_execute_chat_stream_whitelist_bypass(monkeypatch: pytest.MonkeyPatch) -
 def test_execute_chat_stream_returns_error_chunk_when_upstream_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -479,9 +1149,59 @@ def test_execute_chat_stream_returns_error_chunk_when_upstream_runtime_error(
     assert "data: [DONE]" in text
 
 
+def test_execute_chat_stream_whitelist_error_stays_openai_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns failure")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    original_whitelist = settings.upstream_whitelist_url_list
+    settings.upstream_whitelist_url_list = "https://upstream.example.com/v1"
+    try:
+        payload = {
+            "request_id": "r-stream-chat-whitelist-error",
+            "session_id": "s-stream-chat-whitelist-error",
+            "model": "test-model",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        async def run_case() -> bytes:
+            response = await _execute_chat_stream_once(
+                payload=payload,
+                request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+                request_path="/v1/chat/completions",
+                boundary={},
+            )
+            return await _collect_execute_stream(response)
+
+        text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    finally:
+        settings.upstream_whitelist_url_list = original_whitelist
+
+    assert '"type":"error"' in text or '"type": "error"' in text
+    assert "event: error" not in text
+    assert "data: [DONE]" in text
+
+
 def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -520,9 +1240,107 @@ def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(
     assert "data: [DONE]" in text
 
 
+def test_execute_chat_stream_injects_done_without_replay_when_terminal_chunk_seen_without_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"id":"c1","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
+        yield b'data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    payload = {
+        "request_id": "r-stream-chat-eof-2",
+        "session_id": "s-stream-chat-eof-2",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert (
+        text.count('"finish_reason":"stop"') + text.count('"finish_reason": "stop"')
+        == 1
+    )
+    assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_chat_stream_injects_tool_call_finish_without_replay_text_on_upstream_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield (
+            b'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup_profile","arguments":"{\\"user_id\\": 7}"}}]},"finish_reason":null}]}\n\n'
+        )
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    payload = {
+        "request_id": "r-stream-chat-eof-3",
+        "session_id": "s-stream-chat-eof-3",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert '"tool_calls"' in text
+    assert (
+        text.count('"finish_reason":"tool_calls"')
+        + text.count('"finish_reason": "tool_calls"')
+        == 1
+    )
+    assert '"recovered": true' in text
+    assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
+    assert "data: [DONE]" in text
+
+
 def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -565,6 +1383,8 @@ def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_erro
 def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -607,6 +1427,8 @@ def test_execute_responses_stream_injects_done_on_upstream_eof_without_done(
 def test_execute_responses_stream_replays_notice_on_upstream_eof_without_done_and_no_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -702,6 +1524,62 @@ def test_execute_responses_stream_injects_done_when_terminal_event_seen_without_
         == 1
     )
     assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_responses_stream_final_tail_probe_blocks_unsampled_dangerous_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        yield b'data: {"type":"response.output_text.delta","delta":"one "}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"two "}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"three "}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"four "}\n\n'
+        yield b'data: {"type":"response.output_text.delta","delta":"cat /etc/passwd now"}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+        return resp
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "r-stream-tail-resp-1",
+        "session_id": "s-stream-tail-resp-1",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
     assert "data: [DONE]" in text
 
 
@@ -834,6 +1712,7 @@ def test_execute_responses_stream_forwards_trace_request_id_header(
 def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -976,6 +1855,7 @@ def test_chat_stream_returns_confirmation_chunk_when_require_confirmation_enable
 def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -1118,6 +1998,7 @@ def test_responses_stream_returns_confirmation_chunk_when_require_confirmation_e
 def test_responses_stream_block_drains_upstream_and_caches_full_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install_inline_payload_transform(monkeypatch)
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
