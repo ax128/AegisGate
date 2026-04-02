@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import secrets
 import time
 
 from fastapi import Request
@@ -92,16 +93,17 @@ def _ui_client_fingerprint(request: Request) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _ui_session_signature(issued_at: int, fingerprint: str) -> str:
+def _ui_session_signature(issued_at: int, fingerprint: str, nonce: str = "") -> str:
     secret = _ensure_gateway_key().encode("utf-8")
-    payload = f"ui:{issued_at}:{fingerprint}".encode("utf-8")
+    payload = f"ui:{issued_at}:{fingerprint}:{nonce}".encode("utf-8")
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 def _create_ui_session_token(request: Request) -> str:
     issued_at = int(time.time())
+    nonce = secrets.token_hex(16)
     fingerprint = _ui_client_fingerprint(request)
-    return f"{issued_at}.{_ui_session_signature(issued_at, fingerprint)}"
+    return f"{issued_at}.{nonce}.{_ui_session_signature(issued_at, fingerprint, nonce)}"
 
 
 def _ui_csrf_token(session_token: str) -> str:
@@ -113,7 +115,16 @@ def _is_valid_ui_session(token: str, request: Request) -> bool:
     value = (token or "").strip()
     if not value or "." not in value:
         return False
-    issued_at_str, signature = value.split(".", 1)
+    parts = value.split(".", 2)
+    if len(parts) == 3:
+        issued_at_str, nonce, signature = parts
+    elif len(parts) == 2:
+        # Legacy format without nonce — allow validation but will never match
+        # new signatures, so old sessions expire naturally.
+        issued_at_str, signature = parts
+        nonce = ""
+    else:
+        return False
     try:
         issued_at = int(issued_at_str)
     except ValueError:
@@ -122,7 +133,7 @@ def _is_valid_ui_session(token: str, request: Request) -> bool:
         return False
     if time.time() - issued_at > settings.local_ui_session_ttl_seconds:
         return False
-    expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request))
+    expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request), nonce)
     return hmac.compare_digest(signature, expected)
 
 

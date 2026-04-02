@@ -47,6 +47,7 @@ from aegisgate.core.gw_tokens import (
     unregister as gw_tokens_unregister,
     update_and_rename as gw_tokens_update_and_rename,
 )
+from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 import hmac
 
@@ -293,23 +294,26 @@ def register_ui_routes(app: FastAPI) -> None:
                     return v
         return None
 
+    def _write_key_file_safe(path: Path, value: str) -> None:
+        """Write key file with restricted permissions from creation (no open window)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, value.encode("utf-8"))
+        finally:
+            os.close(fd)
+
     def _write_key_file(key_type: str, value: str) -> None:
         primary = _key_path(key_type)
         try:
-            primary.parent.mkdir(parents=True, exist_ok=True)
-            primary.write_text(value, encoding="utf-8")
-            try:
-                os.chmod(primary, 0o600)
-            except OSError:
-                pass
+            _write_key_file_safe(primary, value)
         except PermissionError:
             fallback = _key_fallback_path(key_type)
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            fallback.write_text(value, encoding="utf-8")
-            try:
-                os.chmod(fallback, 0o600)
-            except OSError:
-                pass
+            _write_key_file_safe(fallback, value)
+            logger.warning(
+                "key file written to fallback path=%s (primary %s not writable)",
+                fallback, primary,
+            )
 
     @app.get("/__ui__/api/keys")
     async def local_ui_keys_list() -> JSONResponse:
@@ -318,7 +322,6 @@ def register_ui_routes(app: FastAPI) -> None:
             primary = _key_path(key_type)
             fallback = _key_fallback_path(key_type)
             exists = primary.is_file() or fallback.is_file()
-            active_path = str(primary) if primary.is_file() else (str(fallback) if fallback.is_file() else str(primary))
             result.append({"type": key_type, "filename": filename, "exists": exists})
         return JSONResponse(content={"items": result})
 

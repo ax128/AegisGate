@@ -46,11 +46,11 @@ def _ensure_gateway_key() -> str:
         new_key = secrets.token_urlsafe(32)
         key_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            key_path.write_text(new_key, encoding="utf-8")
+            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.chmod(key_path, 0o600)
-            except OSError:
-                pass
+                os.write(fd, new_key.encode("utf-8"))
+            finally:
+                os.close(fd)
             logger.info("gateway_key auto-generated and saved to %s", key_path)
         except PermissionError as exc:
             raise RuntimeError(
@@ -86,11 +86,11 @@ def _ensure_proxy_token() -> str:
         new_token = secrets.token_urlsafe(32)
         key_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            key_path.write_text(new_token, encoding="utf-8")
+            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.chmod(key_path, 0o600)
-            except OSError:
-                pass
+                os.write(fd, new_token.encode("utf-8"))
+            finally:
+                os.close(fd)
             logger.info("proxy_token auto-generated and saved to %s", key_path)
         except PermissionError as exc:
             raise RuntimeError(
