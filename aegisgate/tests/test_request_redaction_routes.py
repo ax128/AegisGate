@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.filters.redaction import RedactionFilter
+from aegisgate.storage.kv import KVStore
 
 
 def _seed_policy(ctx, policy_name: str = "default") -> dict[str, object]:
@@ -29,6 +30,9 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     async def _noop_semantic_review(*args, **kwargs):
         return None
 
+    async def _noop_store_io(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(openai_router.policy_engine, "resolve", _seed_policy)
     monkeypatch.setattr(openai_router, "_resolve_upstream_base", lambda headers: "http://upstream.test")
     monkeypatch.setattr(openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}")
@@ -36,6 +40,7 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(openai_router, "_run_payload_transform", _inline_payload_transform)
     monkeypatch.setattr(openai_router, "_run_response_pipeline", _identity_response_pipeline)
     monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
+    monkeypatch.setattr(openai_router, "run_store_io", _noop_store_io)
     monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         openai_router,
@@ -51,7 +56,7 @@ def _build_request(
     headers: list[tuple[bytes, bytes]] | None = None,
     scope_updates: dict[str, Any] | None = None,
 ) -> Request:
-    scope = {
+    scope: dict[str, Any] = {
         "type": "http",
         "method": "POST",
         "path": path,
@@ -66,7 +71,15 @@ def _build_request(
     return Request(scope)
 
 
-class _MemoryKVStore:
+def _to_bytes(value: bytes | str | memoryview[int]) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return value.tobytes()
+
+
+class _MemoryKVStore(KVStore):
     def __init__(self) -> None:
         self._mappings: dict[tuple[str, str], dict[str, str]] = {}
 
@@ -196,6 +209,84 @@ async def _run_supported_v1_route(
         _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
     )
     return result, forwarded_payloads[0]["messages"][0]["content"]
+
+
+async def _run_supported_v1_compat_route(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    route_name: str,
+    prompt_text: str,
+) -> tuple[dict | JSONResponse | StreamingResponse, str]:
+    forwarded_payloads: list[dict[str, Any]] = []
+    _install_route_mocks(monkeypatch)
+    _install_real_redaction_pipeline(monkeypatch)
+
+    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+        forwarded_payloads.append(forwarded_payload)
+        if route_name == "chat_from_responses":
+            return 200, {
+                "id": "resp-compat-chat",
+                "object": "response",
+                "model": "gpt-5.4",
+                "output_text": "ok",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+            }
+        if route_name == "responses_from_chat":
+            return 200, {
+                "id": "chat-compat-responses",
+                "object": "chat.completion",
+                "model": "gpt-5.4",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+        return 200, {
+            "id": "resp-compat-messages",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": "ok",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+        }
+
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+
+    if route_name == "chat_from_responses":
+        result = await openai_router.chat_completions(
+            {
+                "model": "gpt-5.4",
+                "input": prompt_text,
+                "request_id": "chat-compat-redaction",
+                "session_id": "chat-compat-redaction",
+            },
+            _build_request(path="/v1/chat/completions"),
+        )
+        return result, forwarded_payloads[0]["input"]
+
+    if route_name == "responses_from_chat":
+        result = await openai_router.responses(
+            {
+                "model": "gpt-5.4",
+                "messages": [{"role": "user", "content": prompt_text}],
+                "request_id": "responses-compat-redaction",
+                "session_id": "responses-compat-redaction",
+            },
+            _build_request(path="/v1/responses"),
+        )
+        return result, forwarded_payloads[0]["messages"][0]["content"]
+
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+    result = await openai_router.messages(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": prompt_text}],
+            "max_tokens": 128,
+            "request_id": "messages-compat-redaction",
+            "session_id": "messages-compat-redaction",
+        },
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_compat": "openai_chat"},
+        ),
+    )
+    return result, forwarded_payloads[0]["input"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -554,7 +645,7 @@ async def test_messages_stream_request_redaction_preserves_anthropic_shape(monke
     assert isinstance(response, StreamingResponse)
     body = b""
     async for chunk in response.body_iterator:
-        body += bytes(chunk)
+        body += _to_bytes(chunk)
     assert b"message_start" in body
     assert len(forwarded_payloads) == 1
     assert forwarded_payloads[0]["system"] == [
@@ -664,3 +755,34 @@ async def test_explicit_secret_still_redacts_on_supported_routes(monkeypatch: py
         )
         assert forwarded_text != secret_prompt
         assert "sk-live-" not in forwarded_text
+
+
+@pytest.mark.asyncio
+async def test_benign_examples_avoid_false_positives_on_compat_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    benign_prompt = (
+        "Review this infra note without redacting it: host api.service.internal resolves to 10.24.8.9, "
+        "and the sample docs line is address: 123 Example Lane."
+    )
+
+    for route_name in ("chat_from_responses", "responses_from_chat", "messages_compat"):
+        _, forwarded_text = await _run_supported_v1_compat_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=benign_prompt,
+        )
+        assert forwarded_text == benign_prompt
+
+
+@pytest.mark.asyncio
+async def test_explicit_secret_still_redacts_on_compat_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret_prompt = _explicit_secret_prompt()
+
+    for route_name in ("chat_from_responses", "responses_from_chat", "messages_compat"):
+        result, forwarded_text = await _run_supported_v1_compat_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=secret_prompt,
+        )
+        assert forwarded_text != secret_prompt
+        assert "sk-live-" not in forwarded_text
+        assert not isinstance(result, JSONResponse) or result.status_code != 403
