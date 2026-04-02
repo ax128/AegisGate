@@ -312,6 +312,99 @@ def get_global_model_map() -> dict[str, str]:
     return _global_model_map
 
 
+def _anthropic_tool_to_responses_tool(tool: object) -> dict | None:
+    if not isinstance(tool, dict):
+        return None
+    if str(tool.get("type") or "").strip().lower() == "function" and "name" in tool:
+        copied = dict(tool)
+        if "input_schema" in copied and "parameters" not in copied:
+            copied["parameters"] = copied.pop("input_schema")
+        return copied
+
+    name = tool.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    converted: dict[str, object] = {
+        "type": "function",
+        "name": name,
+    }
+    if isinstance(tool.get("description"), str):
+        converted["description"] = tool["description"]
+    if "input_schema" in tool:
+        converted["parameters"] = tool["input_schema"]
+    if "strict" in tool:
+        converted["strict"] = tool["strict"]
+    return converted
+
+
+def _anthropic_content_block_to_responses_part(block: object) -> dict | None:
+    if isinstance(block, str):
+        text = block.strip()
+        return {"type": "input_text", "text": text} if text else None
+    if not isinstance(block, dict):
+        text = str(block).strip()
+        return {"type": "input_text", "text": text} if text else None
+
+    block_type = str(block.get("type", "")).strip().lower()
+    if block_type == "text":
+        text = str(block.get("text") or "").strip()
+        return {"type": "input_text", "text": text} if text else None
+    if block_type == "image":
+        source = block.get("source")
+        if isinstance(source, dict):
+            url = source.get("url")
+            if isinstance(url, str) and url.strip():
+                return {"type": "input_image", "image_url": url}
+        placeholder = _flatten_part(block).strip()
+        return {"type": "input_text", "text": placeholder} if placeholder else None
+    if block_type == "tool_use":
+        name = str(block.get("name") or "").strip()
+        raw_input = block.get("input")
+        if isinstance(raw_input, str):
+            arguments = raw_input
+        else:
+            arguments = json.dumps(raw_input or {}, ensure_ascii=False)
+        part = {
+            "type": "function_call",
+            "call_id": str(block.get("id") or f"call_{uuid.uuid4().hex[:12]}"),
+            "name": name or "tool_use",
+            "arguments": arguments,
+        }
+        return part
+    if block_type == "tool_result":
+        content = block.get("content", "")
+        output = _flatten_content(content).strip() if isinstance(content, (list, dict)) else str(content).strip()
+        part = {
+            "type": "function_call_output",
+            "call_id": str(block.get("tool_use_id") or block.get("id") or f"call_{uuid.uuid4().hex[:12]}"),
+            "output": output,
+        }
+        if isinstance(block.get("name"), str) and block.get("name"):
+            part["name"] = str(block["name"])
+        return part
+
+    flattened = _flatten_part(block).strip()
+    return {"type": "input_text", "text": flattened} if flattened else None
+
+
+def _responses_arguments_to_anthropic_input(arguments: object) -> dict:
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str):
+        return {"value": arguments}
+    text = arguments.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw": text}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
+
+
 def messages_payload_to_chat_payload(
     payload: dict,
     model_map: dict[str, str] | None = None,
@@ -452,20 +545,16 @@ def messages_payload_to_responses_payload(
         role = msg.get("role", "user")
         content = msg.get("content", "")
         if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                elif isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        text_parts.append(f"[tool_use: {block.get('name', '')}]")
-                    elif block.get("type") == "tool_result":
-                        text_parts.append(str(block.get("content", "")))
-                    else:
-                        text_parts.append(_flatten_part(block))
-            content = " ".join(text_parts).strip()
+            content_parts = [
+                part
+                for block in content
+                for part in [_anthropic_content_block_to_responses_part(block)]
+                if part is not None
+            ]
+            input_messages.append(
+                {"role": role, "content": content_parts or [{"type": "input_text", "text": ""}]}
+            )
+            continue
         input_messages.append({"role": role, "content": str(content)})
 
     # Model mapping
@@ -507,6 +596,20 @@ def messages_payload_to_responses_payload(
         result["temperature"] = payload["temperature"]
     if "top_p" in payload:
         result["top_p"] = payload["top_p"]
+    if isinstance(payload.get("tools"), list):
+        converted_tools = [
+            converted
+            for tool in payload["tools"]
+            for converted in [_anthropic_tool_to_responses_tool(tool)]
+            if converted is not None
+        ]
+        if converted_tools:
+            result["tools"] = converted_tools
+    if "tool_choice" in payload:
+        result["tool_choice"] = payload["tool_choice"]
+    for key in ("request_id", "session_id", "policy", "metadata"):
+        if key in payload:
+            result[key] = payload[key]
 
     return result
 
@@ -517,17 +620,35 @@ def responses_response_to_messages_response(
     original_model: str,
 ) -> dict:
     """Convert OpenAI /v1/responses response → Anthropic /v1/messages response."""
-    # Extract text from responses output
     output_text = resp.get("output_text") or ""
-    if not output_text:
-        for item in resp.get("output") or []:
-            if isinstance(item, dict):
-                for block in item.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "output_text":
-                        output_text = block.get("text", "")
-                        break
-                if output_text:
-                    break
+    content_blocks: list[dict] = []
+    for item in resp.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type", "")).strip().lower()
+        if item_type == "message":
+            for block in item.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "output_text":
+                    continue
+                text = str(block.get("text") or "")
+                content_blocks.append({"type": "text", "text": text})
+                if not output_text and text:
+                    output_text = text
+            continue
+        if item_type == "function_call":
+            content_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(item.get("call_id") or item.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"),
+                    "name": str(item.get("name") or "function_call"),
+                    "input": _responses_arguments_to_anthropic_input(item.get("arguments")),
+                }
+            )
+
+    if not content_blocks:
+        content_blocks = [{"type": "text", "text": output_text}]
 
     usage = resp.get("usage") or {}
 
@@ -535,7 +656,7 @@ def responses_response_to_messages_response(
         "id": f"msg_{resp.get('id', str(uuid.uuid4()))}",
         "type": "message",
         "role": "assistant",
-        "content": [{"type": "text", "text": output_text}],
+        "content": content_blocks,
         "model": original_model,
         "stop_reason": "end_turn",
         "stop_sequence": None,
