@@ -142,9 +142,10 @@ def test_filter_done_debug_log_only_when_filter_hits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_json_back_to_chat_shape(
+async def test_chat_endpoint_redirects_responses_json_native_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Responses API payload on /chat/completions returns native Responses format (no coerce)."""
     _install_inline_payload_transform(monkeypatch)
     payload = {
         "model": "gpt-5.4",
@@ -173,14 +174,16 @@ async def test_chat_endpoint_redirects_responses_json_back_to_chat_shape(
 
     result = await openai_router.chat_completions(payload, request)
     assert isinstance(result, dict)
-    assert result["object"] == "chat.completion"
-    assert result["choices"][0]["message"]["content"] == "收到。"
+    # Native Responses API format returned as-is
+    assert result["id"] == "resp-1"
+    assert result["output_text"] == "收到。"
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_function_calls_back_to_chat_tool_calls(
+async def test_chat_endpoint_redirects_responses_function_calls_native_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Responses API tool calls on /chat/completions returns native format (no coerce)."""
     _install_inline_payload_transform(monkeypatch)
     payload = {
         "model": "gpt-5.4",
@@ -220,23 +223,16 @@ async def test_chat_endpoint_redirects_responses_function_calls_back_to_chat_too
 
     result = await openai_router.chat_completions(payload, request)
     assert isinstance(result, dict)
-    assert result["choices"][0]["finish_reason"] == "tool_calls"
-    assert result["choices"][0]["message"]["tool_calls"] == [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {
-                "name": "lookup_profile",
-                "arguments": '{"user_id": 7}',
-            },
-        }
-    ]
+    # Native Responses API format — function_call in output
+    assert result["output"][0]["type"] == "function_call"
+    assert result["output"][0]["name"] == "lookup_profile"
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_back_to_chat_chunks(
+async def test_chat_endpoint_redirects_responses_stream_native_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Responses API streaming on /chat/completions returns native SSE (no coerce)."""
     _install_inline_payload_transform(monkeypatch)
     payload = {
         "model": "gpt-5.4",
@@ -276,15 +272,16 @@ async def test_chat_endpoint_redirects_responses_stream_back_to_chat_chunks(
     result = await openai_router.chat_completions(payload, request)
     assert isinstance(result, StreamingResponse)
     body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert b"response.output_text.delta" not in body
+    # Native Responses API SSE events pass through unchanged
+    assert b"response.output_text.delta" in body
     assert b"[DONE]" in body
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_tool_calls_back_to_chat_chunks(
+async def test_chat_endpoint_redirects_responses_stream_tool_calls_native_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Responses API streaming tool calls on /chat/completions returns native SSE."""
     _install_inline_payload_transform(monkeypatch)
     payload = {
         "model": "gpt-5.4",
@@ -324,21 +321,17 @@ async def test_chat_endpoint_redirects_responses_stream_tool_calls_back_to_chat_
     result = await openai_router.chat_completions(payload, request)
     assert isinstance(result, StreamingResponse)
     body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert b'"tool_calls"' in body
+    # Native Responses API events pass through — function_call visible
+    assert b"response.output_item.done" in body
     assert b"lookup_profile" in body
-    assert (
-        b'"finish_reason": "tool_calls"' in body
-        or b'"finish_reason":"tool_calls"' in body
-    )
-    assert b"response.output_item.done" not in body
     assert b"[DONE]" in body
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_without_done_still_closes_chat_stream(
+async def test_chat_endpoint_redirects_responses_stream_without_done_native_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Responses API stream without [DONE] on /chat/completions still passes through."""
     _install_inline_payload_transform(monkeypatch)
     payload = {
         "model": "gpt-5.4",
@@ -374,12 +367,9 @@ async def test_chat_endpoint_redirects_responses_stream_without_done_still_close
     result = await openai_router.chat_completions(payload, request)
     assert isinstance(result, StreamingResponse)
     body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert (
-        b'"content":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"' in body
-        or b'"content": "\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"' in body
-    )
-    assert body.endswith(b"data: [DONE]\n\n")
+    # Native Responses API format — delta text visible, stream ends naturally
+    assert b"response.output_text.delta" in body
+    assert b"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82" in body
 
 
 @pytest.mark.asyncio

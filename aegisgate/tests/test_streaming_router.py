@@ -8,9 +8,11 @@ from collections.abc import AsyncGenerator
 import pytest
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from aegisgate.adapters.openai_compat.compat_bridge import (
+    coerce_responses_stream_to_chat_stream as _coerce_responses_stream_to_chat_stream_raw,
+)
 from aegisgate.adapters.openai_compat.router import (
     _UPSTREAM_EOF_RECOVERY_NOTICE,
-    _coerce_responses_stream_to_chat_stream,
     _execute_chat_stream_once,
     _execute_messages_stream_once,
     _execute_responses_stream_once,
@@ -31,6 +33,24 @@ from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.util.logger import logger as aegis_logger
+
+
+def _noop_text_extractor(body):
+    return ""
+
+
+def _coerce_responses_stream_to_chat_stream(
+    response: StreamingResponse,
+    *,
+    request_id: str,
+    model: str,
+) -> StreamingResponse:
+    return _coerce_responses_stream_to_chat_stream_raw(
+        response,
+        request_id=request_id,
+        model=model,
+        response_text_extractor=_noop_text_extractor,
+    )
 
 
 async def _async_resolve_upstream_example(headers):
