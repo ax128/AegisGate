@@ -282,6 +282,7 @@ def _responses_output_items_to_chat_tool_calls(output: object) -> list[dict[str,
     if not isinstance(output, list):
         return []
     tool_calls: list[dict[str, Any]] = []
+    idx = 0
     for item in output:
         if not isinstance(item, dict):
             continue
@@ -292,6 +293,7 @@ def _responses_output_items_to_chat_tool_calls(output: object) -> list[dict[str,
         )
         tool_calls.append(
             {
+                "index": idx,
                 "id": call_id,
                 "type": "function",
                 "function": {
@@ -300,6 +302,7 @@ def _responses_output_items_to_chat_tool_calls(output: object) -> list[dict[str,
                 },
             }
         )
+        idx += 1
     return tool_calls
 
 

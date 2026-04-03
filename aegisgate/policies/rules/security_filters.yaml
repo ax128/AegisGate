@@ -71,7 +71,7 @@ redaction:
     - id: CRYPTO_ETH_ADDR
       regex: '\b0x[a-fA-F0-9]{40}\b'
     - id: CRYPTO_SOL_ADDR
-      regex: '\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
+      regex: '\b(?=[1-9A-HJ-NP-Za-km-z]*[G-HJ-NP-Zg-hj-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}\b'
     - id: CRYPTO_TRON_ADDR
       regex: '\bT[1-9A-HJ-NP-Za-km-z]{33}\b'
     - id: CRYPTO_WIF_KEY
