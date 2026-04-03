@@ -227,11 +227,10 @@ async def _run_supported_v1_compat_route(
         forwarded_payloads.append(forwarded_payload)
         if route_name == "chat_from_responses":
             return 200, {
-                "id": "resp-compat-chat",
-                "object": "response",
+                "id": "chat-compat-chat",
+                "object": "chat.completion",
                 "model": "gpt-5.4",
-                "output_text": "ok",
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
             }
         if route_name == "responses_from_chat":
             return 200, {
@@ -260,7 +259,14 @@ async def _run_supported_v1_compat_route(
             },
             _build_request(path="/v1/chat/completions"),
         )
-        return result, forwarded_payloads[0]["input"]
+        # After conversion, payload has messages instead of input.
+        # Extract user message content for redaction verification.
+        fwd_messages = forwarded_payloads[0].get("messages", [])
+        user_content = next(
+            (m["content"] for m in fwd_messages if m.get("role") == "user"),
+            "",
+        )
+        return result, user_content
 
     if route_name == "responses_from_chat":
         result = await openai_router.responses(

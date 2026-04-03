@@ -29,6 +29,7 @@ from aegisgate.adapters.openai_compat.compat_bridge import (
     coerce_responses_output_to_chat_output,
     coerce_responses_stream_to_chat_stream,
     coerce_responses_stream_to_messages_stream,
+    convert_responses_payload_to_chat,
     passthrough_chat_response,
     passthrough_responses_output,
 )
@@ -7193,28 +7194,40 @@ async def _execute_generic_once(
 
 @router.post("/chat/completions")
 async def chat_completions(payload: dict, request: Request):
-    # --- 格式兼容：Responses API 格式误发到 chat 端点时，内部转发 ---
+    # --- 格式兼容：Responses API 格式发到 chat 端点时，请求侧转换 ---
+    # 参考 CLIProxyAPI：在请求侧将 Responses API 转为 Chat Completions，
+    # 这样上游返回原生 Chat Completions 格式，无需响应侧 coerce。
     if _looks_like_responses_payload(payload):
-        request.scope["aegis_upstream_route_path"] = "/v1/responses"
-        logger.info(
-            "chat_completions format_redirect: payload has 'input' without 'messages', "
-            "redirecting to responses handler"
-        )
-        redirected = await responses(payload, request)
-        req_preview = await _run_payload_transform(to_internal_responses, payload)
-        if isinstance(redirected, StreamingResponse):
-            return coerce_responses_stream_to_chat_stream(
-                redirected,
-                request_id=req_preview.request_id,
-                model=req_preview.model,
-                response_text_extractor=_extract_responses_output_text,
+        conv_id = _extract_conversation_id(payload)
+        original_tools = payload.get("tools")
+
+        # Tool definition caching (same logic as responses handler)
+        if isinstance(original_tools, list) and len(original_tools) > 0 and conv_id:
+            _tools_cache_put(conv_id, copy.deepcopy(original_tools))
+            logger.debug(
+                "chat_compat tools cached conv_id=%s tool_count=%d",
+                conv_id, len(original_tools),
             )
-        return coerce_responses_output_to_chat_output(
-            redirected,
-            fallback_request_id=req_preview.request_id,
-            fallback_session_id=req_preview.session_id,
-            fallback_model=req_preview.model,
-            text_extractor=_extract_responses_output_text,
+        elif isinstance(original_tools, list) and len(original_tools) == 0:
+            raw_input = payload.get("input")
+            has_function_calls = isinstance(raw_input, list) and any(
+                isinstance(item, dict)
+                and str(item.get("type", "")).strip().lower() == "function_call"
+                for item in raw_input
+            )
+            if has_function_calls:
+                cached = _tools_cache_get(conv_id) if conv_id else None
+                if cached:
+                    payload = {**payload, "tools": cached}
+                    logger.info(
+                        "chat_compat tools injected from cache conv_id=%s tool_count=%d",
+                        conv_id, len(cached),
+                    )
+
+        payload = convert_responses_payload_to_chat(payload)
+        logger.info(
+            "chat_completions format_convert: Responses API payload converted to Chat Completions, "
+            "messages=%d", len(payload.get("messages", [])),
         )
 
     _log_request_if_debug(request, payload, "/v1/chat/completions")

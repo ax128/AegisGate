@@ -141,245 +141,94 @@ def test_filter_done_debug_log_only_when_filter_hits() -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_json_back_to_chat_shape(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_inline_payload_transform(monkeypatch)
+def test_convert_responses_payload_to_chat_basic() -> None:
+    """Responses API payload is converted to Chat Completions format."""
+    from aegisgate.adapters.openai_compat.compat_bridge import convert_responses_payload_to_chat
+
     payload = {
         "model": "gpt-5.4",
         "input": "hello",
-        "request_id": "redirect-json",
-        "session_id": "redirect-json",
+        "instructions": "You are helpful.",
+        "max_output_tokens": 1024,
+        "stream": True,
     }
-
-    async def fake_responses(payload_arg: dict, request_arg: Request):
-        return {"id": "resp-1", "model": "gpt-5.4", "output_text": "收到。"}
-
-    monkeypatch.setattr(openai_router, "responses", fake_responses)
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 12345),
-        }
-    )
-
-    result = await openai_router.chat_completions(payload, request)
-    assert isinstance(result, dict)
-    assert result["object"] == "chat.completion"
-    assert result["choices"][0]["message"]["content"] == "收到。"
+    result = convert_responses_payload_to_chat(payload)
+    assert "messages" in result
+    assert "input" not in result
+    assert result["messages"][0] == {"role": "system", "content": "You are helpful."}
+    assert result["messages"][1] == {"role": "user", "content": "hello"}
+    assert result["max_tokens"] == 1024
+    assert result["stream"] is True
 
 
-@pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_function_calls_back_to_chat_tool_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_inline_payload_transform(monkeypatch)
+def test_convert_responses_payload_to_chat_with_function_calls() -> None:
+    """Function calls and outputs in input are properly converted."""
+    from aegisgate.adapters.openai_compat.compat_bridge import convert_responses_payload_to_chat
+
     payload = {
         "model": "gpt-5.4",
-        "input": "call tool",
-        "request_id": "redirect-json-tool-call",
-        "session_id": "redirect-json-tool-call",
-    }
-
-    async def fake_responses(payload_arg: dict, request_arg: Request):
-        return {
-            "id": "resp-tool-1",
-            "model": "gpt-5.4",
-            "output": [
-                {
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "lookup_profile",
-                    "arguments": '{"user_id": 7}',
-                }
-            ],
-        }
-
-    monkeypatch.setattr(openai_router, "responses", fake_responses)
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 12345),
-        }
-    )
-
-    result = await openai_router.chat_completions(payload, request)
-    assert isinstance(result, dict)
-    assert result["choices"][0]["finish_reason"] == "tool_calls"
-    assert result["choices"][0]["message"]["tool_calls"] == [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {
+        "input": [
+            {"type": "message", "role": "user", "content": "lookup user 7"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
                 "name": "lookup_profile",
                 "arguments": '{"user_id": 7}',
             },
-        }
-    ]
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": '{"name": "Alice"}',
+            },
+        ],
+    }
+    result = convert_responses_payload_to_chat(payload)
+    messages = result["messages"]
+    assert messages[0] == {"role": "user", "content": "lookup user 7"}
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["tool_calls"][0]["id"] == "call_1"
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "lookup_profile"
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == "call_1"
+    assert messages[2]["content"] == '{"name": "Alice"}'
 
 
-@pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_back_to_chat_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_inline_payload_transform(monkeypatch)
+def test_convert_responses_payload_to_chat_tools_format() -> None:
+    """Responses API flat tool definitions are converted to Chat nested format."""
+    from aegisgate.adapters.openai_compat.compat_bridge import convert_responses_payload_to_chat
+
     payload = {
         "model": "gpt-5.4",
-        "input": "hello",
-        "stream": True,
-        "request_id": "redirect-stream",
-        "session_id": "redirect-stream",
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get weather info",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            }
+        ],
     }
-
-    async def responses_generator() -> AsyncGenerator[bytes, None]:
-        yield (
-            b'data: {"type":"response.created","response":{"id":"resp-1","model":"gpt-5.4","status":"in_progress"}}\n\n'
-        )
-        yield (
-            b'data: {"type":"response.output_text.delta","delta":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"}\n\n'
-        )
-        yield b"data: [DONE]\n\n"
-
-    async def fake_responses(payload_arg: dict, request_arg: Request):
-        return StreamingResponse(responses_generator(), media_type="text/event-stream")
-
-    monkeypatch.setattr(openai_router, "responses", fake_responses)
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 12345),
-        }
-    )
-
-    result = await openai_router.chat_completions(payload, request)
-    assert isinstance(result, StreamingResponse)
-    body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert b"response.output_text.delta" not in body
-    assert b"[DONE]" in body
+    result = convert_responses_payload_to_chat(payload)
+    assert result["tools"][0]["type"] == "function"
+    assert result["tools"][0]["function"]["name"] == "get_weather"
+    assert result["tools"][0]["function"]["description"] == "Get weather info"
 
 
-@pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_tool_calls_back_to_chat_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_inline_payload_transform(monkeypatch)
+def test_convert_responses_payload_preserves_metadata() -> None:
+    """metadata, request_id, session_id are preserved through conversion."""
+    from aegisgate.adapters.openai_compat.compat_bridge import convert_responses_payload_to_chat
+
     payload = {
         "model": "gpt-5.4",
-        "input": "call tool",
-        "stream": True,
-        "request_id": "redirect-stream-tool-call",
-        "session_id": "redirect-stream-tool-call",
+        "input": "test",
+        "request_id": "req-1",
+        "session_id": "sess-1",
+        "metadata": {"cursorConversationId": "conv-abc"},
     }
-
-    async def responses_generator() -> AsyncGenerator[bytes, None]:
-        yield (
-            b'data: {"type":"response.output_item.done","response_id":"resp-1","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"lookup_profile","arguments":"{\\"user_id\\": 7}"}}\n\n'
-        )
-        yield (
-            b'data: {"type":"response.completed","response":{"id":"resp-1","model":"gpt-5.4","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup_profile","arguments":"{\\"user_id\\": 7}"}]}}\n\n'
-        )
-        yield b"data: [DONE]\n\n"
-
-    async def fake_responses(payload_arg: dict, request_arg: Request):
-        return StreamingResponse(responses_generator(), media_type="text/event-stream")
-
-    monkeypatch.setattr(openai_router, "responses", fake_responses)
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 12345),
-        }
-    )
-
-    result = await openai_router.chat_completions(payload, request)
-    assert isinstance(result, StreamingResponse)
-    body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert b'"tool_calls"' in body
-    assert b"lookup_profile" in body
-    assert (
-        b'"finish_reason": "tool_calls"' in body
-        or b'"finish_reason":"tool_calls"' in body
-    )
-    assert b"response.output_item.done" not in body
-    assert b"[DONE]" in body
-
-
-@pytest.mark.asyncio
-async def test_chat_endpoint_redirects_responses_stream_without_done_still_closes_chat_stream(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_inline_payload_transform(monkeypatch)
-    payload = {
-        "model": "gpt-5.4",
-        "input": "hello",
-        "stream": True,
-        "request_id": "redirect-stream-no-done",
-        "session_id": "redirect-stream-no-done",
-    }
-
-    async def responses_generator() -> AsyncGenerator[bytes, None]:
-        yield (
-            b'data: {"type":"response.output_text.delta","delta":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"}\n\n'
-        )
-
-    async def fake_responses(payload_arg: dict, request_arg: Request):
-        return StreamingResponse(responses_generator(), media_type="text/event-stream")
-
-    monkeypatch.setattr(openai_router, "responses", fake_responses)
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "path": "/v1/chat/completions",
-            "headers": [],
-            "query_string": b"",
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 12345),
-        }
-    )
-
-    result = await openai_router.chat_completions(payload, request)
-    assert isinstance(result, StreamingResponse)
-    body = await _collect_stream_body(result)
-    assert b"chat.completion.chunk" in body
-    assert (
-        b'"content":"\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"' in body
-        or b'"content": "\xe6\x94\xb6\xe5\x88\xb0\xe3\x80\x82"' in body
-    )
-    assert body.endswith(b"data: [DONE]\n\n")
+    result = convert_responses_payload_to_chat(payload)
+    assert result["request_id"] == "req-1"
+    assert result["metadata"]["cursorConversationId"] == "conv-abc"
 
 
 @pytest.mark.asyncio

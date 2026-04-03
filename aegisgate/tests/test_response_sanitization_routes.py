@@ -536,11 +536,10 @@ async def test_benign_compat_response_paths_do_not_lose_content(monkeypatch: pyt
     compat_cases = {
         "chat_from_responses": (
             {
-                "id": "resp-compat-benign",
-                "object": "response",
+                "id": "chat-compat-benign",
+                "object": "chat.completion",
                 "model": "gpt-5.4",
-                "output_text": "plain benign compat answer",
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "plain benign compat answer"}]}],
+                "choices": [{"message": {"role": "assistant", "content": "plain benign compat answer"}, "finish_reason": "stop"}],
             },
             lambda body: body["choices"][0]["message"]["content"],
         ),
@@ -589,19 +588,16 @@ async def test_chat_compat_response_sanitize_preserves_chat_shape(monkeypatch: p
         monkeypatch,
         route_name="chat_from_responses",
         upstream_body={
-            "id": "resp-compat-chat-1",
-            "object": "response",
+            "id": "chat-compat-chat-1",
+            "object": "chat.completion",
             "model": "gpt-5.4",
-            "output_text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
-            "output": [
+            "choices": [
                 {
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
-                        }
-                    ],
+                    "message": {
+                        "role": "assistant",
+                        "content": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
+                    },
+                    "finish_reason": "stop",
                 }
             ],
         },

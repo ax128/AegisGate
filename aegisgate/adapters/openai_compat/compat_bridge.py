@@ -33,6 +33,154 @@ from aegisgate.util.logger import logger
 BodyTextExtractor = Callable[[dict[str, Any] | str], str]
 
 
+# ---------------------------------------------------------------------------
+# Request conversion: Responses API → Chat Completions
+# Reference: CLIProxyAPI ConvertOpenAIResponsesRequestToOpenAIChatCompletions
+# ---------------------------------------------------------------------------
+
+def _flatten_responses_content_parts(content: Any) -> Any:
+    """Convert Responses API content parts to Chat Completions format."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content) if content else ""
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append({"type": "text", "text": part})
+            continue
+        if not isinstance(part, dict):
+            continue
+        ptype = str(part.get("type", "")).strip().lower()
+        if ptype in ("input_text", "output_text", "text"):
+            parts.append({"type": "text", "text": part.get("text", "")})
+        elif ptype in ("input_image", "image"):
+            url = part.get("image_url") or part.get("url") or ""
+            if url:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            parts.append(part)
+    if len(parts) == 1 and parts[0].get("type") == "text":
+        return parts[0]["text"]
+    return parts
+
+
+def convert_responses_payload_to_chat(payload: dict[str, Any]) -> dict[str, Any]:
+    """Convert a Responses API request payload to Chat Completions format.
+
+    This avoids the need for response-side coercion: the upstream receives
+    a Chat Completions request and returns a Chat Completions response that
+    can be streamed directly to the client.
+    """
+    messages: list[dict[str, Any]] = []
+
+    # instructions → system message
+    instructions = payload.get("instructions")
+    if instructions and isinstance(instructions, str):
+        messages.append({"role": "system", "content": instructions})
+
+    # input → messages
+    raw_input = payload.get("input", "")
+    if isinstance(raw_input, str):
+        messages.append({"role": "user", "content": raw_input})
+    elif isinstance(raw_input, list):
+        for item in raw_input:
+            if isinstance(item, str):
+                messages.append({"role": "user", "content": item})
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).strip().lower()
+            role = str(item.get("role", "user")).strip().lower()
+            if role == "developer":
+                role = "user"
+
+            if item_type == "message":
+                converted_content = _flatten_responses_content_parts(
+                    item.get("content", "")
+                )
+                messages.append({"role": role, "content": converted_content})
+
+            elif item_type == "function_call":
+                call_id = str(
+                    item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                )
+                messages.append({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("name", "")),
+                            "arguments": str(item.get("arguments", "")),
+                        },
+                    }],
+                })
+
+            elif item_type == "function_call_output":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": str(item.get("call_id", "")),
+                    "content": str(item.get("output", "")),
+                })
+
+            else:
+                # Unknown item type — try to preserve as a message
+                content = _flatten_responses_content_parts(
+                    item.get("content", "")
+                )
+                if content:
+                    messages.append({"role": role, "content": content})
+
+    # tools: Responses API flat format → Chat Completions nested format
+    tools = payload.get("tools")
+    chat_tools: list[dict[str, Any]] | None = None
+    if isinstance(tools, list):
+        chat_tools = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            tool_type = str(tool.get("type", "")).strip().lower()
+            if tool_type == "function":
+                chat_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {}),
+                    },
+                })
+
+    # Build Chat Completions payload
+    chat_payload: dict[str, Any] = {
+        "model": payload.get("model", ""),
+        "messages": messages,
+    }
+    if chat_tools is not None:
+        chat_payload["tools"] = chat_tools
+
+    # Field mappings
+    if "max_output_tokens" in payload:
+        chat_payload["max_tokens"] = payload["max_output_tokens"]
+    for key in ("temperature", "top_p", "stream", "tool_choice",
+                "parallel_tool_calls", "stop", "seed",
+                "frequency_penalty", "presence_penalty"):
+        if key in payload:
+            chat_payload[key] = payload[key]
+
+    # reasoning.effort → reasoning_effort
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict) and "effort" in reasoning:
+        chat_payload["reasoning_effort"] = str(reasoning["effort"]).lower()
+
+    # Preserve gateway-internal fields
+    for key in ("request_id", "session_id", "metadata"):
+        if key in payload:
+            chat_payload[key] = payload[key]
+
+    return chat_payload
+
+
 def passthrough_chat_response(
     upstream_body: dict[str, Any] | str,
     *,
