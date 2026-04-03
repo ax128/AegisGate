@@ -295,6 +295,38 @@ Filter pipeline results may also include an `aegisgate` metadata object in succe
 | `x-aegis-redaction-whitelist` | Client -> Gateway | Comma-separated list of redaction keys to exempt from redaction (e.g., field names that look like secrets but are safe). |
 | `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
 
+### Filter Modes (Passthrough / Redact-Only)
+
+AegisGate supports three filter modes, selectable per-request via a token path suffix or HTTP header. This lets you trade security strictness for performance or compatibility as needed.
+
+| Mode | Token URL Suffix | `x-aegis-filter-mode` | Behavior |
+|------|-----------------|----------------------|----------|
+| **Full protection** (default) | `/v1/__gw__/t/<token>/...` | _(none / omit)_ | All enabled policy filters run on both request and response |
+| **Redact-only** | `/v1/__gw__/t/<token>__redact/...` | `redact` | Only redaction filters run (`exact_value_redaction`, `redaction`, `restoration`); security detection is skipped |
+| **Passthrough** | `/v1/__gw__/t/<token>__passthrough/...` | `passthrough` | All filters skipped; request/response forwarded as-is to upstream |
+
+**Examples with local port routing:**
+
+```bash
+# Full protection (default)
+curl http://gateway:18080/v1/__gw__/t/8317/chat/completions ...
+
+# Redact-only — PII/secrets replaced, no injection detection or response blocking
+curl http://gateway:18080/v1/__gw__/t/8317__redact/chat/completions ...
+
+# Passthrough — zero filtering, direct upstream forwarding
+curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
+```
+
+**Notes:**
+
+1. Filter mode applies per-request only; it does not change the token's registration.
+2. Works with both registered tokens and local port routing.
+3. Invalid suffixes (e.g., `__foo`) return `400 invalid_filter_mode`.
+4. Audit logs record the active filter mode (`filter_mode:redact` or `filter_mode:passthrough` security tag).
+5. **Passthrough** still preserves the minimal protocol compatibility layer: gateway-internal fields are stripped, and Chat/Responses parameter conversion is maintained so upstream does not receive unknown fields.
+6. **Security warning:** Passthrough mode skips all security checks. Use only in trusted environments or for debugging.
+
 ### Dangerous Content Handling
 
 | Risk Level | Action | Examples |

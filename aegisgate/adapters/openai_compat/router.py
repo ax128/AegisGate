@@ -702,6 +702,27 @@ def _build_responses_upstream_payload(
             upstream_payload["input"] = _strip_system_exec_runtime_lines(
                 str(sanitized_req_messages[0].content)
             )
+
+    # When tools is an empty list but conversation history contains
+    # function_call items, remove the explicit tools=[] so upstream can
+    # infer available tools from the conversation context.  Some clients
+    # (e.g. Cursor) rely on server-side tool persistence (store:true) and
+    # send tools=[] on subsequent turns; through a stateless proxy this
+    # disables tool calling entirely.
+    tools = upstream_payload.get("tools")
+    if isinstance(tools, list) and len(tools) == 0:
+        input_items = upstream_payload.get("input")
+        if isinstance(input_items, list) and any(
+            isinstance(item, dict)
+            and str(item.get("type", "")).strip().lower() == "function_call"
+            for item in input_items
+        ):
+            del upstream_payload["tools"]
+            logger.debug(
+                "responses strip empty tools request_id=%s reason=function_call_in_history",
+                request_id,
+            )
+
     return upstream_payload
 
 
@@ -789,9 +810,21 @@ def _build_chat_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_responses_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return sanitize_for_responses(
+    result = sanitize_for_responses(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
     )
+    # Strip empty tools when conversation history has function_call items
+    # (same logic as _build_responses_upstream_payload).
+    tools = result.get("tools")
+    if isinstance(tools, list) and len(tools) == 0:
+        input_items = result.get("input")
+        if isinstance(input_items, list) and any(
+            isinstance(item, dict)
+            and str(item.get("type", "")).strip().lower() == "function_call"
+            for item in input_items
+        ):
+            del result["tools"]
+    return result
 
 
 def _build_messages_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:

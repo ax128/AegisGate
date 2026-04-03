@@ -483,6 +483,25 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
 | **仅脱敏**（`__redact`） | `/v1/__gw__/t/Ab3k9Qx7Yp__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
 | **直接穿透**（`__passthrough`） | `/v1/__gw__/t/Ab3k9Qx7Yp__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
 
+**使用示例（端口路由）：**
+
+```bash
+# 全保护（默认） — 全部安全过滤器生效
+curl http://gateway:18080/v1/__gw__/t/8317/chat/completions ...
+
+# 仅脱敏 — PII/密钥替换，跳过注入检测和响应拦截
+curl http://gateway:18080/v1/__gw__/t/8317__redact/chat/completions ...
+
+# 直接穿透 — 零过滤，请求/响应直接转发上游
+curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
+```
+
+也可以通过 HTTP Header 设置（优先级低于 URL 后缀）：
+
+```bash
+curl -H "x-aegis-filter-mode: redact" http://gateway:18080/v1/__gw__/t/8317/chat/completions ...
+```
+
 说明：
 
 1. 过滤模式仅对当前请求生效，不改变 token 本身的注册状态。
