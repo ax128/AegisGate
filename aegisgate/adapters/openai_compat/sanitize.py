@@ -535,6 +535,15 @@ def _sanitize_responses_input_for_upstream_with_hits(
             for key, item in node.items():
                 child_path = f"{path}.{key}" if path else key
 
+                # Skip redaction of function_call arguments — these are
+                # model-generated tool invocations in conversation history.
+                # Redacting file paths in them (e.g. SYS_HOME_PATH) corrupts
+                # the context and prevents coding agents from referencing
+                # their own prior tool calls.
+                if node_type == "function_call" and key == "arguments":
+                    copied[key] = item
+                    continue
+
                 if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {
                     "output",
                     "content",
