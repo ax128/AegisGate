@@ -26,6 +26,8 @@ from aegisgate.adapters.openai_compat.mapper import (
 from aegisgate.adapters.openai_compat.compat_bridge import (
     coerce_chat_output_to_responses_output,
     coerce_chat_stream_to_responses_stream,
+    coerce_responses_output_to_chat_output,
+    coerce_responses_stream_to_chat_stream,
     coerce_responses_stream_to_messages_stream,
     passthrough_chat_response,
     passthrough_responses_output,
@@ -591,6 +593,22 @@ def _passthrough_responses_output(
     )
 
 
+def _coerce_responses_output_to_chat_output(
+    result: dict[str, Any] | JSONResponse,
+    *,
+    fallback_request_id: str,
+    fallback_session_id: str,
+    fallback_model: str,
+) -> dict[str, Any] | JSONResponse:
+    return coerce_responses_output_to_chat_output(
+        result,
+        fallback_request_id=fallback_request_id,
+        fallback_session_id=fallback_session_id,
+        fallback_model=fallback_model,
+        text_extractor=_extract_responses_output_text,
+    )
+
+
 def _coerce_chat_output_to_responses_output(
     result: dict[str, Any] | JSONResponse,
     *,
@@ -604,6 +622,20 @@ def _coerce_chat_output_to_responses_output(
         fallback_session_id=fallback_session_id,
         fallback_model=fallback_model,
         text_extractor=_extract_chat_output_text,
+    )
+
+
+def _coerce_responses_stream_to_chat_stream(
+    response: StreamingResponse,
+    *,
+    request_id: str,
+    model: str,
+) -> StreamingResponse:
+    return coerce_responses_stream_to_chat_stream(
+        response,
+        request_id=request_id,
+        model=model,
+        response_text_extractor=_extract_responses_output_text,
     )
 
 
@@ -7166,9 +7198,24 @@ async def chat_completions(payload: dict, request: Request):
         request.scope["aegis_upstream_route_path"] = "/v1/responses"
         logger.info(
             "chat_completions format_redirect: payload has 'input' without 'messages', "
-            "redirecting to responses handler — returning native Responses API format"
+            "redirecting to responses handler"
         )
-        return await responses(payload, request)
+        redirected = await responses(payload, request)
+        req_preview = await _run_payload_transform(to_internal_responses, payload)
+        if isinstance(redirected, StreamingResponse):
+            return coerce_responses_stream_to_chat_stream(
+                redirected,
+                request_id=req_preview.request_id,
+                model=req_preview.model,
+                response_text_extractor=_extract_responses_output_text,
+            )
+        return coerce_responses_output_to_chat_output(
+            redirected,
+            fallback_request_id=req_preview.request_id,
+            fallback_session_id=req_preview.session_id,
+            fallback_model=req_preview.model,
+            text_extractor=_extract_responses_output_text,
+        )
 
     _log_request_if_debug(request, payload, "/v1/chat/completions")
     boundary = getattr(request.state, "security_boundary", {})

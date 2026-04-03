@@ -542,8 +542,7 @@ async def test_benign_compat_response_paths_do_not_lose_content(monkeypatch: pyt
                 "output_text": "plain benign compat answer",
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": "plain benign compat answer"}]}],
             },
-            # Native Responses API format returned as-is (no coerce to Chat)
-            lambda body: body["output_text"],
+            lambda body: body["choices"][0]["message"]["content"],
         ),
         "responses_from_chat": (
             {
@@ -609,9 +608,8 @@ async def test_chat_compat_response_sanitize_preserves_chat_shape(monkeypatch: p
         response_pipeline=_sanitize_pipeline(dangerous_fragment),
     )
 
-    # Native Responses API format returned as-is (no coerce to Chat)
-    content = result["output_text"]
-    assert result["object"] == "response"
+    content = result["choices"][0]["message"]["content"]
+    assert result["object"] == "chat.completion"
     assert "compat safe prefix content remains visible" in content
     assert "after compat fragment replacement." in content
     assert dangerous_fragment not in content
