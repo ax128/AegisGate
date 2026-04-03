@@ -172,6 +172,58 @@ _TRACE_REQUEST_ID_HEADER = "x-aegis-request-id"
 # Filter modes set via URL path: token__redact or token__passthrough
 _REDACT_ONLY_FILTERS = frozenset({"exact_value_redaction", "redaction", "restoration"})
 
+# ---------------------------------------------------------------------------
+# Per-conversation tool definition cache.
+# Cursor (and similar agents) send tool definitions only on the first turn
+# and rely on server-side session persistence (store:true).  Through a
+# stateless proxy chain the definitions are lost on subsequent turns where
+# tools=[] is sent.  We cache them here keyed by conversation ID so later
+# turns can restore them.
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+_TOOLS_CACHE_MAX_CONVERSATIONS = 256
+_TOOLS_CACHE_TTL_S = 600  # 10 minutes
+
+_tools_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_tools_cache_lock = _threading.Lock()
+
+
+def _tools_cache_put(conversation_id: str, tools: list[dict[str, Any]]) -> None:
+    """Store a non-empty tools list for a conversation."""
+    with _tools_cache_lock:
+        _tools_cache[conversation_id] = (time.monotonic(), tools)
+        # Evict oldest entries when cache exceeds limit.
+        if len(_tools_cache) > _TOOLS_CACHE_MAX_CONVERSATIONS:
+            oldest_key = min(_tools_cache, key=lambda k: _tools_cache[k][0])
+            del _tools_cache[oldest_key]
+
+
+def _tools_cache_get(conversation_id: str) -> list[dict[str, Any]] | None:
+    """Retrieve cached tools for a conversation, or None if expired/absent."""
+    with _tools_cache_lock:
+        entry = _tools_cache.get(conversation_id)
+        if entry is None:
+            return None
+        ts, tools = entry
+        if time.monotonic() - ts > _TOOLS_CACHE_TTL_S:
+            del _tools_cache[conversation_id]
+            return None
+        # Refresh timestamp on access.
+        _tools_cache[conversation_id] = (time.monotonic(), tools)
+        return tools
+
+
+def _extract_conversation_id(payload: dict[str, Any]) -> str | None:
+    """Extract a conversation/session identifier from request metadata."""
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("cursorConversationId", "conversationId", "conversation_id", "session_id"):
+            val = metadata.get(key)
+            if val and isinstance(val, str):
+                return val
+    return None
+
 
 def _filter_mode_from_headers(headers: Mapping[str, str]) -> str | None:
     return headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
@@ -703,25 +755,43 @@ def _build_responses_upstream_payload(
                 str(sanitized_req_messages[0].content)
             )
 
-    # When tools is an empty list but conversation history contains
-    # function_call items, remove the explicit tools=[] so upstream can
-    # infer available tools from the conversation context.  Some clients
-    # (e.g. Cursor) rely on server-side tool persistence (store:true) and
-    # send tools=[] on subsequent turns; through a stateless proxy this
-    # disables tool calling entirely.
+    # Tool definition caching for stateless proxy chains.
+    # Clients like Cursor send full tool definitions on the first turn and
+    # tools=[] on subsequent turns, relying on server-side persistence
+    # (store:true).  Through a stateless proxy the definitions are lost.
+    # We cache them by conversation ID and re-inject when needed.
+    conv_id = _extract_conversation_id(payload)
     tools = upstream_payload.get("tools")
-    if isinstance(tools, list) and len(tools) == 0:
+
+    if isinstance(tools, list) and len(tools) > 0 and conv_id:
+        # Cache non-empty tool definitions for this conversation.
+        _tools_cache_put(conv_id, copy.deepcopy(tools))
+        logger.debug(
+            "responses tools cached request_id=%s conv_id=%s tool_count=%d",
+            request_id, conv_id, len(tools),
+        )
+    elif isinstance(tools, list) and len(tools) == 0:
+        # Empty tools -- try to restore from cache or strip.
         input_items = upstream_payload.get("input")
-        if isinstance(input_items, list) and any(
+        has_function_calls = isinstance(input_items, list) and any(
             isinstance(item, dict)
             and str(item.get("type", "")).strip().lower() == "function_call"
             for item in input_items
-        ):
-            del upstream_payload["tools"]
-            logger.debug(
-                "responses strip empty tools request_id=%s reason=function_call_in_history",
-                request_id,
-            )
+        )
+        if has_function_calls:
+            cached = _tools_cache_get(conv_id) if conv_id else None
+            if cached:
+                upstream_payload["tools"] = cached
+                logger.info(
+                    "responses tools injected from cache request_id=%s conv_id=%s tool_count=%d",
+                    request_id, conv_id, len(cached),
+                )
+            else:
+                del upstream_payload["tools"]
+                logger.debug(
+                    "responses strip empty tools request_id=%s reason=function_call_in_history_no_cache",
+                    request_id,
+                )
 
     return upstream_payload
 
@@ -813,17 +883,24 @@ def _build_responses_passthrough_payload(payload: dict[str, Any]) -> dict[str, A
     result = sanitize_for_responses(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
     )
-    # Strip empty tools when conversation history has function_call items
-    # (same logic as _build_responses_upstream_payload).
+    # Tool cache: same logic as _build_responses_upstream_payload.
+    conv_id = _extract_conversation_id(payload)
     tools = result.get("tools")
-    if isinstance(tools, list) and len(tools) == 0:
+    if isinstance(tools, list) and len(tools) > 0 and conv_id:
+        _tools_cache_put(conv_id, copy.deepcopy(tools))
+    elif isinstance(tools, list) and len(tools) == 0:
         input_items = result.get("input")
-        if isinstance(input_items, list) and any(
+        has_function_calls = isinstance(input_items, list) and any(
             isinstance(item, dict)
             and str(item.get("type", "")).strip().lower() == "function_call"
             for item in input_items
-        ):
-            del result["tools"]
+        )
+        if has_function_calls:
+            cached = _tools_cache_get(conv_id) if conv_id else None
+            if cached:
+                result["tools"] = cached
+            else:
+                del result["tools"]
     return result
 
 
