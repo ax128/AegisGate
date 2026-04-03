@@ -371,7 +371,20 @@ def _convert_responses_stream_payload_to_chat_chunk(
     emitted_text: bool,
     emitted_tool_calls: bool,
     response_text_extractor: BodyTextExtractor,
+    tc_index_map: dict[int, int],
+    tc_next_index: list[int],
+    tc_seen_added: set[int],
 ) -> tuple[list[bytes], bool, bool, bool]:
+    """Convert a single Responses API SSE payload to Chat Completions chunks.
+
+    Handles both incremental tool-call events (output_item.added,
+    function_call_arguments.delta/done, output_item.done) and the bulk
+    extraction fallback from response.completed.
+
+    ``tc_index_map``, ``tc_next_index``, and ``tc_seen_added`` are mutable
+    state owned by the caller's generator -- they track the mapping from
+    Responses API ``output_index`` to Chat Completions ``tool_calls[].index``.
+    """
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError:
@@ -390,11 +403,140 @@ def _convert_responses_stream_payload_to_chat_chunk(
 
     chunks: list[bytes] = []
     aegis_meta = _copy_aegis_meta(payload)
-    if event_type == "response.completed" and not emitted_tool_calls:
-        response = payload.get("response")
-        if isinstance(response, dict):
+
+    # ------------------------------------------------------------------
+    # Incremental tool-call events from the Responses API stream
+    # ------------------------------------------------------------------
+    if event_type == "response.output_item.added":
+        item = payload.get("item")
+        if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "function_call":
+            output_index = int(payload.get("output_index", 0))
+            tc_idx = tc_next_index[0]
+            tc_index_map[output_index] = tc_idx
+            tc_seen_added.add(output_index)
+            tc_next_index[0] += 1
+
+            call_id = str(
+                item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+            )
+            func_name = str(item.get("name") or "")
+            tool_call_entry: dict[str, Any] = {
+                "index": tc_idx,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": func_name, "arguments": ""},
+            }
+            delta: dict[str, Any] = {"tool_calls": [tool_call_entry]}
+            if not role_sent:
+                delta["role"] = "assistant"
+                role_sent = True
+            chunks.append(
+                _serialize_chat_stream_chunk(
+                    request_id=request_id,
+                    model=model,
+                    delta=delta,
+                    finish_reason=None,
+                    aegis_meta=aegis_meta,
+                )
+            )
+            emitted_tool_calls = True
+            logger.debug(
+                "coerce tool_call added request_id=%s output_index=%d tc_idx=%d name=%s",
+                request_id, output_index, tc_idx, func_name,
+            )
+            return chunks, role_sent, emitted_text, emitted_tool_calls
+
+    if event_type == "response.function_call_arguments.delta":
+        output_index = int(payload.get("output_index", 0))
+        arg_delta = str(payload.get("delta", ""))
+        tc_idx = tc_index_map.get(output_index)
+        if tc_idx is not None and arg_delta:
+            delta = {
+                "tool_calls": [
+                    {"index": tc_idx, "function": {"arguments": arg_delta}}
+                ]
+            }
+            chunks.append(
+                _serialize_chat_stream_chunk(
+                    request_id=request_id,
+                    model=model,
+                    delta=delta,
+                    finish_reason=None,
+                    aegis_meta=aegis_meta,
+                )
+            )
+            return chunks, role_sent, emitted_text, emitted_tool_calls
+
+    if event_type == "response.output_item.done":
+        item = payload.get("item")
+        if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "function_call":
+            output_index = int(payload.get("output_index", 0))
+            # Fallback: if we never saw output_item.added for this index,
+            # emit the complete tool call now.
+            if output_index not in tc_seen_added:
+                tc_idx = tc_next_index[0]
+                tc_index_map[output_index] = tc_idx
+                tc_next_index[0] += 1
+
+                call_id = str(
+                    item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                )
+                func_name = str(item.get("name") or "function_call")
+                arguments = str(item.get("arguments") or "")
+                tool_call_entry = {
+                    "index": tc_idx,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": func_name, "arguments": arguments},
+                }
+                delta = {"tool_calls": [tool_call_entry]}
+                if not role_sent:
+                    delta["role"] = "assistant"
+                    role_sent = True
+                chunks.append(
+                    _serialize_chat_stream_chunk(
+                        request_id=request_id,
+                        model=model,
+                        delta=delta,
+                        finish_reason=None,
+                        aegis_meta=aegis_meta,
+                    )
+                )
+                emitted_tool_calls = True
+                logger.debug(
+                    "coerce tool_call done fallback request_id=%s output_index=%d tc_idx=%d name=%s",
+                    request_id, output_index, tc_idx, func_name,
+                )
+            return chunks, role_sent, emitted_text, emitted_tool_calls
+
+    # function_call_arguments.done carries no new data -- skip silently
+    if event_type == "response.function_call_arguments.done":
+        return chunks, role_sent, emitted_text, emitted_tool_calls
+
+    # ------------------------------------------------------------------
+    # response.completed -- bulk fallback for tool calls and text
+    # ------------------------------------------------------------------
+    if event_type == "response.completed":
+        # If incremental tool-call events were already emitted, just emit
+        # the finish_reason sentinel.  Otherwise fall through to the bulk
+        # extraction from response.output for proxies that only send
+        # response.completed with a full output array.
+        if emitted_tool_calls:
+            chunks.append(
+                _serialize_chat_stream_chunk(
+                    request_id=request_id,
+                    model=model,
+                    delta={},
+                    finish_reason="tool_calls",
+                    aegis_meta=aegis_meta,
+                )
+            )
+            return chunks, role_sent, emitted_text, emitted_tool_calls
+
+        response_obj = payload.get("response")
+        if isinstance(response_obj, dict):
             tool_calls = _responses_output_items_to_chat_tool_calls(
-                response.get("output")
+                response_obj.get("output")
             )
             if tool_calls:
                 tool_call_delta: dict[str, Any] = {"tool_calls": tool_calls}
@@ -422,28 +564,31 @@ def _convert_responses_stream_payload_to_chat_chunk(
                 emitted_tool_calls = True
                 return chunks, role_sent, emitted_text, emitted_tool_calls
 
+    # ------------------------------------------------------------------
+    # Text content (output_text.delta or completed fallback)
+    # ------------------------------------------------------------------
     text = ""
     if event_type == "response.output_text.delta":
         text = _extract_stream_text_from_event(payload_text)
     elif event_type == "response.completed" and not emitted_text:
-        response = payload.get("response")
-        if isinstance(response, dict):
-            extracted = response_text_extractor(response)
+        response_obj = payload.get("response")
+        if isinstance(response_obj, dict):
+            extracted = response_text_extractor(response_obj)
             if extracted and not extracted.startswith("[status="):
                 text = extracted
 
     if not text:
         return [], role_sent, emitted_text, emitted_tool_calls
 
-    delta: dict[str, Any] = {"content": text}
+    text_delta: dict[str, Any] = {"content": text}
     if not role_sent:
-        delta["role"] = "assistant"
+        text_delta["role"] = "assistant"
         role_sent = True
     chunks.append(
         _serialize_chat_stream_chunk(
             request_id=request_id,
             model=model,
-            delta=delta,
+            delta=text_delta,
             finish_reason=None,
             aegis_meta=aegis_meta,
         )
@@ -464,6 +609,13 @@ def coerce_responses_stream_to_chat_stream(
         emitted_text = False
         emitted_tool_calls = False
         saw_done = False
+        # Mutable state for incremental tool-call assembly across events.
+        # tc_index_map: Responses output_index -> Chat Completions tool_calls index
+        # tc_next_index: single-element list used as mutable counter
+        # tc_seen_added: output indices that received an output_item.added event
+        tc_index_map: dict[int, int] = {}
+        tc_next_index = [0]
+        tc_seen_added: set[int] = set()
         try:
             async for frame in _iter_sse_frames(_iter_stream_body_chunks(response)):
                 payload_text = _extract_sse_data_payload_from_chunk(frame)
@@ -482,6 +634,9 @@ def coerce_responses_stream_to_chat_stream(
                         emitted_text=emitted_text,
                         emitted_tool_calls=emitted_tool_calls,
                         response_text_extractor=response_text_extractor,
+                        tc_index_map=tc_index_map,
+                        tc_next_index=tc_next_index,
+                        tc_seen_added=tc_seen_added,
                     )
                 )
                 for chunk in chunks:

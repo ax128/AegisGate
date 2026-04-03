@@ -221,6 +221,154 @@ def test_coerce_responses_stream_to_chat_stream_handles_split_frames() -> None:
     assert "data: [DONE]" in body
 
 
+def test_coerce_responses_stream_incremental_tool_calls() -> None:
+    """Tool calls streamed via incremental Responses API events are converted
+    to Chat Completions tool_calls delta chunks."""
+    import json as _json
+
+    async def responses_stream() -> AsyncGenerator[bytes, None]:
+        # 1. output_item.added with type=function_call
+        yield (
+            b'data: {"type":"response.output_item.added","output_index":0,'
+            b'"item":{"type":"function_call","id":"fc_001","call_id":"call_abc",'
+            b'"name":"read_file","arguments":""}}\n\n'
+        )
+        # 2. argument deltas
+        yield (
+            b'data: {"type":"response.function_call_arguments.delta",'
+            b'"output_index":0,"delta":"{\\"path\\":"}\n\n'
+        )
+        yield (
+            b'data: {"type":"response.function_call_arguments.delta",'
+            b'"output_index":0,"delta":"\\"a.txt\\"}"}\n\n'
+        )
+        # 3. arguments done (no new data)
+        yield (
+            b'data: {"type":"response.function_call_arguments.done",'
+            b'"output_index":0,"arguments":"{\\"path\\":\\"a.txt\\"}"}\n\n'
+        )
+        # 4. output_item.done
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"type":"function_call","id":"fc_001","call_id":"call_abc",'
+            b'"name":"read_file","arguments":"{\\"path\\":\\"a.txt\\"}"}}\n\n'
+        )
+        # 5. response.completed with minimal output (no full array)
+        yield (
+            b'data: {"type":"response.completed","response":{"id":"resp_1",'
+            b'"model":"gpt-4","status":"completed","output":[]}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    response = StreamingResponse(responses_stream(), media_type="text/event-stream")
+    coerced = _coerce_responses_stream_to_chat_stream(
+        response,
+        request_id="req-tc",
+        model="test-model",
+    )
+
+    async def run_case() -> bytes:
+        chunks: list[bytes] = []
+        async for chunk in coerced.body_iterator:
+            chunks.append(
+                chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
+            )
+        return b"".join(chunks)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    # Parse all SSE data lines
+    payloads = []
+    for line in body.split("\n"):
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            payloads.append(_json.loads(line[6:]))
+
+    # First chunk: initial tool call with role, id, name, empty arguments
+    first = payloads[0]
+    assert first["object"] == "chat.completion.chunk"
+    tc0 = first["choices"][0]["delta"]["tool_calls"][0]
+    assert tc0["index"] == 0
+    assert tc0["id"] == "call_abc"
+    assert tc0["type"] == "function"
+    assert tc0["function"]["name"] == "read_file"
+    assert tc0["function"]["arguments"] == ""
+    assert first["choices"][0]["delta"].get("role") == "assistant"
+
+    # Middle chunks: argument deltas
+    arg_chunks = [
+        p["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+        for p in payloads[1:]
+        if p["choices"][0].get("delta", {}).get("tool_calls")
+        and p["choices"][0]["delta"]["tool_calls"][0].get("function", {}).get(
+            "arguments"
+        )
+        is not None
+        and p["choices"][0].get("finish_reason") is None
+    ]
+    combined_args = "".join(arg_chunks)
+    assert combined_args == '{"path":"a.txt"}'
+
+    # Final chunk: finish_reason = "tool_calls"
+    finish_payloads = [
+        p for p in payloads if p["choices"][0].get("finish_reason") == "tool_calls"
+    ]
+    assert len(finish_payloads) == 1
+
+    # DONE sentinel
+    assert "data: [DONE]" in body
+
+
+def test_coerce_responses_stream_output_item_done_fallback() -> None:
+    """When no output_item.added is received, output_item.done emits the full
+    tool call as a fallback (some proxies skip incremental events)."""
+    import json as _json
+
+    async def responses_stream() -> AsyncGenerator[bytes, None]:
+        # Only output_item.done, no prior added/delta events
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"type":"function_call","id":"fc_002","call_id":"call_xyz",'
+            b'"name":"write_file","arguments":"{\\"content\\":\\"hi\\"}"}}\n\n'
+        )
+        yield (
+            b'data: {"type":"response.completed","response":{"id":"resp_2",'
+            b'"model":"gpt-4","status":"completed","output":[]}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    response = StreamingResponse(responses_stream(), media_type="text/event-stream")
+    coerced = _coerce_responses_stream_to_chat_stream(
+        response,
+        request_id="req-fb",
+        model="test-model",
+    )
+
+    async def run_case() -> bytes:
+        chunks: list[bytes] = []
+        async for chunk in coerced.body_iterator:
+            chunks.append(
+                chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
+            )
+        return b"".join(chunks)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+
+    payloads = []
+    for line in body.split("\n"):
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            payloads.append(_json.loads(line[6:]))
+
+    # Should have the full tool call from output_item.done fallback
+    tc = payloads[0]["choices"][0]["delta"]["tool_calls"][0]
+    assert tc["id"] == "call_xyz"
+    assert tc["function"]["name"] == "write_file"
+    assert tc["function"]["arguments"] == '{"content":"hi"}'
+
+    # finish_reason = "tool_calls"
+    finish = [p for p in payloads if p["choices"][0].get("finish_reason") == "tool_calls"]
+    assert len(finish) == 1
+
+
 def test_stream_block_reason_uses_response_disposition_first() -> None:
     ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/chat/completions")
     ctx.response_disposition = "sanitize"
