@@ -73,7 +73,9 @@ from aegisgate.adapters.openai_compat.upstream import (
     _build_upstream_url,
     _effective_gateway_headers,
     _forward_json,
+    _forward_json_pinned,
     _forward_stream_lines,
+    _forward_stream_lines_pinned,
     _is_upstream_whitelisted,
     _resolve_upstream_base,
     _safe_error_detail,
@@ -228,6 +230,25 @@ def _extract_conversation_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _tools_cache_key(
+    payload: dict[str, Any],
+    *,
+    tenant_id: str = "default",
+    request_headers: Mapping[str, str] | None = None,
+) -> str | None:
+    conversation_id = _extract_conversation_id(payload)
+    if not conversation_id:
+        return None
+    token_hint = (
+        _header_lookup(request_headers or {}, "x-aegis-token-hint")
+        if request_headers
+        else ""
+    )
+    token_scope = token_hint or "anonymous"
+    tenant_scope = str(tenant_id or "default").strip() or "default"
+    return f"{token_scope}:{tenant_scope}:{conversation_id}"
+
+
 def _filter_mode_from_headers(headers: Mapping[str, str]) -> str | None:
     return headers.get("x-aegis-filter-mode") or headers.get("X-Aegis-Filter-Mode")
 
@@ -243,6 +264,58 @@ def _with_trace_forward_headers(
     if request_id:
         forwarded[_TRACE_REQUEST_ID_HEADER] = request_id
     return forwarded
+
+
+def _build_connect_urls_for_path(
+    request_path: str, connect_bases: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not connect_bases:
+        return ()
+    return tuple(
+        _build_upstream_url(request_path, connect_base)
+        for connect_base in connect_bases
+    )
+
+
+async def _forward_json_with_pinning(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> tuple[int, dict[str, Any] | str]:
+    if connect_urls:
+        return await _forward_json_pinned(
+            url=url,
+            payload=payload,
+            headers=headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+        )
+    return await _forward_json(url, payload, headers)
+
+
+async def _iter_forward_stream_with_pinning(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> AsyncGenerator[bytes, None]:
+    if connect_urls:
+        async for line in _forward_stream_lines_pinned(
+            url=url,
+            payload=payload,
+            headers=headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+        ):
+            yield line
+        return
+    async for line in _forward_stream_lines(url, payload, headers):
+        yield line
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
@@ -274,13 +347,19 @@ async def _forward_json_passthrough(
     payload: dict[str, Any],
     upstream_url: str,
     forward_headers: Mapping[str, str],
+    connect_urls: tuple[str, ...] = (),
+    host_header: str = "",
     boundary: dict | None,
     on_success: Any,
     log_label: str,
 ) -> Any:
     try:
-        status_code, upstream_body = await _forward_json(
-            upstream_url, payload, forward_headers
+        status_code, upstream_body = await _forward_json_with_pinning(
+            url=upstream_url,
+            payload=payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
         )
     except RuntimeError as exc:
         logger.error(
@@ -328,6 +407,8 @@ def _build_passthrough_stream_response(
     payload: dict[str, Any],
     upstream_url: str,
     forward_headers: Mapping[str, str],
+    connect_urls: tuple[str, ...] = (),
+    host_header: str = "",
     boundary: dict | None,
     log_label: str,
 ) -> StreamingResponse:
@@ -339,8 +420,12 @@ def _build_passthrough_stream_response(
 
     async def passthrough_generator() -> AsyncGenerator[bytes, None]:
         try:
-            async for line in _forward_stream_lines(
-                upstream_url, payload, forward_headers
+            async for line in _iter_forward_stream_with_pinning(
+                url=upstream_url,
+                payload=payload,
+                headers=forward_headers,
+                connect_urls=connect_urls,
+                host_header=host_header,
             ):
                 yield line
         except RuntimeError as exc:
@@ -762,6 +847,8 @@ def _build_responses_upstream_payload(
     session_id: str = "-",
     route: str = "-",
     whitelist_keys: set[str] | None = None,
+    tenant_id: str = "default",
+    request_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     upstream_payload = sanitize_for_responses(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS},
@@ -798,7 +885,11 @@ def _build_responses_upstream_payload(
     # tools=[] on subsequent turns, relying on server-side persistence
     # (store:true).  Through a stateless proxy the definitions are lost.
     # We cache them by conversation ID and re-inject when needed.
-    conv_id = _extract_conversation_id(payload)
+    conv_id = _tools_cache_key(
+        payload,
+        tenant_id=tenant_id,
+        request_headers=request_headers,
+    )
     tools = upstream_payload.get("tools")
 
     if isinstance(tools, list) and len(tools) > 0 and conv_id:
@@ -917,12 +1008,21 @@ def _build_chat_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _build_responses_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _build_responses_passthrough_payload(
+    payload: dict[str, Any],
+    *,
+    tenant_id: str = "default",
+    request_headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     result = sanitize_for_responses(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS}
     )
     # Tool cache: same logic as _build_responses_upstream_payload.
-    conv_id = _extract_conversation_id(payload)
+    conv_id = _tools_cache_key(
+        payload,
+        tenant_id=tenant_id,
+        request_headers=request_headers,
+    )
     tools = result.get("tools")
     if isinstance(tools, list) and len(tools) > 0 and conv_id:
         _tools_cache_put(conv_id, copy.deepcopy(tools))
@@ -3023,7 +3123,6 @@ def _derive_session_id(
     headers by _effective_gateway_headers so it remains available in inner handlers
     without threading the request object through.
     """
-    import hashlib
     client_session = str(payload.get("session_id") or request_id)
     if request_headers:
         token_hint = _header_lookup(request_headers, "x-aegis-token-hint").strip()
@@ -3079,20 +3178,16 @@ def _resolve_tenant_id(
     headers: Mapping[str, str] | None = None,
     boundary: Mapping[str, Any] | None = None,
 ) -> str:
-    if payload:
-        for key in ("tenant_id", "tenant", "org_id"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value
-    if headers:
-        for key in (settings.tenant_id_header, "x-tenant-id", "x-aegis-tenant-id"):
-            value = _header_lookup(headers, key)
-            if value:
-                return value
     if boundary:
         value = str(boundary.get("tenant_id") or "").strip()
         if value:
             return value
+    # Security hardening: tenant identity must come from authenticated gateway
+    # context, not directly from client payload/headers.
+    if headers:
+        token_hint = _header_lookup(headers, "x-aegis-token-hint")
+        if token_hint:
+            return f"token:{token_hint}"
     return "default"
 
 
@@ -3605,9 +3700,17 @@ async def _execute_chat_stream_once(
         else payload
     )
 
+    connect_bases: tuple[str, ...] = ()
+    host_header = ""
     try:
-        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
+        if forced_upstream_base:
+            upstream_base = forced_upstream_base
+        else:
+            upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+                request_headers
+            )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -3630,6 +3733,8 @@ async def _execute_chat_stream_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             log_label="chat stream",
         )
@@ -3645,8 +3750,12 @@ async def _execute_chat_stream_once(
 
         async def whitelist_generator() -> AsyncGenerator[bytes, None]:
             try:
-                async for line in _forward_stream_lines(
-                    upstream_url, payload, forward_headers
+                async for line in _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
                 ):
                     yield line
             except RuntimeError as exc:
@@ -3793,7 +3902,13 @@ async def _execute_chat_stream_once(
         blocked_reason: str | None = None
         try:
             async for line in _iter_sse_frames(
-                _forward_stream_lines(upstream_url, upstream_payload, forward_headers)
+                _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=upstream_payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
+                )
             ):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
@@ -4130,14 +4245,26 @@ async def _execute_responses_stream_once(
     )
     filter_mode = _apply_filter_mode(ctx, request_headers)
     passthrough_payload = (
-        _build_responses_passthrough_payload(payload)
+        _build_responses_passthrough_payload(
+            payload,
+            tenant_id=ctx.tenant_id,
+            request_headers=request_headers,
+        )
         if filter_mode == "passthrough"
         else payload
     )
 
+    connect_bases: tuple[str, ...] = ()
+    host_header = ""
     try:
-        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
+        if forced_upstream_base:
+            upstream_base = forced_upstream_base
+        else:
+            upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+                request_headers
+            )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -4160,6 +4287,8 @@ async def _execute_responses_stream_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             log_label="responses stream",
         )
@@ -4175,8 +4304,12 @@ async def _execute_responses_stream_once(
 
         async def whitelist_generator() -> AsyncGenerator[bytes, None]:
             try:
-                async for line in _forward_stream_lines(
-                    upstream_url, payload, forward_headers
+                async for line in _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
                 ):
                     yield line
             except RuntimeError as exc:
@@ -4310,6 +4443,8 @@ async def _execute_responses_stream_once(
         session_id=ctx.session_id,
         route=ctx.route,
         whitelist_keys=ctx.redaction_whitelist_keys,
+        tenant_id=ctx.tenant_id,
+        request_headers=request_headers,
     )
     _input_items = upstream_payload.get("input")
     _input_count = len(_input_items) if isinstance(_input_items, list) else 0
@@ -4333,17 +4468,18 @@ async def _execute_responses_stream_once(
         saw_done = False
         stream_end_reason = "upstream_eof_no_done"
         blocked_reason: str | None = None
-        blocked_confirm_id = ""
-        blocked_confirmation_reason = ""
-        blocked_confirmation_summary = ""
-        blocked_confirmation_meta: dict[str, Any] | None = None
-        blocked_message_text = ""
         last_terminal_event_type = ""
         failure_terminal_logged = False
         terminal_no_text_logged = False
         try:
             async for line in _iter_sse_frames(
-                _forward_stream_lines(upstream_url, upstream_payload, forward_headers)
+                _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=upstream_payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
+                )
             ):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
@@ -4381,32 +4517,6 @@ async def _execute_responses_stream_once(
                             )
                             if blocked_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(blocked_reason)
-                            if _confirmation_approval_enabled():
-                                (
-                                    blocked_confirmation_reason,
-                                    blocked_confirmation_summary,
-                                ) = _confirmation_reason_and_summary(
-                                    ctx,
-                                    source_text=stream_window,
-                                )
-                                blocked_confirm_id = make_confirm_id()
-                                blocked_confirmation_meta = _flow_confirmation_metadata(
-                                    confirm_id=blocked_confirm_id,
-                                    status="pending",
-                                    reason=blocked_confirmation_reason,
-                                    summary=blocked_confirmation_summary,
-                                    phase=PHASE_RESPONSE,
-                                    payload_omitted=False,
-                                    action_token=make_action_bind_token(
-                                        f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                                    ),
-                                )
-                                blocked_message_text = _build_confirmation_message(
-                                    confirm_id=blocked_confirm_id,
-                                    reason=blocked_confirmation_reason,
-                                    summary=blocked_confirmation_summary,
-                                    phase=PHASE_RESPONSE,
-                                )
                     if blocked_reason:
                         break
                     while pending_frames:
@@ -4512,47 +4622,7 @@ async def _execute_responses_stream_once(
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
 
-                        # Only prepare confirmation metadata when confirmation flow is enabled.
-                        if _confirmation_approval_enabled():
-                            (
-                                blocked_confirmation_reason,
-                                blocked_confirmation_summary,
-                            ) = _confirmation_reason_and_summary(
-                                ctx,
-                                source_text=stream_window,
-                            )
-                            blocked_confirm_id = make_confirm_id()
-                            blocked_confirmation_meta = _flow_confirmation_metadata(
-                                confirm_id=blocked_confirm_id,
-                                status="pending",
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                                payload_omitted=False,
-                                action_token=make_action_bind_token(
-                                    f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                                ),
-                            )
-                            blocked_message_text = _build_confirmation_message(
-                                confirm_id=blocked_confirm_id,
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                            )
-                            logger.info(
-                                "responses stream block drain started request_id=%s confirm_id=%s reason=%s chunk_count=%s cached_chars=%s",
-                                ctx.request_id,
-                                blocked_confirm_id,
-                                blocked_reason,
-                                chunk_count,
-                                len(stream_window),
-                            )
-
-                        stream_end_reason = (
-                            "policy_confirmation_draining_upstream"
-                            if _confirmation_approval_enabled()
-                            else "policy_auto_sanitize_buffered"
-                        )
+                        stream_end_reason = "policy_auto_sanitize_buffered"
                         # Break immediately so the client does not stall
                         # waiting for the upstream to finish generating.
                         # The cached content up to this point is sufficient
@@ -4571,41 +4641,40 @@ async def _execute_responses_stream_once(
                     yield pending_frames.pop(0)
                 yield line
             if blocked_reason:
-                if not _confirmation_approval_enabled():
-                    ctx.response_disposition = "sanitize"
-                    ctx.enforcement_actions.append(
-                        "auto_sanitize:stream_buffered_patch"
+                ctx.response_disposition = "sanitize"
+                ctx.enforcement_actions.append(
+                    "auto_sanitize:stream_buffered_patch"
+                )
+                _maybe_log_dangerous_response_sample(
+                    ctx,
+                    stream_window,
+                    route=req.route,
+                    model=req.model,
+                    source="responses_stream_buffered_patch",
+                    log_key="responses_stream_buffered_patch",
+                )
+                logger.info(
+                    "responses stream auto-sanitized (buffered) request_id=%s reason=%s",
+                    ctx.request_id,
+                    blocked_reason,
+                )
+                sanitized_window = (
+                    _build_sanitized_full_response(ctx, source_text=stream_window)
+                    if stream_window
+                    else ""
+                )
+                info_log_sanitized(
+                    "responses_stream_sanitized",
+                    sanitized_window,
+                    request_id=ctx.request_id,
+                    reason=blocked_reason,
+                )
+                while pending_frames:
+                    yield _sanitize_stream_event_line(
+                        pending_frames.pop(0), route=req.route, ctx=ctx
                     )
-                    _maybe_log_dangerous_response_sample(
-                        ctx,
-                        stream_window,
-                        route=req.route,
-                        model=req.model,
-                        source="responses_stream_buffered_patch",
-                        log_key="responses_stream_buffered_patch",
-                    )
-                    logger.info(
-                        "responses stream auto-sanitized (buffered) request_id=%s reason=%s",
-                        ctx.request_id,
-                        blocked_reason,
-                    )
-                    sanitized_window = (
-                        _build_sanitized_full_response(ctx, source_text=stream_window)
-                        if stream_window
-                        else ""
-                    )
-                    info_log_sanitized(
-                        "responses_stream_sanitized",
-                        sanitized_window,
-                        request_id=ctx.request_id,
-                        reason=blocked_reason,
-                    )
-                    while pending_frames:
-                        yield _sanitize_stream_event_line(
-                            pending_frames.pop(0), route=req.route, ctx=ctx
-                        )
-                    yield _stream_done_sse_chunk()
-                    stream_end_reason = "policy_auto_sanitize"
+                yield _stream_done_sse_chunk()
+                stream_end_reason = "policy_auto_sanitize"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 if _needs_final_stream_probe(
                     chunk_count=chunk_count,
@@ -4626,32 +4695,6 @@ async def _execute_responses_stream_once(
                         blocked_reason = decision
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
-                        if _confirmation_approval_enabled():
-                            (
-                                blocked_confirmation_reason,
-                                blocked_confirmation_summary,
-                            ) = _confirmation_reason_and_summary(
-                                ctx,
-                                source_text=stream_window,
-                            )
-                            blocked_confirm_id = make_confirm_id()
-                            blocked_confirmation_meta = _flow_confirmation_metadata(
-                                confirm_id=blocked_confirm_id,
-                                status="pending",
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                                payload_omitted=False,
-                                action_token=make_action_bind_token(
-                                    f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                                ),
-                            )
-                            blocked_message_text = _build_confirmation_message(
-                                confirm_id=blocked_confirm_id,
-                                reason=blocked_confirmation_reason,
-                                summary=blocked_confirmation_summary,
-                                phase=PHASE_RESPONSE,
-                            )
                 if blocked_reason:
                     if not _confirmation_approval_enabled():
                         ctx.response_disposition = "sanitize"
@@ -4810,9 +4853,17 @@ async def _execute_chat_once(
         else payload
     )
 
+    connect_bases: tuple[str, ...] = ()
+    host_header = ""
     try:
-        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
+        if forced_upstream_base:
+            upstream_base = forced_upstream_base
+        else:
+            upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+                request_headers
+            )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -4835,6 +4886,8 @@ async def _execute_chat_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             on_success=lambda upstream_body: passthrough_chat_response(
                 upstream_body,
@@ -4847,8 +4900,12 @@ async def _execute_chat_once(
 
     if _is_upstream_whitelisted(upstream_base):
         try:
-            status_code, upstream_body = await _forward_json(
-                upstream_url, payload, forward_headers
+            status_code, upstream_body = await _forward_json_with_pinning(
+                url=upstream_url,
+                payload=payload,
+                headers=forward_headers,
+                connect_urls=connect_urls,
+                host_header=host_header,
             )
         except RuntimeError as exc:
             logger.error(
@@ -5022,8 +5079,12 @@ async def _execute_chat_once(
         )
 
     try:
-        status_code, upstream_body = await _forward_json(
-            upstream_url, upstream_payload, forward_headers
+        status_code, upstream_body = await _forward_json_with_pinning(
+            url=upstream_url,
+            payload=upstream_payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
         )
     except RuntimeError as exc:
         logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
@@ -5238,14 +5299,26 @@ async def _execute_responses_once(
     )
     filter_mode = _apply_filter_mode(ctx, request_headers)
     passthrough_payload = (
-        _build_responses_passthrough_payload(payload)
+        _build_responses_passthrough_payload(
+            payload,
+            tenant_id=ctx.tenant_id,
+            request_headers=request_headers,
+        )
         if filter_mode == "passthrough"
         else payload
     )
 
+    connect_bases: tuple[str, ...] = ()
+    host_header = ""
     try:
-        upstream_base = forced_upstream_base or (await _resolve_upstream_base(request_headers))[0]
+        if forced_upstream_base:
+            upstream_base = forced_upstream_base
+        else:
+            upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+                request_headers
+            )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -5268,6 +5341,8 @@ async def _execute_responses_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             on_success=lambda upstream_body: passthrough_responses_output(
                 upstream_body,
@@ -5280,8 +5355,12 @@ async def _execute_responses_once(
 
     if _is_upstream_whitelisted(upstream_base):
         try:
-            status_code, upstream_body = await _forward_json(
-                upstream_url, payload, forward_headers
+            status_code, upstream_body = await _forward_json_with_pinning(
+                url=upstream_url,
+                payload=payload,
+                headers=forward_headers,
+                connect_urls=connect_urls,
+                host_header=host_header,
             )
         except RuntimeError as exc:
             logger.error(
@@ -5337,6 +5416,8 @@ async def _execute_responses_once(
             session_id=ctx.session_id,
             route=ctx.route,
             whitelist_keys=ctx.redaction_whitelist_keys,
+            tenant_id=ctx.tenant_id,
+            request_headers=request_headers,
         )
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
@@ -5444,11 +5525,17 @@ async def _execute_responses_once(
             session_id=ctx.session_id,
             route=ctx.route,
             whitelist_keys=ctx.redaction_whitelist_keys,
+            tenant_id=ctx.tenant_id,
+            request_headers=request_headers,
         )
 
     try:
-        status_code, upstream_body = await _forward_json(
-            upstream_url, upstream_payload, forward_headers
+        status_code, upstream_body = await _forward_json_with_pinning(
+            url=upstream_url,
+            payload=upstream_payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
         )
     except RuntimeError as exc:
         logger.error("upstream unreachable request_id=%s error=%s", ctx.request_id, exc)
@@ -5677,9 +5764,13 @@ async def _execute_messages_stream_once(
         "messages stream start request_id=%s route=%s", ctx.request_id, request_path
     )
 
+    host_header = ""
     try:
-        upstream_base = (await _resolve_upstream_base(request_headers))[0]
+        upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+            request_headers
+        )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -5702,6 +5793,8 @@ async def _execute_messages_stream_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             log_label="messages stream",
         )
@@ -5712,8 +5805,12 @@ async def _execute_messages_stream_once(
 
         async def whitelist_generator() -> AsyncGenerator[bytes, None]:
             try:
-                async for line in _forward_stream_lines(
-                    upstream_url, passthrough_payload, forward_headers
+                async for line in _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=passthrough_payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
                 ):
                     yield line
             except RuntimeError as exc:
@@ -5802,7 +5899,13 @@ async def _execute_messages_stream_once(
 
         try:
             async for line in _iter_sse_frames(
-                _forward_stream_lines(upstream_url, upstream_payload, forward_headers)
+                _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=upstream_payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
+                )
             ):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
@@ -6174,9 +6277,13 @@ async def _execute_messages_once(
     )
     logger.info("messages start request_id=%s route=%s", ctx.request_id, request_path)
 
+    host_header = ""
     try:
-        upstream_base = (await _resolve_upstream_base(request_headers))[0]
+        upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+            request_headers
+        )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
     except ValueError as exc:
         logger.warning(
             "invalid upstream base request_id=%s error=%s", ctx.request_id, exc
@@ -6198,6 +6305,8 @@ async def _execute_messages_once(
             payload=passthrough_payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             on_success=_passthrough_any_response,
             log_label="messages endpoint",
@@ -6205,8 +6314,12 @@ async def _execute_messages_once(
 
     if _is_upstream_whitelisted(upstream_base):
         try:
-            status_code, upstream_body = await _forward_json(
-                upstream_url, passthrough_payload, forward_headers
+            status_code, upstream_body = await _forward_json_with_pinning(
+                url=upstream_url,
+                payload=passthrough_payload,
+                headers=forward_headers,
+                connect_urls=connect_urls,
+                host_header=host_header,
             )
         except RuntimeError as exc:
             logger.error(
@@ -6267,8 +6380,12 @@ async def _execute_messages_once(
     )
 
     try:
-        status_code, upstream_body = await _forward_json(
-            upstream_url, upstream_payload, forward_headers
+        status_code, upstream_body = await _forward_json_with_pinning(
+            url=upstream_url,
+            payload=upstream_payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
         )
     except RuntimeError as exc:
         logger.error(
@@ -6392,9 +6509,13 @@ async def _execute_generic_stream_once(
         request_path,
     )
 
+    host_header = ""
     try:
-        upstream_base = (await _resolve_upstream_base(request_headers))[0]
+        upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+            request_headers
+        )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
         logger.debug(
             "generic stream upstream request_id=%s base=%s url=%s",
             ctx.request_id,
@@ -6423,6 +6544,8 @@ async def _execute_generic_stream_once(
             payload=payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             log_label="generic stream",
         )
@@ -6433,8 +6556,12 @@ async def _execute_generic_stream_once(
 
         async def whitelist_generator() -> AsyncGenerator[bytes, None]:
             try:
-                async for line in _forward_stream_lines(
-                    upstream_url, payload, forward_headers
+                async for line in _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
                 ):
                     yield line
             except RuntimeError as exc:
@@ -6522,7 +6649,13 @@ async def _execute_generic_stream_once(
         chunk_count = 0
         try:
             async for line in _iter_sse_frames(
-                _forward_stream_lines(upstream_url, payload, forward_headers)
+                _iter_forward_stream_with_pinning(
+                    url=upstream_url,
+                    payload=payload,
+                    headers=forward_headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
+                )
             ):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is not None and payload_text != "[DONE]":
@@ -6658,9 +6791,13 @@ async def _execute_generic_once(
         "generic proxy start request_id=%s route=%s", ctx.request_id, request_path
     )
 
+    host_header = ""
     try:
-        upstream_base = (await _resolve_upstream_base(request_headers))[0]
+        upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+            request_headers
+        )
         upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
         logger.debug(
             "generic proxy upstream request_id=%s base=%s url=%s",
             ctx.request_id,
@@ -6688,6 +6825,8 @@ async def _execute_generic_once(
             payload=payload,
             upstream_url=upstream_url,
             forward_headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
             boundary=boundary,
             on_success=_passthrough_any_response,
             log_label="generic proxy",
@@ -6695,8 +6834,12 @@ async def _execute_generic_once(
 
     if _is_upstream_whitelisted(upstream_base):
         try:
-            status_code, upstream_body = await _forward_json(
-                upstream_url, payload, forward_headers
+            status_code, upstream_body = await _forward_json_with_pinning(
+                url=upstream_url,
+                payload=payload,
+                headers=forward_headers,
+                connect_urls=connect_urls,
+                host_header=host_header,
             )
         except RuntimeError as exc:
             logger.error(
@@ -6783,8 +6926,12 @@ async def _execute_generic_once(
         )
 
     try:
-        status_code, upstream_body = await _forward_json(
-            upstream_url, payload, forward_headers
+        status_code, upstream_body = await _forward_json_with_pinning(
+            url=upstream_url,
+            payload=payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
         )
     except RuntimeError as exc:
         logger.error(

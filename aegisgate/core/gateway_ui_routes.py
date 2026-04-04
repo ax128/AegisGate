@@ -7,6 +7,7 @@ the main ``gateway.py`` module.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import secrets
 import signal
@@ -291,27 +292,62 @@ def register_ui_routes(app: FastAPI) -> None:
     }
 
     def _key_path(key_type: str) -> Path:
-        return (Path.cwd() / "config" / _KEY_FILES[key_type]).resolve()
+        return (Path.cwd() / "config").resolve() / _KEY_FILES[key_type]
 
     def _key_fallback_path(key_type: str) -> Path:
         return Path("/tmp/aegisgate") / _KEY_FILES[key_type]
 
+    def _is_regular_key_file(path: Path) -> bool:
+        try:
+            return path.is_file() and not path.is_symlink()
+        except OSError:
+            return False
+
     def _read_key_file(key_type: str) -> str | None:
         for candidate in (_key_path(key_type), _key_fallback_path(key_type)):
-            if candidate.is_file():
+            if candidate.is_symlink():
+                logger.warning("ignoring symlinked key file path=%s", candidate)
+                continue
+            if _is_regular_key_file(candidate):
                 v = candidate.read_text(encoding="utf-8").strip()
                 if v:
                     return v
         return None
 
+    def _key_fingerprint(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+    def _mask_key(value: str) -> str:
+        secret = str(value or "")
+        if len(secret) <= 8:
+            return "*" * len(secret)
+        return f"{secret[:4]}***{secret[-3:]}"
+
     def _write_key_file_safe(path: Path, value: str) -> None:
-        """Write key file with restricted permissions from creation (no open window)."""
+        """Atomically write a key file without following an existing symlink."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        tmp_path: Path | None = None
         try:
-            os.write(fd, value.encode("utf-8"))
-        finally:
-            os.close(fd)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                delete=False,
+                dir=str(path.parent),
+                suffix=".tmp",
+            ) as tmp:
+                tmp.write(value)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = Path(tmp.name)
+            os.chmod(tmp_path, 0o600)
+            tmp_path.replace(path)
+        except Exception:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
 
     def _write_key_file(key_type: str, value: str) -> None:
         primary = _key_path(key_type)
@@ -331,18 +367,32 @@ def register_ui_routes(app: FastAPI) -> None:
         for key_type, filename in _KEY_FILES.items():
             primary = _key_path(key_type)
             fallback = _key_fallback_path(key_type)
-            exists = primary.is_file() or fallback.is_file()
+            exists = _is_regular_key_file(primary) or _is_regular_key_file(fallback)
             result.append({"type": key_type, "filename": filename, "exists": exists})
         return JSONResponse(content={"items": result})
 
     @app.get("/__ui__/api/keys/{key_type}")
-    async def local_ui_key_get(key_type: str) -> JSONResponse:
+    async def local_ui_key_get(key_type: str, request: Request) -> JSONResponse:
         if key_type not in _KEY_FILES:
             return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
         value = _read_key_file(key_type)
         if value is None:
             return JSONResponse(status_code=404, content={"error": "key_not_found"})
-        return JSONResponse(content={"ok": True, "type": key_type, "value": value})
+        write_audit({
+            "event": "ui_key_read",
+            "route": f"/__ui__/api/keys/{key_type}",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "key_type": key_type,
+            "key_fingerprint": _key_fingerprint(value),
+        })
+        return JSONResponse(
+            content={
+                "ok": True,
+                "type": key_type,
+                "masked_value": _mask_key(value),
+                "key_fingerprint": _key_fingerprint(value),
+            }
+        )
 
     @app.post("/__ui__/api/keys/{key_type}/rotate")
     async def local_ui_key_rotate(key_type: str, request: Request) -> JSONResponse:
@@ -359,7 +409,14 @@ def register_ui_routes(app: FastAPI) -> None:
             new_key = Fernet.generate_key().decode("utf-8")
             _write_key_file(key_type, new_key)
             _crypto_mod._fernet_instance = None
-            return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
+            write_audit({
+                "event": "ui_key_rotated",
+                "route": f"/__ui__/api/keys/{key_type}/rotate",
+                "actor_ip": request.client.host if request.client else "unknown",
+                "key_type": key_type,
+                "key_fingerprint": _key_fingerprint(new_key),
+            })
+            return JSONResponse(content={"ok": True, "type": key_type, "rotated": True})
         new_key = secrets.token_urlsafe(32)
         _write_key_file(key_type, new_key)
         if key_type == "gateway":
@@ -371,7 +428,7 @@ def register_ui_routes(app: FastAPI) -> None:
             new_session = _create_ui_session_token(request)
             new_csrf = _ui_csrf_token(new_session)
             response = JSONResponse(content={
-                "ok": True, "type": key_type, "value": new_key,
+                "ok": True, "type": key_type, "rotated": True,
                 "csrf_token": new_csrf,
             })
             response.set_cookie(
@@ -382,8 +439,22 @@ def register_ui_routes(app: FastAPI) -> None:
                 samesite="lax",
                 secure=settings.local_ui_secure_cookie,
             )
+            write_audit({
+                "event": "ui_key_rotated",
+                "route": f"/__ui__/api/keys/{key_type}/rotate",
+                "actor_ip": request.client.host if request.client else "unknown",
+                "key_type": key_type,
+                "key_fingerprint": _key_fingerprint(new_key),
+            })
             return response
-        return JSONResponse(content={"ok": True, "type": key_type, "value": new_key})
+        write_audit({
+            "event": "ui_key_rotated",
+            "route": f"/__ui__/api/keys/{key_type}/rotate",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "key_type": key_type,
+            "key_fingerprint": _key_fingerprint(new_key),
+        })
+        return JSONResponse(content={"ok": True, "type": key_type, "rotated": True})
 
     # ------------------------------------------------------------------
     # Security rules YAML CRUD
@@ -449,6 +520,10 @@ def register_ui_routes(app: FastAPI) -> None:
             node = node[k]
         node[keys[-1]] = items
 
+    def _required_rule_regex(body: dict[str, Any]) -> str | None:
+        regex = _string_field(body.get("regex"))
+        return regex or None
+
     @app.get("/__ui__/api/rules")
     async def local_ui_rules_sections() -> JSONResponse:
         sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
@@ -473,13 +548,14 @@ def register_ui_routes(app: FastAPI) -> None:
         rule_id = _string_field(body.get("id"))
         if not rule_id:
             return JSONResponse(status_code=400, content={"error": "missing_id"})
+        regex = _required_rule_regex(body)
+        if regex is None:
+            return JSONResponse(status_code=400, content={"error": "missing_regex"})
         data = _load_rules_yaml()
         items = _get_section_list(data, section)
         if any(str(item.get("id", "")) == rule_id for item in items):
             return JSONResponse(status_code=409, content={"error": "id_exists", "detail": f"规则 id '{rule_id}' 已存在"})
-        new_item: dict = {"id": rule_id}
-        if "regex" in body:
-            new_item["regex"] = str(body["regex"])
+        new_item: dict = {"id": rule_id, "regex": regex}
         if "kind" in body:
             new_item["kind"] = str(body["kind"])
         if "patterns" in body and isinstance(body["patterns"], list):
@@ -502,7 +578,10 @@ def register_ui_routes(app: FastAPI) -> None:
         for item in items:
             if str(item.get("id", "")) == rule_id:
                 if "regex" in body:
-                    item["regex"] = str(body["regex"])
+                    regex = _required_rule_regex(body)
+                    if regex is None:
+                        return JSONResponse(status_code=400, content={"error": "missing_regex"})
+                    item["regex"] = regex
                 if "kind" in body:
                     item["kind"] = str(body["kind"])
                 if "patterns" in body and isinstance(body["patterns"], list):
@@ -682,6 +761,11 @@ def register_ui_routes(app: FastAPI) -> None:
 
     @app.post("/__ui__/api/restart")
     async def local_ui_restart(request: Request) -> JSONResponse:
+        write_audit({
+            "event": "ui_restart_requested",
+            "route": "/__ui__/api/restart",
+            "actor_ip": request.client.host if request.client else "unknown",
+        })
         async def _do_restart() -> None:
             await asyncio.sleep(1.5)
             os.kill(os.getpid(), signal.SIGTERM)

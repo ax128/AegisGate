@@ -5,7 +5,7 @@ This page is the **Wiki-style navigation hub** for connecting terminal/desktop I
 ## Start Here
 
 1. Multi-upstream / multi-tenant: use **Token mode** first.
-2. Single-upstream fast path: use `AEGIS_UPSTREAM_BASE_URL` and call `/v1/...` directly.
+2. Single-upstream fast path: use `AEGIS_UPSTREAM_BASE_URL` only for localhost/internal clients calling `/v1/...` directly.
 3. For Claude, use `POST /v1/messages` (supports streaming).
 4. OAuth-hosted login mode is **not supported**.
 
@@ -14,7 +14,7 @@ This page is the **Wiki-style navigation hub** for connecting terminal/desktop I
 ## Wiki Navigation
 
 - [Quick Start (Token Mode)](#quick-start-token-mode)
-- [Quick Start (Direct v1 Mode)](#quick-start-direct-v1-mode)
+- [Quick Start (Direct v1 Mode)](#quick-start-direct-v1-mode-internal-only)
 - [Claude API Support](#claude-api-support)
 - [Platform Notes (Windows/macOS/Linux/WSL2)](#platform-notes-windowsmacoslinuxwsl2)
 - [Client Matrix](#client-matrix)
@@ -32,7 +32,7 @@ Register once:
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/register \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
+  -d '{"upstream_base":"https://remote-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
 ```
 
 Use returned `baseUrl`:
@@ -50,7 +50,7 @@ Client config baseline:
 
 ---
 
-## Quick Start (Direct v1 Mode)
+## Quick Start (Direct v1 Mode, Internal Only)
 
 For single-upstream deployments, configure:
 
@@ -58,7 +58,7 @@ For single-upstream deployments, configure:
 AEGIS_UPSTREAM_BASE_URL=<YOUR_UPSTREAM_V1_BASE>
 ```
 
-Then call:
+Then let localhost/internal clients call:
 
 ```text
 http://127.0.0.1:18080/v1/...
@@ -74,7 +74,8 @@ curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
 
 Notes:
 - Use an upstream base that includes provider API prefix (e.g. `.../v1`).
-- `v2` should still use token path: `/v2/__gw__/t/<TOKEN>/...` + `x-target-url`.
+- This mode is internal-only. Public or reverse-proxied callers should use token mode instead of direct `/v1/...`.
+- `v2` should still use token path: `/v2/__gw__/t/<TOKEN>/...` + `x-target-url`, and target hosts must be allowed by `AEGIS_V2_TARGET_ALLOWLIST`.
 
 ---
 
@@ -177,7 +178,7 @@ model: claude-3-5-sonnet-latest
   - `POST /__gw__/add`
   - `POST /__gw__/remove`
 - In public ingress, block `/__gw__/*` externally and keep it localhost/internal only.
-- Keep `v2` on token path (`/v2/__gw__/t/<TOKEN>/...`), avoid exposing non-token generic proxy.
+- Keep `v2` on token path (`/v2/__gw__/t/<TOKEN>/...`), avoid exposing non-token generic proxy, and set `AEGIS_V2_TARGET_ALLOWLIST` explicitly.
 - Gateway key is stored in `config/aegis_gateway.key` (auto-generated on first run, chmod 600). Read it with `cat config/aegis_gateway.key`.
 - Prefer Token mode for all new clients.
 - Do not use OAuth-hosted-only mode for AegisGate routing.

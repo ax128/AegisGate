@@ -27,6 +27,9 @@ _SECURITY_CRITICAL_FILTER_NAMES: frozenset[str] = frozenset({
     "privilege_guard",
     "rag_poison_guard",
     "request_sanitizer",
+    "system_prompt_guard",
+    "tool_call_guard",
+    "untrusted_content_guard",
 })
 
 
@@ -75,7 +78,7 @@ class Pipeline:
                     current = plugin.process_request(current, ctx)
                 else:
                     current = plugin.process_response(current, ctx)
-            except Exception as exc:
+            except Exception:
                 elapsed = time.monotonic() - t0
                 logger.exception(
                     "filter_error phase=%s filter=%s elapsed_s=%.3f request_id=%s",

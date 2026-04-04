@@ -4,18 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AegisGate 控制台</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="/__ui__/assets/theme.js"></script>
     <link rel="stylesheet" href="/__ui__/assets/app.css">
-    <script>
-      (function() {
-        var savedTheme = localStorage.getItem('aegisgate_theme');
-        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
-        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
-      })();
-    </script>
   </head>
   <body>
     <div class="app-shell">
@@ -310,7 +300,7 @@
                 </svg>
                 保存基础设置
               </button>
-              <span id="general-save-status" class="status-note"></span>
+              <span id="general-save-status" class="status-note" aria-live="polite"></span>
             </div>
           </section>
 
@@ -338,7 +328,7 @@
                 </svg>
                 保存安全设置
               </button>
-              <span id="security-save-status" class="status-note"></span>
+              <span id="security-save-status" class="status-note" aria-live="polite"></span>
             </div>
           </section>
 
@@ -367,7 +357,7 @@
                 </svg>
                 保存 v2 设置
               </button>
-              <span id="v2-save-status" class="status-note"></span>
+              <span id="v2-save-status" class="status-note" aria-live="polite"></span>
             </div>
           </section>
 
@@ -383,7 +373,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>安全过滤规则</h2>
-                <p class="panel-desc">增删改查 <code>security_filters.yaml</code> 中的检测规则，保存后立即热重载生效</p>
+                <p class="panel-desc">增删改查已接入 UI 的部分 <code>security_filters.yaml</code> 检测规则，保存后立即热重载生效</p>
               </div>
             </div>
 
@@ -421,7 +411,7 @@
                 <div id="action-map-grid" class="form-grid"></div>
                 <div class="panel-actions">
                   <button id="save-action-map" class="btn-save" type="button">保存动作映射</button>
-                  <span id="action-map-status" class="status-note"></span>
+                  <span id="action-map-status" class="status-note" aria-live="polite"></span>
                 </div>
               </div>
             </div>
@@ -620,7 +610,7 @@
                 </svg>
                 保存 Compose
               </button>
-              <span id="compose-save-status" class="status-note"></span>
+              <span id="compose-save-status" class="status-note" aria-live="polite"></span>
             </div>
           </section>
 
@@ -675,7 +665,7 @@
           </div>
         </div>
         <div class="modal-foot">
-          <span id="modal-error" class="modal-error"></span>
+          <span id="modal-error" class="modal-error" role="alert" aria-live="polite"></span>
           <button id="modal-cancel" class="btn-sm-ghost" type="button">取消</button>
           <button id="modal-submit" class="btn-sm" type="button" data-action="submit-token">注册</button>
         </div>
@@ -683,7 +673,7 @@
     </div>
 
     <!-- Key View Modal -->
-    <div id="key-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div id="key-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
       <div class="modal-card">
         <div class="modal-head">
           <h3 id="key-modal-title">密钥值</h3>
@@ -707,7 +697,7 @@
     </div>
 
     <!-- Rule Add/Edit Modal -->
-    <div id="rule-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div id="rule-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rule-modal-title">
       <input type="hidden" id="rule-modal-edit-id" value="">
       <input type="hidden" id="rule-modal-section" value="">
       <div class="modal-card">
@@ -734,7 +724,7 @@
           </div>
         </div>
         <div class="modal-foot">
-          <span id="rule-modal-error" class="modal-error"></span>
+          <span id="rule-modal-error" class="modal-error" role="alert" aria-live="polite"></span>
           <button id="rule-modal-cancel" class="btn-sm-ghost" type="button">取消</button>
           <button id="rule-modal-submit" class="btn-sm" type="button">添加</button>
         </div>
@@ -742,10 +732,10 @@
     </div>
 
     <!-- Redact Value Add Modal -->
-    <div id="redact-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div id="redact-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="redact-modal-title">
       <div class="modal-card">
         <div class="modal-head">
-          <h3>添加精确值脱敏</h3>
+          <h3 id="redact-modal-title">添加精确值脱敏</h3>
           <button id="redact-modal-close" class="modal-close" type="button" aria-label="关闭">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -760,7 +750,7 @@
           </div>
         </div>
         <div class="modal-foot">
-          <span id="redact-modal-error" class="modal-error"></span>
+          <span id="redact-modal-error" class="modal-error" role="alert" aria-live="polite"></span>
           <button id="redact-modal-cancel" class="btn-sm-ghost" type="button">取消</button>
           <button id="redact-modal-submit" class="btn-sm" type="button">添加</button>
         </div>

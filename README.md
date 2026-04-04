@@ -42,7 +42,7 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 | No external API dependency | Yes (TF-IDF local) | Yes | No (OpenAI) | No |
 | Bilingual (EN/ZH) | Yes | English | English | English |
 
-> **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI at `http://localhost:18080/__ui__`
+> **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI login at `http://localhost:18080/__ui__/login`
 
 ### Architecture
 
@@ -97,7 +97,7 @@ AegisGate is an open-source, self-hosted security gateway that sits between your
 AegisGate uses a multi-layer approach: (1) bilingual regex patterns for known injection techniques (direct injection, system prompt exfiltration, typoglycemia obfuscation), (2) a built-in TF-IDF + Logistic Regression semantic classifier that runs locally without GPU, and (3) Unicode/encoding attack detection for invisible characters, bidirectional control abuse, and multi-stage encoded payloads.
 
 **Does AegisGate work with OpenAI, Claude, and other LLM providers?**
-Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/responses`) and a generic HTTP proxy (`/v2/`). Any application that supports a custom `baseUrl` can use AegisGate as a drop-in proxy. It has been verified with OpenAI, Claude (via compatible proxies), Gemini, and any OpenAI-compatible API.
+Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/responses`) and a token-based generic HTTP proxy (`/v2/__gw__/t/<token>/...`, with `x-target-url` + `AEGIS_V2_TARGET_ALLOWLIST`). Applications that support a custom `baseUrl` can use the OpenAI-compatible routes as a drop-in proxy, and HTTP tooling can use the v2 token route when a generic proxy is needed. It has been verified with OpenAI, Claude (via compatible proxies), Gemini, and any OpenAI-compatible API.
 
 **What data does AegisGate redact?**
 Over 50 PII pattern categories including: API keys and tokens (OpenAI, AWS, GitHub, Slack), credit card numbers, SSNs, email addresses, phone numbers, crypto wallet addresses and seed phrases, medical record numbers, IP addresses, internal URLs, and infrastructure identifiers. Custom exact-value redaction is also supported for arbitrary secrets.
@@ -112,7 +112,7 @@ Responses are scored by multiple filters (injection detector, anomaly detector, 
 No. The built-in TF-IDF semantic classifier runs locally (~166KB model file) without GPU. All regex-based detection also runs locally. An optional external semantic service can be configured for advanced use cases, but is not required.
 
 **How do I deploy AegisGate?**
-The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
+The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__/login`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
 
 
 ## Getting Started
@@ -122,12 +122,21 @@ The recommended method is Docker Compose: `docker compose up -d`. The gateway ru
 ```bash
 git clone https://github.com/ax128/AegisGate.git
 cd AegisGate
+# The stock compose file references these external Docker networks by default.
+# Create them first, or override/remove those network attachments for your setup.
+docker network create cliproxyapi_default || true
+docker network create sub2api-deploy_sub2api-network || true
 docker compose up -d --build
 ```
 
 Health check: `curl http://127.0.0.1:18080/health`
 
-Admin UI: `http://localhost:18080/__ui__`
+Admin UI login: `http://localhost:18080/__ui__/login`
+
+Notes:
+
+- The stock `docker-compose.yml` is not a fully standalone "single container only" compose file: it joins external Docker networks for CLIProxyAPI and Sub2API by default.
+- The same compose file also sets `AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api`. These startup-injected Docker service mappings take precedence over numeric host-port fallback for the same token.
 
 ### Local Development (No Docker)
 
@@ -152,7 +161,12 @@ AegisGate is a standalone security proxy layer — it does **not** manage upstre
 
 ### Scenario 1: Co-located Deployment (gateway and upstream on same server)
 
-The gateway supports **automatic local port routing** (enabled by default in Docker, set `AEGIS_ENABLE_LOCAL_PORT_ROUTING=true` for bare-metal):
+AegisGate supports two same-host patterns:
+
+- **Host port routing**: numeric token routes such as `/v1/__gw__/t/8317/...` resolve to `http://<local-port-host>:8317/v1` when `AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`. The stock Docker compose enables this by default; bare-metal deployments must enable it explicitly.
+- **Docker service mapping**: when `AEGIS_DOCKER_UPSTREAMS` is set, startup injects token -> service-name mappings such as `8317 -> http://cli-proxy-api:8317/v1`. These mappings override numeric host-port fallback for the same token.
+
+Host-port routing shape:
 
 ```
 Client → http://<gateway-ip>:18080/v1/__gw__/t/{port}/... → localhost:{port}/v1/...
@@ -166,9 +180,15 @@ Client → http://<gateway-ip>:18080/v1/__gw__/t/{port}/... → localhost:{port}
 
 - `Authorization: Bearer <key>` is passed through to upstream transparently
 - Multiple upstreams can be used simultaneously
-- **No token registration, no config editing, no gateway restart required**
+- For host-port routing, no token registration is required
 - Supports filter mode suffixes: `token__redact` (redaction only) or `token__passthrough` (full passthrough)
   - `token__passthrough` still keeps the OpenAI compatibility layer: gateway-only fields are stripped before forwarding, and Chat/Responses parameter compatibility is preserved
+
+Docker-specific notes:
+
+- The stock compose file already injects `8317:cli-proxy-api`, `8080:sub2api`, and `3000:aiclient2api` via `AEGIS_DOCKER_UPSTREAMS`.
+- Those injected mappings only work if the AegisGate container can resolve and reach the upstream service name on a shared Docker network.
+- The stock compose file ships external network attachments for CLIProxyAPI and Sub2API only. If you want `3000:aiclient2api` to work as a Docker service mapping, add the appropriate network wiring yourself or override/remove that mapping and use host-port routing instead.
 
 ### Scenario 2: Remote Upstream
 
@@ -196,8 +216,9 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 
 - **OpenAI-compatible** (full security pipeline): `POST /v1/chat/completions`, `POST /v1/responses`
 - **Anthropic Messages**: `POST /v1/messages` — full security pipeline; supports native pass-through to Anthropic-compatible upstreams, or protocol conversion to OpenAI Responses via token `compat` mode
-- **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` (requires `x-target-url` header)
-- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; use this for non-OpenAI providers that need transparent proxying
+- **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` — requires `x-target-url`, and the target host must also be present in `AEGIS_V2_TARGET_ALLOWLIST` because empty allowlist is fail-closed
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; by default it still runs the v1 request/response safety pipeline, and only `__passthrough` or upstream whitelist bypass skips filtering
+- **Relay-compatible endpoint**: `POST /relay/generate` — disabled by default; enable with `AEGIS_ENABLE_RELAY_ENDPOINT=true`. This endpoint maps relay-style payloads to `/v1/chat/completions` and requires internal `x-upstream-base` and `gateway-key` headers
 
 Compatibility notes:
 
@@ -260,33 +281,50 @@ When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.j
 
 ### Security Pipeline
 
-**Request side:** PII redaction → exact-value redaction → request sanitizer → RAG poison guard
+**Request side:** PII redaction → exact-value redaction → untrusted content guard → request sanitizer → RAG poison guard
 
-**Response side:** injection detector → anomaly detector → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
+**Response side:** anomaly detector → injection detector → RAG poison guard → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
 
 ### Error Response Format
 
-When the gateway rejects a request (authentication failure, invalid token, rate limit, blocked content), it returns a structured JSON error:
+AegisGate does not use one single JSON error envelope for every route. Current behavior falls into three families:
+
+```json
+{
+  "error": "token_not_found",
+  "detail": "token invalid or expired"
+}
+```
 
 ```json
 {
   "error": {
-    "code": "<error_code>",
     "message": "<human-readable reason>",
-    "aegisgate": { ... }
-  }
+    "type": "aegisgate_error",
+    "code": "<error_code>"
+  },
+  "error_code": "<error_code>",
+  "detail": "<human-readable reason>",
+  "request_id": "<request_id>",
+  "aegisgate": { "...": "..." }
 }
 ```
 
-Common error codes:
+Use HTTP status plus the stable error code fields (`error`, `error.code`, `error_code`) rather than assuming every endpoint returns the same JSON shape.
+
+Common current error codes:
 
 | Code | Meaning |
 |------|---------|
-| `unauthorized` | Missing or invalid gateway key / token |
-| `forbidden` | Request blocked by security boundary or policy |
-| `invalid_filter_mode` | Unrecognized `x-aegis-filter-mode` value |
-| `rate_limited` | Too many requests from the same source |
-| `request_too_large` | Request body exceeds `AEGIS_MAX_REQUEST_BODY_BYTES` |
+| `token_not_found` | Token route is missing, deleted, or not persisted |
+| `token_route_required` | Non-token `/v1` or `/v2` access rejected by the security boundary |
+| `invalid_filter_mode` | Unrecognized filter-mode token suffix such as `__foo` |
+| `gateway_key_invalid` | Admin request supplied the wrong `gateway_key` |
+| `missing_params` | Required JSON fields are missing on admin endpoints |
+| `request_body_too_large` | Request body exceeds `AEGIS_MAX_REQUEST_BODY_BYTES` |
+| `missing_target_url_header` | Current v2 code reused for missing `x-target-url`, malformed target URL, or target host not allowlisted |
+| `upstream_unreachable` | Gateway could not connect to the upstream |
+| `upstream_http_error` | Upstream returned 4xx/5xx and the gateway forwarded the failure |
 
 Filter pipeline results may also include an `aegisgate` metadata object in successful responses, containing risk scores and disposition information.
 
@@ -294,19 +332,20 @@ Filter pipeline results may also include an `aegisgate` metadata object in succe
 
 | Header | Direction | Description |
 |--------|-----------|-------------|
-| `x-aegis-filter-mode` | Client -> Gateway | Set to `passthrough` to skip redaction/sanitization, or `redact` (default). Also settable via token path suffix: `token__passthrough` / `token__redact`. |
-| `x-aegis-redaction-whitelist` | Client -> Gateway | Comma-separated list of redaction keys to exempt from redaction (e.g., field names that look like secrets but are safe). |
+| `x-target-url` | Client -> Gateway | Required on v2 token routes. Must be a complete `http://` or `https://` URL, and the hostname must be allowed by `AEGIS_V2_TARGET_ALLOWLIST`. |
 | `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
+| `x-aegis-filter-mode` | Gateway internal | Derived from the token URL suffix (`__redact` / `__passthrough`) and re-injected by the gateway. Client-supplied values are stripped before inner handlers run. |
+| `x-aegis-redaction-whitelist` | Gateway internal | Derived from token `whitelist_key` bindings and injected by the gateway. Client-supplied values are stripped or ignored. |
 
 ### Filter Modes (Passthrough / Redact-Only)
 
-AegisGate supports three filter modes, selectable per-request via a token path suffix or HTTP header. This lets you trade security strictness for performance or compatibility as needed.
+AegisGate supports three filter modes on token routes. Select them with the token URL suffix. Client-supplied `x-aegis-filter-mode` headers are stripped, and direct `/v1/...` mode always uses full protection.
 
-| Mode | Token URL Suffix | `x-aegis-filter-mode` | Behavior |
-|------|-----------------|----------------------|----------|
-| **Full protection** (default) | `/v1/__gw__/t/<token>/...` | _(none / omit)_ | All enabled policy filters run on both request and response |
-| **Redact-only** | `/v1/__gw__/t/<token>__redact/...` | `redact` | Only redaction filters run (`exact_value_redaction`, `redaction`, `restoration`); security detection is skipped |
-| **Passthrough** | `/v1/__gw__/t/<token>__passthrough/...` | `passthrough` | All filters skipped; request/response forwarded as-is to upstream |
+| Mode | Token URL Suffix | Behavior |
+|------|-----------------|----------|
+| **Full protection** (default) | `/v1/__gw__/t/<token>/...` | All enabled policy filters run on both request and response |
+| **Redact-only** | `/v1/__gw__/t/<token>__redact/...` | Only redaction filters run (`exact_value_redaction`, `redaction`, `restoration`); security detection is skipped |
+| **Passthrough** | `/v1/__gw__/t/<token>__passthrough/...` | All filters skipped; request/response forwarded as-is to upstream |
 
 **Examples with local port routing:**
 
@@ -327,8 +366,9 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 2. Works with both registered tokens and local port routing.
 3. Invalid suffixes (e.g., `__foo`) return `400 invalid_filter_mode`.
 4. Audit logs record the active filter mode (`filter_mode:redact` or `filter_mode:passthrough` security tag).
-5. **Passthrough** still preserves the minimal protocol compatibility layer: gateway-internal fields are stripped, and Chat/Responses parameter conversion is maintained so upstream does not receive unknown fields.
-6. **Security warning:** Passthrough mode skips all security checks. Use only in trusted environments or for debugging.
+5. Direct `/v1/...` mode does not expose a client-settable filter-mode header; use token routes if you need `redact-only` or `passthrough`.
+6. **Passthrough** still preserves the minimal protocol compatibility layer: gateway-internal fields are stripped, and Chat/Responses parameter conversion is maintained so upstream does not receive unknown fields.
+7. **Security warning:** Passthrough mode skips all security checks. Use only in trusted environments or for debugging.
 
 ### Dangerous Content Handling
 
@@ -356,12 +396,15 @@ Key environment variables (set in `config/.env`):
 |----------|---------|-------------|
 | `AEGIS_HOST` | `127.0.0.1` | Listen address |
 | `AEGIS_PORT` | `18080` | Listen port |
-| `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL (no token needed) |
+| `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
 | `AEGIS_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | `true` | Restrict access to loopback; set `false` for Docker |
+| `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | `false` | Enable numeric token host-port fallback such as `/v1/__gw__/t/8317/...` |
+| `AEGIS_DOCKER_UPSTREAMS` | _(empty)_ | Startup token -> Docker service mappings; same-name mappings override host-port fallback |
 | `AEGIS_ENABLE_V2_PROXY` | `true` | Enable v2 generic HTTP proxy |
+| `AEGIS_V2_TARGET_ALLOWLIST` | _(empty)_ | Required hostname allowlist for v2 targets; empty = deny all target hosts |
 | `AEGIS_ENABLE_REDACTION` | `true` | Enable PII redaction |
 | `AEGIS_ENABLE_INJECTION_DETECTOR` | `true` | Enable prompt injection detection |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | `false` | Force-block on dangerous command match |
@@ -370,6 +413,9 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | `600` | Upstream request timeout in seconds |
+| `AEGIS_ENABLE_BUILTIN_COMPAT_TOKENS` | `false` | Auto-inject built-in compat token(s) such as `claude-to-gpt` |
+| `AEGIS_COMPAT_ALLOWED_PORTS` | _(empty)_ | Required allowlist for compat token port routing; empty = deny all compat port routing |
+| `AEGIS_ENABLE_RELAY_ENDPOINT` | `false` | Enable optional `POST /relay/generate` relay-compatible endpoint |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
 | `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For |
 
@@ -418,7 +464,13 @@ For `/v1/responses`, forwarded upstream calls now carry `x-aegis-request-id`, an
 Optimization note (2026-03): Responses SSE frames that include explicit `event:` headers are now buffered and forwarded as full event frames instead of line-by-line. This prevents `event:` and `data:` lines from being reordered across `response.output_text.delta`, `response.output_text.done`, and `response.completed`.
 
 ### v2 returns `missing_target_url_header`
-The `x-target-url` header is required for v2 proxy requests. Include the full target URL with query string.
+Current v2 code reuses `missing_target_url_header` for three target-resolution failures:
+
+- the `x-target-url` header is missing or empty
+- the header value is not a complete `http://` or `https://` URL
+- the target hostname is not present in `AEGIS_V2_TARGET_ALLOWLIST`
+
+Include the full target URL with query string, and make sure the hostname is allowlisted first.
 
 ## License
 

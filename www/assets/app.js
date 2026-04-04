@@ -350,6 +350,51 @@ async function loadBootstrap() {
   await loadDocs(preferredDocId);
 }
 
+function getModalFocusableElements(container) {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((node) => !node.closest(".hidden"));
+}
+
+function openModal(modal, initialFocus) {
+  if (!modal || !modal.classList.contains("hidden")) return;
+  const active = document.activeElement;
+  modal._returnFocus = active && typeof active.focus === "function" ? active : null;
+  modal.classList.remove("hidden");
+  const target = initialFocus || getModalFocusableElements(modal)[0];
+  if (target && typeof target.focus === "function") target.focus();
+}
+
+function closeModal(modal) {
+  if (!modal) return;
+  modal.classList.add("hidden");
+  const returnFocus = modal._returnFocus;
+  modal._returnFocus = null;
+  if (returnFocus && document.contains(returnFocus) && typeof returnFocus.focus === "function") {
+    returnFocus.focus();
+  }
+}
+
+function trapModalFocus(modal, event) {
+  if (event.key !== "Tab") return;
+  const focusable = getModalFocusableElements(modal);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+    return;
+  }
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 // ─── Token Management ────────────────────────
 
 async function loadTokens() {
@@ -446,8 +491,7 @@ function openTokenModal() {
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.add("hidden");
   document.getElementById("modal-submit").textContent = "注册";
-  modal.classList.remove("hidden");
-  document.getElementById("modal-upstream").focus();
+  openModal(modal, document.getElementById("modal-upstream"));
 }
 
 function openEditModal(item) {
@@ -461,13 +505,11 @@ function openEditModal(item) {
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.remove("hidden");
   document.getElementById("modal-submit").textContent = "保存";
-  modal.classList.remove("hidden");
-  document.getElementById("modal-upstream").focus();
+  openModal(modal, document.getElementById("modal-upstream"));
 }
 
 function closeTokenModal() {
-  const modal = document.getElementById("token-modal");
-  if (modal) modal.classList.add("hidden");
+  closeModal(document.getElementById("token-modal"));
 }
 
 async function submitTokenModal() {
@@ -552,16 +594,18 @@ function bindTokenModal() {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) closeTokenModal();
     });
-  }
-  // Close on Escape (only when modal is visible)
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && overlay && !overlay.classList.contains("hidden")) closeTokenModal();
-  });
-  // Submit on Enter inside modal inputs (guard against double-submit)
-  if (overlay) {
     overlay.addEventListener("keydown", (e) => {
+      trapModalFocus(overlay, e);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeTokenModal();
+        return;
+      }
       const btn = overlay.querySelector("[data-action='submit-token']");
-      if (e.key === "Enter" && !e.shiftKey && btn && !btn.disabled) submitTokenModal();
+      if (e.key === "Enter" && !e.shiftKey && btn && !btn.disabled) {
+        e.preventDefault();
+        submitTokenModal();
+      }
     });
   }
 }
@@ -659,13 +703,11 @@ function openRedactModal() {
   if (!modal) return;
   document.getElementById("redact-modal-value").value = "";
   document.getElementById("redact-modal-error").textContent = "";
-  modal.classList.remove("hidden");
-  document.getElementById("redact-modal-value").focus();
+  openModal(modal, document.getElementById("redact-modal-value"));
 }
 
 function closeRedactModal() {
-  const modal = document.getElementById("redact-modal");
-  if (modal) modal.classList.add("hidden");
+  closeModal(document.getElementById("redact-modal"));
 }
 
 async function submitRedactModal() {
@@ -709,8 +751,15 @@ function bindRedactUI() {
   if (modal) {
     modal.addEventListener("click", (e) => { if (e.target === modal) closeRedactModal(); });
     modal.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeRedactModal();
-      if (e.key === "Enter" && !e.shiftKey && submitBtn && !submitBtn.disabled) submitRedactModal();
+      trapModalFocus(modal, e);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeRedactModal();
+      }
+      if (e.key === "Enter" && !e.shiftKey && submitBtn && !submitBtn.disabled) {
+        e.preventDefault();
+        submitRedactModal();
+      }
     });
   }
   loadRedactValues();
@@ -855,13 +904,11 @@ function openRuleModal(section, item) {
   const showKind = section === "command_patterns";
   const kindField = document.getElementById("rule-modal-kind-field");
   if (kindField) kindField.style.display = showKind ? "" : "none";
-  modal.classList.remove("hidden");
-  document.getElementById("rule-modal-id").focus();
+  openModal(modal, document.getElementById("rule-modal-id"));
 }
 
 function closeRuleModal() {
-  const modal = document.getElementById("rule-modal");
-  if (modal) modal.classList.add("hidden");
+  closeModal(document.getElementById("rule-modal"));
 }
 
 async function submitRuleModal() {
@@ -874,7 +921,7 @@ async function submitRuleModal() {
   const errEl = document.getElementById("rule-modal-error");
   errEl.textContent = "";
   if (!ruleId) { errEl.textContent = "请填写规则 ID"; return; }
-  if (!regex && section !== "direct_patterns") { errEl.textContent = "请填写正则表达式"; return; }
+  if (!regex) { errEl.textContent = "请填写正则表达式"; return; }
   const body = {id: ruleId, regex};
   if (kind) body.kind = kind;
   const submitBtn = document.getElementById("rule-modal-submit");
@@ -905,9 +952,9 @@ async function submitRuleModal() {
 }
 
 function bindRulesUI() {
-  document.querySelectorAll(".rules-tab").forEach((tab) => {
+  document.querySelectorAll("[data-rules-section]").forEach((tab) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll(".rules-tab").forEach((t) => t.classList.remove("active"));
+      document.querySelectorAll("[data-rules-section]").forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
       currentRulesSection = tab.dataset.rulesSection;
       loadRules(currentRulesSection);
@@ -942,8 +989,18 @@ function bindRulesUI() {
   if (ruleModal) {
     ruleModal.addEventListener("click", (e) => { if (e.target === ruleModal) closeRuleModal(); });
     ruleModal.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeRuleModal();
-      if (e.key === "Enter" && !e.shiftKey) { const btn = document.getElementById("rule-modal-submit"); if (btn && !btn.disabled) submitRuleModal(); }
+      trapModalFocus(ruleModal, e);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeRuleModal();
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        const btn = document.getElementById("rule-modal-submit");
+        if (btn && !btn.disabled) {
+          e.preventDefault();
+          submitRuleModal();
+        }
+      }
     });
   }
   // Load default section
@@ -966,17 +1023,47 @@ async function loadKeys() {
   } catch (_err) {}
 }
 
+function keyLabel(keyType, rotated = false) {
+  const labels = {
+    gateway: "网关密钥",
+    proxy_token: "代理令牌",
+    fernet: "Fernet 加密密钥",
+  };
+  const base = labels[keyType] || keyType;
+  return rotated ? `${base}（已轮换）` : base;
+}
+
+function formatKeySummary(data, {rotated = false} = {}) {
+  const lines = [];
+  if (rotated) {
+    lines.push("已完成轮换。UI 不回显明文密钥，请使用下面的掩码和指纹核对服务器上的新值。");
+  }
+  if (data && data.masked_value) {
+    lines.push(`掩码: ${data.masked_value}`);
+  }
+  if (data && data.key_fingerprint) {
+    lines.push(`指纹: ${data.key_fingerprint}`);
+  }
+  if (!lines.length) {
+    lines.push("无可显示的密钥摘要。");
+  }
+  return lines.join("\n");
+}
+
+function showKeyModal(keyType, data, {rotated = false} = {}) {
+  const modal = document.getElementById("key-modal");
+  const titleEl = document.getElementById("key-modal-title");
+  const valueEl = document.getElementById("key-modal-value");
+  if (!modal) return;
+  if (titleEl) titleEl.textContent = keyLabel(keyType, rotated);
+  if (valueEl) valueEl.textContent = formatKeySummary(data, {rotated});
+  openModal(modal, document.getElementById("key-modal-copy"));
+}
+
 async function viewKey(keyType) {
   try {
     const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
-    const modal = document.getElementById("key-modal");
-    const titleEl = document.getElementById("key-modal-title");
-    const valueEl = document.getElementById("key-modal-value");
-    if (!modal) return;
-    const labels = {gateway: "网关密钥", proxy_token: "代理令牌", fernet: "Fernet 加密密钥"};
-    if (titleEl) titleEl.textContent = labels[keyType] || keyType;
-    if (valueEl) valueEl.textContent = data.value || "";
-    modal.classList.remove("hidden");
+    showKeyModal(keyType, data);
   } catch (err) {
     alert(`查看失败: ${err.message}`);
   }
@@ -998,15 +1085,8 @@ async function rotateKey(keyType) {
     // session cookie and returns a fresh CSRF token — update it immediately so
     // subsequent requests (including loadKeys on modal close) don't get 401.
     if (data.csrf_token) uiCsrfToken = data.csrf_token;
-    const modal = document.getElementById("key-modal");
-    const titleEl = document.getElementById("key-modal-title");
-    const valueEl = document.getElementById("key-modal-value");
-    const labels = {gateway: "网关密钥（新）", proxy_token: "代理令牌（新）", fernet: "Fernet 密钥（新）"};
-    if (modal && titleEl && valueEl) {
-      titleEl.textContent = labels[keyType] || "新密钥";
-      valueEl.textContent = data.value || "";
-      modal.classList.remove("hidden");
-    }
+    const detail = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
+    showKeyModal(keyType, detail, {rotated: true});
   } catch (err) {
     alert(`更换失败: ${err.message}`);
   }
@@ -1023,7 +1103,7 @@ function bindKeysUI() {
   const cancelBtn = document.getElementById("key-modal-cancel");
   const copyBtn = document.getElementById("key-modal-copy");
   const modal = document.getElementById("key-modal");
-  function closeKeyModal() { if (modal) { modal.classList.add("hidden"); loadKeys(); } }
+  function closeKeyModal() { if (modal) { closeModal(modal); loadKeys(); } }
   if (closeBtn) closeBtn.addEventListener("click", closeKeyModal);
   if (cancelBtn) cancelBtn.addEventListener("click", closeKeyModal);
   if (copyBtn) copyBtn.addEventListener("click", () => {
@@ -1033,7 +1113,16 @@ function bindKeysUI() {
       setTimeout(() => { copyBtn.textContent = "复制"; }, 1500);
     }).catch(() => {});
   });
-  if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) closeKeyModal(); });
+  if (modal) {
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeKeyModal(); });
+    modal.addEventListener("keydown", (e) => {
+      trapModalFocus(modal, e);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeKeyModal();
+      }
+    });
+  }
   loadKeys();
 }
 

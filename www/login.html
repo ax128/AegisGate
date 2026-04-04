@@ -4,21 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AegisGate — 管理登录</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="/__ui__/assets/theme.js"></script>
     <link rel="stylesheet" href="/__ui__/assets/app.css">
-    <script>
-      (function() {
-        var savedTheme = localStorage.getItem('aegisgate_theme');
-        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
-        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
-      })();
-    </script>
   </head>
   <body class="login-page">
-    <button id="theme-toggle" class="btn-hdr btn-theme-float" type="button" title="切换主题">
+    <button id="theme-toggle" class="btn-hdr btn-theme-float" type="button" title="切换主题" aria-label="切换主题">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
       </svg>
@@ -59,7 +49,7 @@
             <p class="field-hint">密钥在首次启动时自动生成，查看文件 <code>config/aegis_gateway.key</code> 或启动日志获取</p>
           </div>
           <button type="submit" class="btn-login">登 录</button>
-          <div id="login-error" class="login-error"></div>
+          <div id="login-error" class="login-error" role="alert" aria-live="polite"></div>
         </form>
 
         <div class="login-notice">
@@ -68,7 +58,7 @@
             <line x1="12" y1="8" x2="12" y2="12"/>
             <line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
-          仅允许内网访问 · 使用 <code>AEGIS_GATEWAY_KEY</code> 作为密码 · 登录后可查看配置与文档
+          默认仅允许本机 loopback 访问 · 使用 <code>config/aegis_gateway.key</code> 文件内容作为密码 · 登录后可查看配置与文档
         </div>
 
         <div class="login-github">

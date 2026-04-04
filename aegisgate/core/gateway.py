@@ -11,6 +11,7 @@ The actual logic lives in:
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import re
 import time
@@ -146,6 +147,34 @@ _confirmation_cache_task: ConfirmationCacheTask | None = None
 _hot_reloader: HotReloader | None = None
 
 
+def _trusted_scope_id(kind: str, *parts: object) -> str:
+    normalized_parts = [str(part).strip() for part in parts if str(part).strip()]
+    if not normalized_parts:
+        return str(kind).strip() or "trusted"
+    digest = hashlib.sha256("|".join(normalized_parts).encode("utf-8")).hexdigest()[:12]
+    prefix = str(kind).strip() or "trusted"
+    return f"{prefix}:{digest}"
+
+
+def _assign_boundary_tenant_scope(
+    request: Request,
+    boundary: dict[str, object],
+    *,
+    source: str,
+) -> str:
+    existing = str(request.scope.get("aegis_tenant_id") or "").strip()
+    if existing:
+        boundary["tenant_id"] = existing
+        return existing
+
+    client_ip = _real_client_ip(request)
+    upstream_base = str(request.scope.get("aegis_upstream_base") or "").strip()
+    tenant_id = _trusted_scope_id(source, client_ip, upstream_base)
+    request.scope["aegis_tenant_id"] = tenant_id
+    boundary["tenant_id"] = tenant_id
+    return tenant_id
+
+
 def _initialize_observability() -> None:
     configure_logging(settings.log_level)
     init_tracing(settings.app_name)
@@ -182,7 +211,10 @@ def _observability_route_label(path: str) -> str:
     if path.startswith("/__ui__"):
         return "ui_page"
     if path.startswith("/__gw__/"):
-        return f"gw_{path.rsplit('/', 1)[-1]}"
+        action = path.rsplit("/", 1)[-1]
+        if action in {"register", "lookup", "unregister", "add", "remove"}:
+            return f"gw_{action}"
+        return "gw_api"
     if path == "/v1/chat/completions":
         return "v1_chat_completions"
     if path == "/v1/responses":
@@ -668,6 +700,7 @@ class GWTokenRewriteMiddleware:
         new_scope["raw_path"] = new_path.encode("utf-8")
         new_scope["aegis_token_authenticated"] = True
         new_scope["aegis_gateway_token"] = token
+        new_scope["aegis_tenant_id"] = _trusted_scope_id("token", token)
         new_scope["aegis_upstream_base"] = ub
         new_scope["aegis_redaction_whitelist_keys"] = wk
         new_scope["aegis_filter_mode"] = filter_mode  # None | "redact" | "passthrough"
@@ -778,6 +811,9 @@ async def security_boundary_middleware(request: Request, call_next):
         "replay_checked": False,
         "max_request_body_bytes": settings.max_request_body_bytes,
     }
+    injected_tenant_id = str(request.scope.get("aegis_tenant_id") or "").strip()
+    if injected_tenant_id:
+        boundary["tenant_id"] = injected_tenant_id
     request.state.security_boundary = boundary
     route_label = _observability_route_label(request.url.path)
     started_at = time.perf_counter()
@@ -958,13 +994,40 @@ async def security_boundary_middleware(request: Request, call_next):
                     request.scope["aegis_upstream_base"] = default_base
                     request.scope["aegis_token_authenticated"] = True
                     boundary["auth_verified"] = True
+                    _assign_boundary_tenant_scope(
+                        request,
+                        boundary,
+                        source="proxy",
+                    )
 
         if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
             default_base = (settings.upstream_base_url or "").strip()
             if default_base:
-                request.scope["aegis_upstream_base"] = default_base
-                request.scope["aegis_token_authenticated"] = True
-                logger.debug("using default upstream for v1 path=%s", request.url.path)
+                client_ip = _real_client_ip(request)
+                if _is_internal_ip(client_ip):
+                    request.scope["aegis_upstream_base"] = default_base
+                    request.scope["aegis_token_authenticated"] = True
+                    _assign_boundary_tenant_scope(
+                        request,
+                        boundary,
+                        source="internal",
+                    )
+                    logger.debug(
+                        "using default upstream for internal v1 path=%s client=%s",
+                        request.url.path,
+                        client_ip,
+                    )
+                else:
+                    logger.warning(
+                        "boundary reject non-internal default-upstream request path=%s client=%s",
+                        request.url.path,
+                        client_ip,
+                    )
+                    return await finish_drain(
+                        "token_route_required",
+                        403,
+                        "default upstream direct mode is internal-only; use /v1/__gw__/t/<token>/... routes",
+                    )
             else:
                 client_ip = _real_client_ip(request)
                 logger.warning(
@@ -986,7 +1049,21 @@ async def security_boundary_middleware(request: Request, call_next):
                 "token_route_required",
                 403,
                 "use /v2/__gw__/t/<token>/... routes for v2 proxy access",
-            )
+                )
+
+        if bool(request.scope.get("aegis_token_authenticated")) and not boundary.get(
+            "tenant_id"
+        ):
+            token = str(request.scope.get("aegis_gateway_token") or "").strip()
+            if token:
+                request.scope["aegis_tenant_id"] = _trusted_scope_id("token", token)
+                boundary["tenant_id"] = str(request.scope["aegis_tenant_id"])
+            elif protected_v1 or protected_v2:
+                _assign_boundary_tenant_scope(
+                    request,
+                    boundary,
+                    source="authenticated",
+                )
 
         header_conflict_reason, header_conflict_detail = _header_smuggling_conflict(
             request
@@ -1107,6 +1184,12 @@ async def security_boundary_middleware(request: Request, call_next):
                 )
 
             boundary["auth_verified"] = True
+            if not boundary.get("tenant_id"):
+                _assign_boundary_tenant_scope(
+                    request,
+                    boundary,
+                    source="hmac",
+                )
             logger.info("boundary hmac verified path=%s", request.url.path)
 
         try:

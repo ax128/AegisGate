@@ -320,6 +320,97 @@ async def _forward_json(
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
+def _normalized_host_for_sni(host_header: str) -> str | None:
+    host = (host_header or "").strip()
+    if not host:
+        return None
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            return None
+        normalized = host[1:end]
+    else:
+        # host:port → host ; plain host stays unchanged
+        normalized = host.rsplit(":", 1)[0] if ":" in host else host
+    normalized = normalized.strip()
+    if not normalized:
+        return None
+    try:
+        ipaddress.ip_address(normalized)
+        return None
+    except ValueError:
+        return normalized
+
+
+def _bound_connect_request(
+    headers: Mapping[str, str],
+    *,
+    host_header: str,
+    connect_url: str,
+) -> tuple[dict[str, str], dict[str, str] | None]:
+    bound_headers = dict(headers)
+    if host_header:
+        bound_headers["Host"] = host_header
+    sni_hostname = (
+        _normalized_host_for_sni(host_header)
+        if connect_url.lower().startswith("https://")
+        else None
+    )
+    extensions = {"sni_hostname": sni_hostname} if sni_hostname else None
+    return bound_headers, extensions
+
+
+async def _forward_json_pinned(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> tuple[int, dict[str, Any] | str]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    trace_request_id = _trace_request_id(headers)
+    logger.debug(
+        "forward_json pinned start request_id=%s url=%s targets=%d payload_bytes=%d",
+        trace_request_id,
+        url,
+        len(connect_urls),
+        len(body),
+    )
+    client = await _get_upstream_async_client()
+    last_error: httpx.HTTPError | None = None
+    for connect_url in connect_urls:
+        try:
+            bound_headers, extensions = _bound_connect_request(
+                headers, host_header=host_header, connect_url=connect_url
+            )
+            response = await client.post(
+                url=connect_url,
+                content=body,
+                headers=bound_headers,
+                extensions=extensions,
+            )
+            logger.debug(
+                "forward_json pinned done request_id=%s connect_url=%s status=%s",
+                trace_request_id,
+                connect_url,
+                response.status_code,
+            )
+            return response.status_code, _decode_json_or_text(response.content)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning(
+                "forward_json pinned http_error request_id=%s connect_url=%s error=%s",
+                trace_request_id,
+                connect_url,
+                str(exc) or "connection_failed_or_timeout",
+            )
+    detail = (
+        (str(last_error) or "").strip() if last_error is not None else ""
+    ) or "connection_failed_or_timeout"
+    raise RuntimeError(f"upstream_unreachable: {detail}") from last_error
+
+
 async def _forward_stream_lines(
     url: str,
     payload: dict[str, Any],
@@ -359,3 +450,63 @@ async def _forward_stream_lines(
             detail,
         )
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
+
+
+async def _forward_stream_lines_pinned(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> AsyncGenerator[bytes, None]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    trace_request_id = _trace_request_id(headers)
+    logger.debug(
+        "forward_stream pinned start request_id=%s url=%s targets=%d payload_bytes=%d",
+        trace_request_id,
+        url,
+        len(connect_urls),
+        len(body),
+    )
+    client = await _get_upstream_async_client()
+    last_error: httpx.HTTPError | None = None
+    for connect_url in connect_urls:
+        try:
+            bound_headers, extensions = _bound_connect_request(
+                headers, host_header=host_header, connect_url=connect_url
+            )
+            async with client.stream(
+                "POST",
+                url=connect_url,
+                content=body,
+                headers=bound_headers,
+                extensions=extensions,
+            ) as resp:
+                logger.debug(
+                    "forward_stream pinned connected request_id=%s connect_url=%s status=%s",
+                    trace_request_id,
+                    connect_url,
+                    resp.status_code,
+                )
+                if resp.status_code >= 400:
+                    detail = _safe_error_detail(
+                        _decode_json_or_text(await resp.aread())
+                    )
+                    raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
+                return
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning(
+                "forward_stream pinned http_error request_id=%s connect_url=%s error=%s",
+                trace_request_id,
+                connect_url,
+                str(exc) or "connection_failed_or_timeout",
+            )
+    detail = (
+        (str(last_error) or "").strip() if last_error is not None else ""
+    ) or "connection_failed_or_timeout"
+    raise RuntimeError(f"upstream_unreachable: {detail}") from last_error

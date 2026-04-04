@@ -12,6 +12,12 @@ http://<网关IP>:18080/v1/__gw__/t/3000
 
 完成。客户端 `Authorization` 头直接透传到 AIClient-2-API。
 
+说明：
+
+- 仓库自带 Docker Compose 默认也会注入 `AEGIS_DOCKER_UPSTREAMS=3000:aiclient2api`，但默认**不会**同时附加 AIClient-2-API 的共享网络。
+- 如果 AegisGate 容器无法解析或访问 `aiclient2api`，这个服务映射不会生效；此时应优先把 AIClient-2-API 的 `3000` 端口映射到宿主机，并使用本地端口路由。
+- 如果你自行补齐了共享网络，也可以保留 `3000:aiclient2api` 这种 Docker 服务映射。
+
 ## 远程部署（不在同一台服务器）
 
 注册 token 绑定远程地址：
