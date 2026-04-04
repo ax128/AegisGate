@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     postgres_dsn: str = ""
     postgres_schema: str = "public"
     max_request_body_bytes: int = 12_000_000
-    max_messages_count: int = 300
+    max_messages_count: int = 500
     max_content_length_per_message: int = 250_000
     max_pending_payload_bytes: int = 1_200_000
     max_response_length: int = 2_000_000
@@ -91,9 +91,16 @@ class Settings(BaseSettings):
     # 开启后 /v1/__gw__/t/8080/chat/completions → http://host.docker.internal:8080/v1/chat/completions
     # 全局模型映射配置（config/model_map.json），compat 转换时使用
     compat_model_map_path: str = "config/model_map.json"
+    # 是否自动注入内置 compat token（例如 "claude-to-gpt"）。
+    # 安全默认：关闭。生产环境不建议开启（避免可预测 token 被滥用）。
+    enable_builtin_compat_tokens: bool = False
     enable_local_port_routing: bool = False
     # 自定义 host（Docker 环境默认 host.docker.internal，裸机可改为 127.0.0.1）
     local_port_routing_host: str = "host.docker.internal"
+    # H-08: Comma-separated allowlist of ports permitted for compat port routing.
+    # Empty string = deny all compat port routing (safe default).
+    # Example: "8317,8080,3000"
+    compat_allowed_ports: str = ""
     # Docker 上游自动注入：启动时自动注册 token → Docker 服务名映射，无需手动编辑 gw_tokens.json。
     # 格式：逗号分隔，每项为 token:service_name[:port]，port 省略时默认等于 token。
     # 示例：8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
@@ -131,6 +138,9 @@ class Settings(BaseSettings):
 
     enable_pending_prune_task: bool = True
     pending_prune_interval_seconds: int = 60
+    # SQLite mapping_store 定期清理间隔（秒）。用于删除超出 pending_data_ttl_seconds 的旧映射，
+    # 防止长时间运行导致磁盘膨胀。
+    mapping_prune_interval_seconds: int = 3600
     clear_pending_on_startup: bool = False
     audit_log_path: str = (
         "logs/audit.jsonl"  # 空串表示不写审计文件；Docker 下可设为 /tmp/audit.jsonl

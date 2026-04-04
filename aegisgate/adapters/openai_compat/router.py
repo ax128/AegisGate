@@ -29,7 +29,6 @@ from aegisgate.adapters.openai_compat.compat_bridge import (
     coerce_responses_output_to_chat_output,
     coerce_responses_stream_to_chat_stream,
     coerce_responses_stream_to_messages_stream,
-    convert_responses_payload_to_chat,
     passthrough_chat_response,
     passthrough_responses_output,
 )
@@ -45,6 +44,7 @@ from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - 
     _get_pipeline,
     clear_pending_confirmations_on_startup,
     close_runtime_dependencies,
+    prune_expired_mappings,
     prune_pending_confirmations,
     reload_runtime_dependencies,
     store,
@@ -139,11 +139,13 @@ semantic_service_client = SemanticServiceClient(
 )
 _GATEWAY_PREFIX = "/v1"
 _STREAM_WINDOW_MAX_CHARS = 8000
-_STREAM_BLOCK_HOLDBACK_EVENTS = 4
+# H-15: Holdback buffer must be >= 2 * check_interval so that frames accumulated
+# between two consecutive probes are always held back until the second probe runs.
+# With check_interval=4, at most 4 frames arrive between probes; we need 8 slots
+# to guarantee no frame escapes before the next safety check.
+_STREAM_FILTER_CHECK_INTERVAL = 4
+_STREAM_BLOCK_HOLDBACK_EVENTS = _STREAM_FILTER_CHECK_INTERVAL * 2  # = 8
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
-_STREAM_FILTER_CHECK_INTERVAL = (
-    4  # run response pipeline every N chunks (not every chunk)
-)
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
 _PENDING_PAYLOAD_KIND_KEY = "_aegisgate_pending_kind"
@@ -650,6 +652,41 @@ def _coerce_chat_stream_to_responses_stream(
         response,
         request_id=request_id,
         model=model,
+    )
+
+
+async def _handle_responses_payload_on_chat_endpoint(
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, Any] | JSONResponse | StreamingResponse:
+    """Preserve Responses payload structure on the chat endpoint.
+
+    Cursor-style clients sometimes send Responses-format transcripts to
+    ``/v1/chat/completions``. Routing them through the chat compat bridge
+    downgrades ``function_call_output`` items into chat ``role=tool`` text,
+    which then flows through the chat redaction path and can break tool
+    continuity. Reuse the native responses execution path instead, then
+    coerce the final output back to chat shape for the caller.
+    """
+    request.scope["aegis_upstream_route_path"] = "/v1/responses"
+    logger.info(
+        "chat_completions format_redirect: Responses API payload preserved, redirecting to responses handler"
+    )
+    redirected = await responses(payload, request)
+    req_preview = await _run_payload_transform(to_internal_responses, payload)
+    if isinstance(redirected, StreamingResponse):
+        return coerce_responses_stream_to_chat_stream(
+            redirected,
+            request_id=req_preview.request_id,
+            model=req_preview.model,
+            response_text_extractor=_extract_responses_output_text,
+        )
+    return coerce_responses_output_to_chat_output(
+        redirected,
+        fallback_request_id=req_preview.request_id,
+        fallback_session_id=req_preview.session_id,
+        fallback_model=req_preview.model,
+        text_extractor=_extract_responses_output_text,
     )
 
 
@@ -2974,13 +3011,66 @@ def _header_lookup(headers: Mapping[str, str], target: str) -> str:
     return ""
 
 
+def _derive_session_id(
+    payload: Mapping[str, Any],
+    request_id: str,
+    request_headers: Mapping[str, str] | None = None,
+) -> str:
+    """Derive a session_id scoped to the authenticated token.
+
+    H-21: Prevent cross-session forgery by prefixing the client-supplied session_id
+    with a short hash of the gateway token.  The token hash is injected into
+    headers by _effective_gateway_headers so it remains available in inner handlers
+    without threading the request object through.
+    """
+    import hashlib
+    client_session = str(payload.get("session_id") or request_id)
+    if request_headers:
+        token_hint = _header_lookup(request_headers, "x-aegis-token-hint").strip()
+        if token_hint:
+            return f"{token_hint}:{client_session}"
+    return client_session
+
+
+# C-02: Field names that must never be whitelisted from a client HTTP header.
+# Allowing a client to whitelist these would bypass PII redaction for the most
+# sensitive secrets.  The check is substring-based so partial names like
+# "access_token" or "api_secret" are also caught.
+_WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset({
+    "password", "passwd", "pwd",
+    "secret",
+    "token",
+    "api_key", "apikey",
+    "private_key", "private",
+    "credential", "credentials",
+    "authorization", "auth",
+    "bearer",
+    "session_key", "session_token",
+    "access_key",
+})
+
+
 def _extract_redaction_whitelist_keys(
     headers: Mapping[str, str] | None = None,
 ) -> set[str]:
     if not headers:
         return set()
     raw = _header_lookup(headers, _REDACTION_WHITELIST_HEADER)
-    return set(normalize_whitelist_keys(raw))
+    keys = set(normalize_whitelist_keys(raw))
+    if not keys:
+        return set()
+    # Block any key that contains or matches a denied security-sensitive name.
+    dangerous = {
+        k for k in keys
+        if any(denied in k.lower() for denied in _WHITELIST_HEADER_DENYLIST)
+    }
+    if dangerous:
+        logger.warning(
+            "redaction_whitelist_header_blocked dangerous_keys=%s",
+            sorted(dangerous),
+        )
+        keys -= dangerous
+    return keys
 
 
 def _resolve_tenant_id(
@@ -3497,6 +3587,7 @@ async def _execute_chat_stream_once(
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     req = await _run_payload_transform(to_internal_chat, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -3692,7 +3783,6 @@ async def _execute_chat_stream_once(
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
-        stream_cached_parts: list[str] = []
         pending_frames: list[bytes] = []
         chunk_count = 0
         saw_tool_call_chunk = False
@@ -3746,93 +3836,6 @@ async def _execute_chat_stream_once(
                             )
                             if blocked_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(blocked_reason)
-                            if _confirmation_approval_enabled():
-                                reason, summary = _confirmation_reason_and_summary(
-                                    ctx, source_text=stream_window
-                                )
-                                confirm_id = make_confirm_id()
-                                now_ts = int(time.time())
-                                cached_text = "".join(stream_cached_parts)
-                                pending_payload = _build_response_pending_payload(
-                                    route=req.route,
-                                    request_id=req.request_id,
-                                    session_id=req.session_id,
-                                    model=req.model,
-                                    fmt=_PENDING_FORMAT_CHAT_STREAM_TEXT,
-                                    content=cached_text,
-                                )
-                                (
-                                    pending_payload,
-                                    pending_payload_hash,
-                                    pending_payload_size,
-                                ) = _prepare_response_pending_payload(pending_payload)
-                                await _store_call(
-                                    "save_pending_confirmation",
-                                    confirm_id=confirm_id,
-                                    session_id=req.session_id,
-                                    route=req.route,
-                                    request_id=req.request_id,
-                                    model=req.model,
-                                    upstream_base=upstream_base,
-                                    pending_request_payload=pending_payload,
-                                    pending_request_hash=pending_payload_hash,
-                                    reason=reason,
-                                    summary=summary,
-                                    tenant_id=ctx.tenant_id,
-                                    created_at=now_ts,
-                                    expires_at=_confirmation_expires_at(
-                                        now_ts, PHASE_RESPONSE
-                                    ),
-                                    retained_until=now_ts
-                                    + max(60, int(settings.pending_data_ttl_seconds)),
-                                )
-                                ctx.response_disposition = "block"
-                                ctx.disposition_reasons.append(
-                                    "awaiting_user_confirmation"
-                                )
-                                ctx.security_tags.add("confirmation_required")
-                                ctx.enforcement_actions.append("confirmation:pending")
-                                confirmation_meta = _flow_confirmation_metadata(
-                                    confirm_id=confirm_id,
-                                    status="pending",
-                                    reason=reason,
-                                    summary=summary,
-                                    phase=PHASE_RESPONSE,
-                                    payload_omitted=False,
-                                    action_token=make_action_bind_token(
-                                        f"{confirm_id}|{reason}|{summary}"
-                                    ),
-                                )
-                                message_text = _build_confirmation_message(
-                                    confirm_id=confirm_id,
-                                    reason=reason,
-                                    summary=summary,
-                                    phase=PHASE_RESPONSE,
-                                )
-                                logger.info(
-                                    "chat stream requires confirmation request_id=%s confirm_id=%s reason=%s",
-                                    ctx.request_id,
-                                    confirm_id,
-                                    blocked_reason,
-                                )
-                                logger.info(
-                                    "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
-                                    ctx.request_id,
-                                    confirm_id,
-                                    req.route,
-                                    _PENDING_FORMAT_CHAT_STREAM_TEXT,
-                                    pending_payload_size,
-                                )
-                                yield _stream_confirmation_sse_chunk(
-                                    ctx,
-                                    req.model,
-                                    req.route,
-                                    message_text,
-                                    confirmation_meta,
-                                )
-                                yield _stream_done_sse_chunk()
-                                stream_end_reason = "policy_confirmation"
-                                return
                             ctx.response_disposition = "sanitize"
                             ctx.enforcement_actions.append(
                                 "auto_sanitize:stream_buffered_patch"
@@ -3856,7 +3859,6 @@ async def _execute_chat_stream_once(
 
                 if chunk_text:
                     stream_window = _trim_stream_window(stream_window, chunk_text)
-                    stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
                 if tool_calls:
@@ -3906,92 +3908,6 @@ async def _execute_chat_stream_once(
                         )
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
-
-                        if _confirmation_approval_enabled():
-                            reason, summary = _confirmation_reason_and_summary(
-                                ctx, source_text=stream_window
-                            )
-                            confirm_id = make_confirm_id()
-                            now_ts = int(time.time())
-                            cached_text = "".join(stream_cached_parts)
-                            pending_payload = _build_response_pending_payload(
-                                route=req.route,
-                                request_id=req.request_id,
-                                session_id=req.session_id,
-                                model=req.model,
-                                fmt=_PENDING_FORMAT_CHAT_STREAM_TEXT,
-                                content=cached_text,
-                            )
-                            (
-                                pending_payload,
-                                pending_payload_hash,
-                                pending_payload_size,
-                            ) = _prepare_response_pending_payload(pending_payload)
-                            await _store_call(
-                                "save_pending_confirmation",
-                                confirm_id=confirm_id,
-                                session_id=req.session_id,
-                                route=req.route,
-                                request_id=req.request_id,
-                                model=req.model,
-                                upstream_base=upstream_base,
-                                pending_request_payload=pending_payload,
-                                pending_request_hash=pending_payload_hash,
-                                reason=reason,
-                                summary=summary,
-                                tenant_id=ctx.tenant_id,
-                                created_at=now_ts,
-                                expires_at=_confirmation_expires_at(
-                                    now_ts, PHASE_RESPONSE
-                                ),
-                                retained_until=now_ts
-                                + max(60, int(settings.pending_data_ttl_seconds)),
-                            )
-                            ctx.response_disposition = "block"
-                            ctx.disposition_reasons.append("awaiting_user_confirmation")
-                            ctx.security_tags.add("confirmation_required")
-                            ctx.enforcement_actions.append("confirmation:pending")
-                            confirmation_meta = _flow_confirmation_metadata(
-                                confirm_id=confirm_id,
-                                status="pending",
-                                reason=reason,
-                                summary=summary,
-                                phase=PHASE_RESPONSE,
-                                payload_omitted=False,
-                                action_token=make_action_bind_token(
-                                    f"{confirm_id}|{reason}|{summary}"
-                                ),
-                            )
-                            message_text = _build_confirmation_message(
-                                confirm_id=confirm_id,
-                                reason=reason,
-                                summary=summary,
-                                phase=PHASE_RESPONSE,
-                            )
-                            logger.info(
-                                "chat stream requires confirmation request_id=%s confirm_id=%s reason=%s",
-                                ctx.request_id,
-                                confirm_id,
-                                blocked_reason,
-                            )
-                            logger.info(
-                                "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
-                                ctx.request_id,
-                                confirm_id,
-                                req.route,
-                                _PENDING_FORMAT_CHAT_STREAM_TEXT,
-                                pending_payload_size,
-                            )
-                            yield _stream_confirmation_sse_chunk(
-                                ctx,
-                                req.model,
-                                req.route,
-                                message_text,
-                                confirmation_meta,
-                            )
-                            yield _stream_done_sse_chunk()
-                            stream_end_reason = "policy_confirmation"
-                            break
 
                         ctx.response_disposition = "sanitize"
                         ctx.enforcement_actions.append(
@@ -4063,77 +3979,6 @@ async def _execute_chat_stream_once(
                         blocked_reason = decision
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
-                        if _confirmation_approval_enabled():
-                            reason, summary = _confirmation_reason_and_summary(
-                                ctx, source_text=stream_window
-                            )
-                            confirm_id = make_confirm_id()
-                            now_ts = int(time.time())
-                            cached_text = "".join(stream_cached_parts)
-                            pending_payload = _build_response_pending_payload(
-                                route=req.route,
-                                request_id=req.request_id,
-                                session_id=req.session_id,
-                                model=req.model,
-                                fmt=_PENDING_FORMAT_CHAT_STREAM_TEXT,
-                                content=cached_text,
-                            )
-                            (
-                                pending_payload,
-                                pending_payload_hash,
-                                pending_payload_size,
-                            ) = _prepare_response_pending_payload(pending_payload)
-                            await _store_call(
-                                "save_pending_confirmation",
-                                confirm_id=confirm_id,
-                                session_id=req.session_id,
-                                route=req.route,
-                                request_id=req.request_id,
-                                model=req.model,
-                                upstream_base=upstream_base,
-                                pending_request_payload=pending_payload,
-                                pending_request_hash=pending_payload_hash,
-                                reason=reason,
-                                summary=summary,
-                                tenant_id=ctx.tenant_id,
-                                created_at=now_ts,
-                                expires_at=_confirmation_expires_at(
-                                    now_ts, PHASE_RESPONSE
-                                ),
-                                retained_until=now_ts
-                                + max(60, int(settings.pending_data_ttl_seconds)),
-                            )
-                            ctx.response_disposition = "block"
-                            ctx.disposition_reasons.append("awaiting_user_confirmation")
-                            ctx.security_tags.add("confirmation_required")
-                            ctx.enforcement_actions.append("confirmation:pending")
-                            confirmation_meta = _flow_confirmation_metadata(
-                                confirm_id=confirm_id,
-                                status="pending",
-                                reason=reason,
-                                summary=summary,
-                                phase=PHASE_RESPONSE,
-                                payload_omitted=False,
-                                action_token=make_action_bind_token(
-                                    f"{confirm_id}|{reason}|{summary}"
-                                ),
-                            )
-                            message_text = _build_confirmation_message(
-                                confirm_id=confirm_id,
-                                reason=reason,
-                                summary=summary,
-                                phase=PHASE_RESPONSE,
-                            )
-                            yield _stream_confirmation_sse_chunk(
-                                ctx,
-                                req.model,
-                                req.route,
-                                message_text,
-                                confirmation_meta,
-                            )
-                            yield _stream_done_sse_chunk()
-                            stream_end_reason = "policy_confirmation"
-                            return
                         ctx.response_disposition = "sanitize"
                         ctx.enforcement_actions.append(
                             "auto_sanitize:stream_buffered_patch"
@@ -4272,6 +4117,7 @@ async def _execute_responses_stream_once(
     forced_upstream_base: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     req = await _run_payload_transform(to_internal_responses, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -4480,7 +4326,6 @@ async def _execute_responses_stream_once(
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
-        stream_cached_parts: list[str] = []
         pending_frames: list[bytes] = []
         chunk_count = 0
         saw_any_data_event = False
@@ -4617,7 +4462,6 @@ async def _execute_responses_stream_once(
                 is_content_event = bool(chunk_text or tool_calls)
                 if chunk_text:
                     stream_window = _trim_stream_window(stream_window, chunk_text)
-                    stream_cached_parts.append(chunk_text)
                     chunk_count += 1
 
                 if is_content_event:
@@ -4762,94 +4606,6 @@ async def _execute_responses_stream_once(
                         )
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_auto_sanitize"
-                else:
-                    now_ts = int(time.time())
-                    cached_text = "".join(stream_cached_parts)
-                    pending_payload = _build_response_pending_payload(
-                        route=req.route,
-                        request_id=req.request_id,
-                        session_id=req.session_id,
-                        model=req.model,
-                        fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                        content=cached_text,
-                    )
-                    pending_payload, pending_payload_hash, pending_payload_size = (
-                        _prepare_response_pending_payload(pending_payload)
-                    )
-                    await _store_call(
-                        "save_pending_confirmation",
-                        confirm_id=blocked_confirm_id,
-                        session_id=req.session_id,
-                        route=req.route,
-                        request_id=req.request_id,
-                        model=req.model,
-                        upstream_base=upstream_base,
-                        pending_request_payload=pending_payload,
-                        pending_request_hash=pending_payload_hash,
-                        reason=blocked_confirmation_reason,
-                        summary=blocked_confirmation_summary,
-                        tenant_id=ctx.tenant_id,
-                        created_at=now_ts,
-                        expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                        retained_until=now_ts
-                        + max(60, int(settings.pending_data_ttl_seconds)),
-                    )
-                    ctx.response_disposition = "block"
-                    if "awaiting_user_confirmation" not in ctx.disposition_reasons:
-                        ctx.disposition_reasons.append("awaiting_user_confirmation")
-                    ctx.security_tags.add("confirmation_required")
-                    ctx.enforcement_actions.append("confirmation:pending")
-                    logger.info(
-                        "responses stream requires confirmation request_id=%s confirm_id=%s reason=%s",
-                        ctx.request_id,
-                        blocked_confirm_id,
-                        blocked_reason,
-                    )
-                    logger.info(
-                        "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
-                        ctx.request_id,
-                        blocked_confirm_id,
-                        req.route,
-                        _PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                        pending_payload_size,
-                    )
-                    logger.info(
-                        "responses stream block drain completed request_id=%s confirm_id=%s saw_done=%s chunk_count=%s cached_chars=%s",
-                        ctx.request_id,
-                        blocked_confirm_id,
-                        saw_done,
-                        chunk_count,
-                        len(cached_text),
-                    )
-                    confirmation_meta = (
-                        blocked_confirmation_meta
-                        or _flow_confirmation_metadata(
-                            confirm_id=blocked_confirm_id,
-                            status="pending",
-                            reason=blocked_confirmation_reason,
-                            summary=blocked_confirmation_summary,
-                            phase=PHASE_RESPONSE,
-                            payload_omitted=False,
-                            action_token=make_action_bind_token(
-                                f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                            ),
-                        )
-                    )
-                    message_text = blocked_message_text or _build_confirmation_message(
-                        confirm_id=blocked_confirm_id,
-                        reason=blocked_confirmation_reason,
-                        summary=blocked_confirmation_summary,
-                        phase=PHASE_RESPONSE,
-                    )
-                    yield _stream_confirmation_sse_chunk(
-                        ctx,
-                        req.model,
-                        req.route,
-                        message_text,
-                        confirmation_meta,
-                    )
-                    yield _stream_done_sse_chunk()
-                    stream_end_reason = "policy_confirmation"
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 if _needs_final_stream_probe(
                     chunk_count=chunk_count,
@@ -4935,72 +4691,6 @@ async def _execute_responses_stream_once(
                         yield _stream_done_sse_chunk()
                         stream_end_reason = "policy_auto_sanitize"
                         return
-                    now_ts = int(time.time())
-                    cached_text = "".join(stream_cached_parts)
-                    pending_payload = _build_response_pending_payload(
-                        route=req.route,
-                        request_id=req.request_id,
-                        session_id=req.session_id,
-                        model=req.model,
-                        fmt=_PENDING_FORMAT_RESPONSES_STREAM_TEXT,
-                        content=cached_text,
-                    )
-                    pending_payload, pending_payload_hash, pending_payload_size = (
-                        _prepare_response_pending_payload(pending_payload)
-                    )
-                    await _store_call(
-                        "save_pending_confirmation",
-                        confirm_id=blocked_confirm_id,
-                        session_id=req.session_id,
-                        route=req.route,
-                        request_id=req.request_id,
-                        model=req.model,
-                        upstream_base=upstream_base,
-                        pending_request_payload=pending_payload,
-                        pending_request_hash=pending_payload_hash,
-                        reason=blocked_confirmation_reason,
-                        summary=blocked_confirmation_summary,
-                        tenant_id=ctx.tenant_id,
-                        created_at=now_ts,
-                        expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                        retained_until=now_ts
-                        + max(60, int(settings.pending_data_ttl_seconds)),
-                    )
-                    ctx.response_disposition = "block"
-                    if "awaiting_user_confirmation" not in ctx.disposition_reasons:
-                        ctx.disposition_reasons.append("awaiting_user_confirmation")
-                    ctx.security_tags.add("confirmation_required")
-                    ctx.enforcement_actions.append("confirmation:pending")
-                    confirmation_meta = (
-                        blocked_confirmation_meta
-                        or _flow_confirmation_metadata(
-                            confirm_id=blocked_confirm_id,
-                            status="pending",
-                            reason=blocked_confirmation_reason,
-                            summary=blocked_confirmation_summary,
-                            phase=PHASE_RESPONSE,
-                            payload_omitted=False,
-                            action_token=make_action_bind_token(
-                                f"{blocked_confirm_id}|{blocked_confirmation_reason}|{blocked_confirmation_summary}"
-                            ),
-                        )
-                    )
-                    message_text = blocked_message_text or _build_confirmation_message(
-                        confirm_id=blocked_confirm_id,
-                        reason=blocked_confirmation_reason,
-                        summary=blocked_confirmation_summary,
-                        phase=PHASE_RESPONSE,
-                    )
-                    yield _stream_confirmation_sse_chunk(
-                        ctx,
-                        req.model,
-                        req.route,
-                        message_text,
-                        confirmation_meta,
-                    )
-                    yield _stream_done_sse_chunk()
-                    stream_end_reason = "policy_confirmation"
-                    return
                 while pending_frames:
                     yield pending_frames.pop(0)
                 if saw_terminal_event:
@@ -5102,6 +4792,7 @@ async def _execute_chat_once(
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
     req = await _run_payload_transform(to_internal_chat, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -5534,6 +5225,7 @@ async def _execute_responses_once(
     forced_upstream_base: str | None = None,
 ) -> dict | JSONResponse:
     req = await _run_payload_transform(to_internal_responses, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -5964,6 +5656,7 @@ async def _execute_messages_stream_once(
     tenant_id: str = "default",
 ) -> StreamingResponse | JSONResponse:
     req = await _run_payload_transform(to_internal_messages, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -6462,6 +6155,7 @@ async def _execute_messages_once(
     tenant_id: str = "default",
 ) -> JSONResponse | PlainTextResponse:
     req = await _run_payload_transform(to_internal_messages, payload)
+    req.session_id = _derive_session_id(payload, req.request_id, request_headers)
     ctx = RequestContext(
         request_id=req.request_id,
         session_id=req.session_id,
@@ -6679,7 +6373,7 @@ async def _execute_generic_stream_once(
     tenant_id: str = "default",
 ) -> StreamingResponse | JSONResponse:
     request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
-    session_id = str(payload.get("session_id") or request_id)
+    session_id = _derive_session_id(payload, request_id, request_headers)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
     ctx = RequestContext(
         request_id=request_id,
@@ -6947,7 +6641,7 @@ async def _execute_generic_once(
     tenant_id: str = "default",
 ) -> JSONResponse | PlainTextResponse:
     request_id = str(payload.get("request_id") or f"generic-{int(time.time() * 1000)}")
-    session_id = str(payload.get("session_id") or request_id)
+    session_id = _derive_session_id(payload, request_id, request_headers)
     model = str(payload.get("model") or payload.get("target_model") or "generic-model")
     ctx = RequestContext(
         request_id=request_id,
@@ -7194,41 +6888,8 @@ async def _execute_generic_once(
 
 @router.post("/chat/completions")
 async def chat_completions(payload: dict, request: Request):
-    # --- 格式兼容：Responses API 格式发到 chat 端点时，请求侧转换 ---
-    # 参考 CLIProxyAPI：在请求侧将 Responses API 转为 Chat Completions，
-    # 这样上游返回原生 Chat Completions 格式，无需响应侧 coerce。
     if _looks_like_responses_payload(payload):
-        conv_id = _extract_conversation_id(payload)
-        original_tools = payload.get("tools")
-
-        # Tool definition caching (same logic as responses handler)
-        if isinstance(original_tools, list) and len(original_tools) > 0 and conv_id:
-            _tools_cache_put(conv_id, copy.deepcopy(original_tools))
-            logger.debug(
-                "chat_compat tools cached conv_id=%s tool_count=%d",
-                conv_id, len(original_tools),
-            )
-        elif isinstance(original_tools, list) and len(original_tools) == 0:
-            raw_input = payload.get("input")
-            has_function_calls = isinstance(raw_input, list) and any(
-                isinstance(item, dict)
-                and str(item.get("type", "")).strip().lower() == "function_call"
-                for item in raw_input
-            )
-            if has_function_calls:
-                cached = _tools_cache_get(conv_id) if conv_id else None
-                if cached:
-                    payload = {**payload, "tools": cached}
-                    logger.info(
-                        "chat_compat tools injected from cache conv_id=%s tool_count=%d",
-                        conv_id, len(cached),
-                    )
-
-        payload = convert_responses_payload_to_chat(payload)
-        logger.info(
-            "chat_completions format_convert: Responses API payload converted to Chat Completions, "
-            "messages=%d", len(payload.get("messages", [])),
-        )
+        return await _handle_responses_payload_on_chat_endpoint(payload, request)
 
     _log_request_if_debug(request, payload, "/v1/chat/completions")
     boundary = getattr(request.state, "security_boundary", {})
@@ -7237,7 +6898,7 @@ async def chat_completions(payload: dict, request: Request):
         payload=payload, headers=gateway_headers, boundary=boundary
     )
     request_id = str(payload.get("request_id") or "preview-chat")
-    session_id = str(payload.get("session_id") or request_id)
+    session_id = _derive_session_id(payload, request_id, gateway_headers)
     ctx_preview = RequestContext(
         request_id=request_id,
         session_id=session_id,
@@ -7495,7 +7156,7 @@ async def responses(payload: dict, request: Request):
         payload=payload, headers=gateway_headers, boundary=boundary
     )
     request_id = str(payload.get("request_id") or "preview-responses")
-    session_id = str(payload.get("session_id") or request_id)
+    session_id = _derive_session_id(payload, request_id, gateway_headers)
     ctx_preview = RequestContext(
         request_id=request_id,
         session_id=session_id,
@@ -7737,7 +7398,7 @@ async def messages(payload: dict, request: Request):
         payload=payload, headers=gateway_headers, boundary=boundary
     )
     request_id = str(payload.get("request_id") or "preview-messages")
-    session_id = str(payload.get("session_id") or request_id)
+    session_id = _derive_session_id(payload, request_id, gateway_headers)
     ctx_preview = RequestContext(
         request_id=request_id,
         session_id=session_id,

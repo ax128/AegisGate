@@ -255,8 +255,10 @@ def _should_bypass_v2_response_filter(target_url: str) -> bool:
 
 def _is_v2_target_allowlisted(hostname: str) -> bool:
     raw = (settings.v2_target_allowlist or "").strip()
+    # M-03: Empty allowlist = deny-all (fail-closed) rather than allow-all.
+    # Operators must explicitly list permitted hostnames in AEGIS_V2_TARGET_ALLOWLIST.
     if not raw:
-        return True
+        return False
     host = (hostname or "").strip().lower()
     if not host:
         return False
@@ -924,12 +926,10 @@ def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]
 
 
 def _extract_redaction_whitelist_keys(request: Request) -> set[str]:
+    # Security default: only allow whitelist keys injected by the gateway token middleware.
+    # Ignore any client-supplied x-aegis-redaction-whitelist header.
     keys = normalize_whitelist_keys(request.scope.get("aegis_redaction_whitelist_keys"))
-    if keys:
-        return set(keys)
-    return set(
-        normalize_whitelist_keys(request.headers.get(_REDACTION_WHITELIST_HEADER, ""))
-    )
+    return set(keys)
 
 
 def _request_prefers_streaming(

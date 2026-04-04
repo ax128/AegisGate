@@ -51,6 +51,10 @@ def _ensure_gateway_key() -> str:
                 os.write(fd, new_key.encode("utf-8"))
             finally:
                 os.close(fd)
+            try:
+                os.chmod(str(key_path), 0o600)
+            except OSError:
+                pass
             logger.info("gateway_key auto-generated and saved to %s", key_path)
         except PermissionError as exc:
             raise RuntimeError(
@@ -91,6 +95,10 @@ def _ensure_proxy_token() -> str:
                 os.write(fd, new_token.encode("utf-8"))
             finally:
                 os.close(fd)
+            try:
+                os.chmod(str(key_path), 0o600)
+            except OSError:
+                pass
             logger.info("proxy_token auto-generated and saved to %s", key_path)
         except PermissionError as exc:
             raise RuntimeError(

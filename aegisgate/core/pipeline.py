@@ -18,6 +18,17 @@ _SLOW_FILTER_WARN_S = 1.0
 _init_log_lock = threading.Lock()
 _init_logged: bool = False
 
+# H-07: Security-critical filters must never be silently forward-degraded when
+# storage_failure_action=forward.  Only storage-backed filters (e.g. RedactionFilter
+# with a storage dependency) should benefit from the forward fallback; pure security
+# logic filters must always block on error.
+_SECURITY_CRITICAL_FILTER_NAMES: frozenset[str] = frozenset({
+    "injection_detector",
+    "privilege_guard",
+    "rag_poison_guard",
+    "request_sanitizer",
+})
+
 
 def _should_log_filter_done(
     *, phase: str, is_stream: bool, report: dict[str, Any]
@@ -77,7 +88,8 @@ class Pipeline:
                 if phase == "request":
                     from aegisgate.config.settings import settings as _settings
 
-                    if _settings.storage_failure_action == "forward":
+                    is_security_critical = plugin.name in _SECURITY_CRITICAL_FILTER_NAMES
+                    if _settings.storage_failure_action == "forward" and not is_security_critical:
                         logger.warning(
                             "filter_error_degraded phase=%s filter=%s request_id=%s — forwarding due to storage_failure_action=forward",
                             phase,

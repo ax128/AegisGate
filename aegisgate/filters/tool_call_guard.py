@@ -12,6 +12,22 @@ from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 
 
+# H-10: Unconditionally blocked tool names regardless of whitelist configuration.
+# These represent system-execution tools that a language model must never invoke
+# unless explicitly whitelisted by the operator.
+_DANGEROUS_TOOL_NAMES: frozenset[str] = frozenset({
+    "bash", "shell", "sh", "zsh", "fish",
+    "eval", "exec", "execute",
+    "system", "popen", "subprocess",
+    "python", "ruby", "node", "perl",
+    "powershell", "cmd",
+    "curl", "wget",
+    "nc", "netcat",
+    "rm", "del", "rmdir",
+    "sudo", "su",
+})
+
+
 _READ_ONLY_CONTENT_TOOLS = frozenset(
     {
         # 只读文件操作
@@ -79,6 +95,12 @@ class ToolCallGuard(BaseFilter):
         self._tool_whitelist = {
             str(item) for item in guard_rules.get("tool_whitelist", [])
         }
+        if not self._tool_whitelist:
+            logger.warning(
+                "tool_call_guard: no tool_whitelist configured — "
+                "dangerous tool names will be blocked by built-in blacklist (%d entries)",
+                len(_DANGEROUS_TOOL_NAMES),
+            )
         self._default_action = str(guard_rules.get("default_action", "block"))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
@@ -258,7 +280,19 @@ class ToolCallGuard(BaseFilter):
                     action,
                 )
 
+            # H-10: Blacklist check — applies even when no whitelist is configured.
             lowered_name = tool_name.lower()
+            if lowered_name and lowered_name in _DANGEROUS_TOOL_NAMES:
+                if not self._tool_whitelist or tool_name not in self._tool_whitelist:
+                    violations.append(f"dangerous_tool_name:{tool_name}")
+                    action = self._apply_action(ctx, "disallowed_tool")
+                    blocked = blocked or action == "block"
+                    logger.warning(
+                        "dangerous_tool_name blocked request_id=%s tool=%s action=%s",
+                        ctx.request_id,
+                        tool_name,
+                        action,
+                    )
             if lowered_name not in _READ_ONLY_CONTENT_TOOLS:
                 # 文件写入工具仅检查注入链规则，跳过路径引用规则以降低误拦
                 patterns = (

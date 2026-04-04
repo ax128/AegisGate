@@ -227,10 +227,17 @@ async def _run_supported_v1_compat_route(
         forwarded_payloads.append(forwarded_payload)
         if route_name == "chat_from_responses":
             return 200, {
-                "id": "chat-compat-chat",
-                "object": "chat.completion",
+                "id": "resp-compat-chat",
+                "object": "response",
                 "model": "gpt-5.4",
-                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "output_text": "ok",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
             }
         if route_name == "responses_from_chat":
             return 200, {
@@ -259,14 +266,7 @@ async def _run_supported_v1_compat_route(
             },
             _build_request(path="/v1/chat/completions"),
         )
-        # After conversion, payload has messages instead of input.
-        # Extract user message content for redaction verification.
-        fwd_messages = forwarded_payloads[0].get("messages", [])
-        user_content = next(
-            (m["content"] for m in fwd_messages if m.get("role") == "user"),
-            "",
-        )
-        return result, user_content
+        return result, str(forwarded_payloads[0]["input"])
 
     if route_name == "responses_from_chat":
         result = await openai_router.responses(
@@ -794,3 +794,63 @@ async def test_explicit_secret_still_redacts_on_compat_routes(monkeypatch: pytes
         assert forwarded_text != secret_prompt
         assert "sk-live-" not in forwarded_text
         assert not isinstance(result, JSONResponse) or result.status_code != 403
+
+
+@pytest.mark.asyncio
+async def test_chat_from_responses_preserves_structured_tool_output_for_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forwarded_payloads: list[dict[str, Any]] = []
+    _install_route_mocks(monkeypatch)
+    _install_real_redaction_pipeline(monkeypatch)
+
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
+        forwarded_payloads.append(forwarded_payload)
+        return 200, {
+            "id": "resp-compat-structured",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": "ok",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+
+    result = await openai_router.chat_completions(
+        {
+            "model": "gpt-5.4",
+            "input": [
+                {"type": "message", "role": "user", "content": "lookup user 7"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup_profile",
+                    "arguments": '{"user_id": 7}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart",
+                },
+            ],
+            "request_id": "chat-compat-structured",
+            "session_id": "chat-compat-structured",
+        },
+        _build_request(path="/v1/chat/completions"),
+    )
+
+    assert isinstance(result, dict)
+    assert result["object"] == "chat.completion"
+    assert "messages" not in forwarded_payloads[0]
+    assert isinstance(forwarded_payloads[0].get("input"), list)
+    assert forwarded_payloads[0]["input"][1]["type"] == "function_call"
+    assert forwarded_payloads[0]["input"][2]["type"] == "function_call_output"
+    assert forwarded_payloads[0]["input"][2]["output"] == "[REDACTED:JWT]"

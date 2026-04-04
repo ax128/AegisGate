@@ -49,6 +49,7 @@ from aegisgate.core.gw_tokens import (
 )
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
+from aegisgate.core.audit import write_audit
 import hmac
 
 _WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
@@ -136,6 +137,15 @@ def register_ui_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=500, content={"error": "env_write_failed", "detail": str(exc)})
         from aegisgate.core.hot_reload import reload_settings
         reload_settings()
+        # H-20: Audit every successful configuration change for traceability.
+        write_audit({
+            "event": "config_updated",
+            "route": "/__ui__/api/config",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "updated_fields": {
+                str(k): str(v) for k, v in updated_fields.items()
+            },
+        })
         return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
 
     @app.get("/__ui__/api/docs/{doc_id}")
@@ -341,6 +351,11 @@ def register_ui_routes(app: FastAPI) -> None:
         if key_type == "fernet":
             from cryptography.fernet import Fernet
             from aegisgate.storage import crypto as _crypto_mod
+            # H-17: Save current key to history before rotation so existing
+            # ciphertext remains decodable via MultiFernet during the transition.
+            current_raw = _read_key_file("fernet")
+            if current_raw:
+                _crypto_mod.save_prev_key(current_raw.encode("utf-8"))
             new_key = Fernet.generate_key().decode("utf-8")
             _write_key_file(key_type, new_key)
             _crypto_mod._fernet_instance = None

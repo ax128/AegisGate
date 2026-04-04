@@ -292,10 +292,12 @@ def list_tokens() -> dict[str, dict[str, Any]]:
 
 
 def inject_builtin_compat_tokens() -> None:
-    """注入系统内置的 compat token。启动时自动调用，无需配置。
+    """注入系统内置的 compat token（受配置开关控制）。
 
     若用户已在 gw_tokens.json 中自定义了同名 token，保留用户配置不覆盖。
     """
+    if not bool(getattr(settings, "enable_builtin_compat_tokens", False)):
+        return
     _BUILTIN_COMPAT = {
         "claude-to-gpt": {
             "upstream_base": "",

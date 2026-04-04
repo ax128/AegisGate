@@ -13,6 +13,7 @@ from typing import Any
 from aegisgate.core.background_worker import ensure_worker_thread, run_queue_worker, shutdown_queue_worker
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
+from aegisgate.util.secure_file import open_append_0600
 
 
 _AUDIT_QUEUE: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=10000)
@@ -27,8 +28,7 @@ def _append_payload(payload: dict[str, Any]) -> None:
         return
     path = Path(path_str)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
+        with open_append_0600(path) as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except OSError as exc:
         logger.warning("audit worker write failed: %s", exc)

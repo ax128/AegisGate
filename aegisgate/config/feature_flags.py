@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from aegisgate.config.settings import settings
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class FeatureFlags:
     redaction: bool = settings.enable_redaction
     restoration: bool = settings.enable_restoration
@@ -26,9 +26,8 @@ feature_flags = FeatureFlags()
 
 
 def refresh_feature_flags() -> None:
-    # Build a fresh snapshot first, then copy fields from one consistent read
-    # of settings. This reduces skew across flags but is not a fully atomic
-    # swap for concurrent readers of the existing singleton instance.
+    # Atomically swap the snapshot reference so concurrent readers always
+    # observe a consistent set of flags.
     new = FeatureFlags(
         redaction=settings.enable_redaction,
         restoration=settings.enable_restoration,
@@ -44,5 +43,5 @@ def refresh_feature_flags() -> None:
         rag_poison_guard=settings.enable_rag_poison_guard,
         exact_value_redaction=settings.enable_exact_value_redaction,
     )
-    for field_name in FeatureFlags.__dataclass_fields__:
-        setattr(feature_flags, field_name, getattr(new, field_name))
+    global feature_flags
+    feature_flags = new

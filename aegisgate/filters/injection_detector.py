@@ -426,17 +426,28 @@ class PromptInjectionDetector(BaseFilter):
     def _score_signals(self, signals: dict[str, list[str]]) -> dict[str, Any]:
         feature_scores = {key: 0.0 for key in self._risk_weights}
         signal_breakdown: dict[str, dict[str, object]] = {}
+        # Track per-bucket severity list for weighted combination
+        bucket_severities: dict[str, list[float]] = {}
 
         for signal_name, hits in signals.items():
             if not hits:
                 continue
             bucket, severity = self._signal_profiles.get(signal_name, ("intent", 0.7))
-            feature_scores[bucket] = max(feature_scores.get(bucket, 0.0), severity)
+            bucket_severities.setdefault(bucket, []).append(severity)
             signal_breakdown[signal_name] = {
                 "bucket": bucket,
                 "severity": round(severity, 4),
                 "hits": len(hits),
             }
+
+        # H-11: Use probabilistic combination (1 - ∏(1 - sᵢ)) instead of max()
+        # so that multiple low-severity signals in the same bucket accumulate.
+        # Cap at 1.0 to avoid impossible probabilities.
+        for bucket, severities in bucket_severities.items():
+            combined = 1.0
+            for s in severities:
+                combined *= (1.0 - s)
+            feature_scores[bucket] = min(1.0, 1.0 - combined)
 
         raw, score, contributions = weighted_nonlinear_score(feature_scores, self._risk_weights, self._nonlinear_k)
         return {
@@ -450,11 +461,11 @@ class PromptInjectionDetector(BaseFilter):
         }
 
     # Categories that are expected in normal AI output (the model quoting or
-    # explaining prompt-injection techniques).  On the *response* side these
-    # signals are treated as discussion context even when the surrounding text
-    # lacks explicit research/educational markers, to avoid over-blocking
-    # legitimate explanatory content.
-    _RESPONSE_SIDE_BENIGN_CATEGORIES: frozenset[str] = frozenset({"direct", "typoglycemia", "html_markdown"})
+    # explaining prompt-injection techniques).  On the *response* side only
+    # typoglycemia is treated as inherently benign — direct injection commands
+    # and html_markdown (which covers <script> XSS) are still adversarial and
+    # must never be auto-downgraded.
+    _RESPONSE_SIDE_BENIGN_CATEGORIES: frozenset[str] = frozenset({"typoglycemia"})
 
     def _apply_action(
         self, ctx: RequestContext, category: str, *, contextual_discussion: bool = False, phase: str = "request"

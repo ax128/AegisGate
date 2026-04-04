@@ -10,6 +10,7 @@ import json
 from typing import Any, AsyncGenerator, Mapping
 from urllib.parse import urlparse, urlunparse
 
+import hashlib
 import httpx
 from fastapi import Request
 
@@ -128,6 +129,20 @@ def _trace_request_id(headers: Mapping[str, str]) -> str:
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
     """从请求中取 headers 供网关校验与转发使用（仅 Header，不含 Query）。"""
     headers = dict(request.headers)
+    # Strip any client-supplied internal trust headers. These are only allowed
+    # to be injected from the gateway middleware scope.
+    _strip = {
+        _UPSTREAM_SOURCE_HEADER,
+        _UPSTREAM_SOURCE_HEADER.replace("-", "_"),
+        _REDACTION_WHITELIST_HEADER,
+        _REDACTION_WHITELIST_HEADER.replace("-", "_"),
+        "x-aegis-filter-mode",
+        "x_aegis_filter_mode",
+        "x-aegis-token-hint",
+        "x_aegis_token_hint",
+    }
+    _strip_lower = {name.lower() for name in _strip}
+    headers = {k: v for k, v in headers.items() if k.lower() not in _strip_lower}
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()
@@ -140,6 +155,12 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_filter_mode = request.scope.get("aegis_filter_mode")
     if injected_filter_mode:
         headers["x-aegis-filter-mode"] = injected_filter_mode
+    # H-21: Inject a short token hash so inner handlers can namespace session_ids
+    # per authenticated token, preventing cross-session forgery.
+    injected_token = str(request.scope.get("aegis_gateway_token") or "").strip()
+    if injected_token:
+        token_hint = hashlib.sha256(injected_token.encode("utf-8")).hexdigest()[:12]
+        headers["x-aegis-token-hint"] = token_hint
     return headers
 
 

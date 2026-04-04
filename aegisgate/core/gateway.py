@@ -27,6 +27,7 @@ from aegisgate.adapters.openai_compat.router import (
     clear_pending_confirmations_on_startup,
     close_runtime_dependencies,
     close_semantic_async_client,
+    prune_expired_mappings,
     prune_pending_confirmations,
     reload_runtime_dependencies,
     router as openai_router,
@@ -311,6 +312,20 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         settings.enable_v2_proxy,
     )
 
+    # H-04: Warn loudly when HMAC auth is disabled in production.
+    if not settings.enable_request_hmac_auth and settings.env.lower() in ("prod", "production"):
+        logger.warning(
+            "SECURITY WARNING: AEGIS_ENABLE_REQUEST_HMAC_AUTH=false in production env. "
+            "Token authentication is the only access credential. "
+            "Enable HMAC (AEGIS_ENABLE_REQUEST_HMAC_AUTH=true + AEGIS_REQUEST_HMAC_SECRET=<secret>) "
+            "for an additional layer of request integrity protection."
+        )
+    elif settings.enable_request_hmac_auth and not (settings.request_hmac_secret or "").strip():
+        logger.warning(
+            "SECURITY WARNING: AEGIS_ENABLE_REQUEST_HMAC_AUTH=true but AEGIS_REQUEST_HMAC_SECRET is empty. "
+            "Set a strong secret in config/.env or AEGIS_REQUEST_HMAC_SECRET env var."
+        )
+
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
@@ -339,7 +354,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     global _confirmation_cache_task, _hot_reloader
     if settings.enable_pending_prune_task and _confirmation_cache_task is None:
         _confirmation_cache_task = ConfirmationCacheTask(
-            prune_func=prune_pending_confirmations
+            prune_func=prune_pending_confirmations,
+            mapping_prune_func=prune_expired_mappings,
         )
         await _confirmation_cache_task.start()
 
@@ -503,6 +519,59 @@ class GWTokenRewriteMiddleware:
                 )
                 port = int(port_str)
                 if 1024 <= port <= 65535:
+                    # H-08: Compat port routing is fail-closed: require an explicit allowlist.
+                    _allowed_ports_raw = (settings.compat_allowed_ports or "").strip()
+                    _allowed_ports = {
+                        int(p.strip())
+                        for p in _allowed_ports_raw.split(",")
+                        if p.strip().isdigit()
+                    }
+                    if not _allowed_ports:
+                        with trace_span(
+                            "gateway.request",
+                            http_method=method,
+                            http_route=route_label,
+                        ) as span:
+                            response = JSONResponse(
+                                status_code=403,
+                                content={
+                                    "error": "port_not_allowed",
+                                    "detail": "compat port routing disabled; set AEGIS_COMPAT_ALLOWED_PORTS to an explicit allowlist",
+                                },
+                            )
+                            _record_request_observability(
+                                method=method,
+                                route_label=route_label,
+                                started_at=started_at,
+                                status_code=response.status_code,
+                                reject_reason="port_not_allowed",
+                                span=span,
+                            )
+                            await response(scope, receive, send)
+                            return
+                    if port not in _allowed_ports:
+                        with trace_span(
+                            "gateway.request",
+                            http_method=method,
+                            http_route=route_label,
+                        ) as span:
+                            response = JSONResponse(
+                                status_code=403,
+                                content={
+                                    "error": "port_not_allowed",
+                                    "detail": f"port {port} is not in compat_allowed_ports",
+                                },
+                            )
+                            _record_request_observability(
+                                method=method,
+                                route_label=route_label,
+                                started_at=started_at,
+                                status_code=response.status_code,
+                                reject_reason="port_not_allowed",
+                                span=span,
+                            )
+                            await response(scope, receive, send)
+                            return
                     # 优先复用已注册的端口 token（如 docker_upstreams 注入的），
                     # 否则用 local_port_routing_host 构造
                     port_mapping = gw_tokens_get(port_str)

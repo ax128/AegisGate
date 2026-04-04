@@ -324,6 +324,17 @@ def prune_pending_confirmations(now_ts: int) -> int:
     return int(store.prune_pending_confirmations(now_ts))
 
 
+def prune_expired_mappings(max_age_seconds: int) -> int:
+    method = getattr(store, "prune_expired_mappings", None)
+    if not callable(method):
+        return 0
+    try:
+        return int(method(max_age_seconds=max_age_seconds))
+    except TypeError:
+        # Backward compatibility for implementations that only accept a positional argument.
+        return int(method(int(max_age_seconds)))
+
+
 def clear_pending_confirmations_on_startup() -> int:
     """启动时清空所有待确认记录，使重启后仅新请求的确认有效。"""
     return int(store.clear_all_pending_confirmations())

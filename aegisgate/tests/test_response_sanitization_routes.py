@@ -536,10 +536,19 @@ async def test_benign_compat_response_paths_do_not_lose_content(monkeypatch: pyt
     compat_cases = {
         "chat_from_responses": (
             {
-                "id": "chat-compat-benign",
-                "object": "chat.completion",
+                "id": "resp-compat-benign",
+                "object": "response",
                 "model": "gpt-5.4",
-                "choices": [{"message": {"role": "assistant", "content": "plain benign compat answer"}, "finish_reason": "stop"}],
+                "output_text": "plain benign compat answer",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "plain benign compat answer"}
+                        ],
+                    }
+                ],
             },
             lambda body: body["choices"][0]["message"]["content"],
         ),
@@ -588,16 +597,20 @@ async def test_chat_compat_response_sanitize_preserves_chat_shape(monkeypatch: p
         monkeypatch,
         route_name="chat_from_responses",
         upstream_body={
-            "id": "chat-compat-chat-1",
-            "object": "chat.completion",
+            "id": "resp-compat-chat-1",
+            "object": "response",
             "model": "gpt-5.4",
-            "choices": [
+            "output_text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
+            "output": [
                 {
-                    "message": {
-                        "role": "assistant",
-                        "content": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
-                    },
-                    "finish_reason": "stop",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"{safe_prefix}{dangerous_fragment}{safe_suffix}",
+                        }
+                    ],
                 }
             ],
         },

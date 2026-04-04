@@ -18,6 +18,7 @@ from aegisgate.core.background_worker import (
     shutdown_queue_worker,
 )
 from aegisgate.util.logger import logger
+from aegisgate.util.secure_file import open_append_0600
 
 _FALLBACK_LOG_PATH = Path("/tmp") / "aegisgate" / "dangerous_response_samples.jsonl"
 _LOG_RETENTION_DAYS = 10
@@ -75,8 +76,7 @@ def mark_text_with_spans(
 
 def _can_append_file(path: Path) -> bool:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8"):
+        with open_append_0600(path):
             pass
         return True
     except OSError:
@@ -209,7 +209,7 @@ def _append_payload(payload: dict[str, Any]) -> None:
     if path is None:
         return
     try:
-        with path.open("a", encoding="utf-8") as handle:
+        with open_append_0600(path) as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except OSError as exc:
         logger.warning("dangerous response log write failed: %s", exc)

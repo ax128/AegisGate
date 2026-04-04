@@ -12,7 +12,7 @@ import yaml
 
 from aegisgate.config.settings import settings
 from aegisgate.config.security_level import apply_threshold, normalize_security_level
-from aegisgate.config.feature_flags import feature_flags
+import aegisgate.config.feature_flags as feature_flags_module
 from aegisgate.core.context import RequestContext
 from aegisgate.core.errors import PolicyResolutionError
 from aegisgate.util.logger import logger
@@ -119,26 +119,27 @@ class PolicyEngine:
         data = self._load_policy(policy_name)
         configured = set(data.get("enabled_filters", []))
 
+        flags = feature_flags_module.feature_flags
         global_flags = {
-            "redaction": feature_flags.redaction,
-            "restoration": feature_flags.restoration,
-            "injection_detector": feature_flags.injection_detector,
-            "privilege_guard": feature_flags.privilege_guard,
-            "anomaly_detector": feature_flags.anomaly_detector,
-            "request_sanitizer": feature_flags.request_sanitizer,
-            "output_sanitizer": feature_flags.output_sanitizer,
-            "post_restore_guard": feature_flags.post_restore_guard,
-            "system_prompt_guard": feature_flags.system_prompt_guard,
-            "untrusted_content_guard": feature_flags.untrusted_content_guard,
-            "tool_call_guard": feature_flags.tool_call_guard,
-            "rag_poison_guard": feature_flags.rag_poison_guard,
-            "exact_value_redaction": feature_flags.exact_value_redaction,
+            "redaction": flags.redaction,
+            "restoration": flags.restoration,
+            "injection_detector": flags.injection_detector,
+            "privilege_guard": flags.privilege_guard,
+            "anomaly_detector": flags.anomaly_detector,
+            "request_sanitizer": flags.request_sanitizer,
+            "output_sanitizer": flags.output_sanitizer,
+            "post_restore_guard": flags.post_restore_guard,
+            "system_prompt_guard": flags.system_prompt_guard,
+            "untrusted_content_guard": flags.untrusted_content_guard,
+            "tool_call_guard": flags.tool_call_guard,
+            "rag_poison_guard": flags.rag_poison_guard,
+            "exact_value_redaction": flags.exact_value_redaction,
         }
         enabled = {item for item in configured if global_flags.get(item, False)}
         # Redaction is mandatory baseline protection and is not downgraded by security level.
-        if feature_flags.redaction:
+        if flags.redaction:
             enabled.add("redaction")
-        if feature_flags.exact_value_redaction:
+        if flags.exact_value_redaction:
             enabled.add("exact_value_redaction")
         raw_threshold = float(data.get("risk_threshold", 0.85))
         security_level = normalize_security_level()

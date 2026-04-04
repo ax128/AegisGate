@@ -238,6 +238,9 @@ When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.j
 
 3. Point your client at the compat token with a local port:
    ```bash
+   # Allow compat port routing (fail-closed by default)
+   export AEGIS_COMPAT_ALLOWED_PORTS=8317
+
    # Claude Code / Anthropic SDK
    export ANTHROPIC_BASE_URL=http://gateway:18080/v1/__gw__/t/claude-to-gpt/8317
    ```
@@ -363,6 +366,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_ENABLE_INJECTION_DETECTOR` | `true` | Enable prompt injection detection |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | `false` | Force-block on dangerous command match |
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | `12000000` | Maximum request body size in bytes |
+| `AEGIS_MAX_MESSAGES_COUNT` | `500` | Maximum number of messages allowed in `/v1/chat/completions` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | `600` | Upstream request timeout in seconds |

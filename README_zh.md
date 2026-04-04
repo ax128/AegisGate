@@ -716,7 +716,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_DANGEROUS_RESPONSE_LOG_PATH` | 危险样本日志基路径；运行时会自动按日期切分为 `dangerous_response_samples-YYYY-MM-DD` 形式，带扩展名时会保留扩展名，并自动清理 10 天前旧文件；不可写时回退 `/tmp/aegisgate/dangerous_response_samples-YYYY-MM-DD.jsonl` | `logs/dangerous_response_samples.jsonl` |
 | `AEGIS_GW_TOKENS_PATH` | token 映射文件路径 | `config/gw_tokens.json` |
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `12000000` |
-| `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `300` |
+| `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `500` |
 | `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `250000` |
 | `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `1200000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |

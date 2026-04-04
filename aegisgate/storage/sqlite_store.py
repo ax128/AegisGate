@@ -68,9 +68,22 @@ class SqliteKVStore(KVStore):
                   session_id TEXT NOT NULL,
                   request_id TEXT NOT NULL,
                   payload TEXT NOT NULL,
+                  created_at INTEGER NOT NULL DEFAULT 0,
                   PRIMARY KEY (session_id, request_id)
                 )
                 """
+            )
+            # C-03: Migrate existing mapping_store tables that lack created_at.
+            mapping_cols = {
+                str(row[1]).lower()
+                for row in conn.execute("PRAGMA table_info(mapping_store)").fetchall()
+            }
+            if "created_at" not in mapping_cols:
+                conn.execute(
+                    "ALTER TABLE mapping_store ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mapping_store_created_at ON mapping_store(created_at)"
             )
             conn.execute(
                 """
@@ -139,19 +152,21 @@ class SqliteKVStore(KVStore):
     def set_mapping(
         self, session_id: str, request_id: str, mapping: dict[str, str]
     ) -> None:
+        import time as _time
         self._cache.set(session_id, request_id, mapping)
         payload = encrypt_mapping(mapping)
+        now_ts = int(_time.time())
 
         def _write() -> None:
             with self._managed_connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO mapping_store (session_id, request_id, payload)
-                    VALUES (?, ?, ?)
+                    INSERT INTO mapping_store (session_id, request_id, payload, created_at)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(session_id, request_id)
-                    DO UPDATE SET payload=excluded.payload
+                    DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at
                     """,
-                    (session_id, request_id, payload),
+                    (session_id, request_id, payload, now_ts),
                 )
                 conn.commit()
 
@@ -467,6 +482,26 @@ class SqliteKVStore(KVStore):
                 return int(cursor.rowcount or 0)
 
         return self._with_retry(_delete)
+
+    def prune_expired_mappings(self, max_age_seconds: int = 86400) -> int:
+        """C-03: Remove mapping_store rows older than max_age_seconds.
+
+        Should be called periodically (e.g. hourly) to prevent indefinite
+        accumulation of stale PII mappings.
+        """
+        import time as _time
+        cutoff = int(_time.time()) - max(300, max_age_seconds)
+
+        def _prune() -> int:
+            with self._managed_connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM mapping_store WHERE created_at > 0 AND created_at < ?",
+                    (cutoff,),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
+        return self._with_retry(_prune)
 
 
 def _pending_row_to_dict(row: tuple) -> dict[str, Any]:

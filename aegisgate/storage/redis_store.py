@@ -89,8 +89,13 @@ class RedisKVStore(KVStore):
     def set_mapping(
         self, session_id: str, request_id: str, mapping: dict[str, str]
     ) -> None:
+        from aegisgate.config.settings import settings as _settings
         payload = encrypt_mapping(mapping)
-        self.client.set(self._mapping_key(session_id, request_id), payload)
+        # C-03/H-19: Always set a TTL so redaction mappings cannot accumulate
+        # indefinitely in Redis memory.  Use pending_data_ttl_seconds with a
+        # small safety buffer so in-flight restorations are not cut short.
+        ttl = max(3600, int(_settings.pending_data_ttl_seconds) + 300)
+        self.client.set(self._mapping_key(session_id, request_id), payload, ex=ttl)
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
         payload = self.client.get(self._mapping_key(session_id, request_id))
