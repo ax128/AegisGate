@@ -893,7 +893,20 @@ async def _open_v2_stream(
     raise last_error
 
 
+def _connection_scoped_headers(headers: Mapping[str, str]) -> set[str]:
+    scoped: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        for token in value.split(","):
+            name = token.strip().lower()
+            if name:
+                scoped.add(name)
+    return scoped
+
+
 def _build_forward_headers(request: Request) -> dict[str, str]:
+    connection_scoped = _connection_scoped_headers(request.headers)
     excluded = {
         "host",
         "content-length",
@@ -909,6 +922,8 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
         lowered = key.lower()
         if lowered in excluded:
             continue
+        if lowered in connection_scoped:
+            continue
         if lowered.startswith("x-aegis-") or lowered.startswith("x_aegis_"):
             continue
         headers[key] = value
@@ -916,10 +931,20 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
 
 
 def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    excluded = {"content-length", "content-encoding", *_HOP_BY_HOP_HEADERS}
+    connection_scoped = _connection_scoped_headers(headers)
+    excluded = {
+        "content-length",
+        "content-encoding",
+        "set-cookie",
+        "set-cookie2",
+        *_HOP_BY_HOP_HEADERS,
+    }
     out: dict[str, str] = {}
     for key, value in headers.items():
-        if key.lower() in excluded:
+        lowered = key.lower()
+        if lowered in excluded:
+            continue
+        if lowered in connection_scoped:
             continue
         out[key] = value
     return out

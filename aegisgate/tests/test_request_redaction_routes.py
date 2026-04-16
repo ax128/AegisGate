@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 from fastapi import Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
@@ -15,7 +16,10 @@ from aegisgate.storage.kv import KVStore
 def _seed_policy(ctx, policy_name: str = "default") -> dict[str, object]:
     ctx.enabled_filters = {"redaction"}
     ctx.risk_threshold = 0.85
-    return {"enabled_filters": set(ctx.enabled_filters), "threshold": ctx.risk_threshold}
+    return {
+        "enabled_filters": set(ctx.enabled_filters),
+        "threshold": ctx.risk_threshold,
+    }
 
 
 def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -34,16 +38,30 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return None
 
     monkeypatch.setattr(openai_router.policy_engine, "resolve", _seed_policy)
+
     async def _fake_resolve(headers):
         return ("http://upstream.test", (), "")
+
     monkeypatch.setattr(openai_router, "_resolve_upstream_base", _fake_resolve)
-    monkeypatch.setattr(openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}")
-    monkeypatch.setattr(openai_router, "_build_forward_headers", lambda headers: {"x-forwarded-for": "test"})
-    monkeypatch.setattr(openai_router, "_run_payload_transform", _inline_payload_transform)
-    monkeypatch.setattr(openai_router, "_run_response_pipeline", _identity_response_pipeline)
+    monkeypatch.setattr(
+        openai_router, "_build_upstream_url", lambda path, base: f"{base}{path}"
+    )
+    monkeypatch.setattr(
+        openai_router,
+        "_build_forward_headers",
+        lambda headers: {"x-forwarded-for": "test"},
+    )
+    monkeypatch.setattr(
+        openai_router, "_run_payload_transform", _inline_payload_transform
+    )
+    monkeypatch.setattr(
+        openai_router, "_run_response_pipeline", _identity_response_pipeline
+    )
     monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
     monkeypatch.setattr(openai_router, "run_store_io", _noop_store_io)
-    monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        openai_router, "debug_log_original", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(
         openai_router,
         "_write_audit_event",
@@ -85,7 +103,9 @@ class _MemoryKVStore(KVStore):
     def __init__(self) -> None:
         self._mappings: dict[tuple[str, str], dict[str, str]] = {}
 
-    def set_mapping(self, session_id: str, request_id: str, mapping: dict[str, str]) -> None:
+    def set_mapping(
+        self, session_id: str, request_id: str, mapping: dict[str, str]
+    ) -> None:
         self._mappings[(session_id, request_id)] = dict(mapping)
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
@@ -95,7 +115,9 @@ class _MemoryKVStore(KVStore):
         return self._mappings.pop((session_id, request_id), {})
 
     def save_pending_confirmation(self, **kwargs) -> None:  # pragma: no cover
-        raise AssertionError("unexpected confirmation persistence in request redaction test")
+        raise AssertionError(
+            "unexpected confirmation persistence in request redaction test"
+        )
 
     def get_latest_pending_confirmation(self, *args, **kwargs):  # pragma: no cover
         return None
@@ -103,14 +125,18 @@ class _MemoryKVStore(KVStore):
     def get_single_pending_confirmation(self, *args, **kwargs):  # pragma: no cover
         return None
 
-    def compare_and_update_pending_confirmation_status(self, **kwargs) -> bool:  # pragma: no cover
+    def compare_and_update_pending_confirmation_status(
+        self, **kwargs
+    ) -> bool:  # pragma: no cover
         return False
 
     def get_pending_confirmation(self, confirm_id: str):  # pragma: no cover
         return None
 
     def update_pending_confirmation_status(self, **kwargs) -> None:  # pragma: no cover
-        raise AssertionError("unexpected confirmation status update in request redaction test")
+        raise AssertionError(
+            "unexpected confirmation status update in request redaction test"
+        )
 
     def delete_pending_confirmation(self, **kwargs) -> bool:  # pragma: no cover
         return False
@@ -128,11 +154,139 @@ def _install_real_redaction_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run_real_redaction_only(pipeline, req: InternalRequest, ctx):
         return redaction_filter.process_request(req, ctx)
 
-    monkeypatch.setattr(openai_router, "_run_request_pipeline", _run_real_redaction_only)
+    monkeypatch.setattr(
+        openai_router, "_run_request_pipeline", _run_real_redaction_only
+    )
 
 
 def _explicit_secret_prompt() -> str:
     return "Authorization: Bearer " + "sk-live-" + "secretvalue123456"
+
+
+def test_build_chat_upstream_payload_rejects_shape_violation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "model": "gpt-5.4",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }
+
+    monkeypatch.setattr(
+        openai_router,
+        "_sanitize_chat_messages_for_upstream_with_hits",
+        lambda messages, whitelist_keys=None: ([], []),
+    )
+
+    with pytest.raises(ValueError, match="chat_input_shape_violation"):
+        openai_router._build_chat_upstream_payload(
+            payload,
+            [InternalMessage(role="user", content="hi")],
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_route_shape_violation_returns_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_route_mocks(monkeypatch)
+    _install_real_redaction_pipeline(monkeypatch)
+
+    monkeypatch.setattr(
+        openai_router,
+        "_sanitize_chat_messages_for_upstream_with_hits",
+        lambda messages, whitelist_keys=None: ([], []),
+    )
+
+    result = await openai_router._execute_chat_once(
+        payload={
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hello"}],
+            "request_id": "chat-shape-route",
+            "session_id": "chat-shape-route",
+        },
+        request_headers={},
+        request_path="/v1/chat/completions",
+        boundary={},
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 400
+    body = json.loads(_to_bytes(result.body).decode("utf-8"))
+    assert body["error_code"] == "invalid_request_payload_shape"
+    assert "chat_input_shape_violation" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_responses_route_shape_violation_returns_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_route_mocks(monkeypatch)
+    _install_real_redaction_pipeline(monkeypatch)
+
+    monkeypatch.setattr(
+        openai_router,
+        "_sanitize_responses_input_for_upstream_with_hits",
+        lambda value, whitelist_keys=None: ({}, []),
+    )
+
+    result = await openai_router._execute_responses_once(
+        payload={
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+            "request_id": "responses-shape-route",
+            "session_id": "responses-shape-route",
+        },
+        request_headers={},
+        request_path="/v1/responses",
+        boundary={},
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 400
+    body = json.loads(_to_bytes(result.body).decode("utf-8"))
+    assert body["error_code"] == "invalid_request_payload_shape"
+    assert "responses_input_shape_violation" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_messages_route_shape_violation_returns_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_route_mocks(monkeypatch)
+    _install_real_redaction_pipeline(monkeypatch)
+
+    monkeypatch.setattr(
+        openai_router,
+        "_sanitize_messages_system_for_upstream_with_hits",
+        lambda value, whitelist_keys=None: ({}, []),
+    )
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+
+    result = await openai_router.messages(
+        {
+            "model": "claude-sonnet-4.5",
+            "system": [{"type": "text", "text": "hello"}],
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+            "request_id": "messages-shape-route",
+            "session_id": "messages-shape-route",
+        },
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_upstream_route_path": "/v1/messages"},
+        ),
+    )
+
+    assert isinstance(result, JSONResponse)
+    assert result.status_code == 400
+    body = json.loads(_to_bytes(result.body).decode("utf-8"))
+    assert body["error_code"] == "invalid_request_payload_shape"
+    assert "messages_system_shape_violation" in body["detail"]
 
 
 async def _run_supported_v1_route(
@@ -140,12 +294,14 @@ async def _run_supported_v1_route(
     *,
     route_name: str,
     prompt_text: str,
-) -> tuple[dict | JSONResponse | StreamingResponse, str]:
+) -> tuple[dict | JSONResponse | StreamingResponse | PlainTextResponse, str]:
     forwarded_payloads: list[dict[str, Any]] = []
     _install_route_mocks(monkeypatch)
     _install_real_redaction_pipeline(monkeypatch)
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         if route_name == "chat":
             return 200, {
@@ -208,7 +364,10 @@ async def _run_supported_v1_route(
             "request_id": "messages-benign-examples",
             "session_id": "messages-benign-examples",
         },
-        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_upstream_route_path": "/v1/messages"},
+        ),
     )
     return result, forwarded_payloads[0]["messages"][0]["content"]
 
@@ -218,12 +377,14 @@ async def _run_supported_v1_compat_route(
     *,
     route_name: str,
     prompt_text: str,
-) -> tuple[dict | JSONResponse | StreamingResponse, str]:
+) -> tuple[dict | JSONResponse | StreamingResponse | PlainTextResponse, str]:
     forwarded_payloads: list[dict[str, Any]] = []
     _install_route_mocks(monkeypatch)
     _install_real_redaction_pipeline(monkeypatch)
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         if route_name == "chat_from_responses":
             return 200, {
@@ -251,7 +412,9 @@ async def _run_supported_v1_compat_route(
             "object": "response",
             "model": "gpt-5.4",
             "output_text": "ok",
-            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}
+            ],
         }
 
     monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
@@ -298,7 +461,9 @@ async def _run_supported_v1_compat_route(
 
 
 @pytest.mark.asyncio
-async def test_chat_request_redaction_preserves_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_request_redaction_preserves_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "gpt-5.4",
         "messages": [
@@ -339,7 +504,9 @@ async def test_chat_request_redaction_preserves_shape(monkeypatch: pytest.Monkey
             }
         )
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         return 200, {
             "id": "chat-1",
@@ -377,7 +544,9 @@ async def test_chat_request_redaction_preserves_shape(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_chat_request_redaction_does_not_return_403(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_request_redaction_does_not_return_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "gpt-5.4",
         "messages": [
@@ -385,7 +554,10 @@ async def test_chat_request_redaction_does_not_return_403(monkeypatch: pytest.Mo
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Authorization: Bearer sk-live-secret"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/diagram.png"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/diagram.png"},
+                    },
                 ],
             }
         ],
@@ -408,7 +580,9 @@ async def test_chat_request_redaction_does_not_return_403(monkeypatch: pytest.Mo
             }
         )
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         return 200, {
             "id": "chat-allow",
@@ -432,14 +606,19 @@ async def test_chat_request_redaction_does_not_return_403(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_responses_request_redaction_structured_input(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_responses_request_redaction_structured_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "gpt-5.4",
         "input": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Authorization: Bearer sk-live-secret"},
+                    {
+                        "type": "input_text",
+                        "text": "Authorization: Bearer sk-live-secret",
+                    },
                     {"type": "input_image", "image_url": "https://example.com/cat.png"},
                 ],
                 "provider_field": {"keep": True},
@@ -452,7 +631,10 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
     audit_calls = _install_route_mocks(monkeypatch)
 
     async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
-        assert req.messages[0].content == "Authorization: Bearer sk-live-secret [IMAGE_CONTENT]"
+        assert (
+            req.messages[0].content
+            == "Authorization: Bearer sk-live-secret [IMAGE_CONTENT]"
+        )
         return req.model_copy(
             update={
                 "messages": [
@@ -465,7 +647,9 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
             }
         )
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         return 200, {
             "id": "resp-1",
@@ -490,7 +674,10 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
         {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "Authorization: Bearer [REDACTED:TOKEN]"},
+                {
+                    "type": "input_text",
+                    "text": "Authorization: Bearer [REDACTED:TOKEN]",
+                },
                 {"type": "input_image", "image_url": "https://example.com/cat.png"},
             ],
             "provider_field": {"keep": True},
@@ -499,11 +686,17 @@ async def test_responses_request_redaction_structured_input(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_messages_request_redaction_preserves_anthropic_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "claude-sonnet-4.5",
         "system": [
-            {"type": "text", "text": "Authorization: Bearer sk-live-system-secret", "cache_control": {"type": "ephemeral"}},
+            {
+                "type": "text",
+                "text": "Authorization: Bearer sk-live-system-secret",
+                "cache_control": {"type": "ephemeral"},
+            },
             {"type": "text", "text": "Keep this guidance."},
         ],
         "messages": [
@@ -511,7 +704,10 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "token=sk-live-user-secret"},
-                    {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                    {
+                        "type": "image",
+                        "source": {"type": "url", "url": "https://example.com/cat.png"},
+                    },
                 ],
                 "metadata": {"segment": "alpha"},
             }
@@ -528,7 +724,10 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
     async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
         assert req.route == "/v1/messages"
         assert [message.role for message in req.messages] == ["system", "user"]
-        assert req.messages[0].content == "Authorization: Bearer sk-live-system-secret Keep this guidance."
+        assert (
+            req.messages[0].content
+            == "Authorization: Bearer sk-live-system-secret Keep this guidance."
+        )
         assert req.messages[1].content == "token=sk-live-user-secret [IMAGE_CONTENT]"
         return req.model_copy(
             update={
@@ -547,7 +746,9 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
             }
         )
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         return 200, {
             "id": "msg-1",
@@ -563,7 +764,10 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
 
     result = await openai_router.messages(
         payload,
-        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_upstream_route_path": "/v1/messages"},
+        ),
     )
 
     assert isinstance(result, (dict, JSONResponse))
@@ -582,7 +786,10 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
             "role": "user",
             "content": [
                 {"type": "text", "text": "token=[REDACTED:TOKEN]"},
-                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "https://example.com/cat.png"},
+                },
             ],
             "metadata": {"segment": "alpha"},
         }
@@ -593,16 +800,23 @@ async def test_messages_request_redaction_preserves_anthropic_shape(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_messages_stream_request_redaction_preserves_anthropic_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_messages_stream_request_redaction_preserves_anthropic_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "claude-sonnet-4.5",
-        "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
+        "system": [
+            {"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}
+        ],
         "messages": [
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "token=sk-live-user-secret"},
-                    {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                    {
+                        "type": "image",
+                        "source": {"type": "url", "url": "https://example.com/cat.png"},
+                    },
                 ],
             }
         ],
@@ -638,16 +852,21 @@ async def test_messages_stream_request_redaction_preserves_anthropic_shape(monke
         headers: dict[str, str],
     ):
         forwarded_payloads.append(forwarded_payload)
-        yield b"data: {\"type\":\"message_start\"}\n\n"
+        yield b'data: {"type":"message_start"}\n\n'
         yield b"data: [DONE]\n\n"
 
     monkeypatch.setattr(openai_router, "_run_request_pipeline", fake_request_pipeline)
-    monkeypatch.setattr(openai_router, "_forward_stream_lines", fake_forward_stream_lines)
+    monkeypatch.setattr(
+        openai_router, "_forward_stream_lines", fake_forward_stream_lines
+    )
     monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
 
     response = await openai_router.messages(
         payload,
-        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_upstream_route_path": "/v1/messages"},
+        ),
     )
 
     assert isinstance(response, StreamingResponse)
@@ -664,7 +883,10 @@ async def test_messages_stream_request_redaction_preserves_anthropic_shape(monke
             "role": "user",
             "content": [
                 {"type": "text", "text": "token=[REDACTED:TOKEN]"},
-                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "https://example.com/cat.png"},
+                },
             ],
         }
     ]
@@ -672,11 +894,20 @@ async def test_messages_stream_request_redaction_preserves_anthropic_shape(monke
 
 
 @pytest.mark.asyncio
-async def test_messages_request_redaction_avoids_generic_403(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_messages_request_redaction_avoids_generic_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = {
         "model": "claude-sonnet-4.5",
-        "system": [{"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}],
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "token=sk-live-user-secret"}]}],
+        "system": [
+            {"type": "text", "text": "Authorization: Bearer sk-live-system-secret"}
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "token=sk-live-user-secret"}],
+            }
+        ],
         "max_tokens": 256,
         "request_id": "messages-redaction-allow",
         "session_id": "messages-redaction-allow",
@@ -689,13 +920,21 @@ async def test_messages_request_redaction_avoids_generic_403(monkeypatch: pytest
         return req.model_copy(
             update={
                 "messages": [
-                    InternalMessage(role="system", content="[REDACTED:AUTH_BEARER]", source="system"),
-                    InternalMessage(role="user", content="[REDACTED:AWS_SECRET_ACCESS_KEY]", source="user"),
+                    InternalMessage(
+                        role="system", content="[REDACTED:AUTH_BEARER]", source="system"
+                    ),
+                    InternalMessage(
+                        role="user",
+                        content="[REDACTED:AWS_SECRET_ACCESS_KEY]",
+                        source="user",
+                    ),
                 ]
             }
         )
 
-    async def fake_forward_json(url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]):
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
         forwarded_payloads.append(forwarded_payload)
         return 200, {
             "id": "msg-allow",
@@ -711,7 +950,10 @@ async def test_messages_request_redaction_avoids_generic_403(monkeypatch: pytest
 
     result = await openai_router.messages(
         payload,
-        _build_request(path="/v1/messages", scope_updates={"aegis_upstream_route_path": "/v1/messages"}),
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_upstream_route_path": "/v1/messages"},
+        ),
     )
 
     assert forwarded_payloads
@@ -719,7 +961,9 @@ async def test_messages_request_redaction_avoids_generic_403(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_benign_examples_avoid_false_positives(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_benign_examples_avoid_false_positives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     benign_prompt = (
         "Review this infra note without redacting it: host api.service.internal resolves to 10.24.8.9, "
         "and the sample docs line is address: 123 Example Lane."
@@ -735,7 +979,9 @@ async def test_benign_examples_avoid_false_positives(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_benign_examples_do_not_trigger_403(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_benign_examples_do_not_trigger_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     benign_prompt = (
         "Security review snippet: the dev host admin.corp.internal points to 10.0.0.12 and "
         "the mock address field is address: 42 Example Road."
@@ -752,7 +998,9 @@ async def test_benign_examples_do_not_trigger_403(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_explicit_secret_still_redacts_on_supported_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_explicit_secret_still_redacts_on_supported_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     secret_prompt = _explicit_secret_prompt()
 
     for route_name in ("chat", "responses", "messages"):
@@ -766,7 +1014,25 @@ async def test_explicit_secret_still_redacts_on_supported_routes(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_benign_examples_avoid_false_positives_on_compat_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_marker_prefix_does_not_bypass_supported_route_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = "Authorization: Bearer sk-live-secretvalue123456 [REDACTED:FAKE]"
+
+    for route_name in ("chat", "responses", "messages"):
+        _, forwarded_text = await _run_supported_v1_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=prompt,
+        )
+        assert "sk-live-" not in forwarded_text
+        assert "[REDACTED:FAKE]" in forwarded_text
+
+
+@pytest.mark.asyncio
+async def test_benign_examples_avoid_false_positives_on_compat_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     benign_prompt = (
         "Review this infra note without redacting it: host api.service.internal resolves to 10.24.8.9, "
         "and the sample docs line is address: 123 Example Lane."
@@ -782,7 +1048,9 @@ async def test_benign_examples_avoid_false_positives_on_compat_routes(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_explicit_secret_still_redacts_on_compat_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_explicit_secret_still_redacts_on_compat_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     secret_prompt = _explicit_secret_prompt()
 
     for route_name in ("chat_from_responses", "responses_from_chat", "messages_compat"):
@@ -793,6 +1061,23 @@ async def test_explicit_secret_still_redacts_on_compat_routes(monkeypatch: pytes
         )
         assert forwarded_text != secret_prompt
         assert "sk-live-" not in forwarded_text
+        assert not isinstance(result, JSONResponse) or result.status_code != 403
+
+
+@pytest.mark.asyncio
+async def test_marker_prefix_does_not_bypass_compat_route_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = "Authorization: Bearer sk-live-secretvalue123456 [REDACTED:FAKE]"
+
+    for route_name in ("chat_from_responses", "responses_from_chat", "messages_compat"):
+        result, forwarded_text = await _run_supported_v1_compat_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=prompt,
+        )
+        assert "sk-live-" not in forwarded_text
+        assert "[REDACTED:FAKE]" in forwarded_text
         assert not isinstance(result, JSONResponse) or result.status_code != 403
 
 

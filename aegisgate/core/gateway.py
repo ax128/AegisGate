@@ -746,8 +746,15 @@ async def _drain_and_reject(
     status_code: int,
     detail: str | None = None,
 ) -> JSONResponse:
-    """Consume request body (prevent Starlette warnings) and return a blocked response."""
-    await request.body()
+    """Drain request stream and return a blocked response."""
+    try:
+        async for _ in request.stream():
+            pass
+    except RuntimeError:
+        # Stream may have already been consumed by earlier boundary checks.
+        pass
+    except Exception:
+        logger.debug("failed to drain request stream before reject", exc_info=True)
     boundary["rejected_reason"] = reason
     return _blocked_response(status_code=status_code, reason=reason, detail=detail)
 
@@ -800,6 +807,46 @@ def _header_smuggling_conflict(request: Request) -> tuple[str | None, str | None
         )
 
     return None, None
+
+
+async def _read_request_body_limited(
+    request: Request,
+    *,
+    max_bytes: int,
+) -> tuple[bytes, int, bool]:
+    """Read request body from stream with a hard size cap.
+
+    Returns: (body, total_size, exceeded_limit)
+    """
+    if max_bytes <= 0:
+        body = await request.body()
+        return body, len(body), False
+
+    total = 0
+    exceeded = False
+    collected = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        chunk_size = len(chunk)
+        total += chunk_size
+        if exceeded:
+            continue
+        if total <= max_bytes:
+            collected.extend(chunk)
+            continue
+        keep = max_bytes - (total - chunk_size)
+        if keep > 0:
+            collected.extend(chunk[:keep])
+        exceeded = True
+
+    if exceeded:
+        return b"", total, True
+
+    body = bytes(collected)
+    # Preserve body for downstream handlers after stream consumption.
+    request._body = body  # type: ignore[attr-defined]
+    return body, total, False
 
 
 @app.middleware("http")
@@ -1104,13 +1151,16 @@ async def security_boundary_middleware(request: Request, call_next):
                 return await finish_drain("request_body_too_large", 413)
             boundary["request_body_size"] = content_length
         elif settings.max_request_body_bytes > 0 and method in {"POST", "PUT", "PATCH"}:
-            cached_body = await request.body()
-            boundary["request_body_size"] = len(cached_body)
-            if len(cached_body) > settings.max_request_body_bytes:
+            cached_body, request_size, exceeded = await _read_request_body_limited(
+                request,
+                max_bytes=settings.max_request_body_bytes,
+            )
+            boundary["request_body_size"] = request_size
+            if exceeded:
                 boundary["rejected_reason"] = "request_body_too_large"
                 logger.warning(
                     "boundary reject oversize request actual_size=%s max=%s path=%s",
-                    len(cached_body),
+                    request_size,
                     settings.max_request_body_bytes,
                     request.url.path,
                 )
@@ -1172,6 +1222,10 @@ async def security_boundary_middleware(request: Request, call_next):
                 timestamp=timestamp,
                 nonce=nonce,
                 body=body,
+                method=method,
+                path=request.url.path,
+                query=request.url.query,
+                content_type=request.headers.get("content-type", ""),
             )
             if not verify_hmac_signature(
                 secret=secret,

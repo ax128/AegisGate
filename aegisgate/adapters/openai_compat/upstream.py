@@ -121,6 +121,18 @@ def _header_value(headers: Mapping[str, str], target: str) -> str:
     return ""
 
 
+def _connection_scoped_headers(headers: Mapping[str, str]) -> set[str]:
+    scoped: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        for token in value.split(","):
+            name = token.strip().lower()
+            if name:
+                scoped.add(name)
+    return scoped
+
+
 def _trace_request_id(headers: Mapping[str, str]) -> str:
     request_id = _header_value(headers, _TRACE_REQUEST_ID_HEADER).strip()
     return request_id or "-"
@@ -245,6 +257,7 @@ def _is_upstream_whitelisted(upstream_base: str) -> bool:
 
 def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
     forwarded: dict[str, str] = {}
+    connection_scoped = _connection_scoped_headers(headers)
     excluded = {
         "host",
         "content-length",
@@ -257,6 +270,8 @@ def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
     for key, value in headers.items():
         lowered = key.lower()
         if lowered in excluded:
+            continue
+        if lowered in connection_scoped:
             continue
         if lowered.startswith("x-aegis-") or lowered.startswith("x_aegis_"):
             continue

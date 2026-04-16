@@ -90,6 +90,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _looks_like_gateway_confirmation_text,
     _looks_like_gateway_internal_history_text,
     _looks_like_gateway_upstream_recovery_notice_text,
+    _preserves_json_shape,
     _responses_function_output_redaction_patterns,
     _responses_relaxed_redaction_patterns,
     _sanitize_chat_messages_for_upstream_with_hits,
@@ -223,7 +224,12 @@ def _extract_conversation_id(payload: dict[str, Any]) -> str | None:
     """Extract a conversation/session identifier from request metadata."""
     metadata = payload.get("metadata")
     if isinstance(metadata, dict):
-        for key in ("cursorConversationId", "conversationId", "conversation_id", "session_id"):
+        for key in (
+            "cursorConversationId",
+            "conversationId",
+            "conversation_id",
+            "session_id",
+        ):
             val = metadata.get(key)
             if val and isinstance(val, str):
                 return val
@@ -296,6 +302,32 @@ async def _forward_json_with_pinning(
     return await _forward_json(url, payload, headers)
 
 
+def _stream_bootstrap_retries() -> int:
+    try:
+        retries = int(getattr(settings, "stream_bootstrap_retries", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, retries)
+
+
+def _is_retryable_stream_bootstrap_error(detail: str) -> bool:
+    normalized = (detail or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith("upstream_unreachable:"):
+        return True
+    if not normalized.startswith("upstream_http_error:"):
+        return False
+    parts = normalized.split(":", 2)
+    if len(parts) < 2:
+        return False
+    try:
+        status_code = int(parts[1].strip())
+    except ValueError:
+        return False
+    return status_code in {401, 403, 408, 429} or status_code >= 500
+
+
 async def _iter_forward_stream_with_pinning(
     *,
     url: str,
@@ -304,18 +336,48 @@ async def _iter_forward_stream_with_pinning(
     connect_urls: tuple[str, ...],
     host_header: str,
 ) -> AsyncGenerator[bytes, None]:
-    if connect_urls:
-        async for line in _forward_stream_lines_pinned(
-            url=url,
-            payload=payload,
-            headers=headers,
-            connect_urls=connect_urls,
-            host_header=host_header,
-        ):
-            yield line
-        return
-    async for line in _forward_stream_lines(url, payload, headers):
-        yield line
+    max_retries = _stream_bootstrap_retries()
+    attempt = 0
+    while True:
+        yielded_any = False
+        try:
+            if connect_urls:
+                async for line in _forward_stream_lines_pinned(
+                    url=url,
+                    payload=payload,
+                    headers=headers,
+                    connect_urls=connect_urls,
+                    host_header=host_header,
+                ):
+                    yielded_any = True
+                    yield line
+                return
+
+            async for line in _forward_stream_lines(url, payload, headers):
+                yielded_any = True
+                yield line
+            return
+        except RuntimeError as exc:
+            detail = str(exc)
+            if yielded_any:
+                raise
+            if attempt >= max_retries:
+                raise
+            if not _is_retryable_stream_bootstrap_error(detail):
+                raise
+            attempt += 1
+            request_id = (
+                _header_lookup(headers, _TRACE_REQUEST_ID_HEADER).strip()
+                if headers
+                else ""
+            ) or "-"
+            logger.warning(
+                "stream bootstrap retry request_id=%s attempt=%s/%s reason=%s",
+                request_id,
+                attempt,
+                max_retries,
+                detail,
+            )
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
@@ -801,6 +863,8 @@ def _build_chat_upstream_payload(
             whitelist_keys=whitelist_keys,
         )
     )
+    if not _preserves_json_shape(original_messages, sanitized_original_messages):
+        raise ValueError("chat_input_shape_violation")
     updated_messages: list[dict[str, Any]] = []
     for idx, message in enumerate(sanitized_req_messages):
         if idx < len(sanitized_original_messages) and isinstance(
@@ -862,6 +926,8 @@ def _build_responses_upstream_payload(
                     whitelist_keys=whitelist_keys,
                 )
             )
+            if not _preserves_json_shape(original_input, sanitized_input):
+                raise ValueError("responses_input_shape_violation")
             upstream_payload["input"] = sanitized_input
             if redaction_hits:
                 sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
@@ -897,7 +963,9 @@ def _build_responses_upstream_payload(
         _tools_cache_put(conv_id, copy.deepcopy(tools))
         logger.debug(
             "responses tools cached request_id=%s conv_id=%s tool_count=%d",
-            request_id, conv_id, len(tools),
+            request_id,
+            conv_id,
+            len(tools),
         )
     elif isinstance(tools, list) and len(tools) == 0:
         # Empty tools -- try to restore from cache or strip.
@@ -913,7 +981,9 @@ def _build_responses_upstream_payload(
                 upstream_payload["tools"] = cached
                 logger.info(
                     "responses tools injected from cache request_id=%s conv_id=%s tool_count=%d",
-                    request_id, conv_id, len(cached),
+                    request_id,
+                    conv_id,
+                    len(cached),
                 )
             else:
                 del upstream_payload["tools"]
@@ -953,6 +1023,8 @@ def _build_messages_upstream_payload(
                     whitelist_keys=whitelist_keys,
                 )
             )
+            if not _preserves_json_shape(system_value, sanitized_system):
+                raise ValueError("messages_system_shape_violation")
             upstream_payload["system"] = sanitized_system
             redaction_hits.extend(system_hits)
         else:
@@ -967,6 +1039,8 @@ def _build_messages_upstream_payload(
             whitelist_keys=whitelist_keys,
         )
     )
+    if not _preserves_json_shape(original_messages, sanitized_original_messages):
+        raise ValueError("messages_input_shape_violation")
     redaction_hits.extend(message_hits)
     updated_messages: list[dict[str, Any]] = []
     for idx, message in enumerate(remaining_messages):
@@ -3135,18 +3209,27 @@ def _derive_session_id(
 # Allowing a client to whitelist these would bypass PII redaction for the most
 # sensitive secrets.  The check is substring-based so partial names like
 # "access_token" or "api_secret" are also caught.
-_WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset({
-    "password", "passwd", "pwd",
-    "secret",
-    "token",
-    "api_key", "apikey",
-    "private_key", "private",
-    "credential", "credentials",
-    "authorization", "auth",
-    "bearer",
-    "session_key", "session_token",
-    "access_key",
-})
+_WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "private_key",
+        "private",
+        "credential",
+        "credentials",
+        "authorization",
+        "auth",
+        "bearer",
+        "session_key",
+        "session_token",
+        "access_key",
+    }
+)
 
 
 def _extract_redaction_whitelist_keys(
@@ -3160,7 +3243,8 @@ def _extract_redaction_whitelist_keys(
         return set()
     # Block any key that contains or matches a denied security-sensitive name.
     dangerous = {
-        k for k in keys
+        k
+        for k in keys
         if any(denied in k.lower() for denied in _WHITELIST_HEADER_DENYLIST)
     }
     if dangerous:
@@ -3622,6 +3706,28 @@ def _error_response(
     )
 
 
+def _is_payload_shape_violation_error(exc: ValueError) -> bool:
+    return str(exc).strip().endswith("_shape_violation")
+
+
+def _payload_shape_violation_response(
+    *, exc: ValueError, ctx: RequestContext, boundary: dict | None = None
+) -> JSONResponse:
+    reason = str(exc).strip() or "payload_shape_violation"
+    logger.warning(
+        "request payload shape violation request_id=%s reason=%s",
+        ctx.request_id,
+        reason,
+    )
+    return _error_response(
+        status_code=400,
+        reason="invalid_request_payload_shape",
+        detail=reason,
+        ctx=ctx,
+        boundary=boundary,
+    )
+
+
 def _stream_runtime_reason(error_detail: str) -> str:
     if error_detail.startswith("upstream_http_error"):
         return "upstream_http_error"
@@ -3880,15 +3986,24 @@ async def _execute_chat_stream_once(
         )
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = await _run_payload_transform(
-        _build_chat_upstream_payload,
-        payload,
-        sanitized_req.messages,
-        request_id=ctx.request_id,
-        session_id=ctx.session_id,
-        route=ctx.route,
-        whitelist_keys=ctx.redaction_whitelist_keys,
-    )
+    try:
+        upstream_payload = await _run_payload_transform(
+            _build_chat_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        raise
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
@@ -4435,17 +4550,26 @@ async def _execute_responses_stream_once(
         )
         return _build_streaming_response(request_confirmation_generator())
 
-    upstream_payload = await _run_payload_transform(
-        _build_responses_upstream_payload,
-        payload,
-        sanitized_req.messages,
-        request_id=ctx.request_id,
-        session_id=ctx.session_id,
-        route=ctx.route,
-        whitelist_keys=ctx.redaction_whitelist_keys,
-        tenant_id=ctx.tenant_id,
-        request_headers=request_headers,
-    )
+    try:
+        upstream_payload = await _run_payload_transform(
+            _build_responses_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+            tenant_id=ctx.tenant_id,
+            request_headers=request_headers,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        raise
     _input_items = upstream_payload.get("input")
     _input_count = len(_input_items) if isinstance(_input_items, list) else 0
     _payload_bytes = len(
@@ -4642,9 +4766,7 @@ async def _execute_responses_stream_once(
                 yield line
             if blocked_reason:
                 ctx.response_disposition = "sanitize"
-                ctx.enforcement_actions.append(
-                    "auto_sanitize:stream_buffered_patch"
-                )
+                ctx.enforcement_actions.append("auto_sanitize:stream_buffered_patch")
                 _maybe_log_dangerous_response_sample(
                     ctx,
                     stream_window,
@@ -4953,15 +5075,24 @@ async def _execute_chat_once(
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
     pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = await _run_payload_transform(
-            _build_chat_upstream_payload,
-            payload,
-            req.messages,
-            request_id=ctx.request_id,
-            session_id=ctx.session_id,
-            route=ctx.route,
-            whitelist_keys=ctx.redaction_whitelist_keys,
-        )
+        try:
+            upstream_payload = await _run_payload_transform(
+                _build_chat_upstream_payload,
+                payload,
+                req.messages,
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                route=ctx.route,
+                whitelist_keys=ctx.redaction_whitelist_keys,
+            )
+        except ValueError as exc:
+            if _is_payload_shape_violation_error(exc):
+                return _payload_shape_violation_response(
+                    exc=exc,
+                    ctx=ctx,
+                    boundary=boundary,
+                )
+            raise
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
@@ -5068,15 +5199,24 @@ async def _execute_chat_once(
             )
             return to_chat_response(confirmation_resp)
 
-        upstream_payload = await _run_payload_transform(
-            _build_chat_upstream_payload,
-            payload,
-            sanitized_req.messages,
-            request_id=ctx.request_id,
-            session_id=ctx.session_id,
-            route=ctx.route,
-            whitelist_keys=ctx.redaction_whitelist_keys,
-        )
+        try:
+            upstream_payload = await _run_payload_transform(
+                _build_chat_upstream_payload,
+                payload,
+                sanitized_req.messages,
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                route=ctx.route,
+                whitelist_keys=ctx.redaction_whitelist_keys,
+            )
+        except ValueError as exc:
+            if _is_payload_shape_violation_error(exc):
+                return _payload_shape_violation_response(
+                    exc=exc,
+                    ctx=ctx,
+                    boundary=boundary,
+                )
+            raise
 
     try:
         status_code, upstream_body = await _forward_json_with_pinning(
@@ -5408,17 +5548,26 @@ async def _execute_responses_once(
     # 用户已确认放行（yes）：不再走请求侧过滤，直接转发
     pipeline = _get_pipeline()
     if forced_upstream_base and skip_confirmation:
-        upstream_payload = await _run_payload_transform(
-            _build_responses_upstream_payload,
-            payload,
-            req.messages,
-            request_id=ctx.request_id,
-            session_id=ctx.session_id,
-            route=ctx.route,
-            whitelist_keys=ctx.redaction_whitelist_keys,
-            tenant_id=ctx.tenant_id,
-            request_headers=request_headers,
-        )
+        try:
+            upstream_payload = await _run_payload_transform(
+                _build_responses_upstream_payload,
+                payload,
+                req.messages,
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                route=ctx.route,
+                whitelist_keys=ctx.redaction_whitelist_keys,
+                tenant_id=ctx.tenant_id,
+                request_headers=request_headers,
+            )
+        except ValueError as exc:
+            if _is_payload_shape_violation_error(exc):
+                return _payload_shape_violation_response(
+                    exc=exc,
+                    ctx=ctx,
+                    boundary=boundary,
+                )
+            raise
         ctx.enforcement_actions.append("confirmation:request_filters_skipped")
     else:
         request_user_text = _request_user_text_for_excerpt(payload, req.route)
@@ -5517,17 +5666,26 @@ async def _execute_responses_once(
             )
             return to_responses_output(confirmation_resp)
 
-        upstream_payload = await _run_payload_transform(
-            _build_responses_upstream_payload,
-            payload,
-            sanitized_req.messages,
-            request_id=ctx.request_id,
-            session_id=ctx.session_id,
-            route=ctx.route,
-            whitelist_keys=ctx.redaction_whitelist_keys,
-            tenant_id=ctx.tenant_id,
-            request_headers=request_headers,
-        )
+        try:
+            upstream_payload = await _run_payload_transform(
+                _build_responses_upstream_payload,
+                payload,
+                sanitized_req.messages,
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                route=ctx.route,
+                whitelist_keys=ctx.redaction_whitelist_keys,
+                tenant_id=ctx.tenant_id,
+                request_headers=request_headers,
+            )
+        except ValueError as exc:
+            if _is_payload_shape_violation_error(exc):
+                return _payload_shape_violation_response(
+                    exc=exc,
+                    ctx=ctx,
+                    boundary=boundary,
+                )
+            raise
 
     try:
         status_code, upstream_body = await _forward_json_with_pinning(
@@ -5862,15 +6020,24 @@ async def _execute_messages_stream_once(
             boundary=boundary,
         )
 
-    upstream_payload = await _run_payload_transform(
-        _build_messages_upstream_payload,
-        payload,
-        sanitized_req.messages,
-        request_id=ctx.request_id,
-        session_id=ctx.session_id,
-        route=ctx.route,
-        whitelist_keys=ctx.redaction_whitelist_keys,
-    )
+    try:
+        upstream_payload = await _run_payload_transform(
+            _build_messages_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        raise
     base_reports = list(ctx.report_items)
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
@@ -6369,15 +6536,24 @@ async def _execute_messages_once(
             boundary=boundary,
         )
 
-    upstream_payload = await _run_payload_transform(
-        _build_messages_upstream_payload,
-        payload,
-        sanitized_req.messages,
-        request_id=ctx.request_id,
-        session_id=ctx.session_id,
-        route=ctx.route,
-        whitelist_keys=ctx.redaction_whitelist_keys,
-    )
+    try:
+        upstream_payload = await _run_payload_transform(
+            _build_messages_upstream_payload,
+            payload,
+            sanitized_req.messages,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=ctx.route,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc,
+                ctx=ctx,
+                boundary=boundary,
+            )
+        raise
 
     try:
         status_code, upstream_body = await _forward_json_with_pinning(

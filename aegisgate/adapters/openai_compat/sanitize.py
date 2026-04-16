@@ -47,7 +47,7 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
     }
 )
 _RESPONSES_NON_CONTENT_KEYS = frozenset(
-    {"id", "call_id", "type", "role", "name", "status"}
+    {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
 )
 _RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
     {
@@ -74,8 +74,10 @@ _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
     re.IGNORECASE,
 )
+_REDACTED_MARKER_RE = re.compile(r"\[REDACTED:[A-Z0-9_]+\]")
 
 _UPSTREAM_EOF_RECOVERY_NOTICE = "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
+_GATEWAY_INTERNAL_HISTORY_PLACEHOLDER = "[REDACTED:GATEWAY_INTERNAL_HISTORY]"
 
 
 def _looks_like_gateway_confirmation_text(text: str | None) -> bool:
@@ -121,6 +123,21 @@ def _strip_system_exec_runtime_lines(text: str | None) -> str:
     lines = body.splitlines()
     kept = [line for line in lines if not _SYSTEM_EXEC_RUNTIME_LINE_RE.match(line)]
     return "\n".join(kept).strip()
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not spans:
+        return []
+    ordered = sorted(spans, key=lambda item: item[0])
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
 
 
 def _sanitize_payload_for_log(value: Any) -> Any:
@@ -214,8 +231,6 @@ def _sanitize_text_for_upstream_with_hits(
         return "", []
     if looks_like_base64_blob(text):
         return text, []
-    if "[REDACTED:" in text:
-        return _strip_system_exec_runtime_lines(text), []
 
     cleaned = _strip_system_exec_runtime_lines(text)
     if not cleaned:
@@ -233,6 +248,11 @@ def _sanitize_text_for_upstream_with_hits(
         return cleaned, []
     for pattern_id, pattern in patterns:
         protected_spans = protected_spans_for_text(cleaned, whitelist)
+        marker_spans = [
+            (match.start(), match.end())
+            for match in _REDACTED_MARKER_RE.finditer(cleaned)
+        ]
+        protected_spans = _merge_spans(protected_spans + marker_spans)
         match_count = 0
         first_raw = ""
 
@@ -291,7 +311,9 @@ def _sanitize_chat_messages_for_upstream_with_hits(
     """Sanitize structured chat message content without flattening payload shape."""
     hits: list[dict[str, Any]] = []
 
-    def _sanitize_structured_part(node: Any, *, path: str, role: str, field: str) -> Any:
+    def _sanitize_structured_part(
+        node: Any, *, path: str, role: str, field: str
+    ) -> Any:
         if isinstance(node, str):
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
                 node,
@@ -318,35 +340,14 @@ def _sanitize_chat_messages_for_upstream_with_hits(
             return node
 
         copied: dict[str, Any] = dict(node)
-        node_type = str(node.get("type", "")).strip().lower()
         for key, item in node.items():
             child_path = f"{path}.{key}" if path else key
-            if key == "text" and isinstance(item, str):
+            if isinstance(item, (str, list, dict)):
                 copied[key] = _sanitize_structured_part(
                     item,
                     path=child_path,
                     role=role,
-                    field="text",
-                )
-                continue
-            if key == "content" and isinstance(item, (list, dict)):
-                copied[key] = _sanitize_structured_part(
-                    item,
-                    path=child_path,
-                    role=role,
-                    field="content",
-                )
-                continue
-            if (
-                key == "content"
-                and isinstance(item, str)
-                and node_type in {"text", "input_text", "output_text"}
-            ):
-                copied[key] = _sanitize_structured_part(
-                    item,
-                    path=child_path,
-                    role=role,
-                    field="content",
+                    field=key,
                 )
         return copied
 
@@ -357,14 +358,16 @@ def _sanitize_chat_messages_for_upstream_with_hits(
             continue
         copied_message = dict(message)
         role = str(message.get("role", "")).strip().lower() or "user"
-        content = message.get("content")
-        if isinstance(content, (list, dict)):
-            copied_message["content"] = _sanitize_structured_part(
-                content,
-                path=f"messages[{idx}].content",
-                role=role,
-                field="content",
-            )
+        for key, item in message.items():
+            if key == "role":
+                continue
+            if isinstance(item, (str, list, dict)):
+                copied_message[key] = _sanitize_structured_part(
+                    item,
+                    path=f"messages[{idx}].{key}",
+                    role=role,
+                    field=key,
+                )
         sanitized_messages.append(copied_message)
 
     dedup: dict[tuple[str, str, str, str], int] = {}
@@ -412,32 +415,13 @@ def _sanitize_messages_system_for_upstream_with_hits(
             return node
 
         copied: dict[str, Any] = dict(node)
-        node_type = str(node.get("type", "")).strip().lower()
         for key, item in node.items():
             child_path = f"{path}.{key}" if path else key
-            if key == "text" and isinstance(item, str):
+            if isinstance(item, (str, list, dict)):
                 copied[key] = _sanitize_system_part(
                     item,
                     path=child_path,
-                    field="text",
-                )
-                continue
-            if key == "content" and isinstance(item, (list, dict)):
-                copied[key] = _sanitize_system_part(
-                    item,
-                    path=child_path,
-                    field="content",
-                )
-                continue
-            if (
-                key == "content"
-                and isinstance(item, str)
-                and node_type in {"text", "input_text", "output_text"}
-            ):
-                copied[key] = _sanitize_system_part(
-                    item,
-                    path=child_path,
-                    field="content",
+                    field=key,
                 )
         return copied
 
@@ -491,6 +475,12 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
     def _sanitize(node: Any, *, path: str, role: str = "", field: str = "") -> Any:
         if isinstance(node, str):
+            if role in {
+                "assistant",
+                "system",
+                "developer",
+            } and _looks_like_gateway_internal_history_text(node):
+                return _GATEWAY_INTERNAL_HISTORY_PLACEHOLDER
             if _should_skip_responses_field_redaction(field):
                 return node
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
@@ -509,8 +499,6 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 sanitized_item = _sanitize(
                     item, path=f"{path}[{idx}]", role=role, field=field
                 )
-                if sanitized_item is None:
-                    continue
                 out.append(sanitized_item)
             return out
 
@@ -522,13 +510,6 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
             node_type = str(node.get("type", "")).strip().lower()
             node_role = str(node.get("role", role)).strip().lower()
-
-            if node_role in {"assistant", "system", "developer"}:
-                content = node.get("content")
-                if isinstance(
-                    content, str
-                ) and _looks_like_gateway_internal_history_text(content):
-                    return None
 
             copied: dict[str, Any] = dict(node)
 
@@ -559,26 +540,15 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     and node_role in {"assistant", "system", "developer"}
                     and isinstance(item, list)
                 ):
-                    filtered_parts: list[Any] = []
-                    for idx, part in enumerate(item):
-                        if isinstance(part, dict):
-                            text = part.get("text")
-                            if isinstance(
-                                text, str
-                            ) and _looks_like_gateway_internal_history_text(text):
-                                continue
-                        sanitized_part = _sanitize(
+                    copied[key] = [
+                        _sanitize(
                             part,
                             path=f"{child_path}[{idx}]",
                             role=node_role,
                             field="content",
                         )
-                        if sanitized_part is None:
-                            continue
-                        filtered_parts.append(sanitized_part)
-                    if not filtered_parts:
-                        return None
-                    copied[key] = filtered_parts
+                        for idx, part in enumerate(item)
+                    ]
                     continue
 
                 copied[key] = _sanitize(
@@ -622,3 +592,30 @@ def _sanitize_responses_input_for_upstream(
         value, whitelist_keys=whitelist_keys
     )
     return sanitized
+
+
+def _shape_signature(value: Any) -> tuple[tuple[str, str], ...]:
+    """Return a deterministic structural signature for nested JSON-like payloads."""
+
+    signature: list[tuple[str, str]] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            signature.append((path, "dict"))
+            for key, item in node.items():
+                child = f"{path}.{key}" if path else str(key)
+                _walk(item, child)
+            return
+        if isinstance(node, list):
+            signature.append((path, f"list:{len(node)}"))
+            for idx, item in enumerate(node):
+                _walk(item, f"{path}[{idx}]")
+            return
+        signature.append((path, type(node).__name__))
+
+    _walk(value, "$")
+    return tuple(signature)
+
+
+def _preserves_json_shape(original: Any, sanitized: Any) -> bool:
+    return _shape_signature(original) == _shape_signature(sanitized)

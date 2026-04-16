@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: float = 600.0
     upstream_max_connections: int = 300
     upstream_max_keepalive_connections: int = 100
+    # 流式请求在尚未向客户端发送任何字节前，遇到可重试上游错误时的最大重试次数。
+    # 0 表示禁用；建议按需显式开启并保持小值（1~2）以避免放大失败流量。
+    stream_bootstrap_retries: int = 0
     # 默认关闭线程池卸载：当前 Python 3.13 运行环境下，asyncio.to_thread 会让
     # 事件循环在关闭阶段卡住，导致 pytest/短生命周期脚本无法正常退出。
     # 生产如确认运行时无该问题，可通过环境变量显式开启。

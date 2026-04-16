@@ -15,6 +15,7 @@ from aegisgate.adapters.openai_compat.router import (
     _execute_messages_stream_once,
     _execute_responses_stream_once,
     _extract_sse_data_payload,
+    _iter_forward_stream_with_pinning,
     _run_request_pipeline,
     _run_response_pipeline,
     _stream_block_reason,
@@ -434,6 +435,208 @@ def test_extract_stream_event_type_normalizes_type() -> None:
         == "response.output_text.delta"
     )
     assert _extract_stream_event_type('{"x":1}') == ""
+
+
+def test_openai_forward_headers_strip_connection_scoped_header() -> None:
+    from aegisgate.adapters.openai_compat.upstream import _build_forward_headers
+
+    headers = _build_forward_headers(
+        {
+            "Connection": "x-drop-me, keep-alive",
+            "X-Drop-Me": "secret",
+            "X-Extra": "keep-me",
+        }
+    )
+
+    assert headers == {"X-Extra": "keep-me", "Content-Type": "application/json"}
+
+
+def test_v2_forward_headers_strip_connection_scoped_header() -> None:
+    from fastapi import Request
+
+    from aegisgate.adapters.v2_proxy.router import _build_forward_headers
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v2",
+            "headers": [
+                (b"host", b"gateway.test"),
+                (b"connection", b"x-internal-trace"),
+                (b"x-internal-trace", b"leak"),
+                (b"x-target-url", b"https://upstream.example.com/v2"),
+                (b"x-extra", b"keep-me"),
+            ],
+            "query_string": b"",
+            "scheme": "https",
+            "server": ("gateway.test", 443),
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+    headers = _build_forward_headers(request)
+    assert headers == {"x-extra": "keep-me"}
+
+
+def test_v2_client_response_headers_strip_connection_scoped_header() -> None:
+    from aegisgate.adapters.v2_proxy.router import _build_client_response_headers
+
+    headers = _build_client_response_headers(
+        {
+            "Connection": "x-upstream-trace",
+            "X-Upstream-Trace": "should-drop",
+            "X-Extra": "keep-me",
+        }
+    )
+
+    assert headers == {"X-Extra": "keep-me"}
+
+
+@pytest.mark.asyncio
+async def test_iter_forward_stream_retries_before_first_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("upstream_unreachable: bootstrap timeout")
+        yield b"data: ok\n\n"
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries", 1
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/responses",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": "rq-bootstrap-retry"},
+            connect_urls=(),
+            host_header="",
+        )
+    ]
+
+    assert attempts == 2
+    assert chunks == [b"data: ok\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_iter_forward_stream_retries_before_first_chunk_with_pinning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines_pinned(
+        *, url, payload, headers, connect_urls, host_header
+    ):
+        del url, payload, headers, connect_urls, host_header
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("upstream_unreachable: bootstrap timeout")
+        yield b"data: pinned-ok\n\n"
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries", 1
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines_pinned",
+        fake_forward_stream_lines_pinned,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/responses",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": "rq-bootstrap-retry-pinned"},
+            connect_urls=("https://93.184.216.34/v1/responses",),
+            host_header="upstream.example.com",
+        )
+    ]
+
+    assert attempts == 2
+    assert chunks == [b"data: pinned-ok\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_iter_forward_stream_does_not_retry_after_first_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        yield b"data: partial\n\n"
+        raise RuntimeError("upstream_unreachable: after-first-byte")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries", 3
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    chunks: list[bytes] = []
+    with pytest.raises(RuntimeError, match="after-first-byte"):
+        async for chunk in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/chat/completions",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": "rq-bootstrap-no-retry"},
+            connect_urls=(),
+            host_header="",
+        ):
+            chunks.append(chunk)
+
+    assert attempts == 1
+    assert chunks == [b"data: partial\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_iter_forward_stream_does_not_retry_non_retryable_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("upstream_http_error:400:bad_request")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries", 3
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    with pytest.raises(RuntimeError, match="upstream_http_error:400:bad_request"):
+        async for _ in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/chat/completions",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": "rq-bootstrap-no-retry-400"},
+            connect_urls=(),
+            host_header="",
+        ):
+            pass
+
+    assert attempts == 1
 
 
 def test_messages_stream_harness_avoids_offload_timeout_pattern(

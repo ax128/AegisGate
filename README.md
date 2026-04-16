@@ -413,6 +413,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | `600` | Upstream request timeout in seconds |
+| `AEGIS_STREAM_BOOTSTRAP_RETRIES` | `0` | Streaming retries before first byte is sent to client (retryable upstream errors only); enabling may cause duplicate upstream execution |
 | `AEGIS_ENABLE_BUILTIN_COMPAT_TOKENS` | `false` | Auto-inject built-in compat token(s) such as `claude-to-gpt` |
 | `AEGIS_COMPAT_ALLOWED_PORTS` | _(empty)_ | Required allowlist for compat token port routing; empty = deny all compat port routing |
 | `AEGIS_ENABLE_RELAY_ENDPOINT` | `false` | Enable optional `POST /relay/generate` relay-compatible endpoint |

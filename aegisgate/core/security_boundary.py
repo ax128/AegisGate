@@ -90,8 +90,33 @@ def build_nonce_cache():
     return NonceReplayCache(max_entries=settings.request_nonce_cache_size)
 
 
-def build_signature_payload(timestamp: str, nonce: str, body: bytes) -> bytes:
-    return timestamp.encode("utf-8") + b"." + nonce.encode("utf-8") + b"." + body
+def build_signature_payload(
+    timestamp: str,
+    nonce: str,
+    body: bytes,
+    *,
+    method: str = "",
+    path: str = "",
+    query: str = "",
+    content_type: str = "",
+) -> bytes:
+    normalized_method = (method or "").strip().upper()
+    normalized_path = (path or "").strip() or "/"
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+    normalized_query = (query or "").strip()
+    normalized_content_type = (content_type or "").strip().lower()
+    metadata = "\n".join(
+        [
+            timestamp,
+            nonce,
+            normalized_method,
+            normalized_path,
+            normalized_query,
+            normalized_content_type,
+        ]
+    ).encode("utf-8")
+    return metadata + b"\n\n" + body
 
 
 def compute_hmac_sha256(secret: str, payload: bytes) -> str:

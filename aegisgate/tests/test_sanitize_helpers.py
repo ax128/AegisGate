@@ -6,17 +6,18 @@ from aegisgate.adapters.openai_compat.sanitize import (
     _looks_like_gateway_confirmation_text,
     _looks_like_gateway_internal_history_text,
     _looks_like_gateway_upstream_recovery_notice_text,
+    _preserves_json_shape,
     _sanitize_chat_messages_for_upstream_with_hits,
     _sanitize_messages_system_for_upstream_with_hits,
     _sanitize_payload_for_log,
     _sanitize_responses_input_for_upstream_with_hits,
+    _sanitize_text_for_upstream_with_hits,
     _should_skip_responses_field_redaction,
     _strip_system_exec_runtime_lines,
 )
 
 
 class TestLooksLikeGatewayConfirmationText:
-
     def test_chinese_confirmation(self) -> None:
         text = "⚠️ 安全确认（高风险操作）\n确认编号：cfm-123"
         assert _looks_like_gateway_confirmation_text(text) is True
@@ -40,7 +41,6 @@ class TestLooksLikeGatewayConfirmationText:
 
 
 class TestLooksLikeGatewayUpstreamRecoveryNotice:
-
     def test_exact_notice(self) -> None:
         text = "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
         assert _looks_like_gateway_upstream_recovery_notice_text(text) is True
@@ -58,7 +58,6 @@ class TestLooksLikeGatewayUpstreamRecoveryNotice:
 
 
 class TestLooksLikeGatewayInternalHistoryText:
-
     def test_confirmation_is_internal(self) -> None:
         text = "⚠️ 安全确认（高风险操作）\n确认编号：cfm-123"
         assert _looks_like_gateway_internal_history_text(text) is True
@@ -72,7 +71,6 @@ class TestLooksLikeGatewayInternalHistoryText:
 
 
 class TestStripSystemExecRuntimeLines:
-
     def test_removes_exec_lines(self) -> None:
         text = "line1\n  System: [tool] Exec completed\nline3"
         result = _strip_system_exec_runtime_lines(text)
@@ -92,7 +90,6 @@ class TestStripSystemExecRuntimeLines:
 
 
 class TestSanitizePayloadForLog:
-
     def test_removes_parameters(self) -> None:
         value = {"name": "test", "parameters": {"x": 1}}
         result = _sanitize_payload_for_log(value)
@@ -122,9 +119,9 @@ class TestSanitizePayloadForLog:
 
 
 class TestShouldSkipResponsesFieldRedaction:
-
     def test_non_content_keys_skipped(self) -> None:
         assert _should_skip_responses_field_redaction("id") is True
+        assert _should_skip_responses_field_redaction("tool_call_id") is True
         assert _should_skip_responses_field_redaction("type") is True
         assert _should_skip_responses_field_redaction("role") is True
 
@@ -147,7 +144,6 @@ class TestShouldSkipResponsesFieldRedaction:
 
 
 class TestSanitizeChatStructuredContent:
-
     def test_chat_structured_content_redacts_only_text_parts(self) -> None:
         messages = [
             {
@@ -155,8 +151,14 @@ class TestSanitizeChatStructuredContent:
                 "name": "alice",
                 "content": [
                     {"type": "text", "text": "Authorization: Bearer sk-live-secret"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
-                    {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/cat.png"},
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": "AAAA", "format": "wav"},
+                    },
                 ],
                 "provider_meta": {"keep": True},
             }
@@ -170,8 +172,14 @@ class TestSanitizeChatStructuredContent:
                 "name": "alice",
                 "content": [
                     {"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
-                    {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/cat.png"},
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": "AAAA", "format": "wav"},
+                    },
                 ],
                 "provider_meta": {"keep": True},
             }
@@ -206,6 +214,85 @@ class TestSanitizeChatStructuredContent:
         assert sanitized == messages
         assert hits == []
 
+    def test_chat_structured_content_redacts_unknown_string_leaves_but_keeps_shape(
+        self,
+    ) -> None:
+        messages = [
+            {
+                "role": "user",
+                "id": "msg_1",
+                "name": "alice",
+                "content": [{"type": "text", "text": "normal"}],
+                "metadata": {
+                    "api_token": "Authorization: Bearer sk-live-12345678901234567890",
+                    "tag": "alpha",
+                },
+            }
+        ]
+
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+
+        assert sanitized[0]["id"] == "msg_1"
+        assert sanitized[0]["name"] == "alice"
+        assert sanitized[0]["content"] == [{"type": "text", "text": "normal"}]
+        assert "sk-live-" not in sanitized[0]["metadata"]["api_token"]
+        assert sanitized[0]["metadata"]["tag"] == "alpha"
+        assert len(sanitized) == len(messages)
+        assert len(sanitized[0]["content"]) == len(messages[0]["content"])
+        assert hits
+
+
+def test_responses_internal_history_keeps_original_structure() -> None:
+    history_text = "⚠️ 安全确认（高风险操作）\n确认编号：cfm-123"
+    payload = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": history_text},
+                {"type": "output_text", "text": "safe"},
+            ],
+            "meta": {"id": "m1"},
+        }
+    ]
+
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload)
+
+    assert len(sanitized) == 1
+    assert sanitized[0]["role"] == "assistant"
+    assert sanitized[0]["meta"] == {"id": "m1"}
+    assert len(sanitized[0]["content"]) == 2
+    assert sanitized[0]["content"][0]["type"] == "output_text"
+    assert sanitized[0]["content"][0]["text"] == "[REDACTED:GATEWAY_INTERNAL_HISTORY]"
+    assert sanitized[0]["content"][1] == {"type": "output_text", "text": "safe"}
+
+
+def test_shape_guard_reports_preserved_shape_after_sanitize() -> None:
+    payload = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Authorization: Bearer " + "sk-live-" + "secretvalue123456",
+                },
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.com/cat.png",
+                },
+            ],
+            "metadata": {"trace": "keep"},
+        }
+    ]
+
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload)
+    assert _preserves_json_shape(payload, sanitized) is True
+
+
+def test_shape_guard_detects_list_length_change() -> None:
+    original = {"a": ["x", "y"]}
+    changed = {"a": ["x"]}
+    assert _preserves_json_shape(original, changed) is False
+
 
 def _explicit_secret_text() -> str:
     return "Authorization: Bearer " + "sk-live-" + "secretvalue123456"
@@ -220,15 +307,23 @@ def test_benign_examples_preserve_supported_route_helpers() -> None:
     chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
         [{"role": "user", "content": [{"type": "text", "text": benign_text}]}]
     )
-    responses_sanitized, responses_hits = _sanitize_responses_input_for_upstream_with_hits(
-        [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
+    responses_sanitized, responses_hits = (
+        _sanitize_responses_input_for_upstream_with_hits(
+            [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
+        )
     )
-    messages_sanitized, messages_hits = _sanitize_messages_system_for_upstream_with_hits(
-        [{"type": "text", "text": benign_text}]
+    messages_sanitized, messages_hits = (
+        _sanitize_messages_system_for_upstream_with_hits(
+            [{"type": "text", "text": benign_text}]
+        )
     )
 
-    assert chat_sanitized == [{"role": "user", "content": [{"type": "text", "text": benign_text}]}]
-    assert responses_sanitized == [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
+    assert chat_sanitized == [
+        {"role": "user", "content": [{"type": "text", "text": benign_text}]}
+    ]
+    assert responses_sanitized == [
+        {"role": "user", "content": [{"type": "input_text", "text": benign_text}]}
+    ]
     assert messages_sanitized == [{"type": "text", "text": benign_text}]
     assert chat_hits == []
     assert responses_hits == []
@@ -241,20 +336,36 @@ def test_explicit_secret_still_redacts() -> None:
     chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
         [{"role": "user", "content": [{"type": "text", "text": secret_text}]}]
     )
-    responses_sanitized, responses_hits = _sanitize_responses_input_for_upstream_with_hits(
-        [{"role": "user", "content": [{"type": "input_text", "text": secret_text}]}]
+    responses_sanitized, responses_hits = (
+        _sanitize_responses_input_for_upstream_with_hits(
+            [{"role": "user", "content": [{"type": "input_text", "text": secret_text}]}]
+        )
     )
-    messages_sanitized, messages_hits = _sanitize_messages_system_for_upstream_with_hits(
-        [{"type": "text", "text": secret_text}]
+    messages_sanitized, messages_hits = (
+        _sanitize_messages_system_for_upstream_with_hits(
+            [{"type": "text", "text": secret_text}]
+        )
     )
 
     assert chat_sanitized == [
-        {"role": "user", "content": [{"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]}
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}
+            ],
+        }
     ]
     assert responses_sanitized == [
-        {"role": "user", "content": [{"type": "input_text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]}
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}
+            ],
+        }
     ]
-    assert messages_sanitized == [{"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}]
+    assert messages_sanitized == [
+        {"type": "text", "text": "Authorization: Bearer [REDACTED:TOKEN]"}
+    ]
     assert chat_hits == [
         {
             "path": "messages[0].content[0].text",
@@ -282,3 +393,58 @@ def test_explicit_secret_still_redacts() -> None:
             "count": 1,
         }
     ]
+
+
+def test_marker_prefix_does_not_skip_secret_redaction() -> None:
+    text = "Authorization: Bearer sk-live-12345678901234567890 [REDACTED:FAKE]"
+
+    sanitized, hits = _sanitize_text_for_upstream_with_hits(
+        text,
+        role="user",
+        path="messages[0].content[0].text",
+        field="text",
+    )
+
+    assert "sk-live-" not in sanitized
+    assert "[REDACTED:FAKE]" in sanitized
+    assert hits
+
+
+def test_responses_input_marker_prefix_still_redacts_secret() -> None:
+    payload = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Authorization: Bearer sk-live-12345678901234567890 [REDACTED:FAKE]",
+                }
+            ],
+        }
+    ]
+
+    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload)
+    text = sanitized[0]["content"][0]["text"]
+
+    assert "sk-live-" not in text
+    assert "[REDACTED:FAKE]" in text
+    assert hits
+
+
+def test_marker_and_whitelist_spans_coexist_safely() -> None:
+    whitelisted = "sk-live-11111111111111111111"
+    unprotected = "sk-live-22222222222222222222"
+    text = f"tenant={whitelisted} [REDACTED:FAKE] Authorization: Bearer {unprotected}"
+
+    sanitized, hits = _sanitize_text_for_upstream_with_hits(
+        text,
+        role="user",
+        path="messages[0].content[0].text",
+        field="text",
+        whitelist_keys={"tenant"},
+    )
+
+    assert whitelisted in sanitized
+    assert unprotected not in sanitized
+    assert "[REDACTED:FAKE]" in sanitized
+    assert hits
