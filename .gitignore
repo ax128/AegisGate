@@ -64,16 +64,7 @@ Thumbs.db
 .vscode/
 
 # Do not publish local docs directory (lowercase or uppercase)
-docs/*
-!docs/superpowers/
-docs/superpowers/*
-!docs/superpowers/plans/
-!docs/superpowers/specs/
-docs/superpowers/plans/*
-docs/superpowers/specs/*
-!docs/superpowers/plans/2026-04-18-forwarding-kernel-design.md
-!docs/superpowers/plans/2026-04-18-forwarding-kernel-phase0.md
-!docs/superpowers/specs/2026-04-18-forwarding-kernel-design.md
+docs/
 DOC/
 
 # Local/internal reports and checklists (do not upload)
