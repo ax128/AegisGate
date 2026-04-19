@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.core.models import InternalRequest, InternalResponse
@@ -39,12 +39,16 @@ def _build_request(
     return Request(scope)
 
 
-def _json_body(result: dict[str, Any] | JSONResponse) -> dict[str, Any]:
+def _json_body(
+    result: dict[str, Any] | JSONResponse | PlainTextResponse | StreamingResponse,
+) -> dict[str, Any]:
     if isinstance(result, JSONResponse):
         raw_body = result.body
         if isinstance(raw_body, memoryview):
             return json.loads(raw_body.tobytes().decode("utf-8"))
         return json.loads(raw_body.decode("utf-8"))
+    if isinstance(result, (PlainTextResponse, StreamingResponse)):
+        raise AssertionError("unexpected non-JSON response in response sanitization test")
     return result
 
 
@@ -379,7 +383,7 @@ async def test_benign_response_paths_do_not_lose_content(monkeypatch: pytest.Mon
         assert text_getter(result) == "plain benign answer"
         assert openai_router._DANGER_FRAGMENT_NOTICE not in json.dumps(result, ensure_ascii=False)
         assert "sanitized_text" not in result
-        assert audit_calls
+        assert len(audit_calls) == 1
 
         if route_name != "messages":
             assert result["aegisgate"]["action"] == "allow"
@@ -402,6 +406,7 @@ async def test_sanitized_outputs_use_aegisgate_metadata_channel(monkeypatch: pyt
     )
     assert "aegisgate" in chat_result
     assert "sanitized_text" not in chat_result
+    assert len(chat_audit_calls) == 1
     assert chat_audit_calls[0]["action"] == "sanitize"
     assert chat_audit_calls[0]["response_disposition"] == "sanitize"
 
@@ -419,6 +424,7 @@ async def test_sanitized_outputs_use_aegisgate_metadata_channel(monkeypatch: pyt
     )
     assert "aegisgate" in responses_result
     assert "sanitized_text" not in responses_result
+    assert len(responses_audit_calls) == 1
     assert responses_audit_calls[0]["action"] == "sanitize"
     assert responses_audit_calls[0]["response_disposition"] == "sanitize"
 
@@ -584,7 +590,7 @@ async def test_benign_compat_response_paths_do_not_lose_content(monkeypatch: pyt
         assert openai_router._DANGER_FRAGMENT_NOTICE not in json.dumps(result, ensure_ascii=False)
         assert "sanitized_text" not in result
         assert result["aegisgate"]["action"] == "allow"
-        assert audit_calls
+        assert len(audit_calls) == 1
 
 
 @pytest.mark.asyncio

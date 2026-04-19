@@ -16,6 +16,7 @@ aegisgate/tests/*
 !aegisgate/tests/test_response_sanitization_routes.py
 !aegisgate/tests/test_sanitize_helpers.py
 !aegisgate/tests/test_streaming_router.py
+!aegisgate/tests/test_forwarding_kernel_phase0_guardrails.py
 !aegisgate/tests/test_hot_reload_unit.py
 !aegisgate/tests/test_injection_detector.py
 !aegisgate/tests/test_sqlite_mapping_prune.py
@@ -63,7 +64,16 @@ Thumbs.db
 .vscode/
 
 # Do not publish local docs directory (lowercase or uppercase)
-docs/
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+!docs/superpowers/specs/
+docs/superpowers/plans/*
+docs/superpowers/specs/*
+!docs/superpowers/plans/2026-04-18-forwarding-kernel-design.md
+!docs/superpowers/plans/2026-04-18-forwarding-kernel-phase0.md
+!docs/superpowers/specs/2026-04-18-forwarding-kernel-design.md
 DOC/
 
 # Local/internal reports and checklists (do not upload)

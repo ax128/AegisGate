@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # 开启后 /v1/__gw__/t/8080/chat/completions → http://host.docker.internal:8080/v1/chat/completions
     # 全局模型映射配置（config/model_map.json），compat 转换时使用
     compat_model_map_path: str = "config/model_map.json"
+    # Private, internal-only rollout gate for forwarding-kernel cutover.
+    # Comma-separated route/mode keys such as "responses.once,chat.stream".
+    # Empty string keeps all forwarding-kernel rollout paths disabled.
+    internal_forwarding_kernel_rollout: str = ""
     # 是否自动注入内置 compat token（例如 "claude-to-gpt"）。
     # 安全默认：关闭。生产环境不建议开启（避免可预测 token 被滥用）。
     enable_builtin_compat_tokens: bool = False

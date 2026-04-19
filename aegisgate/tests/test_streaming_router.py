@@ -1568,6 +1568,105 @@ def test_execute_chat_stream_whitelist_error_stays_openai_sse(
     assert "data: [DONE]" in text
 
 
+def test_execute_responses_stream_whitelist_error_stays_openai_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns failure")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    original_whitelist = settings.upstream_whitelist_url_list
+    settings.upstream_whitelist_url_list = "https://upstream.example.com/v1"
+    try:
+        payload = {
+            "request_id": "r-stream-responses-whitelist-error",
+            "session_id": "s-stream-responses-whitelist-error",
+            "model": "test-model",
+            "stream": True,
+            "input": "hello",
+        }
+
+        async def run_case() -> bytes:
+            response = await _execute_responses_stream_once(
+                payload=payload,
+                request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+                request_path="/v1/responses",
+                boundary={},
+            )
+            return await _collect_execute_stream(response)
+
+        text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    finally:
+        settings.upstream_whitelist_url_list = original_whitelist
+
+    assert '"type":"error"' in text or '"type": "error"' in text
+    assert "event: error" not in text
+    assert "dns failure" in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_messages_stream_whitelist_error_stays_anthropic_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        if False:
+            yield b""
+        raise RuntimeError("upstream_unreachable: dns failure")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    original_whitelist = settings.upstream_whitelist_url_list
+    settings.upstream_whitelist_url_list = "https://upstream.example.com/v1"
+    try:
+        payload = {
+            "request_id": "r-stream-messages-whitelist-error",
+            "session_id": "s-stream-messages-whitelist-error",
+            "model": "claude-sonnet-4.5",
+            "stream": True,
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        async def run_case() -> bytes:
+            response = await _execute_messages_stream_once(
+                payload=payload,
+                request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+                request_path="/v1/messages",
+                boundary={},
+            )
+            return await _collect_execute_stream(response)
+
+        text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    finally:
+        settings.upstream_whitelist_url_list = original_whitelist
+
+    assert "event: error" in text
+    assert '"type":"error"' in text or '"type": "error"' in text
+    assert "dns failure" in text
+    assert "data: [DONE]" not in text
+
+
 def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

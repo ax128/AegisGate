@@ -460,6 +460,112 @@ async def _run_supported_v1_compat_route(
     return result, forwarded_payloads[0]["input"][0]["content"]
 
 
+def _compat_success_body(route_name: str) -> dict[str, Any]:
+    if route_name == "chat_from_responses":
+        return {
+            "id": "resp-compat-chat",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": "ok",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+        }
+    if route_name == "responses_from_chat":
+        return {
+            "id": "chat-compat-responses",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+    return {
+        "id": "resp-compat-messages",
+        "object": "response",
+        "model": "gpt-5.4",
+        "output_text": "ok",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "ok"}],
+            }
+        ],
+    }
+
+
+async def _run_compat_route_with_exactly_once_counters(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    route_name: str,
+    prompt_text: str,
+) -> tuple[
+    dict | JSONResponse | StreamingResponse | PlainTextResponse,
+    list[tuple[str, str, str]],
+    list[str],
+    list[str],
+]:
+    request_pipeline_calls: list[tuple[str, str, str]] = []
+    forward_calls: list[str] = []
+    audit_calls = _install_route_mocks(monkeypatch)
+
+    async def fake_request_pipeline(pipeline, req: InternalRequest, ctx):
+        request_pipeline_calls.append((ctx.route, ctx.request_id, ctx.session_id))
+        return req
+
+    async def fake_forward_json(
+        url: str, forwarded_payload: dict[str, Any], headers: dict[str, str]
+    ):
+        forward_calls.append(url)
+        return 200, _compat_success_body(route_name)
+
+    monkeypatch.setattr(openai_router, "_run_request_pipeline", fake_request_pipeline)
+    monkeypatch.setattr(openai_router, "_forward_json", fake_forward_json)
+
+    if route_name == "chat_from_responses":
+        result = await openai_router.chat_completions(
+            {
+                "model": "gpt-5.4",
+                "input": prompt_text,
+                "request_id": "chat-compat-once",
+                "session_id": "chat-compat-once",
+            },
+            _build_request(path="/v1/chat/completions"),
+        )
+        return result, request_pipeline_calls, forward_calls, audit_calls
+
+    if route_name == "responses_from_chat":
+        result = await openai_router.responses(
+            {
+                "model": "gpt-5.4",
+                "messages": [{"role": "user", "content": prompt_text}],
+                "request_id": "responses-compat-once",
+                "session_id": "responses-compat-once",
+            },
+            _build_request(path="/v1/responses"),
+        )
+        return result, request_pipeline_calls, forward_calls, audit_calls
+
+    monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
+    result = await openai_router.messages(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": prompt_text}],
+            "max_tokens": 128,
+            "request_id": "messages-compat-once",
+            "session_id": "messages-compat-once",
+        },
+        _build_request(
+            path="/v1/messages",
+            scope_updates={"aegis_compat": "openai_chat"},
+        ),
+    )
+    return result, request_pipeline_calls, forward_calls, audit_calls
+
+
 @pytest.mark.asyncio
 async def test_chat_request_redaction_preserves_shape(
     monkeypatch: pytest.MonkeyPatch,
@@ -1048,6 +1154,37 @@ async def test_benign_examples_avoid_false_positives_on_compat_routes(
 
 
 @pytest.mark.asyncio
+async def test_benign_request_redaction_parity_matches_between_native_and_compat_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    benign_prompt = (
+        "Review this infra note without redacting it: host api.service.internal resolves to 10.24.8.9, "
+        "and the sample docs line is address: 123 Example Lane."
+    )
+
+    native_forwarded = []
+    for route_name in ("chat", "responses", "messages"):
+        _, forwarded_text = await _run_supported_v1_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=benign_prompt,
+        )
+        native_forwarded.append(forwarded_text)
+
+    compat_forwarded = []
+    for route_name in ("chat_from_responses", "responses_from_chat", "messages_compat"):
+        _, forwarded_text = await _run_supported_v1_compat_route(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text=benign_prompt,
+        )
+        compat_forwarded.append(forwarded_text)
+
+    assert native_forwarded == [benign_prompt, benign_prompt, benign_prompt]
+    assert compat_forwarded == [benign_prompt, benign_prompt, benign_prompt]
+
+
+@pytest.mark.asyncio
 async def test_explicit_secret_still_redacts_on_compat_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1079,6 +1216,37 @@ async def test_marker_prefix_does_not_bypass_compat_route_redaction(
         assert "sk-live-" not in forwarded_text
         assert "[REDACTED:FAKE]" in forwarded_text
         assert not isinstance(result, JSONResponse) or result.status_code != 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route_name,expected_route,expected_request_id",
+    [
+        ("chat_from_responses", "/v1/responses", "chat-compat-once"),
+        ("responses_from_chat", "/v1/chat/completions", "responses-compat-once"),
+        ("messages_compat", "/v1/responses", "messages-compat-once"),
+    ],
+)
+async def test_compat_routes_run_request_pipeline_upstream_and_audit_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+    expected_route: str,
+    expected_request_id: str,
+) -> None:
+    result, request_pipeline_calls, forward_calls, audit_calls = (
+        await _run_compat_route_with_exactly_once_counters(
+            monkeypatch,
+            route_name=route_name,
+            prompt_text="keep this benign prompt intact",
+        )
+    )
+
+    assert not isinstance(result, JSONResponse) or result.status_code != 403
+    assert request_pipeline_calls == [
+        (expected_route, expected_request_id, expected_request_id)
+    ]
+    assert len(forward_calls) == 1
+    assert audit_calls == [expected_request_id]
 
 
 @pytest.mark.asyncio
