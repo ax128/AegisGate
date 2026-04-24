@@ -14,6 +14,7 @@ http://<网关IP>:18080/v1/__gw__/t/8317
 
 说明：
 
+- 安全默认：纯数字端口 token（如 `8317`）仅内网可用；对公网暴露请改用 `/__gw__/register` 注册随机 token（推荐），或启用请求 HMAC / 显式放开 `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`。
 - 若你使用仓库自带 Docker Compose，`8317` 可能优先命中启动时注入的 `AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api`，而不是主机端口回退。
 - 这个 Docker 服务映射只有在 AegisGate 容器与 CLIProxyAPI 共享网络、且能解析 `cli-proxy-api` 服务名时才生效。
 - 若没有共享网络，请把 CLIProxyAPI 端口映射到宿主机，并启用/保留本地端口路由。
@@ -34,6 +35,6 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ## Caddy 对外暴露
 
-参见 [README.md — Caddy + 网关对公网暴露](README.md#场景三caddy--网关对公网暴露)。
+参见 [Caddyfile.example](Caddyfile.example)。
 
 管理后台建议单独域名直连 CLIProxyAPI，不经网关。

@@ -335,6 +335,102 @@ async def _forward_json(
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
+async def _forward_multipart(
+    url: str,
+    *,
+    data: list[tuple[str, str]] | None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None,
+    headers: Mapping[str, str],
+) -> tuple[int, dict[str, Any] | str]:
+    trace_request_id = _trace_request_id(headers)
+    file_count = len(files or [])
+    logger.debug(
+        "forward_multipart start request_id=%s url=%s fields=%d files=%d",
+        trace_request_id,
+        url,
+        len(data or []),
+        file_count,
+    )
+    client = await _get_upstream_async_client()
+    try:
+        response = await client.post(
+            url=url,
+            data=data or None,
+            files=files or None,
+            headers=dict(headers),
+        )
+        logger.debug(
+            "forward_multipart done request_id=%s url=%s status=%s",
+            trace_request_id,
+            url,
+            response.status_code,
+        )
+        return response.status_code, _decode_json_or_text(response.content)
+    except httpx.HTTPError as exc:
+        detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
+        logger.warning(
+            "forward_multipart http_error request_id=%s url=%s error=%s",
+            trace_request_id,
+            url,
+            detail,
+        )
+        raise RuntimeError(f"upstream_unreachable: {detail}") from exc
+
+
+async def _forward_multipart_pinned(
+    *,
+    url: str,
+    data: list[tuple[str, str]] | None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None,
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> tuple[int, dict[str, Any] | str]:
+    trace_request_id = _trace_request_id(headers)
+    file_count = len(files or [])
+    logger.debug(
+        "forward_multipart pinned start request_id=%s url=%s targets=%d fields=%d files=%d",
+        trace_request_id,
+        url,
+        len(connect_urls),
+        len(data or []),
+        file_count,
+    )
+    client = await _get_upstream_async_client()
+    last_error: httpx.HTTPError | None = None
+    for connect_url in connect_urls:
+        try:
+            bound_headers, extensions = _bound_connect_request(
+                headers, host_header=host_header, connect_url=connect_url
+            )
+            response = await client.post(
+                url=connect_url,
+                data=data or None,
+                files=files or None,
+                headers=bound_headers,
+                extensions=extensions,
+            )
+            logger.debug(
+                "forward_multipart pinned done request_id=%s connect_url=%s status=%s",
+                trace_request_id,
+                connect_url,
+                response.status_code,
+            )
+            return response.status_code, _decode_json_or_text(response.content)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning(
+                "forward_multipart pinned http_error request_id=%s connect_url=%s error=%s",
+                trace_request_id,
+                connect_url,
+                str(exc) or "connection_failed_or_timeout",
+            )
+    detail = (
+        (str(last_error) or "").strip() if last_error is not None else ""
+    ) or "connection_failed_or_timeout"
+    raise RuntimeError(f"upstream_unreachable: {detail}") from last_error
+
+
 def _normalized_host_for_sni(host_header: str) -> str | None:
     host = (host_header or "").strip()
     if not host:

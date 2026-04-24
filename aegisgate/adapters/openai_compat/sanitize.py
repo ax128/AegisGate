@@ -79,6 +79,55 @@ _REDACTED_MARKER_RE = re.compile(r"\[REDACTED:[A-Z0-9_]+\]")
 _UPSTREAM_EOF_RECOVERY_NOTICE = "[AegisGate] 上游流提前断开（未收到 [DONE]）。已返回可恢复内容，建议重试获取完整结果。"
 _GATEWAY_INTERNAL_HISTORY_PLACEHOLDER = "[REDACTED:GATEWAY_INTERNAL_HISTORY]"
 
+_MEDIA_LOCATOR_FIELDS = frozenset({"image_url", "file_id"})
+_MEDIA_URL_FIELDS = frozenset({"url", "uri"})
+_MEDIA_SOURCE_URL_BLOCK_TYPES = frozenset(
+    {
+        "image",
+        "input_image",
+        "document",
+        "input_document",
+        "audio",
+        "input_audio",
+        "video",
+        "input_video",
+        "file",
+        "input_file",
+    }
+)
+_CONTENT_BLOCK_PATH_RE = re.compile(r"(?:^|\.)content\[\d+\]$")
+_SYSTEM_BLOCK_PATH_RE = re.compile(r"^system\[\d+\]$")
+
+
+def _is_media_block_container_path(path: str) -> bool:
+    lowered = (path or "").lower()
+    return bool(
+        _CONTENT_BLOCK_PATH_RE.search(lowered) or _SYSTEM_BLOCK_PATH_RE.match(lowered)
+    )
+
+
+def _is_media_locator_field(
+    *,
+    path: str,
+    field: str | None,
+    media_block_type: str | None = None,
+) -> bool:
+    normalized = str(field or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in _MEDIA_LOCATOR_FIELDS:
+        return True
+    if normalized in _MEDIA_URL_FIELDS:
+        lowered = (path or "").lower()
+        # Chat: messages[*].content[*].image_url.url
+        # Responses: input[*].content[*].image_url (string) or nested image_url.url
+        if ".image_url." in lowered:
+            return True
+        if lowered.endswith(".source.url") or lowered.endswith(".source.uri"):
+            normalized_block_type = str(media_block_type or "").strip().lower()
+            return normalized_block_type in _MEDIA_SOURCE_URL_BLOCK_TYPES
+    return False
+
 
 def _looks_like_gateway_confirmation_text(text: str | None) -> bool:
     body = str(text or "")
@@ -312,9 +361,31 @@ def _sanitize_chat_messages_for_upstream_with_hits(
     hits: list[dict[str, Any]] = []
 
     def _sanitize_structured_part(
-        node: Any, *, path: str, role: str, field: str
+        node: Any,
+        *,
+        path: str,
+        role: str,
+        field: str,
+        media_block_type: str | None = None,
     ) -> Any:
         if isinstance(node, str):
+            # Media locator fields (image_url/file_id) must be forwarded as-is.
+            # We still scan and record redaction hits for audit visibility.
+            if _is_media_locator_field(
+                path=path,
+                field=field,
+                media_block_type=media_block_type,
+            ):
+                _, node_hits = _sanitize_text_for_upstream_with_hits(
+                    node,
+                    role=role,
+                    path=path,
+                    field=field,
+                    whitelist_keys=whitelist_keys,
+                )
+                hits.extend(node_hits)
+                return node
+
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
                 node,
                 role=role,
@@ -332,12 +403,19 @@ def _sanitize_chat_messages_for_upstream_with_hits(
                     path=f"{path}[{idx}]",
                     role=role,
                     field=field,
+                    media_block_type=media_block_type,
                 )
                 for idx, item in enumerate(node)
             ]
 
         if not isinstance(node, dict):
             return node
+
+        next_media_block_type = media_block_type
+        if _is_media_block_container_path(path):
+            block_type = str(node.get("type", "")).strip().lower()
+            if block_type:
+                next_media_block_type = block_type
 
         copied: dict[str, Any] = dict(node)
         for key, item in node.items():
@@ -348,6 +426,7 @@ def _sanitize_chat_messages_for_upstream_with_hits(
                     path=child_path,
                     role=role,
                     field=key,
+                    media_block_type=next_media_block_type,
                 )
         return copied
 
@@ -367,6 +446,7 @@ def _sanitize_chat_messages_for_upstream_with_hits(
                     path=f"messages[{idx}].{key}",
                     role=role,
                     field=key,
+                    media_block_type=None,
                 )
         sanitized_messages.append(copied_message)
 
@@ -393,8 +473,29 @@ def _sanitize_messages_system_for_upstream_with_hits(
 ) -> tuple[Any, list[dict[str, Any]]]:
     hits: list[dict[str, Any]] = []
 
-    def _sanitize_system_part(node: Any, *, path: str, field: str) -> Any:
+    def _sanitize_system_part(
+        node: Any,
+        *,
+        path: str,
+        field: str,
+        media_block_type: str | None = None,
+    ) -> Any:
         if isinstance(node, str):
+            if _is_media_locator_field(
+                path=path,
+                field=field,
+                media_block_type=media_block_type,
+            ):
+                _, node_hits = _sanitize_text_for_upstream_with_hits(
+                    node,
+                    role="system",
+                    path=path,
+                    field=field,
+                    whitelist_keys=whitelist_keys,
+                )
+                hits.extend(node_hits)
+                return node
+
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
                 node,
                 role="system",
@@ -407,12 +508,23 @@ def _sanitize_messages_system_for_upstream_with_hits(
 
         if isinstance(node, list):
             return [
-                _sanitize_system_part(item, path=f"{path}[{idx}]", field=field)
+                _sanitize_system_part(
+                    item,
+                    path=f"{path}[{idx}]",
+                    field=field,
+                    media_block_type=media_block_type,
+                )
                 for idx, item in enumerate(node)
             ]
 
         if not isinstance(node, dict):
             return node
+
+        next_media_block_type = media_block_type
+        if _is_media_block_container_path(path):
+            block_type = str(node.get("type", "")).strip().lower()
+            if block_type:
+                next_media_block_type = block_type
 
         copied: dict[str, Any] = dict(node)
         for key, item in node.items():
@@ -422,6 +534,7 @@ def _sanitize_messages_system_for_upstream_with_hits(
                     item,
                     path=child_path,
                     field=key,
+                    media_block_type=next_media_block_type,
                 )
         return copied
 
@@ -473,7 +586,14 @@ def _sanitize_responses_input_for_upstream_with_hits(
     hits: list[dict[str, Any]] = []
     seen: set[int] = set()
 
-    def _sanitize(node: Any, *, path: str, role: str = "", field: str = "") -> Any:
+    def _sanitize(
+        node: Any,
+        *,
+        path: str,
+        role: str = "",
+        field: str = "",
+        media_block_type: str | None = None,
+    ) -> Any:
         if isinstance(node, str):
             if role in {
                 "assistant",
@@ -481,6 +601,20 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 "developer",
             } and _looks_like_gateway_internal_history_text(node):
                 return _GATEWAY_INTERNAL_HISTORY_PLACEHOLDER
+            if _is_media_locator_field(
+                path=path,
+                field=field,
+                media_block_type=media_block_type,
+            ):
+                _, node_hits = _sanitize_text_for_upstream_with_hits(
+                    node,
+                    role=role,
+                    path=path,
+                    field=field or "text",
+                    whitelist_keys=whitelist_keys,
+                )
+                hits.extend(node_hits)
+                return node
             if _should_skip_responses_field_redaction(field):
                 return node
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
@@ -497,7 +631,11 @@ def _sanitize_responses_input_for_upstream_with_hits(
             out: list[Any] = []
             for idx, item in enumerate(node):
                 sanitized_item = _sanitize(
-                    item, path=f"{path}[{idx}]", role=role, field=field
+                    item,
+                    path=f"{path}[{idx}]",
+                    role=role,
+                    field=field,
+                    media_block_type=media_block_type,
                 )
                 out.append(sanitized_item)
             return out
@@ -510,6 +648,9 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
             node_type = str(node.get("type", "")).strip().lower()
             node_role = str(node.get("role", role)).strip().lower()
+            next_media_block_type = media_block_type
+            if _is_media_block_container_path(path) and node_type:
+                next_media_block_type = node_type
 
             copied: dict[str, Any] = dict(node)
 
@@ -531,7 +672,11 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     "result",
                 }:
                     copied[key] = _sanitize(
-                        item, path=child_path, role="tool", field=key
+                        item,
+                        path=child_path,
+                        role="tool",
+                        field=key,
+                        media_block_type=next_media_block_type,
                     )
                     continue
 
@@ -546,13 +691,18 @@ def _sanitize_responses_input_for_upstream_with_hits(
                             path=f"{child_path}[{idx}]",
                             role=node_role,
                             field="content",
+                            media_block_type=next_media_block_type,
                         )
                         for idx, part in enumerate(item)
                     ]
                     continue
 
                 copied[key] = _sanitize(
-                    item, path=child_path, role=node_role, field=key
+                    item,
+                    path=child_path,
+                    role=node_role,
+                    field=key,
+                    media_block_type=next_media_block_type,
                 )
 
             # Sanitize tool/function name to match upstream pattern ^[a-zA-Z0-9_-]+
@@ -568,7 +718,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
         return node
 
-    sanitized = _sanitize(value, path="input")
+    sanitized = _sanitize(value, path="input", media_block_type=None)
     dedup: dict[tuple[str, str, str, str], int] = {}
     for item in hits:
         key = (

@@ -176,12 +176,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 一般危险片段仍使用 chunked-hyphen 分词变形
   - 模式来源：`anomaly_detector.command_patterns` + `sanitizer.force_block_command_patterns` + `privilege_guard.blocked_patterns` + 硬编码高危 shell 命令（13 条）
 
-- **TF-IDF 语义检测模块**（Phase 1）
-  - 内置轻量 TF-IDF + LogisticRegression 双语分类器，无需 GPU，约 166KB 模型文件
-  - 训练数据：deepset/prompt-injections + 中英文补充样本（DAN/jailbreak/角色劫持 + Agent 工作指令安全样本）
-  - 三层检测逻辑：TF-IDF 高置信度安全直接放行 → 高置信度注入标记 → 灰区交正则细分 → TF-IDF 安全中置信度抑制正则误报
-  - 新增 `AEGIS_ENABLE_SEMANTIC_MODULE`（默认 `true`）
-  - 重训练脚本：`scripts/train_tfidf.py`
+- **语义模块（TF-IDF 资产 + 可选语义复核）**
+  - 仓库包含轻量 TF-IDF + LogisticRegression 模型文件与训练脚本（离线实验/维护用）：`aegisgate/models/tfidf/*`、`scripts/train_tfidf.py`
+  - 网关主链路语义复核（可选）：
+    - 开关：`AEGIS_ENABLE_SEMANTIC_MODULE`（默认 `true`）
+    - 灰区门控：仅当风险评分落在 `(AEGIS_SEMANTIC_GRAY_LOW, AEGIS_SEMANTIC_GRAY_HIGH)` 才触发
+    - 执行方式：调用 `AEGIS_SEMANTIC_SERVICE_URL` 指向的语义服务；URL 为空时仅灰区触发记录 `semantic_service_unconfigured` 并降级（不做语义风险抬升）
   - 新增可选依赖组：`pip install ".[semantic]"`（scikit-learn、jieba、joblib）
 
 ### Security
@@ -210,8 +210,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **默认安全级别改为 `medium`**：宽松模式，大部分"可能危险"指令不拦截，仅高危 + 脱敏；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。语义检测模块（TF-IDF）默认开启，进一步降低误报。
-- **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认改为 `true`**：Store 操作在线程池执行，避免 SQLite 读写阻塞 event loop，提升高并发性能。
+- **默认安全级别改为 `medium`**：宽松模式，大部分"可能危险"指令不拦截，仅高危 + 脱敏；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。语义复核开关（`AEGIS_ENABLE_SEMANTIC_MODULE`，灰区门控）默认开启；未配置语义服务 URL 时仅在灰区触发降级记录，不做语义风险抬升。
+- **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认保持为 `false`**：当前 Store I/O 与过滤管道已通过独立执行器 offload；该开关主要作为兼容字段保留。
 - **`confirmation_ttl_seconds` 从 300s 增加到 600s**：给用户更充裕的时间做 yes/no 决策。
 - **Stale executing 状态自动恢复**：prune 后台任务每 60s 自动将卡在 `executing` 超过 120s 的确认记录恢复为 `pending`，不再依赖下次请求触发。涉及 SQLite/Redis/PostgreSQL 三个存储后端。
 
@@ -250,10 +250,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - **修复**：`_extract_responses_output_text` 与 `_extract_chat_output_text` 安全回退改为仅提取 `status`/`error` 字段的短字符串，**不再** `json.dumps` 整个 body。
 
 - **[Critical] 网关卡死：过滤管道同步执行阻塞 event loop**
-  - `enable_thread_offload=False`（默认值）时，`pipeline.run_request` / `pipeline.run_response` 直接在 asyncio event loop 线程中同步执行。CPU 密集型过滤器（正则扫描、typoglycemia 检测等）处理大文本时会占用 event loop 数秒至数十秒，令网关无法处理任何新请求，表现为"卡死"。
-  - **修复**：`_run_request_pipeline` / `_run_response_pipeline` 无论 `enable_thread_offload` 设置如何，现在一律通过 `asyncio.to_thread` 在线程池中执行，保证 event loop 永远不被阻塞。
-  - **新增**：通过 `asyncio.wait_for` 对过滤管道强制施加硬超时（默认 30 秒）。超时后请求侧原样放行，响应侧返回超时拦截。
-  - **新增** `AEGIS_FILTER_PIPELINE_TIMEOUT_S`（settings: `filter_pipeline_timeout_s`，默认 `30.0`）：控制过滤管道最大执行时间。设为 `0` 表示不限制。
+  - 过滤管道（request/response）当前始终在独立线程池执行（不会在 event loop 同步运行）。
+  - `AEGIS_FILTER_PIPELINE_TIMEOUT_S`（默认 `90.0`）用于限制过滤管道最大执行时间；设为 `0` 表示不限制。
+  - 请求侧超时动作由 `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` 控制：`block`（默认）或 `pass`。
+  - 响应侧超时：固定 `block` 并返回简短超时提示文本。
 
 ### Added
 
@@ -275,8 +275,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `30.0` | 过滤管道最大执行时间（秒），超时后响应被拦截，请求被放行，`0` 表示不限制 |
-| `AEGIS_ENABLE_THREAD_OFFLOAD` | `true` | 控制 Store 操作是否在线程池执行（默认开启，避免 SQLite 阻塞 event loop） |
+| `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90.0` | 过滤管道最大执行时间（秒）；请求侧按 `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` 处理，响应侧固定拦截；`0` 表示不限制 |
+| `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | 请求过滤管道超时动作：`block`（安全默认）或 `pass`（兼容旧行为） |
+| `AEGIS_ENABLE_THREAD_OFFLOAD` | `false` | （保留字段）历史兼容开关；当前 Store I/O 与过滤管道已通过独立执行器 offload，不依赖此项 |
 | `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | `false` | **[已废弃]** 放行确认流程已移除，无论值为何均自动遮挡/分割后返回 |
 
 ### 调试日志配置

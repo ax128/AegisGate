@@ -194,6 +194,94 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
+    def test_chat_image_url_preserved_but_hits_recorded(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://example.com/img.png?token=abc.def.ghi&expires=123"
+                        },
+                    }
+                ],
+            }
+        ]
+
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+
+        assert sanitized == messages
+        assert hits == [
+            {
+                "path": "messages[0].content[0].image_url.url",
+                "field": "url",
+                "role": "user",
+                "pattern": "URL_TOKEN_QUERY",
+                "count": 1,
+            }
+        ]
+
+    def test_chat_non_media_source_url_sanitized(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "source": {
+                            "url": "https://example.com/img.png?token=abc.def.ghi&expires=123"
+                        },
+                    }
+                ],
+            }
+        ]
+
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+
+        assert (
+            sanitized[0]["content"][0]["source"]["url"]
+            == "[REDACTED:URL_TOKEN_QUERY]&expires=123"
+        )
+        assert hits == [
+            {
+                "path": "messages[0].content[0].source.url",
+                "field": "url",
+                "role": "user",
+                "pattern": "URL_TOKEN_QUERY",
+                "count": 1,
+            }
+        ]
+
+    def test_chat_media_source_url_preserved_but_hits_recorded(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": "https://example.com/img.png?token=abc.def.ghi&expires=123",
+                        },
+                    }
+                ],
+            }
+        ]
+
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+
+        assert sanitized == messages
+        assert hits == [
+            {
+                "path": "messages[0].content[0].source.url",
+                "field": "url",
+                "role": "user",
+                "pattern": "URL_TOKEN_QUERY",
+                "count": 1,
+            }
+        ]
+
     def test_chat_structured_content_preserves_unknown_nested_fields(self) -> None:
         messages = [
             {
@@ -286,6 +374,33 @@ def test_shape_guard_reports_preserved_shape_after_sanitize() -> None:
 
     sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload)
     assert _preserves_json_shape(payload, sanitized) is True
+
+
+def test_responses_image_url_preserved_but_hits_recorded() -> None:
+    payload = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.com/img.png?token=abc.def.ghi&expires=123",
+                }
+            ],
+        }
+    ]
+
+    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload)
+
+    assert sanitized == payload
+    assert hits == [
+        {
+            "path": "input[0].content[0].image_url",
+            "field": "image_url",
+            "role": "user",
+            "pattern": "URL_TOKEN_QUERY",
+            "count": 1,
+        }
+    ]
 
 
 def test_shape_guard_detects_list_length_change() -> None:

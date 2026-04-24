@@ -871,6 +871,22 @@ async def security_boundary_middleware(request: Request, call_next):
         http_method=method,
         http_route=route_label,
     ) as span:
+        effective_max_body_bytes = int(settings.max_request_body_bytes)
+        multipart_max = int(settings.max_multipart_body_bytes)
+        normalized_path = (request.url.path or "/").rstrip("/") or "/"
+        if (
+            multipart_max > 0
+            and normalized_path
+            in {
+                "/v1/files",
+                "/v1/images/edits",
+                "/v1/images/variations",
+            }
+        ):
+            content_type = request.headers.get("content-type", "").strip().lower()
+            if content_type.startswith("multipart/form-data"):
+                effective_max_body_bytes = max(effective_max_body_bytes, multipart_max)
+        boundary["max_request_body_bytes"] = effective_max_body_bytes
 
         def finish(response: Response) -> Response:
             reject_reason = boundary.get("rejected_reason")
@@ -1130,7 +1146,7 @@ async def security_boundary_middleware(request: Request, call_next):
         cached_body: bytes | None = None
         content_length_header = request.headers.get("content-length", "").strip()
         if (
-            settings.max_request_body_bytes > 0
+            effective_max_body_bytes > 0
             and method in {"POST", "PUT", "PATCH"}
             and content_length_header
         ):
@@ -1141,19 +1157,19 @@ async def security_boundary_middleware(request: Request, call_next):
                     "boundary reject invalid content-length path=%s", request.url.path
                 )
                 return await finish_drain("invalid_content_length", 400)
-            if content_length > settings.max_request_body_bytes:
+            if content_length > effective_max_body_bytes:
                 logger.warning(
                     "boundary reject oversize request content_length=%s max=%s path=%s",
                     content_length,
-                    settings.max_request_body_bytes,
+                    effective_max_body_bytes,
                     request.url.path,
                 )
                 return await finish_drain("request_body_too_large", 413)
             boundary["request_body_size"] = content_length
-        elif settings.max_request_body_bytes > 0 and method in {"POST", "PUT", "PATCH"}:
+        elif effective_max_body_bytes > 0 and method in {"POST", "PUT", "PATCH"}:
             cached_body, request_size, exceeded = await _read_request_body_limited(
                 request,
-                max_bytes=settings.max_request_body_bytes,
+                max_bytes=effective_max_body_bytes,
             )
             boundary["request_body_size"] = request_size
             if exceeded:
@@ -1161,7 +1177,7 @@ async def security_boundary_middleware(request: Request, call_next):
                 logger.warning(
                     "boundary reject oversize request actual_size=%s max=%s path=%s",
                     request_size,
-                    settings.max_request_body_bytes,
+                    effective_max_body_bytes,
                     request.url.path,
                 )
                 return finish(
@@ -1245,6 +1261,78 @@ async def security_boundary_middleware(request: Request, call_next):
                     source="hmac",
                 )
             logger.info("boundary hmac verified path=%s", request.url.path)
+
+        # ------------------------------------------------------------------
+        # Public-surface restrictions for predictable routing tokens and
+        # explicitly requested filter bypass paths.
+        #
+        # - Numeric tokens (e.g. /v1/__gw__/t/8317/...) are predictable and are
+        #   treated as internal-only by default.
+        # - `token__passthrough` disables all security filters and is internal-only
+        #   by default.
+        #
+        # For both cases, treat "forwarded headers present but direct peer is not
+        # a trusted proxy" as public to avoid proxy misconfiguration making public
+        # traffic appear internal.
+        # ------------------------------------------------------------------
+        token = str(request.scope.get("aegis_gateway_token") or "").strip()
+        filter_mode = str(request.scope.get("aegis_filter_mode") or "").strip().lower()
+        forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+        direct_ip = (request.client.host if request.client else "").strip()
+        if token or filter_mode == "passthrough":
+            is_port_token = False
+            if token.isdigit():
+                try:
+                    port = int(token)
+                except ValueError:
+                    port = 0
+                is_port_token = 1024 <= port <= 65535
+
+            if is_port_token or filter_mode == "passthrough":
+                client_ip = _real_client_ip(request)
+                trusted_proxy = _is_trusted_proxy(direct_ip)
+                is_internal = _is_internal_ip(client_ip)
+                if forwarded_for and not trusted_proxy:
+                    is_internal = False
+                is_public = not is_internal
+
+                if (
+                    is_port_token
+                    and is_public
+                    and not bool(boundary.get("auth_verified"))
+                    and not settings.allow_public_numeric_tokens
+                ):
+                    logger.warning(
+                        "boundary reject public numeric token token=%s client=%s path=%s forwarded=%s",
+                        token,
+                        client_ip,
+                        request.url.path,
+                        bool(forwarded_for),
+                    )
+                    return await finish_drain(
+                        "numeric_token_public_restricted",
+                        403,
+                        "numeric token routes are internal-only; register a random token or enable HMAC",
+                    )
+
+                if (
+                    protected_v1
+                    and filter_mode == "passthrough"
+                    and is_public
+                    and not settings.allow_public_passthrough_mode
+                ):
+                    logger.warning(
+                        "boundary reject public passthrough mode token=%s client=%s path=%s forwarded=%s",
+                        token[:6] if token else "-",
+                        client_ip,
+                        request.url.path,
+                        bool(forwarded_for),
+                    )
+                    return await finish_drain(
+                        "passthrough_mode_public_restricted",
+                        403,
+                        "passthrough mode is internal-only; remove __passthrough from the token path",
+                    )
 
         try:
             response = await call_next(request)

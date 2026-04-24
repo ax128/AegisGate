@@ -74,15 +74,25 @@ cd /path/to/AegisGate
 ## 4) How to start AegisGate with Docker? 推荐安装方式
 
 ```bash
+docker network create cliproxyapi_default || true
+docker network create sub2api-deploy_sub2api-network || true
 docker compose up -d --build
 docker compose ps
 docker compose logs -f aegisgate
 ```
 
+说明：仓库自带 `docker-compose.yml` 默认引用上述 external networks；如果你的环境不需要这些上游网络，需先覆盖或移除对应 network 挂载，再启动。
+
 健康检查：
 
 ```bash
 curl -sS http://127.0.0.1:18080/health
+```
+
+就绪检查（readiness，可选）：
+
+```bash
+curl -sS http://127.0.0.1:18080/ready
 ```
 
 ## 5) How to run without Docker? 源码本地运行
@@ -188,12 +198,12 @@ model: gpt-4.1-mini
 
 ## 9) How to manage tokens and the gateway? 常用管理命令
 
-查看 token：
+查看 token（按 `upstream_base` 查询已注册项）：
 
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/lookup \
   -H "Content-Type: application/json" \
-  -d '{"token":"<TOKEN>"}'
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<AEGIS_GATEWAY_KEY>"}'
 ```
 
 删除 token：
@@ -201,15 +211,30 @@ curl -X POST http://127.0.0.1:18080/__gw__/lookup \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/unregister \
   -H "Content-Type: application/json" \
-  -d '{"token":"<TOKEN>"}'
+  -d '{"token":"<TOKEN>","gateway_key":"<AEGIS_GATEWAY_KEY>"}'
 ```
 
-查看所有 token（需要网关密钥）：
+查看所有 token（最稳妥：直接读本机映射文件）：
 
 ```bash
-curl http://127.0.0.1:18080/__ui__/api/tokens \
-  -H "X-Gateway-Key: <AEGIS_GATEWAY_KEY>"
+cat config/gw_tokens.json
 ```
+
+通过 UI API 查看所有 token（`GET /__ui__/api/tokens` 不是 `X-Gateway-Key` 直调接口；需要 session cookie）：
+
+```bash
+# 1) 登录 UI，获取 session cookie
+curl -c /tmp/aegisgate-ui.cookie -X POST http://127.0.0.1:18080/__ui__/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"password":"<AEGIS_GATEWAY_KEY>"}'
+
+# 2) 使用已登录 session 查看 token 列表
+curl -b /tmp/aegisgate-ui.cookie http://127.0.0.1:18080/__ui__/api/tokens
+```
+
+说明：
+- 若 `curl` 调用 UI API 返回 401，通常是因为 `AEGIS_LOCAL_UI_SECURE_COOKIE=true`（默认）会下发 `Secure` cookie，`http://127.0.0.1` 场景下 cookie 不会被回传；此时请改用 HTTPS 访问 UI，或临时设置 `AEGIS_LOCAL_UI_SECURE_COOKIE=false` 后重启网关再测试（仅建议开发环境）。
+- UI 写接口除 session 外还要求 `x-aegis-ui-csrf`；可通过 `GET /__ui__/api/bootstrap` 读取当前 session 的 csrf token。
 
 查看日志：
 
@@ -234,7 +259,7 @@ docker compose up -d --build
 
 1. `health` 是否正常（`curl http://127.0.0.1:18080/health`）。
 2. 确认使用哪种路由模式：token 路由（路径含 `/v1/__gw__/t/<TOKEN>/...`）或直连上游（`AEGIS_UPSTREAM_BASE_URL` 是否已设置）。
-3. Token 路由：token 是否存在（`/__gw__/lookup`）；上游地址与 API key 是否正确。
+3. Token 路由：若只知道 `upstream_base`，用 `POST /__gw__/lookup` 反查 token；若只知道 token，可查看 `config/gw_tokens.json` 或登录 UI 后访问 `/__ui__/api/tokens`。同时确认上游地址与 API key 是否正确。
 4. 直连模式：`.env` 中 `AEGIS_UPSTREAM_BASE_URL` 是否正确，是否已重启。
 5. 看 `docker compose logs -f aegisgate` 是否有 `upstream` 错误、自动净化（auto-sanitize）、阻断原因。
 

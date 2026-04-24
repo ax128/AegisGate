@@ -7,9 +7,11 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+coverage.xml
 # Keep the curated CI test subset and shared cleanup hook tracked.
 aegisgate/tests/*
 !aegisgate/tests/conftest.py
+!aegisgate/tests/test_gateway_boundary_access.py
 !aegisgate/tests/test_openai_request_mapping.py
 !aegisgate/tests/test_passthrough_filter_mode.py
 !aegisgate/tests/test_request_redaction_routes.py
@@ -53,6 +55,9 @@ config/stats.json
 
 # Auto-generated IDE/agent files
 AGENTS.md
+.claude/
+.codex/
+.codex
 *.egg-info/
 build/
 dist/
@@ -62,6 +67,7 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+.worktrees/
 
 # Do not publish local docs directory (lowercase or uppercase)
 docs/
