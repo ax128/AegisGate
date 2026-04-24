@@ -196,6 +196,13 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
         "section": "general",
     },
     {
+        "env": "AEGIS_MAX_MULTIPART_BODY_BYTES",
+        "field": "max_multipart_body_bytes",
+        "label": "multipart 最大请求体（字节）",
+        "type": "int",
+        "section": "general",
+    },
+    {
         "env": "AEGIS_MAX_MESSAGES_COUNT",
         "field": "max_messages_count",
         "label": "最大消息条数",

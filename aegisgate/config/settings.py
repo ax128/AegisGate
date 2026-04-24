@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     postgres_dsn: str = ""
     postgres_schema: str = "public"
     max_request_body_bytes: int = 12_000_000
+    # Multipart/form-data requests (for example image edits / file upload) may be larger.
+    # OpenAI image edit masks require the image+mask to be <50MB; keep a small safety buffer.
+    max_multipart_body_bytes: int = 60_000_000
     max_messages_count: int = 500
     max_content_length_per_message: int = 250_000
     max_pending_payload_bytes: int = 1_200_000
@@ -77,7 +80,10 @@ class Settings(BaseSettings):
     strict_command_block_enabled: bool = False
     # high: 全量检测 | medium（默认）: 宽松，仅高危+脱敏 | low: 极宽松，基本只脱敏+极端危险拦截
     security_level: str = "medium"
-    enable_semantic_module: bool = True  # 内置 TF-IDF 语义分类器，无需 GPU
+    # 语义复核（响应侧、灰区门控）。
+    # 仅当 risk_score 落在 (semantic_gray_low, semantic_gray_high) 时才触发；
+    # 通过 semantic_service_url 指向的语义服务执行。URL 为空时仅记录降级，不做风险抬升。
+    enable_semantic_module: bool = True
     semantic_gray_low: float = 0.25
     semantic_gray_high: float = 0.75
     semantic_timeout_ms: int = 150
@@ -102,6 +108,12 @@ class Settings(BaseSettings):
     # 安全默认：关闭。生产环境不建议开启（避免可预测 token 被滥用）。
     enable_builtin_compat_tokens: bool = False
     enable_local_port_routing: bool = False
+    # Allow numeric tokens (1024-65535) to be used from public/non-internal clients.
+    # Default: False (internal-only) to prevent exposing predictable port tokens on public ingress.
+    allow_public_numeric_tokens: bool = False
+    # Allow `token__passthrough` mode from public/non-internal clients.
+    # Default: False (internal-only) because passthrough disables all security filters.
+    allow_public_passthrough_mode: bool = False
     # 自定义 host（Docker 环境默认 host.docker.internal，裸机可改为 127.0.0.1）
     local_port_routing_host: str = "host.docker.internal"
     # H-08: Comma-separated allowlist of ports permitted for compat port routing.

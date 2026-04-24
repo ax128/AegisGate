@@ -8,10 +8,12 @@ import logging
 import asyncio
 import re
 import time
+import uuid
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Generator, Mapping
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from starlette.datastructures import UploadFile
 
 from aegisgate.adapters.openai_compat.mapper import (
     messages_payload_to_responses_payload,
@@ -92,6 +94,8 @@ from aegisgate.adapters.openai_compat.upstream import (
     _effective_gateway_headers,
     _forward_json,
     _forward_json_pinned,
+    _forward_multipart,
+    _forward_multipart_pinned,
     _forward_stream_lines,
     _forward_stream_lines_pinned,
     _is_upstream_whitelisted,
@@ -318,6 +322,27 @@ async def _forward_json_with_pinning(
             host_header=host_header,
         )
     return await _forward_json(url, payload, headers)
+
+
+async def _forward_multipart_with_pinning(
+    *,
+    url: str,
+    data: list[tuple[str, str]] | None,
+    files: list[tuple[str, tuple[str, bytes, str]]] | None,
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+) -> tuple[int, dict[str, Any] | str]:
+    if connect_urls:
+        return await _forward_multipart_pinned(
+            url=url,
+            data=data,
+            files=files,
+            headers=headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+        )
+    return await _forward_multipart(url, data=data, files=files, headers=headers)
 
 
 def _stream_bootstrap_retries() -> int:
@@ -7213,6 +7238,179 @@ async def _execute_generic_once(
     return _passthrough_any_response(upstream_body)
 
 
+def _strip_content_type_header(headers: Mapping[str, str]) -> dict[str, str]:
+    copied = dict(headers)
+    for key in list(copied):
+        if key.lower() == "content-type":
+            del copied[key]
+    return copied
+
+
+async def _execute_multipart_once(
+    *,
+    request: Request,
+    request_headers: Mapping[str, str],
+    request_path: str,
+    boundary: dict | None,
+    tenant_id: str = "default",
+) -> JSONResponse | PlainTextResponse:
+    request_id = f"multipart-{uuid.uuid4().hex[:12]}"
+    token_hint = _header_lookup(request_headers, "x-aegis-token-hint")
+    session_id = f"{token_hint}:{request_id}" if token_hint else request_id
+    ctx = RequestContext(
+        request_id=request_id,
+        session_id=session_id,
+        route=request_path,
+        tenant_id=tenant_id,
+    )
+    ctx.redaction_whitelist_keys = _extract_redaction_whitelist_keys(request_headers)
+    policy_engine.resolve(ctx, policy_name=settings.default_policy)
+    filter_mode = _apply_filter_mode(ctx, request_headers)
+    logger.info("multipart proxy start request_id=%s route=%s", request_id, request_path)
+
+    host_header = ""
+    try:
+        upstream_base, connect_bases, host_header = await _resolve_upstream_base(
+            request_headers
+        )
+        upstream_url = _build_upstream_url(request_path, upstream_base)
+        connect_urls = _build_connect_urls_for_path(request_path, connect_bases)
+    except ValueError as exc:
+        logger.warning("invalid upstream base request_id=%s error=%s", request_id, exc)
+        return _error_response(
+            status_code=400,
+            reason="invalid_upstream_base",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    data: list[tuple[str, str]] = []
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    redaction_hits: list[dict[str, Any]] = []
+    whitelist_keys = ctx.redaction_whitelist_keys
+
+    async with request.form() as form:
+        for key, value in form.multi_items():
+            if isinstance(value, UploadFile):
+                filename = str(value.filename or "blob")
+                content_type = str(value.content_type or "application/octet-stream")
+                try:
+                    content = await value.read()
+                finally:
+                    await value.close()
+                files.append((str(key), (filename, content, content_type)))
+                continue
+
+            raw_text = str(value)
+            if filter_mode == "passthrough":
+                data.append((str(key), raw_text))
+                continue
+
+            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+                raw_text,
+                role="user",
+                path=f"multipart.{key}",
+                field=str(key),
+                whitelist_keys=whitelist_keys,
+            )
+            redaction_hits.extend(node_hits)
+            # Preserve media locator fields as-is (e.g. signed image URLs).
+            if str(key).strip().lower() in {"image_url", "file_id"}:
+                data.append((str(key), raw_text))
+            else:
+                data.append((str(key), cleaned))
+
+    if filter_mode != "passthrough":
+        analysis_parts = [value for _, value in data]
+        if files:
+            analysis_parts.append("[BINARY_CONTENT]")
+        analysis_text = " ".join(part for part in analysis_parts if part).strip()
+        if (
+            settings.max_content_length_per_message > 0
+            and len(analysis_text) > settings.max_content_length_per_message
+        ):
+            analysis_text = analysis_text[: settings.max_content_length_per_message]
+        model = next((v for k, v in data if k == "model"), "generic-model")
+        req = InternalRequest(
+            request_id=request_id,
+            session_id=session_id,
+            route=request_path,
+            model=model,
+            messages=[
+                InternalMessage(
+                    role="user",
+                    content=analysis_text or "[NON_TEXT_PAYLOAD]",
+                    source="user",
+                )
+            ],
+            metadata={"raw": {"multipart": True}},
+        )
+        pipeline = _get_pipeline()
+        await _run_request_pipeline(pipeline, req, ctx)
+        if ctx.request_disposition == "block":
+            return _error_response(
+                status_code=403,
+                reason="request_blocked",
+                detail="multipart request blocked by security policy",
+                ctx=ctx,
+                boundary=boundary,
+            )
+
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        logger.warning(
+            "multipart input redaction request_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            request_path,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
+
+    forward_headers = _with_trace_forward_headers(
+        _build_forward_headers(request_headers), request_id
+    )
+    # Let httpx build a correct multipart boundary.
+    forward_headers = _strip_content_type_header(forward_headers)
+
+    try:
+        status_code, upstream_body = await _forward_multipart_with_pinning(
+            url=upstream_url,
+            data=data,
+            files=files,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+        )
+    except RuntimeError as exc:
+        logger.error(
+            "multipart upstream unreachable request_id=%s error=%s", request_id, exc
+        )
+        return _error_response(
+            status_code=502,
+            reason="upstream_unreachable",
+            detail=str(exc),
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    if status_code >= 400:
+        detail = _safe_error_detail(upstream_body)
+        return _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+
+    _write_audit_event(ctx, boundary=boundary)
+    if isinstance(upstream_body, dict):
+        return JSONResponse(status_code=status_code, content=upstream_body)
+    return PlainTextResponse(status_code=status_code, content=str(upstream_body))
+
+
 @router.post("/chat/completions")
 async def chat_completions(payload: dict, request: Request):
     rollout_key = _chat_entrypoint_rollout_key(payload)
@@ -7276,14 +7474,17 @@ async def chat_completions(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_chat_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    pending = await run_store_io(
-        _resolve_pending_confirmation,
-        payload,
-        user_text,
-        now_ts,
-        expected_route=req_preview.route,
-        tenant_id=tenant_id,
-    )
+    filter_mode = _filter_mode_from_headers(gateway_headers)
+    pending = None
+    if filter_mode != "passthrough":
+        pending = await run_store_io(
+            _resolve_pending_confirmation,
+            payload,
+            user_text,
+            now_ts,
+            expected_route=req_preview.route,
+            tenant_id=tenant_id,
+        )
     # Only log confirmation details when there's an actual pending or explicit command.
     if pending or decision_value not in {"unknown", ""}:
         logger.debug(
@@ -7558,14 +7759,17 @@ async def responses(payload: dict, request: Request):
     now_ts = int(time.time())
     user_text = _extract_responses_user_text(payload)
     decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    pending = await run_store_io(
-        _resolve_pending_confirmation,
-        payload,
-        user_text,
-        now_ts,
-        expected_route=req_preview.route,
-        tenant_id=tenant_id,
-    )
+    filter_mode = _filter_mode_from_headers(gateway_headers)
+    pending = None
+    if filter_mode != "passthrough":
+        pending = await run_store_io(
+            _resolve_pending_confirmation,
+            payload,
+            user_text,
+            now_ts,
+            expected_route=req_preview.route,
+            tenant_id=tenant_id,
+        )
     # Only log confirmation details when there's an actual pending or explicit command.
     if pending or decision_value not in {"unknown", ""}:
         logger.debug(
@@ -7933,6 +8137,51 @@ async def _messages_compat_openai_chat(
             )
         )
     return resp_result
+
+
+@router.post("/files")
+async def files(request: Request):
+    """Raw/multipart pass-through for OpenAI Files API."""
+    boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=None, headers=gateway_headers, boundary=boundary)
+    return await _execute_multipart_once(
+        request=request,
+        request_headers=gateway_headers,
+        request_path="/v1/files",
+        boundary=boundary,
+        tenant_id=tenant_id,
+    )
+
+
+@router.post("/images/edits")
+async def images_edits(request: Request):
+    """Raw/multipart pass-through for OpenAI Images edits API."""
+    boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=None, headers=gateway_headers, boundary=boundary)
+    return await _execute_multipart_once(
+        request=request,
+        request_headers=gateway_headers,
+        request_path="/v1/images/edits",
+        boundary=boundary,
+        tenant_id=tenant_id,
+    )
+
+
+@router.post("/images/variations")
+async def images_variations(request: Request):
+    """Raw/multipart pass-through for OpenAI Images variations API."""
+    boundary = getattr(request.state, "security_boundary", {})
+    gateway_headers = _effective_gateway_headers(request)
+    tenant_id = _resolve_tenant_id(payload=None, headers=gateway_headers, boundary=boundary)
+    return await _execute_multipart_once(
+        request=request,
+        request_headers=gateway_headers,
+        request_path="/v1/images/variations",
+        boundary=boundary,
+        tenant_id=tenant_id,
+    )
 
 
 @router.post("/{subpath:path}")

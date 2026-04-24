@@ -2,7 +2,7 @@
   "_说明": "多上游 Token 预配置模板。编辑后保存为 gw_tokens.json，重启网关自动加载。",
   "_格式": "每个 key 是自定义 token 名称，客户端通过 /v1/__gw__/t/<token>/... 访问对应上游。",
   "_compat说明": [
-    "设置 compat=openai_chat 后，/v1/messages 请求自动转换为 /v1/chat/completions 格式。",
+    "设置 compat=openai_chat 后，/v1/messages 请求自动转换为 /v1/responses 格式。",
     "模型映射由全局 config/model_map.json 管理，不绑定具体 token。",
     "default_model 可选，覆盖全局映射未命中时的默认模型（默认 gpt-5.4）。",
     "允许的目标模型: gpt-5, gpt-5.2, gpt-5.4, gpt-5.4-mini, gpt-5.2-codex, gpt-5.3-codex"

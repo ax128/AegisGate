@@ -71,6 +71,8 @@ cat config/aegis_gateway.key
 
 示例流程：
 
+> 注意：`AEGIS_LOCAL_UI_SECURE_COOKIE=true`（默认）会下发 `Secure` cookie。`curl -c/-b` 在 `http://127.0.0.1` 下通常不会回传该 cookie，导致后续 UI API 调用返回 401。用 `curl` 调试 UI API 时建议临时设置 `AEGIS_LOCAL_UI_SECURE_COOKIE=false` 后重启网关，或在 HTTPS 下访问。
+
 ```bash
 # 1) 登录，保存 cookie
 curl -X POST http://127.0.0.1:18080/__ui__/api/login \

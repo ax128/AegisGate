@@ -10,10 +10,10 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 
 ### Key Features
 
-- **Prompt Injection Protection** — Multi-layer detection: regex patterns, TF-IDF semantic classifier (bilingual EN/ZH, no GPU required), Unicode/encoding attack detection, typoglycemia defense
+- **Prompt Injection Protection** — Multi-layer detection: regex patterns, optional semantic review (gray-zone gated: `AEGIS_ENABLE_SEMANTIC_MODULE` + `AEGIS_SEMANTIC_SERVICE_URL` + `AEGIS_SEMANTIC_GRAY_LOW/HIGH`), Unicode/encoding attack detection, typoglycemia defense
 - **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers
 - **Dangerous Response Sanitization** — Automatic obfuscation of high-risk LLM outputs (shell commands, SQL injection payloads, HTTP smuggling) with configurable security levels (low/medium/high)
-- **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and generic proxy; works with any OpenAI-compatible provider
+- **OpenAI-Compatible + Anthropic Messages API** — Drop-in routes for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and the generic proxy; works with OpenAI-compatible providers and Anthropic-compatible Messages upstreams
 - **Anthropic ↔ OpenAI Protocol Conversion** — Token-based `compat` mode converts Anthropic `/v1/messages` requests to OpenAI `/v1/responses` on the fly, enabling Claude Code / Anthropic SDK to talk to OpenAI-compatible upstreams (GPT-5.4, etc.) without code changes
 - **MCP & Agent SKILL Support** — Integrates with Cursor, Claude Code, Codex, Windsurf and other AI coding agents via Model Context Protocol
 - **Token-Based Routing** — Route requests to multiple upstream providers through a single gateway with per-token upstream mapping and whitelist controls
@@ -39,10 +39,10 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 | Web management UI | Yes | No | No | Dashboard |
 | MCP / Agent SKILL support | Yes | No | No | No |
 | Token-based multi-upstream routing | Yes | N/A | N/A | N/A |
-| No external API dependency | Yes (TF-IDF local) | Yes | No (OpenAI) | No |
+| No external API dependency | Yes (core filters local; semantic service optional) | Yes | No (OpenAI) | No |
 | Bilingual (EN/ZH) | Yes | English | English | English |
 
-> **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI login at `http://localhost:18080/__ui__/login`
+> **Quick start:** create `cliproxyapi_default` and `sub2api-deploy_sub2api-network` first, then run `docker compose up -d --build` — gateway runs on port 18080, admin UI login at `http://localhost:18080/__ui__/login`
 
 ### Architecture
 
@@ -65,13 +65,14 @@ flowchart LR
         end
 
         subgraph RespPipeline["Response Pipeline"]
-            S1[Injection Detector<br/>regex + TF-IDF semantic]
+            S1[Injection Detector<br/>regex patterns]
             S2[Anomaly Detector<br/>encoding & command patterns]
             S3[Privilege Guard]
             S4[Tool Call Guard]
             S5[Restoration &<br/>Post-Restore Guard]
             S6[Output Sanitizer<br/>block / sanitize / pass]
         end
+        SR[Semantic Review (Gray Zone)<br/>optional service call]
 
         MW --> ReqPipeline
     end
@@ -85,7 +86,8 @@ flowchart LR
     A1 & A2 -->|"baseUrl → gateway"| MW
     ReqPipeline -->|filtered request| U1 & U2 & U3
     U1 & U2 & U3 -->|raw response| RespPipeline
-    RespPipeline -->|sanitized response| A1 & A2
+    RespPipeline -->|optional gray-zone review| SR
+    SR -->|sanitized response| A1 & A2
 ```
 
 ### Frequently Asked Questions
@@ -94,7 +96,7 @@ flowchart LR
 AegisGate is an open-source, self-hosted security gateway that sits between your AI applications and LLM API providers. It inspects and filters both requests and responses in real-time, protecting against prompt injection, PII leakage, and dangerous LLM outputs.
 
 **How does AegisGate detect prompt injection?**
-AegisGate uses a multi-layer approach: (1) bilingual regex patterns for known injection techniques (direct injection, system prompt exfiltration, typoglycemia obfuscation), (2) a built-in TF-IDF + Logistic Regression semantic classifier that runs locally without GPU, and (3) Unicode/encoding attack detection for invisible characters, bidirectional control abuse, and multi-stage encoded payloads.
+AegisGate uses a multi-layer approach: (1) bilingual regex patterns for known injection techniques (direct injection, system prompt exfiltration, typoglycemia obfuscation), (2) an optional semantic-review stage that is gray-zone gated by `AEGIS_SEMANTIC_GRAY_LOW/HIGH` (enabled by `AEGIS_ENABLE_SEMANTIC_MODULE`, service-backed via `AEGIS_SEMANTIC_SERVICE_URL`), and (3) Unicode/encoding attack detection for invisible characters, bidirectional control abuse, and multi-stage encoded payloads.
 
 **Does AegisGate work with OpenAI, Claude, and other LLM providers?**
 Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/responses`) and a token-based generic HTTP proxy (`/v2/__gw__/t/<token>/...`, with `x-target-url` + `AEGIS_V2_TARGET_ALLOWLIST`). Applications that support a custom `baseUrl` can use the OpenAI-compatible routes as a drop-in proxy, and HTTP tooling can use the v2 token route when a generic proxy is needed. It has been verified with OpenAI, Claude (via compatible proxies), Gemini, and any OpenAI-compatible API.
@@ -109,10 +111,10 @@ Yes. AegisGate supports MCP (Model Context Protocol) and Agent SKILL integration
 Responses are scored by multiple filters (injection detector, anomaly detector, privilege guard, tool call guard). Based on the cumulative risk score and configurable security level (low/medium/high), the gateway either passes the response through, sanitizes dangerous fragments (replacing them with safe markers), or blocks the entire response. Streaming responses are checked incrementally and can be terminated mid-stream.
 
 **Does AegisGate require an external AI service for detection?**
-No. The built-in TF-IDF semantic classifier runs locally (~166KB model file) without GPU. All regex-based detection also runs locally. An optional external semantic service can be configured for advanced use cases, but is not required.
+Not for baseline protection. Regex-based detection, redaction, response sanitization, and routing safeguards run locally. The optional semantic-review stage is gray-zone gated (by `AEGIS_SEMANTIC_GRAY_LOW/HIGH`); when enabled, the gateway queries `AEGIS_SEMANTIC_SERVICE_URL` only for gray-zone cases. If the URL is empty, those gray-zone cases record `semantic_service_unconfigured` and continue without semantic escalation. The repository still ships local TF-IDF assets and training scripts for offline experiments (not wired into the default gateway path).
 
 **How do I deploy AegisGate?**
-The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__/login`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
+The recommended method is Docker Compose. With the stock `docker-compose.yml`, create the referenced external networks first (`cliproxyapi_default` and `sub2api-deploy_sub2api-network`), then run `docker compose up -d --build`. The gateway runs on port 18080 with a built-in web management console at `/__ui__/login`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
 
 
 ## Getting Started
@@ -130,6 +132,8 @@ docker compose up -d --build
 ```
 
 Health check: `curl http://127.0.0.1:18080/health`
+
+Readiness check: `curl http://127.0.0.1:18080/ready`
 
 Admin UI login: `http://localhost:18080/__ui__/login`
 
@@ -183,6 +187,8 @@ Client → http://<gateway-ip>:18080/v1/__gw__/t/{port}/... → localhost:{port}
 - For host-port routing, no token registration is required
 - Supports filter mode suffixes: `token__redact` (redaction only) or `token__passthrough` (full passthrough)
   - `token__passthrough` still keeps the OpenAI compatibility layer: gateway-only fields are stripped before forwarding, and Chat/Responses parameter compatibility is preserved
+- **Security default:** numeric port tokens (1024–65535, e.g. `/v1/__gw__/t/8317/...`) are treated as internal-only. For public clients, register a random token (recommended) or enable request HMAC auth; override with `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`.
+- **Security default:** `token__passthrough` is treated as internal-only because it disables all filters; override with `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE=true` (dangerous).
 
 Docker-specific notes:
 
@@ -205,8 +211,10 @@ Use the returned token: `http://<gateway-ip>:18080/v1/__gw__/t/<token>`
 ### Scenario 3: Caddy + TLS for Public Access
 
 ```
-Client → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
+Client → https://api.example.com/v1/__gw__/t/<token>/... → Caddy → AegisGate:18080 → localhost:8317
 ```
+
+For public access, prefer a random registered token. Numeric port tokens and `__passthrough` are blocked for public/non-internal clients by default.
 
 See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 
@@ -369,6 +377,7 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 5. Direct `/v1/...` mode does not expose a client-settable filter-mode header; use token routes if you need `redact-only` or `passthrough`.
 6. **Passthrough** still preserves the minimal protocol compatibility layer: gateway-internal fields are stripped, and Chat/Responses parameter conversion is maintained so upstream does not receive unknown fields.
 7. **Security warning:** Passthrough mode skips all security checks. Use only in trusted environments or for debugging.
+8. **Public surface:** by default, numeric port tokens (1024–65535) and `__passthrough` mode are blocked for public/non-internal clients. For public use, register a random token (recommended), or enable HMAC / explicit allow flags.
 
 ### Dangerous Content Handling
 
@@ -399,9 +408,15 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
+| `AEGIS_ENABLE_SEMANTIC_MODULE` | `true` | Enable semantic review (gray-zone gated; see `AEGIS_SEMANTIC_GRAY_LOW/HIGH`) |
+| `AEGIS_SEMANTIC_SERVICE_URL` | _(empty)_ | Semantic service endpoint. When empty, gray-zone cases record `semantic_service_unconfigured` and skip semantic escalation |
+| `AEGIS_SEMANTIC_GRAY_LOW` | `0.25` | Lower bound for triggering semantic review (only when `risk_score` is between low/high) |
+| `AEGIS_SEMANTIC_GRAY_HIGH` | `0.75` | Upper bound for triggering semantic review (only when `risk_score` is between low/high) |
 | `AEGIS_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | `true` | Restrict access to loopback; set `false` for Docker |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | `false` | Enable numeric token host-port fallback such as `/v1/__gw__/t/8317/...` |
+| `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS` | `false` | Allow numeric tokens (1024–65535) from public/non-internal clients (default: internal-only) |
+| `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE` | `false` | Allow `__passthrough` mode from public/non-internal clients (dangerous; default: internal-only) |
 | `AEGIS_DOCKER_UPSTREAMS` | _(empty)_ | Startup token -> Docker service mappings; same-name mappings override host-port fallback |
 | `AEGIS_ENABLE_V2_PROXY` | `true` | Enable v2 generic HTTP proxy |
 | `AEGIS_V2_TARGET_ALLOWLIST` | _(empty)_ | Required hostname allowlist for v2 targets; empty = deny all target hosts |
@@ -422,6 +437,20 @@ Key environment variables (set in `config/.env`):
 
 Full configuration reference: [`aegisgate/config/settings.py`](aegisgate/config/settings.py) and [`config/.env.example`](config/.env.example).
 
+### Semantic Service Protocol (Optional)
+
+If `AEGIS_ENABLE_SEMANTIC_MODULE=true` and a request falls into the gray-zone gate, the gateway may call `AEGIS_SEMANTIC_SERVICE_URL` with:
+
+```json
+{"text":"..."}
+```
+
+The semantic service should return a JSON object:
+
+```json
+{"risk_score":0.0,"tags":[],"reasons":[]}
+```
+
 ## Agent Skill
 
 Agent-executable installation and integration guide: [SKILL.md](SKILL.md)
@@ -440,7 +469,7 @@ pip install -e ".[observability]"
 ```
 
 With the observability extra installed, AegisGate exposes `/metrics` for Prometheus scraping and initializes the OpenTelemetry provider/exporter during startup.
-Automatic request spans are not enabled by default in this release.
+Gateway request handling creates `gateway.request` spans. Whether those spans are exported depends on your OpenTelemetry exporter setup; without an OTLP exporter, spans are discarded unless `AEGIS_OTEL_CONSOLE_EXPORTER=true` is set.
 `/metrics` does not have a dedicated auth layer; it inherits the gateway's normal network and auth controls, so disabling loopback/HMAC protections may expose it more broadly.
 
 ## Troubleshooting
