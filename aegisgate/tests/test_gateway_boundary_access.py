@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import httpx
 import pytest
+import yaml
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import Request
 
 from aegisgate.core import gateway
 from aegisgate.core import gateway_network
+from aegisgate.core import gateway_ui_routes
+from aegisgate.core import gw_tokens
 
 
 def _build_request(
@@ -636,3 +642,139 @@ async def test_boundary_allows_admin_endpoints_from_private_ip(
     response = await gateway.security_boundary_middleware(request, _allow_next)
 
     assert response.status_code == 200
+
+
+@pytest.fixture
+def _clear_gw_tokens() -> None:
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+    yield
+    with gw_tokens._lock:
+        gw_tokens._tokens.clear()
+
+
+@pytest.mark.asyncio
+async def test_ui_rules_add_rejects_invalid_regex(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rules_path = tmp_path / "security_rules.yaml"
+    monkeypatch.setattr(gateway_ui_routes.settings, "security_rules_path", str(rules_path))
+
+    app = FastAPI()
+    gateway_ui_routes.register_ui_routes(app)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/__ui__/api/rules/command_patterns",
+            json={"id": "bad", "regex": "("},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_regex"
+    assert not rules_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_ui_rules_update_rejects_invalid_regex_without_changing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rules_path = tmp_path / "security_rules.yaml"
+    rules_path.write_text(
+        yaml.safe_dump(
+            {
+                "anomaly_detector": {
+                    "command_patterns": [
+                        {"id": "existing", "regex": r"\brm\s+-rf\b"}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = rules_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(gateway_ui_routes.settings, "security_rules_path", str(rules_path))
+
+    app = FastAPI()
+    gateway_ui_routes.register_ui_routes(app)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/__ui__/api/rules/command_patterns/existing",
+            json={"regex": "("},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_regex"
+    assert rules_path.read_text(encoding="utf-8") == before
+
+
+def test_gw_tokens_save_raises_when_token_file_cannot_be_persisted(
+    monkeypatch: pytest.MonkeyPatch, _clear_gw_tokens: None
+) -> None:
+    with gw_tokens._lock:
+        gw_tokens._tokens["tok"] = {
+            "upstream_base": "https://upstream.example.com/v1",
+            "whitelist_key": [],
+        }
+
+    def fail_named_temporary_file(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gw_tokens.tempfile, "NamedTemporaryFile", fail_named_temporary_file)
+
+    with pytest.raises(OSError, match="disk full"):
+        gw_tokens._save()
+
+
+def test_gw_tokens_register_rolls_back_memory_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch, _clear_gw_tokens: None
+) -> None:
+    token = "A" * gw_tokens._TOKEN_LEN
+    monkeypatch.setattr(gw_tokens, "_generate_alnum_token", lambda length: token)
+
+    def fail_save() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gw_tokens, "_save", fail_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        gw_tokens.register("https://upstream.example.com/v1")
+
+    assert gw_tokens.get(token) is None
+
+
+def test_gw_tokens_builtin_injection_keeps_memory_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch, _clear_gw_tokens: None
+) -> None:
+    monkeypatch.setattr(gw_tokens.settings, "enable_builtin_compat_tokens", True)
+
+    def fail_save() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gw_tokens, "_save", fail_save)
+
+    gw_tokens.inject_builtin_compat_tokens()
+
+    mapping = gw_tokens.get("claude-to-gpt")
+    assert mapping is not None
+    assert mapping["compat"] == "openai_chat"
+
+
+def test_gw_tokens_docker_upstreams_keep_memory_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch, _clear_gw_tokens: None
+) -> None:
+    monkeypatch.setattr(gw_tokens.settings, "docker_upstreams", "8317:cli-proxy-api")
+
+    def fail_save() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gw_tokens, "_save", fail_save)
+
+    injected = gw_tokens.inject_docker_upstreams()
+
+    assert injected == 1
+    mapping = gw_tokens.get("8317")
+    assert mapping is not None
+    assert mapping["upstream_base"] == "http://cli-proxy-api:8317/v1"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from dataclasses import dataclass
 import json
 import logging
@@ -10,7 +11,7 @@ import re
 from contextlib import AsyncExitStack
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import ipaddress
 
@@ -25,7 +26,7 @@ from aegisgate.util.ip_safety import (
     bound_connect_url,
     request_host_header,
 )
-from aegisgate.config.redact_values import replace_exact_values
+from aegisgate.config.redact_values import load_redact_values, replace_exact_values
 from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
@@ -177,6 +178,20 @@ _V2_HTTP_ATTACK_REASON_MAP: dict[str, str] = {
     "web_http_obs_fold_header": "检测到响应正文中嵌入的 HTTP 头折叠/混淆特征",
 }
 _V2_DANGER_FRAGMENT_NOTICE = "【AegisGate已处理危险疑似片段】"
+_V2_SENSITIVE_QUERY_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "auth_token",
+    "token",
+    "password",
+    "passwd",
+    "secret",
+    "signature",
+    "credential",
+)
 
 _v2_async_client: httpx.AsyncClient | None = None
 _v2_client_lock = asyncio.Lock()
@@ -240,6 +255,63 @@ def _target_host(target_url: str) -> str:
         return (urlparse(target_url).hostname or "").strip().lower()
     except (ValueError, AttributeError):
         return ""
+
+
+def _is_sensitive_query_key(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(name or "").strip().lower())
+    return any(part in normalized for part in _V2_SENSITIVE_QUERY_KEY_PARTS)
+
+
+def _redact_v2_target_url_for_log(target_url: str) -> str:
+    try:
+        parsed = urlparse(target_url)
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return mask_for_log(target_url)
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        query = parsed.query
+        if query:
+            query = urlencode(
+                [
+                    (key, mask_for_log(value) if _is_sensitive_query_key(key) else value)
+                    for key, value in parse_qsl(query, keep_blank_values=True)
+                ],
+                doseq=True,
+            )
+        return urlunparse(
+            (parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment)
+        )
+    except (TypeError, ValueError):
+        return mask_for_log(str(target_url or ""))
+
+
+def _v2_exact_value_tail_chars() -> int:
+    try:
+        values = load_redact_values()
+    except Exception as exc:
+        logger.warning("v2 exact-value redaction values unavailable error=%s", exc)
+        return 0
+    max_len = max((len(value) for value in values if isinstance(value, str)), default=0)
+    return max(0, max_len - 1)
+
+
+def _redact_v2_exact_stream_text(
+    text_piece: str,
+    pending_text: str,
+    *,
+    tail_chars: int,
+) -> tuple[list[bytes], str]:
+    text = pending_text + text_piece
+    replaced, _count = replace_exact_values(text)
+    if tail_chars <= 0:
+        return ([replaced.encode("utf-8")] if replaced else []), ""
+    if len(replaced) <= tail_chars:
+        return [], replaced
+    emit_text = replaced[:-tail_chars]
+    next_pending = replaced[-tail_chars:]
+    return ([emit_text.encode("utf-8")] if emit_text else []), next_pending
 
 
 def _should_bypass_v2_response_filter(target_url: str) -> bool:
@@ -792,6 +864,8 @@ async def _extract_target_url(
             None,
             f"invalid target url in header {_V2_TARGET_URL_HEADER}: scheme must be http/https",
         )
+    if parsed.username or parsed.password:
+        return None, "target url userinfo is not allowed"
     hostname = (parsed.hostname or "").strip().lower()
     if not _is_v2_target_allowlisted(hostname):
         return None, "target url host is not in v2 target allowlist"
@@ -997,7 +1071,7 @@ async def _proxy_v2_streaming(
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning(
             "v2 upstream unreachable target=%s error=%s",
-            target.original_url,
+            _redact_v2_target_url_for_log(target.original_url),
             detail,
         )
         return JSONResponse(
@@ -1025,7 +1099,7 @@ async def _proxy_v2_streaming(
             "v2 response filter bypass method=%s path=%s target=%s host=%s",
             request.method,
             request.url.path,
-            target.original_url,
+            _redact_v2_target_url_for_log(target.original_url),
             _target_host(target.original_url),
         )
 
@@ -1086,7 +1160,7 @@ async def _proxy_v2_streaming(
                     "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
                     request.method,
                     request.url.path,
-                    target.original_url,
+                    _redact_v2_target_url_for_log(target.original_url),
                     upstream_response.status_code,
                     replacements,
                     sanitized_stream_matches,
@@ -1097,7 +1171,7 @@ async def _proxy_v2_streaming(
                 "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
                 request.method,
                 request.url.path,
-                target.original_url,
+                _redact_v2_target_url_for_log(target.original_url),
                 upstream_response.status_code,
                 matches,
                 bool(replacements > 0),
@@ -1107,6 +1181,13 @@ async def _proxy_v2_streaming(
         saw_done = False
         sse_tail = ""
         inject_done = False
+        exact_pending_text = ""
+        exact_tail_chars = 0
+        exact_decoder = None
+        if settings.enable_exact_value_redaction and is_textual:
+            exact_tail_chars = _v2_exact_value_tail_chars()
+            if exact_tail_chars > 0:
+                exact_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
             for chunk in buffered_chunks:
                 if not chunk:
@@ -1114,12 +1195,16 @@ async def _proxy_v2_streaming(
                 if is_sse:
                     detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
                     saw_done = saw_done or detected
-                if settings.enable_exact_value_redaction:
-                    chunk_text = chunk.decode("utf-8", errors="replace")
-                    replaced, ev_count = replace_exact_values(chunk_text)
-                    if ev_count > 0:
-                        chunk = replaced.encode("utf-8")
-                yield chunk
+                if exact_decoder is not None:
+                    out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
+                        exact_decoder.decode(chunk, final=False),
+                        exact_pending_text,
+                        tail_chars=exact_tail_chars,
+                    )
+                    for out_chunk in out_chunks:
+                        yield out_chunk
+                else:
+                    yield chunk
             if not upstream_exhausted:
                 async for chunk in upstream_iter:
                     if not chunk:
@@ -1129,29 +1214,51 @@ async def _proxy_v2_streaming(
                             chunk, tail=sse_tail
                         )
                         saw_done = saw_done or detected
-                    if settings.enable_exact_value_redaction:
-                        chunk_text = chunk.decode("utf-8", errors="replace")
-                        replaced, ev_count = replace_exact_values(chunk_text)
-                        if ev_count > 0:
-                            chunk = replaced.encode("utf-8")
-                    yield chunk
+                    if exact_decoder is not None:
+                        out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
+                            exact_decoder.decode(chunk, final=False),
+                            exact_pending_text,
+                            tail_chars=exact_tail_chars,
+                        )
+                        for out_chunk in out_chunks:
+                            yield out_chunk
+                    else:
+                        yield chunk
         except httpx.HTTPError as exc:
             detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
             logger.warning(
                 "v2 upstream stream interrupted target=%s error=%s",
-                target.original_url,
+                _redact_v2_target_url_for_log(target.original_url),
                 detail,
             )
         finally:
             if is_sse and not saw_done:
                 inject_done = True
             await exit_stack.aclose()
+        if exact_decoder is not None:
+            decoded_tail = exact_decoder.decode(b"", final=True)
+            if decoded_tail:
+                out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
+                    decoded_tail,
+                    exact_pending_text,
+                    tail_chars=exact_tail_chars,
+                )
+                for out_chunk in out_chunks:
+                    yield out_chunk
+        if exact_decoder is not None and exact_pending_text:
+            out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
+                "",
+                exact_pending_text,
+                tail_chars=0,
+            )
+            for out_chunk in out_chunks:
+                yield out_chunk
         if inject_done:
             logger.warning(
                 "v2 sse upstream closed without DONE method=%s path=%s target=%s inject_done=true",
                 request.method,
                 request.url.path,
-                target.original_url,
+                _redact_v2_target_url_for_log(target.original_url),
             )
             yield _SSE_DONE_RECOVERY_CHUNK
 
@@ -1267,7 +1374,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 "v2 redaction method=%s path=%s target=%s client_ip=%s user_agent=%s replacements=%d hit_ids=%s markers=%s",
                 request.method,
                 request.url.path,
-                target.original_url,
+                _redact_v2_target_url_for_log(target.original_url),
                 client_ip,
                 user_agent,
                 redaction_count,
@@ -1299,7 +1406,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning(
             "v2 upstream unreachable target=%s error=%s",
-            target.original_url,
+            _redact_v2_target_url_for_log(target.original_url),
             detail,
         )
         return JSONResponse(
@@ -1334,7 +1441,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
             "v2 response filter bypass method=%s path=%s target=%s host=%s",
             request.method,
             request.url.path,
-            target.original_url,
+            _redact_v2_target_url_for_log(target.original_url),
             _target_host(target.original_url),
         )
     if (
@@ -1360,7 +1467,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 "v2 response sanitized method=%s path=%s target=%s status=%s replacements=%s matches=%s",
                 request.method,
                 request.url.path,
-                target.original_url,
+                _redact_v2_target_url_for_log(target.original_url),
                 upstream_response.status_code,
                 replacements,
                 matches,

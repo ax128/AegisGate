@@ -5,9 +5,12 @@ import io
 import logging
 from collections.abc import AsyncGenerator
 
+import httpx
 import pytest
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from aegisgate.adapters.v2_proxy import router as v2_router
 from aegisgate.adapters.openai_compat.router import (
     _UPSTREAM_EOF_RECOVERY_NOTICE,
     _coerce_responses_stream_to_chat_stream,
@@ -138,6 +141,36 @@ def test_run_request_pipeline_uses_dedicated_offload_helper(
 
     assert asyncio.run(_run_request_pipeline(None, req, ctx)) is req
     assert len(called) == 1
+
+
+def test_run_request_pipeline_timeout_block_marks_request_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_filter_pipeline_offloop(func, *args, **kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.run_filter_pipeline_offloop",
+        fake_run_filter_pipeline_offloop,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.filter_pipeline_timeout_s",
+        1.0,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.request_pipeline_timeout_action",
+        "block",
+    )
+
+    req = object()
+    ctx = RequestContext(
+        request_id="rq-timeout", session_id="sq-timeout", route="/v1/chat/completions"
+    )
+
+    assert asyncio.run(_run_request_pipeline(None, req, ctx)) is req
+    assert ctx.request_disposition == "block"
+    assert "request_filter_timeout" in ctx.disposition_reasons
+    assert "filter_pipeline_timeout" in ctx.security_tags
 
 
 def test_run_response_pipeline_uses_dedicated_offload_helper(
@@ -491,6 +524,250 @@ def test_v2_client_response_headers_strip_connection_scoped_header() -> None:
     )
 
     assert headers == {"X-Extra": "keep-me"}
+
+
+def _build_v2_security_request(
+    *,
+    path: str = "/v2",
+    method: str = "POST",
+    headers: list[tuple[bytes, bytes]] | None = None,
+    body: bytes = b"",
+) -> Request:
+    sent = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": headers or [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    }
+    return Request(scope, receive)
+
+
+class _FakeV2ExitStack:
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakeV2StreamResponse:
+    status_code = 200
+
+    def __init__(
+        self, chunks: list[bytes], content_type: str = "text/plain; charset=utf-8"
+    ) -> None:
+        self._chunks = chunks
+        self.headers = {"content-type": content_type}
+
+    async def aiter_bytes(self) -> AsyncGenerator[bytes, None]:
+        for chunk in self._chunks:
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_exact_value_redaction_spans_chunk_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "abcdef123456"
+
+    def fake_replace_exact_values(text: str) -> tuple[str, int]:
+        return text.replace(secret, "[REDACTED:EXACT_VALUE]"), text.count(secret)
+
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [b"prefix abc", b"def123456 suffix"]
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", True)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "replace_exact_values", fake_replace_exact_values)
+    monkeypatch.setattr(
+        v2_router, "load_redact_values", lambda: [secret], raising=False
+    )
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert secret.encode("utf-8") not in body
+    assert b"[REDACTED:EXACT_VALUE]" in body
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_exact_value_redaction_handles_split_utf8_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "密钥abcdef1234"
+    payload = f"prefix {secret} suffix".encode("utf-8")
+    split_at = len("prefix ".encode("utf-8")) + 1
+
+    def fake_replace_exact_values(text: str) -> tuple[str, int]:
+        return text.replace(secret, "[REDACTED:EXACT_VALUE]"), text.count(secret)
+
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [payload[:split_at], payload[split_at:]]
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", True)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "replace_exact_values", fake_replace_exact_values)
+    monkeypatch.setattr(
+        v2_router, "load_redact_values", lambda: [secret], raising=False
+    )
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"[REDACTED:EXACT_VALUE]" in body
+    assert "\ufffd".encode("utf-8") not in body
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_exact_value_redaction_preserves_binary_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = b"\xff\xfe\x00binary\x80chunk"
+
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [original],
+            content_type="application/octet-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", True)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(
+        v2_router,
+        "replace_exact_values",
+        lambda text: (text.replace("secretsecret", "[REDACTED:EXACT_VALUE]"), text.count("secretsecret")),
+    )
+    monkeypatch.setattr(
+        v2_router, "load_redact_values", lambda: ["secretsecret"], raising=False
+    )
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert body == original
+
+
+@pytest.mark.asyncio
+async def test_v2_target_url_rejects_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(v2_router.settings, "v2_target_allowlist", "upstream.example.com")
+    monkeypatch.setattr(v2_router.settings, "v2_block_internal_targets", False)
+    request = _build_v2_security_request(
+        headers=[
+            (
+                b"x-target-url",
+                b"https://user:password@upstream.example.com/v2",
+            )
+        ]
+    )
+
+    target, error = await v2_router._extract_target_url(request)
+
+    assert target is None
+    assert error == "target url userinfo is not allowed"
+
+
+@pytest.mark.asyncio
+async def test_v2_upstream_error_log_redacts_sensitive_target_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(v2_router.settings, "v2_target_allowlist", "upstream.example.com")
+    monkeypatch.setattr(v2_router.settings, "v2_block_internal_targets", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_request_redaction", False)
+
+    async def fake_get_v2_async_client():
+        return object()
+
+    async def fake_request_v2_upstream(**kwargs):
+        raise httpx.ConnectError("boom")
+
+    log_messages: list[str] = []
+
+    def fake_warning(message: str, *args, **kwargs) -> None:
+        log_messages.append(message % args)
+
+    monkeypatch.setattr(v2_router, "_get_v2_async_client", fake_get_v2_async_client)
+    monkeypatch.setattr(v2_router, "_request_v2_upstream", fake_request_v2_upstream)
+    monkeypatch.setattr(v2_router.logger, "warning", fake_warning)
+    request = _build_v2_security_request(
+        headers=[
+            (
+                b"x-target-url",
+                b"https://upstream.example.com/v2?api_key=supersecretvalue&ok=yes",
+            )
+        ],
+        body=b"{}",
+    )
+
+    response = await v2_router.proxy_v2(request)
+
+    assert response.status_code == 502
+    log_text = "\n".join(log_messages)
+    assert "supersecretvalue" not in log_text
+    assert "api_key=" in log_text
 
 
 @pytest.mark.asyncio

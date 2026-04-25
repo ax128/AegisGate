@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import secrets
 import signal
 import tempfile
@@ -226,6 +227,9 @@ def register_ui_routes(app: FastAPI) -> None:
             token, already = gw_tokens_register(upstream_base, whitelist_key=whitelist)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
+        except OSError as exc:
+            logger.warning("ui token register persistence failed error=%s", exc)
+            return JSONResponse(status_code=500, content={"error": "token_persistence_failed"})
         base_url = _gateway_token_base_url(request, token)
         return JSONResponse(
             status_code=200 if already else 201,
@@ -267,6 +271,9 @@ def register_ui_routes(app: FastAPI) -> None:
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": str(exc)})
+        except OSError as exc:
+            logger.warning("ui token update persistence failed token=%s error=%s", token, exc)
+            return JSONResponse(status_code=500, content={"error": "token_persistence_failed"})
         if not updated:
             return JSONResponse(status_code=404, content={"error": "token_not_found"})
         base_url = _gateway_token_base_url(request, active_token)
@@ -277,7 +284,12 @@ def register_ui_routes(app: FastAPI) -> None:
         token = token.strip()
         if not token:
             return JSONResponse(status_code=400, content={"error": "missing_token"})
-        if gw_tokens_unregister(token):
+        try:
+            removed = gw_tokens_unregister(token)
+        except OSError as exc:
+            logger.warning("ui token delete persistence failed token=%s error=%s", token, exc)
+            return JSONResponse(status_code=500, content={"error": "token_persistence_failed"})
+        if removed:
             return JSONResponse(content={"ok": True})
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
 
@@ -524,6 +536,16 @@ def register_ui_routes(app: FastAPI) -> None:
         regex = _string_field(body.get("regex"))
         return regex or None
 
+    def _invalid_regex_response(regex: str) -> JSONResponse | None:
+        try:
+            re.compile(regex)
+        except re.error as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_regex", "detail": str(exc)},
+            )
+        return None
+
     @app.get("/__ui__/api/rules")
     async def local_ui_rules_sections() -> JSONResponse:
         sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
@@ -551,6 +573,9 @@ def register_ui_routes(app: FastAPI) -> None:
         regex = _required_rule_regex(body)
         if regex is None:
             return JSONResponse(status_code=400, content={"error": "missing_regex"})
+        invalid_regex = _invalid_regex_response(regex)
+        if invalid_regex is not None:
+            return invalid_regex
         data = _load_rules_yaml()
         items = _get_section_list(data, section)
         if any(str(item.get("id", "")) == rule_id for item in items):
@@ -581,6 +606,9 @@ def register_ui_routes(app: FastAPI) -> None:
                     regex = _required_rule_regex(body)
                     if regex is None:
                         return JSONResponse(status_code=400, content={"error": "missing_regex"})
+                    invalid_regex = _invalid_regex_response(regex)
+                    if invalid_regex is not None:
+                        return invalid_regex
                     item["regex"] = regex
                 if "kind" in body:
                     item["kind"] = str(body["kind"])

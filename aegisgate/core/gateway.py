@@ -1402,12 +1402,22 @@ async def gw_register(request: Request) -> JSONResponse:
                 "detail": "upstream_base 不能使用文档中的示例地址，请替换为你的真实上游地址后再注册。",
             },
         )
-    if whitelist_present:
-        token, already_registered = gw_tokens_register(
-            upstream_base, whitelist_key=requested_whitelist
+    try:
+        if whitelist_present:
+            token, already_registered = gw_tokens_register(
+                upstream_base, whitelist_key=requested_whitelist
+            )
+        else:
+            token, already_registered = gw_tokens_register(upstream_base)
+    except OSError as exc:
+        logger.warning("gw token register persistence failed error=%s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "token_persistence_failed",
+                "detail": "could not persist gateway token mapping",
+            },
         )
-    else:
-        token, already_registered = gw_tokens_register(upstream_base)
     stored = gw_tokens_get(token) or {}
     effective_whitelist = (
         normalize_whitelist_keys(stored.get("whitelist_key"))
@@ -1489,9 +1499,16 @@ async def gw_add(request: Request) -> JSONResponse:
     current_set = set(current)
     added = [k for k in whitelist_add if k not in current_set]
     next_whitelist = current + added
-    updated = gw_tokens_update(
-        token, upstream_base=next_upstream_base, whitelist_key=next_whitelist
-    )
+    try:
+        updated = gw_tokens_update(
+            token, upstream_base=next_upstream_base, whitelist_key=next_whitelist
+        )
+    except OSError as exc:
+        logger.warning("gw token update persistence failed token=%s error=%s", token, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "token_persistence_failed"},
+        )
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
@@ -1541,9 +1558,16 @@ async def gw_remove(request: Request) -> JSONResponse:
     remove_set = set(whitelist_remove)
     removed = [k for k in current if k in remove_set]
     next_whitelist = [k for k in current if k not in remove_set]
-    updated = gw_tokens_update(
-        token, upstream_base=upstream_base, whitelist_key=next_whitelist
-    )
+    try:
+        updated = gw_tokens_update(
+            token, upstream_base=upstream_base, whitelist_key=next_whitelist
+        )
+    except OSError as exc:
+        logger.warning("gw token remove persistence failed token=%s error=%s", token, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "token_persistence_failed"},
+        )
     if not updated:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
     latest = (gw_tokens_get(token) or {}).get("whitelist_key", current)
@@ -1636,7 +1660,15 @@ async def gw_unregister(request: Request) -> JSONResponse:
     mapping = gw_tokens_get(token)
     if not mapping:
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
-    if gw_tokens_unregister(token):
+    try:
+        removed = gw_tokens_unregister(token)
+    except OSError as exc:
+        logger.warning("gw token unregister persistence failed token=%s error=%s", token, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "token_persistence_failed"},
+        )
+    if removed:
         return JSONResponse(content={"ok": True, "message": "token removed"})
     return JSONResponse(status_code=404, content={"error": "token_not_found"})
 

@@ -123,7 +123,13 @@ def _save() -> None:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        logger.warning("gw_tokens: could not persist to %s: %s (in-memory state intact)", path, exc)
+        logger.warning("gw_tokens: could not persist to %s: %s", path, exc)
+        raise
+
+
+def _restore_tokens(snapshot: dict[str, dict[str, Any]]) -> None:
+    _tokens.clear()
+    _tokens.update(copy.deepcopy(snapshot))
 
 
 def get(token: str) -> dict[str, Any] | None:
@@ -198,9 +204,14 @@ def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _
                 mapping = _tokens.get(existing) or {}
                 current = normalize_whitelist_keys(mapping.get("whitelist_key"))
                 if current != whitelist_keys:
+                    snapshot = copy.deepcopy(_tokens)
                     mapping["whitelist_key"] = whitelist_keys
                     _tokens[existing] = mapping
-                    _save()
+                    try:
+                        _save()
+                    except OSError:
+                        _restore_tokens(snapshot)
+                        raise
             return existing, True
         for attempt in range(20):
             token = _generate_alnum_token(_TOKEN_LEN)
@@ -208,11 +219,16 @@ def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _
                 break
         else:
             raise RuntimeError("failed to generate unique gw_token after 20 attempts")
+        snapshot = copy.deepcopy(_tokens)
         _tokens[token] = {
             "upstream_base": upstream_base,
             "whitelist_key": whitelist_keys if whitelist_provided else [],
         }
-        _save()
+        try:
+            _save()
+        except OSError:
+            _restore_tokens(snapshot)
+            raise
     return token, False
 
 
@@ -221,8 +237,13 @@ def unregister(token: str) -> bool:
     with _lock:
         if token not in _tokens:
             return False
+        snapshot = copy.deepcopy(_tokens)
         del _tokens[token]
-        _save()
+        try:
+            _save()
+        except OSError:
+            _restore_tokens(snapshot)
+            raise
         return True
 
 
@@ -243,8 +264,13 @@ def update(token: str, *, upstream_base: str | None = None, gateway_key: str | N
             next_mapping["upstream_base"] = normalized_upstream
         if whitelist_key is not None:
             next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
+        snapshot = copy.deepcopy(_tokens)
         _tokens[token] = next_mapping
-        _save()
+        try:
+            _save()
+        except OSError:
+            _restore_tokens(snapshot)
+            raise
         return True
 
 
@@ -274,6 +300,7 @@ def update_and_rename(
             next_mapping["upstream_base"] = normalized_upstream
         if whitelist_key is not None:
             next_mapping["whitelist_key"] = normalize_whitelist_keys(whitelist_key)
+        snapshot = copy.deepcopy(_tokens)
         if new_token and new_token != token:
             if new_token in _tokens:
                 raise ValueError(f"token already exists: {new_token}")
@@ -281,7 +308,11 @@ def update_and_rename(
             del _tokens[token]
         else:
             _tokens[token] = next_mapping
-        _save()
+        try:
+            _save()
+        except OSError:
+            _restore_tokens(snapshot)
+            raise
         return True
 
 
@@ -312,7 +343,13 @@ def inject_builtin_compat_tokens() -> None:
                 _tokens[token] = dict(mapping)
                 injected.append(token)
         if injected:
-            _save()
+            try:
+                _save()
+            except OSError:
+                logger.warning(
+                    "builtin compat tokens persistence failed; keeping in-memory tokens: %s",
+                    ", ".join(injected),
+                )
             logger.info("builtin compat tokens injected: %s", ", ".join(injected))
 
 
@@ -353,6 +390,12 @@ def inject_docker_upstreams() -> int:
     if injected:
         with _lock:
             _tokens.update(pending)
-            _save()
+            try:
+                _save()
+            except OSError:
+                logger.warning(
+                    "docker_upstreams persistence failed; keeping in-memory tokens: %s",
+                    raw,
+                )
         logger.info("docker_upstreams injected %d token(s): %s", injected, raw)
     return injected

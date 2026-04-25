@@ -1719,6 +1719,7 @@ async def _run_request_pipeline(
         if settings.request_pipeline_timeout_action == "pass":
             return original_req
         # Default "block": reject the request instead of passing unfiltered content.
+        ctx.request_disposition = "block"
         ctx.response_disposition = "block"
         ctx.disposition_reasons.append("request_filter_timeout")
         return req

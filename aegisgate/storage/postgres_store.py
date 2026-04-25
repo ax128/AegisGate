@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -130,10 +131,31 @@ class PostgresKVStore(KVStore):
                       session_id TEXT NOT NULL,
                       request_id TEXT NOT NULL,
                       payload TEXT NOT NULL,
+                      created_at BIGINT NOT NULL DEFAULT 0,
                       PRIMARY KEY (session_id, request_id)
                     )
                     """
                     )
+                )
+                cur.execute(
+                    self._sql(
+                        """
+                    ALTER TABLE {mt}
+                    ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT 0
+                    """
+                    )
+                )
+                cur.execute(
+                    self._sql(
+                        """
+                    CREATE INDEX IF NOT EXISTS idx_mapping_store_created_at
+                    ON {mt} (created_at)
+                    """
+                    )
+                )
+                cur.execute(
+                    self._sql("UPDATE {mt} SET created_at = %s WHERE created_at = 0"),
+                    (int(time.time()),),
                 )
                 cur.execute(
                     self._sql(
@@ -198,18 +220,21 @@ class PostgresKVStore(KVStore):
     ) -> None:
         self._cache.set(session_id, request_id, mapping)
         payload = encrypt_mapping(mapping)
+        created_at = int(time.time())
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     self._sql(
                         """
-                        INSERT INTO {mt} (session_id, request_id, payload)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO {mt} (session_id, request_id, payload, created_at)
+                        VALUES (%s, %s, %s, %s)
                         ON CONFLICT (session_id, request_id)
-                        DO UPDATE SET payload = EXCLUDED.payload
+                        DO UPDATE SET
+                          payload = EXCLUDED.payload,
+                          created_at = EXCLUDED.created_at
                         """
                     ),
-                    (session_id, request_id, payload),
+                    (session_id, request_id, payload, created_at),
                 )
             conn.commit()
 
@@ -271,6 +296,23 @@ class PostgresKVStore(KVStore):
         if not row:
             return {}
         return decrypt_mapping(str(row[0]))
+
+    def prune_expired_mappings(self, max_age_seconds: int) -> int:
+        ttl = max(300, int(max_age_seconds))
+        cutoff = int(time.time()) - ttl
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    self._sql(
+                        "DELETE FROM {mt} WHERE created_at > 0 AND created_at < %s"
+                    ),
+                    (cutoff,),
+                )
+                removed = int(cur.rowcount or 0)
+            conn.commit()
+        if removed > 0:
+            self._cache = LRUMappingCache(self.max_cache_entries)
+        return removed
 
     def save_pending_confirmation(
         self,
