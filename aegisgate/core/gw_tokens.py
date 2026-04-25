@@ -18,6 +18,18 @@ from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
+try:
+    from aegisgate.storage.crypto import encrypt_whitelist_key, decrypt_whitelist_key
+    _HAS_CRYPTO = True
+except Exception:
+    _HAS_CRYPTO = False
+
+    def encrypt_whitelist_key(v: str) -> str:  # type: ignore[misc]
+        return v
+
+    def decrypt_whitelist_key(v: str) -> str:  # type: ignore[misc]
+        return v
+
 # 内存映射：token -> {"upstream_base": str, "whitelist_key": list[str]}
 _tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
@@ -72,9 +84,14 @@ def load(*, replace: bool = False) -> None:
                 # compat token 允许省略 upstream_base（走端口路径时动态覆盖）
                 if "upstream_base" not in v and not v.get("compat"):
                     continue
+                raw_wk = v.get("whitelist_key")
+                if isinstance(raw_wk, list):
+                    raw_wk = [decrypt_whitelist_key(x) if isinstance(x, str) else x for x in raw_wk]
+                elif isinstance(raw_wk, str):
+                    raw_wk = decrypt_whitelist_key(raw_wk)
                 entry: dict[str, Any] = {
                     "upstream_base": str(v.get("upstream_base") or ""),
-                    "whitelist_key": normalize_whitelist_keys(v.get("whitelist_key")),
+                    "whitelist_key": normalize_whitelist_keys(raw_wk),
                 }
                 # 协议兼容层：compat 模式 + 模型映射
                 if v.get("compat"):
@@ -94,7 +111,14 @@ def load(*, replace: bool = False) -> None:
 def _save() -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data: dict[str, Any] = {_GW_TOKENS_KEY: dict(_tokens)}
+    serializable: dict[str, dict[str, Any]] = {}
+    for tok, mapping in _tokens.items():
+        entry = dict(mapping)
+        wk = entry.get("whitelist_key")
+        if isinstance(wk, list) and _HAS_CRYPTO:
+            entry["whitelist_key"] = [encrypt_whitelist_key(x) if isinstance(x, str) and x else x for x in wk]
+        serializable[tok] = entry
+    data: dict[str, Any] = {_GW_TOKENS_KEY: serializable}
     tmp_path: Path | None = None
     try:
         # Write to a sibling temp file first so readers never observe a

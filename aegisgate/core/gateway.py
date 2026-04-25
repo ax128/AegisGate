@@ -1186,7 +1186,7 @@ async def security_boundary_middleware(request: Request, call_next):
 
         if settings.enable_request_hmac_auth:
             secret = settings.request_hmac_secret
-            if not secret:
+            if not secret or not secret.strip():
                 logger.error("request hmac auth enabled but secret is empty")
                 boundary["rejected_reason"] = "hmac_misconfigured"
                 return finish(

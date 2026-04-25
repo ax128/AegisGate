@@ -138,6 +138,27 @@ def decrypt_mapping(payload: str) -> dict[str, str]:
         raise
 
 
+_WHITELIST_KEY_PREFIX = "encwk:v1:"
+
+
+def encrypt_whitelist_key(value: str) -> str:
+    if not value:
+        return value
+    token = _get_fernet().encrypt(value.encode("utf-8")).decode("utf-8")
+    return f"{_WHITELIST_KEY_PREFIX}{token}"
+
+
+def decrypt_whitelist_key(value: str) -> str:
+    if not value or not value.startswith(_WHITELIST_KEY_PREFIX):
+        return value
+    token = value[len(_WHITELIST_KEY_PREFIX):]
+    try:
+        return _get_fernet().decrypt(token.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        logger.warning("crypto: decrypt_whitelist_key failed with InvalidToken")
+        return ""
+
+
 def encrypt_pending_payload(payload: dict[str, Any]) -> str:
     raw = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

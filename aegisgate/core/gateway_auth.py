@@ -59,11 +59,14 @@ def _is_passthrough_read_path(path: str) -> bool:
 
 
 def _is_public_ui_path(path: str) -> bool:
-    return path in {
+    import posixpath
+
+    normalized = posixpath.normpath(path)
+    return normalized in {
         "/__ui__/login",
         "/__ui__/health",
         "/__ui__/api/login",
-    } or path.startswith("/__ui__/assets/")
+    } or normalized.startswith("/__ui__/assets/")
 
 
 def _apply_ui_security_headers(response: Response) -> Response:

@@ -4,6 +4,14 @@ from dataclasses import dataclass
 
 from aegisgate.config.settings import settings
 
+_SECURITY_CRITICAL_FLAGS = (
+    "injection_detector",
+    "request_sanitizer",
+    "privilege_guard",
+    "tool_call_guard",
+    "output_sanitizer",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureFlags:
@@ -22,7 +30,27 @@ class FeatureFlags:
     exact_value_redaction: bool = settings.enable_exact_value_redaction
 
 
+def _check_disabled_filters(flags: FeatureFlags) -> None:
+    from aegisgate.util.logger import logger
+
+    disabled = [name for name in _SECURITY_CRITICAL_FLAGS if not getattr(flags, name)]
+    if len(disabled) == len(_SECURITY_CRITICAL_FLAGS):
+        logger.error(
+            "SECURITY CRITICAL: ALL security-critical filters are disabled (%s). "
+            "The gateway provides NO security protection. "
+            "Set at least one AEGIS_ENABLE_* flag to true.",
+            ", ".join(disabled),
+        )
+    elif disabled:
+        logger.warning(
+            "Security filters disabled: %s. "
+            "Review AEGIS_ENABLE_* settings to ensure this is intentional.",
+            ", ".join(disabled),
+        )
+
+
 feature_flags = FeatureFlags()
+_check_disabled_filters(feature_flags)
 
 
 def refresh_feature_flags() -> None:
@@ -43,5 +71,6 @@ def refresh_feature_flags() -> None:
         rag_poison_guard=settings.enable_rag_poison_guard,
         exact_value_redaction=settings.enable_exact_value_redaction,
     )
+    _check_disabled_filters(new)
     global feature_flags
     feature_flags = new

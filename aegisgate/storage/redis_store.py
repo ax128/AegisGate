@@ -167,8 +167,10 @@ class RedisKVStore(KVStore):
             "retained_until": str(retained_until),
             "updated_at": str(created_at),
         }
+        ttl = max(int(retained_until - created_at) + 3600, 7200)
         pipe = self.client.pipeline()
         pipe.hset(key, mapping=mapping)
+        pipe.expire(key, ttl)
         pipe.zadd(session_idx, {confirm_id: created_at})
         pipe.zadd(retention_idx, {confirm_id: retained_until})
         pipe.execute()
