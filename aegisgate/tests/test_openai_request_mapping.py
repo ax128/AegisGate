@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
+from aegisgate.adapters.openai_compat import mapper
 from aegisgate.adapters.openai_compat.mapper import (
     messages_payload_to_responses_payload,
     responses_response_to_messages_response,
@@ -250,3 +256,35 @@ def test_responses_response_to_messages_response_preserves_function_calls() -> N
         },
         {"type": "text", "text": "处理完成"},
     ]
+
+
+def test_configured_allowed_models_extend_builtin_whitelist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Models added via config extend the built-in allowlist (union). The built-in
+    # set stays a floor, so unknown models are still rejected.
+    monkeypatch.setattr(mapper, "_configured_allowed_models", frozenset({"gpt-5.5"}))
+
+    ok = mapper.messages_payload_to_responses_payload(
+        {"model": "claude-x", "messages": []}, default_model="gpt-5.5"
+    )
+    assert ok["model"] == "gpt-5.5"
+
+    with pytest.raises(ValueError):
+        mapper.messages_payload_to_responses_payload(
+            {"model": "claude-x", "messages": []}, default_model="totally-unknown"
+        )
+
+
+def test_load_global_model_map_loads_allowed_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(mapper, "_configured_allowed_models", frozenset())
+    cfg = tmp_path / "model_map.json"
+    cfg.write_text(json.dumps({"map": {}, "allowed_models": ["gpt-5.5", "gpt-5.6"]}))
+    monkeypatch.setattr(mapper.settings, "compat_model_map_path", str(cfg))
+
+    mapper.load_global_model_map()
+
+    assert "gpt-5.5" in mapper._configured_allowed_models
+    assert "gpt-5.6" in mapper._configured_allowed_models
