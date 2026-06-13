@@ -289,9 +289,11 @@ When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.j
 
 ### Security Pipeline
 
-**Request side:** PII redaction → exact-value redaction → untrusted content guard → request sanitizer → RAG poison guard
+**Request side** (default policy): exact-value redaction → PII redaction → request sanitizer → RAG poison guard
 
-**Response side:** anomaly detector → injection detector → RAG poison guard → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
+**Response side** (default policy): exact-value redaction → anomaly detector → injection detector → RAG poison guard → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
+
+> `untrusted content guard` and `system prompt guard` are constructed into the pipeline but not part of the default policy's `enabled_filters`; enable them via policy YAML plus the matching feature flag.
 
 ### Error Response Format
 

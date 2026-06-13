@@ -170,8 +170,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - `stream=true` 流式透传
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
   - 默认仍沿用 v1 请求/响应安全管道；若使用 `__passthrough` 或命中上游白名单绕过，才会跳过过滤
-- 请求侧：`redaction`、`exact_value_redaction`、`untrusted_content_guard`、`request_sanitizer`、`rag_poison_guard`
-- 响应侧：`anomaly_detector`、`injection_detector`、`rag_poison_guard`、`privilege_guard`、`tool_call_guard`、`restoration`、`post_restore_guard`、`output_sanitizer`
+- 请求侧（默认策略）：`exact_value_redaction`、`redaction`、`request_sanitizer`、`rag_poison_guard`
+- 响应侧（默认策略）：`exact_value_redaction`、`anomaly_detector`、`injection_detector`、`rag_poison_guard`、`privilege_guard`、`tool_call_guard`、`restoration`、`post_restore_guard`、`output_sanitizer`
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
 - `responses` 结构化 `input` 预转发脱敏：覆盖 `user/developer/system/assistant` 与 `function_call_output/tool_output` 等节点
 - 高风险自动处理：命中高风险时自动遮挡/分割危险片段后返回，无需人工确认
@@ -236,18 +236,18 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 `v1` 链路（OpenAI 兼容）：
 
-1. 请求侧过滤：`redaction -> exact_value_redaction -> untrusted_content_guard -> request_sanitizer -> rag_poison_guard`
+1. 请求侧过滤：`exact_value_redaction -> redaction -> system_prompt_guard -> untrusted_content_guard -> request_sanitizer -> rag_poison_guard`
 2. 转发到上游 LLM（chat/responses/generic 子路径）
-3. 响应侧过滤：`anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
+3. 响应侧过滤：`exact_value_redaction -> anomaly_detector -> injection_detector -> rag_poison_guard -> privilege_guard -> tool_call_guard -> restoration -> post_restore_guard -> output_sanitizer`
 4. 按风险处置：`allow / sanitize / block`（危险片段自动遮挡/分割，不走确认流程）
 5. 记录审计事件（含风险标签、处置原因、确认状态）
 
 说明：
 
 - 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
-- 当前默认策略包含 `tool_call_guard`，但 **不包含** `untrusted_content_guard`：
+- 当前默认策略包含 `tool_call_guard`，但 **不包含** `system_prompt_guard` 与 `untrusted_content_guard`：
   - 若需要对 `retrieval/web/tool/document` 等不可信来源做包裹与风险抬升，需在策略 YAML 中显式加入 `untrusted_content_guard`，并保持对应 feature flag 开启。
-  - `tool_call_guard` 默认对未命中白名单的工具名仅做审查（`review`），但对危险参数默认直接按 `block` 处理；编码工具（`apply_patch`/`write`/`edit`/`bash` 等 25+）自动跳过 `dangerous_param` 扫描，避免代码 diff 内容误触发。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
+  - `tool_call_guard` 默认对未命中白名单的工具名仅做审查（`review`），但对危险参数默认直接按 `block` 处理；文件写入类工具（`apply_patch`/`write`/`edit` 等约 12 个）仅跳过“路径引用类”规则（`sensitive_file_access`/`path_traversal`/`ssh_key_access`），仍执行执行类危险参数扫描，避免代码 diff 内容误触发路径类规则；`bash`/`shell` 等执行类工具名列入危险工具名单（命中即标记，默认动作 `review`，可配为 `block`），且仍走完整危险参数扫描。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
 
 `v2` 链路（通用 HTTP 代理）：
 
@@ -340,7 +340,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 **分级变形策略**：
 
-- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 45 条模式）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。
+- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 10 条命令模式）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
@@ -478,8 +478,12 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
    }
    ```
 
-3. 客户端配置（以 Claude Code 为例）：
+3. 放开 compat 端口路由并配置客户端（`AEGIS_COMPAT_ALLOWED_PORTS` 默认空＝拒绝所有端口路由，必须显式放开，否则返回 `403 port_not_allowed`）：
    ```bash
+   # 放开 compat 端口路由（默认空＝全部拒绝）
+   export AEGIS_COMPAT_ALLOWED_PORTS=8317
+
+   # 客户端（以 Claude Code 为例）
    export ANTHROPIC_BASE_URL=http://<网关IP>:18080/v1/__gw__/t/claude-to-gpt/8317
    ```
 
@@ -823,8 +827,9 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 - `system_exfil`（系统提示泄露）
 - `obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）
 - `unicode_bidi`（bidi 方向控制攻击）
-- `tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等 45+ 模式）
 - `spam_noise`（赌博/色情/平台垃圾内容噪声，>=2 类别组合时触发）
+
+> 注：`tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等约 26 种模式）默认动作为 `review`（抬高风险分并标记复核，按阈值处置），**并非**无条件强制拦截；如需强拦，可在 `security_filters.yaml` 的 `action_map.injection_detector.tool_call_injection` 改为 `block`。
 
 ### 5.3 语义复核模块
 
