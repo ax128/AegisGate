@@ -25,6 +25,9 @@ from aegisgate.adapters.openai_compat.router import (
     _stream_block_reason,
     _stream_block_sse_chunk,
 )
+from aegisgate.adapters.openai_compat.compat_bridge import (
+    coerce_responses_stream_to_messages_stream,
+)
 from aegisgate.adapters.openai_compat.stream_utils import (
     _extract_sse_data_payload_from_chunk,
     _extract_stream_event_type,
@@ -292,6 +295,75 @@ def test_chat_stream_tool_call_arguments_forwarded_intact() -> None:
     fn = patched["choices"][0]["delta"]["tool_calls"][0]["function"]
     assert fn["name"] == "bash"
     assert fn["arguments"] == arguments
+
+
+def _messages_stream_from_responses(chunks: list[bytes]) -> StreamingResponse:
+    async def gen() -> AsyncGenerator[bytes, None]:
+        for chunk in chunks:
+            yield chunk
+
+    return coerce_responses_stream_to_messages_stream(
+        StreamingResponse(gen(), media_type="text/event-stream"),
+        original_model="claude-x",
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_surfaces_response_failed_as_error() -> None:
+    # A failed upstream must surface as an Anthropic error event, not a clean
+    # end_turn (which would make the client treat the failure as a finished turn).
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            b'data: {"type":"response.failed","response":{"id":"r1",'
+            b'"status":"failed","error":{"code":"server_error","message":"boom"}}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b"event: error" in body
+    assert b"end_turn" not in body
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_maps_max_tokens_stop_reason() -> None:
+    # An upstream truncated at the token limit must map to stop_reason=max_tokens,
+    # not end_turn, so the client knows the result was cut off.
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"r1",'
+            b'"status":"incomplete",'
+            b'"incomplete_details":{"reason":"max_output_tokens"},"output":[]}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b'"max_tokens"' in body
+    assert b"end_turn" not in body
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_reports_real_output_tokens() -> None:
+    # The Anthropic message_delta must carry the upstream's real output_tokens,
+    # not the gateway's per-delta approximation.
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"r1",'
+            b'"status":"completed",'
+            b'"usage":{"input_tokens":7,"output_tokens":42},"output":[]}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b'"output_tokens": 42' in body
 
 
 def test_coerce_responses_stream_incremental_tool_calls() -> None:

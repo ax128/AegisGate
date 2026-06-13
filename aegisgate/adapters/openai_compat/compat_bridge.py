@@ -1344,6 +1344,51 @@ def _messages_stream_finish_events(
     return events
 
 
+def _messages_stop_reason_from_response(
+    resp_obj: dict[str, Any], *, saw_tool_use: bool
+) -> str:
+    """Map an OpenAI Responses terminal object to an Anthropic stop_reason."""
+    if saw_tool_use:
+        return "tool_use"
+    status = str(resp_obj.get("status") or "").strip().lower()
+    if status == "incomplete":
+        details = resp_obj.get("incomplete_details")
+        reason = ""
+        if isinstance(details, dict):
+            reason = str(details.get("reason") or "").strip().lower()
+        if reason in ("max_output_tokens", "max_tokens"):
+            return "max_tokens"
+    return "end_turn"
+
+
+def _messages_output_tokens(resp_obj: dict[str, Any], fallback: int) -> int:
+    """Prefer the upstream's real output_tokens over the per-delta approximation."""
+    usage = resp_obj.get("usage")
+    if isinstance(usage, dict):
+        value = usage.get("output_tokens")
+        if isinstance(value, int) and value >= 0:
+            return value
+    return fallback
+
+
+def _messages_stream_error_event(resp_obj: dict[str, Any]) -> bytes:
+    """Anthropic SSE error event for a failed upstream response."""
+    error = resp_obj.get("error") if isinstance(resp_obj, dict) else None
+    error_type = "api_error"
+    message = "upstream response failed"
+    if isinstance(error, dict):
+        code = error.get("code")
+        if isinstance(code, str) and code.strip():
+            error_type = code
+        text = error.get("message")
+        if isinstance(text, str) and text.strip():
+            message = text
+    return _serialize_anthropic_sse_event(
+        "error",
+        {"type": "error", "error": {"type": error_type, "message": message}},
+    )
+
+
 def coerce_chat_stream_to_messages_stream(
     response: StreamingResponse,
     *,
@@ -1598,30 +1643,42 @@ def coerce_responses_stream_to_messages_stream(
 
                 if event_type == "response.completed":
                     resp_obj = payload.get("response") or {}
-                    if isinstance(resp_obj, dict):
-                        for output_item in resp_obj.get("output") or []:
-                            if not isinstance(output_item, dict):
-                                continue
-                            if (
-                                str(output_item.get("type") or "").strip().lower()
-                                != "function_call"
-                            ):
-                                continue
-                            for chunk in _tool_call_chunks(output_item):
-                                yield chunk
-
-                if event_type in ("response.completed", "response.failed"):
+                    completed = resp_obj if isinstance(resp_obj, dict) else {}
+                    for output_item in completed.get("output") or []:
+                        if not isinstance(output_item, dict):
+                            continue
+                        if (
+                            str(output_item.get("type") or "").strip().lower()
+                            != "function_call"
+                        ):
+                            continue
+                        for chunk in _tool_call_chunks(output_item):
+                            yield chunk
                     if not started:
                         for chunk in _start_message_only():
                             yield chunk
                     for chunk in _close_text_block():
                         yield chunk
                     for chunk in _messages_stream_finish_events(
-                        stop_reason="tool_use" if saw_tool_use else "end_turn",
-                        output_tokens=output_tokens,
+                        stop_reason=_messages_stop_reason_from_response(
+                            completed, saw_tool_use=saw_tool_use
+                        ),
+                        output_tokens=_messages_output_tokens(completed, output_tokens),
                         include_block_stop=False,
                     ):
                         yield chunk
+                    return
+
+                if event_type == "response.failed":
+                    failed = payload.get("response")
+                    if not isinstance(failed, dict):
+                        failed = {}
+                    if not started:
+                        for chunk in _start_message_only():
+                            yield chunk
+                    for chunk in _close_text_block():
+                        yield chunk
+                    yield _messages_stream_error_event(failed)
                     return
         except Exception as exc:
             logger.warning("stream coerce responses→messages error error=%s", exc)
