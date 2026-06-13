@@ -886,6 +886,16 @@ async def security_boundary_middleware(request: Request, call_next):
             content_type = request.headers.get("content-type", "").strip().lower()
             if content_type.startswith("multipart/form-data"):
                 effective_max_body_bytes = max(effective_max_body_bytes, multipart_max)
+        # Token-routed generic-proxy traffic (CLIProxyAPI etc.) may carry large
+        # multimodal payloads; raise the limit for it without loosening direct
+        # openai-compatible JSON routes. aegis_gateway_token is set only by the
+        # gw-token rewrite; /v2 is the direct generic-proxy path.
+        v2_max_body_bytes = int(settings.v2_max_request_body_bytes)
+        is_generic_proxy = bool(
+            request.scope.get("aegis_gateway_token")
+        ) or normalized_path.startswith("/v2")
+        if v2_max_body_bytes > 0 and is_generic_proxy:
+            effective_max_body_bytes = max(effective_max_body_bytes, v2_max_body_bytes)
         boundary["max_request_body_bytes"] = effective_max_body_bytes
 
         def finish(response: Response) -> Response:
