@@ -256,6 +256,50 @@ def test_responses_response_to_messages_response_preserves_function_calls() -> N
         },
         {"type": "text", "text": "处理完成"},
     ]
+    # A tool call must surface stop_reason=tool_use so Anthropic clients run the
+    # tool and continue the turn; reporting end_turn breaks the tool loop.
+    assert result["stop_reason"] == "tool_use"
+
+
+def test_responses_response_to_messages_response_text_only_is_end_turn() -> None:
+    resp = {
+        "id": "resp-text-1",
+        "model": "gpt-5.4",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+    }
+
+    result = responses_response_to_messages_response(resp, original_model="claude-sonnet-4.5")
+
+    assert result["stop_reason"] == "end_turn"
+
+
+def test_responses_response_to_messages_response_maps_max_tokens() -> None:
+    resp = {
+        "id": "resp-incomplete-1",
+        "model": "gpt-5.4",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "partial"}],
+            }
+        ],
+        "usage": {"input_tokens": 9, "output_tokens": 128},
+    }
+
+    result = responses_response_to_messages_response(resp, original_model="claude-sonnet-4.5")
+
+    assert result["stop_reason"] == "max_tokens"
 
 
 def test_configured_allowed_models_extend_builtin_whitelist(

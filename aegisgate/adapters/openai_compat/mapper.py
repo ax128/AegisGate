@@ -603,6 +603,28 @@ def messages_payload_to_responses_payload(
     return result
 
 
+def _messages_stop_reason_from_responses_obj(
+    resp: dict, *, saw_tool_use: bool
+) -> str:
+    """Map an OpenAI Responses object to an Anthropic stop_reason.
+
+    Mirrors compat_bridge._messages_stop_reason_from_response for the
+    non-streaming path (mapper cannot import compat_bridge: that module
+    imports mapper, so the dependency must stay one-directional).
+    """
+    if saw_tool_use:
+        return "tool_use"
+    status = str(resp.get("status") or "").strip().lower()
+    if status == "incomplete":
+        details = resp.get("incomplete_details")
+        reason = ""
+        if isinstance(details, dict):
+            reason = str(details.get("reason") or "").strip().lower()
+        if reason in ("max_output_tokens", "max_tokens"):
+            return "max_tokens"
+    return "end_turn"
+
+
 def responses_response_to_messages_response(
     resp: dict,
     *,
@@ -639,6 +661,10 @@ def responses_response_to_messages_response(
     if not content_blocks:
         content_blocks = [{"type": "text", "text": output_text}]
 
+    saw_tool_use = any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in content_blocks
+    )
     usage = resp.get("usage") or {}
 
     result: dict = {
@@ -647,7 +673,9 @@ def responses_response_to_messages_response(
         "role": "assistant",
         "content": content_blocks,
         "model": original_model,
-        "stop_reason": "end_turn",
+        "stop_reason": _messages_stop_reason_from_responses_obj(
+            resp, saw_tool_use=saw_tool_use
+        ),
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("input_tokens", 0),
