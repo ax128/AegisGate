@@ -1052,6 +1052,27 @@ def _sse_done_seen_from_chunk(chunk: bytes, *, tail: str) -> tuple[bool, str]:
     return done_seen, new_tail
 
 
+_NON_DONE_SSE_MARKERS: tuple[bytes, ...] = (
+    b"content_block",
+    b"message_start",
+    b"message_delta",
+    b"message_stop",
+    b'"candidates"',
+)
+
+
+def _sse_chunk_is_non_done_protocol(chunk: bytes) -> bool:
+    """True when an SSE chunk reveals a protocol that terminates WITHOUT a
+    ``data: [DONE]`` sentinel — Anthropic Messages (message_*/content_block_*) or
+    Gemini (candidates).
+
+    The recovery sentinel is injected on early EOF by default (OpenAI and
+    OpenAI-compatible streams expect it), but never for these protocols, where a
+    trailing ``data: [DONE]`` would corrupt the stream.
+    """
+    return any(marker in chunk for marker in _NON_DONE_SSE_MARKERS)
+
+
 async def _proxy_v2_streaming(
     *,
     request: Request,
@@ -1181,6 +1202,7 @@ async def _proxy_v2_streaming(
 
     async def _iter_body() -> AsyncGenerator[bytes, None]:
         saw_done = False
+        saw_non_done_protocol = False
         sse_tail = ""
         inject_done = False
         exact_pending_text = ""
@@ -1197,6 +1219,9 @@ async def _proxy_v2_streaming(
                 if is_sse:
                     detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
                     saw_done = saw_done or detected
+                    saw_non_done_protocol = (
+                        saw_non_done_protocol or _sse_chunk_is_non_done_protocol(chunk)
+                    )
                 if exact_decoder is not None:
                     out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
                         exact_decoder.decode(chunk, final=False),
@@ -1216,6 +1241,10 @@ async def _proxy_v2_streaming(
                             chunk, tail=sse_tail
                         )
                         saw_done = saw_done or detected
+                        saw_non_done_protocol = (
+                            saw_non_done_protocol
+                            or _sse_chunk_is_non_done_protocol(chunk)
+                        )
                     if exact_decoder is not None:
                         out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
                             exact_decoder.decode(chunk, final=False),
@@ -1234,7 +1263,7 @@ async def _proxy_v2_streaming(
                 detail,
             )
         finally:
-            if is_sse and not saw_done:
+            if is_sse and not saw_non_done_protocol and not saw_done:
                 inject_done = True
             await exit_stack.aclose()
         if exact_decoder is not None:

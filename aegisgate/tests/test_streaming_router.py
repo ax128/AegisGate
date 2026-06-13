@@ -749,6 +749,87 @@ async def test_v2_stream_exact_value_redaction_preserves_binary_streams(
 
 
 @pytest.mark.asyncio
+async def test_v2_stream_does_not_inject_done_into_anthropic_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anthropic Messages SSE terminates with message_stop and never emits [DONE];
+    # the OpenAI recovery sentinel must not be appended (it corrupts the stream).
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [
+                b'event: message_start\ndata: {"type":"message_start"}\n\n',
+                b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ],
+            content_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"data: [DONE]" not in body
+    assert b"message_stop" in body
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_injects_done_for_openai_stream_missing_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An OpenAI chat stream cut off before its [DONE] still gets the recovery
+    # sentinel so OpenAI clients do not hang.
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [
+                b'data: {"object":"chat.completion.chunk",'
+                b'"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            ],
+            content_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"data: [DONE]" in body
+
+
+@pytest.mark.asyncio
 async def test_v2_target_url_rejects_userinfo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
