@@ -81,7 +81,7 @@ Notes:
 
 ## Claude API Support
 
-Supported via generic proxy:
+Supported via the v1 OpenAI-compatible adapter (`/v1/messages` is handled natively with the full safety pipeline; other subpaths such as `count_tokens` go through the v1 generic pass-through):
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`
 - `stream=true` streaming passthrough
