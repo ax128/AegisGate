@@ -1033,10 +1033,15 @@ def _extract_redaction_whitelist_keys(request: Request) -> set[str]:
 
 
 def _request_prefers_streaming(
-    request: Request, body: bytes, content_type: str
+    request: Request, body: bytes, content_type: str, target_url: str = ""
 ) -> bool:
     accept = (request.headers.get("accept") or "").lower()
     if "text/event-stream" in accept:
+        return True
+    # Gemini's streamGenerateContent (and ?alt=sse) stream the response without an
+    # SSE Accept header or a body "stream":true flag; detect them from the target.
+    lowered_target = (target_url or "").lower()
+    if ":streamgeneratecontent" in lowered_target or "alt=sse" in lowered_target:
         return True
     if "json" not in content_type.lower():
         return False
@@ -1414,7 +1419,9 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
 
     forward_headers = _build_forward_headers(request)
     client = await _get_v2_async_client()
-    if _request_prefers_streaming(request, outbound_body, original_content_type):
+    if _request_prefers_streaming(
+        request, outbound_body, original_content_type, target.original_url
+    ):
         return await _proxy_v2_streaming(
             request=request,
             client=client,

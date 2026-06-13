@@ -901,6 +901,26 @@ async def test_v2_stream_injects_done_for_openai_stream_missing_done(
     assert b"data: [DONE]" in body
 
 
+def test_v2_streaming_detected_for_gemini_stream_generate_content() -> None:
+    # Gemini's streamGenerateContent (often without an SSE Accept header or a body
+    # "stream":true flag) must still be forwarded as a stream, not buffered.
+    request = _build_v2_security_request(headers=[(b"accept", b"application/json")])
+    target_url = (
+        "https://up/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    )
+    assert v2_router._request_prefers_streaming(
+        request, b'{"contents":[]}', "application/json", target_url
+    )
+
+
+def test_v2_streaming_not_detected_for_gemini_unary_generate_content() -> None:
+    request = _build_v2_security_request(headers=[(b"accept", b"application/json")])
+    target_url = "https://up/v1beta/models/gemini-2.5-pro:generateContent"
+    assert not v2_router._request_prefers_streaming(
+        request, b'{"contents":[]}', "application/json", target_url
+    )
+
+
 @pytest.mark.asyncio
 async def test_v2_target_url_rejects_userinfo(
     monkeypatch: pytest.MonkeyPatch,
