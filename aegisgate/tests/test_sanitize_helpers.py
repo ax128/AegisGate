@@ -563,3 +563,30 @@ def test_marker_and_whitelist_spans_coexist_safely() -> None:
     assert unprotected not in sanitized
     assert "[REDACTED:FAKE]" in sanitized
     assert hits
+
+
+def test_chat_sanitize_preserves_tool_call_linkage_fields() -> None:
+    # Tool-call linkage fields (id / function.name / tool_call_id) must never be
+    # redacted, even when the value matches a secret pattern — otherwise the
+    # call<->result linkage breaks and the upstream rejects the request. This
+    # mirrors the Responses-path guarantee (_should_skip_responses_field_redaction).
+    secret_like = "AKIAIOSFODNN7EXAMPLE"
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": secret_like,
+                    "type": "function",
+                    "function": {"name": secret_like, "arguments": '{"q": 1}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": secret_like, "content": "ok"},
+    ]
+
+    sanitized, _hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+
+    assert sanitized[0]["tool_calls"][0]["id"] == secret_like
+    assert sanitized[0]["tool_calls"][0]["function"]["name"] == secret_like
+    assert sanitized[1]["tool_call_id"] == secret_like

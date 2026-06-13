@@ -96,7 +96,9 @@ _V2_RELAXED_PII_IDS = frozenset(
         "AUTH_BEARER",
     }
 )
-_V2_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_V2_NON_CONTENT_KEYS = frozenset(
+    {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
+)
 _V2_SKIP_REDACTION_FIELDS = frozenset(
     {
         # encryption/cipher blobs should be forwarded as-is to avoid breaking payload semantics
