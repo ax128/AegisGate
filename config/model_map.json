@@ -7,5 +7,7 @@
     "claude-sonnet-4-20250514": "gpt-5.4",
     "claude-sonnet-4-6": "gpt-5.4",
     "claude-haiku-4-5-20251001": "gpt-5.4-mini"
-  }
+  },
+  "_allowed_models说明": "compat 目标模型白名单的可配置扩展，与内置白名单取并集（内置为下限，不能被配空）。新增上游模型写这里即可，无需改代码。",
+  "allowed_models": []
 }

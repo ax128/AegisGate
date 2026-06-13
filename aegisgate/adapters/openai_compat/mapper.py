@@ -329,16 +329,25 @@ COMPAT_DEFAULT_MODEL = "gpt-5.4"
 
 # 全局模型映射（从 config/model_map.json 加载）
 _global_model_map: dict[str, str] = {}
+# compat 目标模型白名单的可配置扩展（model_map.json 的 allowed_models）。与内置
+# COMPAT_ALLOWED_MODELS 取并集——内置集合为下限，配置只增不减，不能被配空。
+_configured_allowed_models: frozenset[str] = frozenset()
+
+
+def _effective_allowed_models() -> frozenset[str]:
+    """内置白名单(下限) ∪ 配置扩展。"""
+    return COMPAT_ALLOWED_MODELS | _configured_allowed_models
 
 
 def load_global_model_map() -> None:
-    """从 config/model_map.json 加载全局模型映射。启动和热重载时调用。"""
-    global _global_model_map
+    """从 config/model_map.json 加载全局模型映射与白名单扩展。启动和热重载时调用。"""
+    global _global_model_map, _configured_allowed_models
     p = settings.compat_model_map_path
     path = Path(p) if os.path.isabs(p) else Path.cwd() / p
     if not path.is_file():
         logger.debug("global model_map not found path=%s, skip", path)
         _global_model_map = {}
+        _configured_allowed_models = frozenset()
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -348,9 +357,17 @@ def load_global_model_map() -> None:
             logger.info("global model_map loaded path=%s count=%d", path, len(_global_model_map))
         else:
             _global_model_map = {}
+        raw_allowed = data.get("allowed_models") if isinstance(data, dict) else None
+        if isinstance(raw_allowed, list):
+            _configured_allowed_models = frozenset(
+                str(m).strip() for m in raw_allowed if str(m).strip()
+            )
+        else:
+            _configured_allowed_models = frozenset()
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("global model_map load failed path=%s error=%s", path, exc)
         _global_model_map = {}
+        _configured_allowed_models = frozenset()
 
 
 def get_global_model_map() -> dict[str, str]:
@@ -538,10 +555,11 @@ def messages_payload_to_responses_payload(
         model = default_model
     else:
         model = COMPAT_DEFAULT_MODEL
-    if model not in COMPAT_ALLOWED_MODELS:
+    allowed = _effective_allowed_models()
+    if model not in allowed:
         raise ValueError(
             f"compat target model '{model}' not allowed, "
-            f"valid: {sorted(COMPAT_ALLOWED_MODELS)}"
+            f"valid: {sorted(allowed)}"
         )
 
     result: dict = {
