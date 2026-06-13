@@ -402,6 +402,20 @@ def _anthropic_content_block_to_responses_part(block: object) -> dict | None:
             url = source.get("url")
             if isinstance(url, str) and url.strip():
                 return {"type": "input_image", "image_url": url}
+            # Standard Anthropic base64 image: rebuild a data URL so the image
+            # is forwarded intact instead of being flattened to a placeholder.
+            media_type = source.get("media_type")
+            data = source.get("data")
+            if (
+                isinstance(media_type, str)
+                and media_type.strip()
+                and isinstance(data, str)
+                and data.strip()
+            ):
+                return {
+                    "type": "input_image",
+                    "image_url": f"data:{media_type};base64,{data}",
+                }
         placeholder = _flatten_part(block).strip()
         return {"type": "input_text", "text": placeholder} if placeholder else None
     if block_type == "tool_use":
@@ -449,95 +463,6 @@ def _responses_arguments_to_anthropic_input(arguments: object) -> dict:
     if isinstance(parsed, dict):
         return parsed
     return {"value": parsed}
-
-
-def messages_payload_to_chat_payload(
-    payload: dict,
-    model_map: dict[str, str] | None = None,
-    default_model: str | None = None,
-) -> dict:
-    """Convert Anthropic /v1/messages request → OpenAI /v1/chat/completions request.
-
-    Handles: system (str/list), messages, model mapping, max_tokens,
-    temperature, top_p, top_k, stream, stop_sequences, tools.
-    """
-    messages: list[dict] = []
-
-    # Anthropic: system is top-level, not in messages array
-    system = payload.get("system")
-    if system:
-        if isinstance(system, str):
-            sys_text = system
-        elif isinstance(system, list):
-            sys_text = " ".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in system
-            ).strip()
-        else:
-            sys_text = str(system)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-
-    # Convert messages — Anthropic content can be str or list of content blocks
-    for msg in payload.get("messages", []):
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            messages.append({"role": role, "content": content})
-        elif isinstance(content, list):
-            # Flatten text blocks; pass tool_use/tool_result as-is for now
-            text_parts = []
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                elif isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        # Will be handled in tool_calls conversion later
-                        text_parts.append(f"[tool_use: {block.get('name', '')}]")
-                    elif block.get("type") == "tool_result":
-                        text_parts.append(str(block.get("content", "")))
-                    else:
-                        text_parts.append(_flatten_part(block))
-            messages.append({"role": role, "content": " ".join(text_parts).strip()})
-        else:
-            messages.append({"role": role, "content": str(content)})
-
-    # Model mapping 优先级: token 级 model_map > 全局 model_map > default_model > COMPAT_DEFAULT_MODEL
-    original_model = payload.get("model", "unknown-model")
-    if model_map and original_model in model_map:
-        model = model_map[original_model]
-    elif original_model in _global_model_map:
-        model = _global_model_map[original_model]
-    elif default_model:
-        model = default_model
-    else:
-        model = COMPAT_DEFAULT_MODEL
-    # 白名单校验
-    if model not in COMPAT_ALLOWED_MODELS:
-        raise ValueError(
-            f"compat target model '{model}' not allowed, "
-            f"valid: {sorted(COMPAT_ALLOWED_MODELS)}"
-        )
-
-    result: dict = {
-        "model": model,
-        "messages": messages,
-        "stream": payload.get("stream", False),
-    }
-
-    # Optional params
-    if "max_tokens" in payload:
-        result["max_tokens"] = payload["max_tokens"]
-    if "temperature" in payload:
-        result["temperature"] = payload["temperature"]
-    if "top_p" in payload:
-        result["top_p"] = payload["top_p"]
-    if "stop_sequences" in payload:
-        result["stop"] = payload["stop_sequences"]
-
-    return result
 
 
 def chat_response_to_messages_response(

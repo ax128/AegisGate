@@ -169,6 +169,49 @@ def test_messages_payload_to_responses_payload_preserves_context_and_structured_
     ]
 
 
+def test_messages_payload_to_responses_payload_preserves_base64_image() -> None:
+    # Standard Anthropic image block uses a base64 source (no `url`); it must be
+    # forwarded as a reconstructed data URL, not flattened to a text placeholder.
+    b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
+        "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": b64,
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = messages_payload_to_responses_payload(payload, default_model="gpt-5.4")
+
+    assert result["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is this?"},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/png;base64,{b64}",
+                },
+            ],
+        }
+    ]
+
+
 def test_responses_response_to_messages_response_preserves_function_calls() -> None:
     resp = {
         "id": "resp-tool-1",

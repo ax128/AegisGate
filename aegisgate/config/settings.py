@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # Multipart/form-data requests (for example image edits / file upload) may be larger.
     # OpenAI image edit masks require the image+mask to be <50MB; keep a small safety buffer.
     max_multipart_body_bytes: int = 60_000_000
+    # Token-routed generic-proxy requests (CLIProxyAPI etc.) may carry large
+    # multimodal payloads (inline image/video) above the 12MB text JSON limit.
+    v2_max_request_body_bytes: int = 64_000_000
     max_messages_count: int = 500
     max_content_length_per_message: int = 250_000
     max_pending_payload_bytes: int = 1_200_000

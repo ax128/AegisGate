@@ -46,7 +46,7 @@ _RESPONSES_RELAXED_PII_IDS = frozenset(
         "CRYPTO_SEED_PHRASE",
     }
 )
-_RESPONSES_NON_CONTENT_KEYS = frozenset(
+_NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
 )
 _RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
@@ -369,6 +369,11 @@ def _sanitize_chat_messages_for_upstream_with_hits(
         media_block_type: str | None = None,
     ) -> Any:
         if isinstance(node, str):
+            # Tool-call linkage / structural fields (id, tool_call_id, name, ...)
+            # must be forwarded verbatim; redacting them breaks the call<->result
+            # linkage. Mirrors the Responses-path skip set.
+            if str(field or "").strip().lower() in _NON_CONTENT_KEYS:
+                return node
             # Media locator fields (image_url/file_id) must be forwarded as-is.
             # We still scan and record redaction hits for audit visibility.
             if _is_media_locator_field(
@@ -559,7 +564,7 @@ def _should_skip_responses_field_redaction(field: str | None) -> bool:
     normalized = str(field or "").strip().lower()
     if not normalized:
         return False
-    if normalized in _RESPONSES_NON_CONTENT_KEYS:
+    if normalized in _NON_CONTENT_KEYS:
         return True
     if normalized in _RESPONSES_SKIP_REDACTION_FIELDS:
         return True

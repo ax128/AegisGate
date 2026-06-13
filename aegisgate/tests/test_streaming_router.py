@@ -19,10 +19,14 @@ from aegisgate.adapters.openai_compat.router import (
     _execute_responses_stream_once,
     _extract_sse_data_payload,
     _iter_forward_stream_with_pinning,
+    _patch_chat_stream_payload,
     _run_request_pipeline,
     _run_response_pipeline,
     _stream_block_reason,
     _stream_block_sse_chunk,
+)
+from aegisgate.adapters.openai_compat.compat_bridge import (
+    coerce_responses_stream_to_messages_stream,
 )
 from aegisgate.adapters.openai_compat.stream_utils import (
     _extract_sse_data_payload_from_chunk,
@@ -253,6 +257,113 @@ def test_coerce_responses_stream_to_chat_stream_handles_split_frames() -> None:
     assert '"object": "chat.completion.chunk"' in body
     assert '"content": "hello"' in body
     assert "data: [DONE]" in body
+
+
+def test_chat_stream_tool_call_arguments_forwarded_intact() -> None:
+    # In streaming, a tool_call's `arguments` arrives as fragments the client
+    # reassembles into one JSON string. Per-fragment response-side sanitization
+    # corrupts that reassembly, so the chat stream patcher must leave streamed
+    # tool_call name/arguments untouched (mirrors the Responses-path decision to
+    # skip argument deltas). `delta.content` text is still sanitized elsewhere.
+    ctx = RequestContext(
+        request_id="tc-stream",
+        session_id="tc-stream",
+        route="/v1/chat/completions",
+    )
+    arguments = '{"cmd":"rm -rf /tmp/demo"}'
+    chunk = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": arguments},
+                        }
+                    ]
+                },
+                "finish_reason": None,
+            }
+        ]
+    }
+
+    patched = _patch_chat_stream_payload(chunk, ctx)
+
+    fn = patched["choices"][0]["delta"]["tool_calls"][0]["function"]
+    assert fn["name"] == "bash"
+    assert fn["arguments"] == arguments
+
+
+def _messages_stream_from_responses(chunks: list[bytes]) -> StreamingResponse:
+    async def gen() -> AsyncGenerator[bytes, None]:
+        for chunk in chunks:
+            yield chunk
+
+    return coerce_responses_stream_to_messages_stream(
+        StreamingResponse(gen(), media_type="text/event-stream"),
+        original_model="claude-x",
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_surfaces_response_failed_as_error() -> None:
+    # A failed upstream must surface as an Anthropic error event, not a clean
+    # end_turn (which would make the client treat the failure as a finished turn).
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            b'data: {"type":"response.failed","response":{"id":"r1",'
+            b'"status":"failed","error":{"code":"server_error","message":"boom"}}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b"event: error" in body
+    assert b"end_turn" not in body
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_maps_max_tokens_stop_reason() -> None:
+    # An upstream truncated at the token limit must map to stop_reason=max_tokens,
+    # not end_turn, so the client knows the result was cut off.
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"r1",'
+            b'"status":"incomplete",'
+            b'"incomplete_details":{"reason":"max_output_tokens"},"output":[]}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b'"max_tokens"' in body
+    assert b"end_turn" not in body
+
+
+@pytest.mark.asyncio
+async def test_messages_compat_stream_reports_real_output_tokens() -> None:
+    # The Anthropic message_delta must carry the upstream's real output_tokens,
+    # not the gateway's per-delta approximation.
+    coerced = _messages_stream_from_responses(
+        [
+            b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"r1",'
+            b'"status":"completed",'
+            b'"usage":{"input_tokens":7,"output_tokens":42},"output":[]}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    body = await _collect_execute_stream(coerced)
+
+    assert b'"output_tokens": 42' in body
 
 
 def test_coerce_responses_stream_incremental_tool_calls() -> None:
@@ -707,6 +818,107 @@ async def test_v2_stream_exact_value_redaction_preserves_binary_streams(
 
     body = await _collect_execute_stream(response)
     assert body == original
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_does_not_inject_done_into_anthropic_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anthropic Messages SSE terminates with message_stop and never emits [DONE];
+    # the OpenAI recovery sentinel must not be appended (it corrupts the stream).
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [
+                b'event: message_start\ndata: {"type":"message_start"}\n\n',
+                b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ],
+            content_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"data: [DONE]" not in body
+    assert b"message_stop" in body
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_injects_done_for_openai_stream_missing_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An OpenAI chat stream cut off before its [DONE] still gets the recovery
+    # sentinel so OpenAI clients do not hang.
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [
+                b'data: {"object":"chat.completion.chunk",'
+                b'"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            ],
+            content_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"data: [DONE]" in body
+
+
+def test_v2_streaming_detected_for_gemini_stream_generate_content() -> None:
+    # Gemini's streamGenerateContent (often without an SSE Accept header or a body
+    # "stream":true flag) must still be forwarded as a stream, not buffered.
+    request = _build_v2_security_request(headers=[(b"accept", b"application/json")])
+    target_url = (
+        "https://up/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    )
+    assert v2_router._request_prefers_streaming(
+        request, b'{"contents":[]}', "application/json", target_url
+    )
+
+
+def test_v2_streaming_not_detected_for_gemini_unary_generate_content() -> None:
+    request = _build_v2_security_request(headers=[(b"accept", b"application/json")])
+    target_url = "https://up/v1beta/models/gemini-2.5-pro:generateContent"
+    assert not v2_router._request_prefers_streaming(
+        request, b'{"contents":[]}', "application/json", target_url
+    )
 
 
 @pytest.mark.asyncio

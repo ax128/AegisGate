@@ -778,3 +778,46 @@ def test_gw_tokens_docker_upstreams_keep_memory_when_persistence_fails(
     mapping = gw_tokens.get("8317")
     assert mapping is not None
     assert mapping["upstream_base"] == "http://cli-proxy-api:8317/v1"
+
+
+@pytest.mark.asyncio
+async def test_boundary_allows_large_body_for_token_routed_generic_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Token-routed (generic-proxy / CLIProxyAPI) requests may carry large
+    # multimodal bodies (e.g. inline image/video) that exceed the 12MB text limit.
+    monkeypatch.setattr(gateway.settings, "max_request_body_bytes", 12_000_000)
+    monkeypatch.setattr(gateway.settings, "v2_max_request_body_bytes", 64_000_000)
+    request = _build_request(
+        "/v1/chat/completions",
+        token_authenticated=True,
+        gateway_token="tok-123",
+        headers={"content-length": "20000000"},
+        body={"messages": []},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+    assert int(request.state.security_boundary["max_request_body_bytes"]) >= 64_000_000
+
+
+@pytest.mark.asyncio
+async def test_boundary_keeps_text_limit_for_direct_non_token_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A direct (non-token) call keeps the 12MB text limit; the generic-proxy
+    # override must not loosen ordinary openai-compatible routes.
+    monkeypatch.setattr(gateway.settings, "max_request_body_bytes", 12_000_000)
+    monkeypatch.setattr(gateway.settings, "v2_max_request_body_bytes", 64_000_000)
+    request = _build_request(
+        "/v1/chat/completions",
+        token_authenticated=True,
+        headers={"content-length": "20000000"},
+        body={"messages": []},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 413
+    assert _response_json(response)["error"]["code"] == "request_body_too_large"

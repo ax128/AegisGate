@@ -21,7 +21,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.util.ip_safety import (
-    is_blocked_ip as _is_blocked_ip,
     resolve_public_ips,
     bound_connect_url,
     request_host_header,
@@ -96,7 +95,9 @@ _V2_RELAXED_PII_IDS = frozenset(
         "AUTH_BEARER",
     }
 )
-_V2_NON_CONTENT_KEYS = frozenset({"id", "call_id", "type", "role", "name", "status"})
+_V2_NON_CONTENT_KEYS = frozenset(
+    {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
+)
 _V2_SKIP_REDACTION_FIELDS = frozenset(
     {
         # encryption/cipher blobs should be forwarded as-is to avoid breaking payload semantics
@@ -1032,10 +1033,15 @@ def _extract_redaction_whitelist_keys(request: Request) -> set[str]:
 
 
 def _request_prefers_streaming(
-    request: Request, body: bytes, content_type: str
+    request: Request, body: bytes, content_type: str, target_url: str = ""
 ) -> bool:
     accept = (request.headers.get("accept") or "").lower()
     if "text/event-stream" in accept:
+        return True
+    # Gemini's streamGenerateContent (and ?alt=sse) stream the response without an
+    # SSE Accept header or a body "stream":true flag; detect them from the target.
+    lowered_target = (target_url or "").lower()
+    if ":streamgeneratecontent" in lowered_target or "alt=sse" in lowered_target:
         return True
     if "json" not in content_type.lower():
         return False
@@ -1048,6 +1054,27 @@ def _sse_done_seen_from_chunk(chunk: bytes, *, tail: str) -> tuple[bool, str]:
     done_seen = "data: [DONE]" in text or "data:[DONE]" in text
     new_tail = text[-_SSE_DONE_DETECT_TAIL_CHARS:] if text else ""
     return done_seen, new_tail
+
+
+_NON_DONE_SSE_MARKERS: tuple[bytes, ...] = (
+    b"content_block",
+    b"message_start",
+    b"message_delta",
+    b"message_stop",
+    b'"candidates"',
+)
+
+
+def _sse_chunk_is_non_done_protocol(chunk: bytes) -> bool:
+    """True when an SSE chunk reveals a protocol that terminates WITHOUT a
+    ``data: [DONE]`` sentinel — Anthropic Messages (message_*/content_block_*) or
+    Gemini (candidates).
+
+    The recovery sentinel is injected on early EOF by default (OpenAI and
+    OpenAI-compatible streams expect it), but never for these protocols, where a
+    trailing ``data: [DONE]`` would corrupt the stream.
+    """
+    return any(marker in chunk for marker in _NON_DONE_SSE_MARKERS)
 
 
 async def _proxy_v2_streaming(
@@ -1179,6 +1206,7 @@ async def _proxy_v2_streaming(
 
     async def _iter_body() -> AsyncGenerator[bytes, None]:
         saw_done = False
+        saw_non_done_protocol = False
         sse_tail = ""
         inject_done = False
         exact_pending_text = ""
@@ -1195,6 +1223,9 @@ async def _proxy_v2_streaming(
                 if is_sse:
                     detected, sse_tail = _sse_done_seen_from_chunk(chunk, tail=sse_tail)
                     saw_done = saw_done or detected
+                    saw_non_done_protocol = (
+                        saw_non_done_protocol or _sse_chunk_is_non_done_protocol(chunk)
+                    )
                 if exact_decoder is not None:
                     out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
                         exact_decoder.decode(chunk, final=False),
@@ -1214,6 +1245,10 @@ async def _proxy_v2_streaming(
                             chunk, tail=sse_tail
                         )
                         saw_done = saw_done or detected
+                        saw_non_done_protocol = (
+                            saw_non_done_protocol
+                            or _sse_chunk_is_non_done_protocol(chunk)
+                        )
                     if exact_decoder is not None:
                         out_chunks, exact_pending_text = _redact_v2_exact_stream_text(
                             exact_decoder.decode(chunk, final=False),
@@ -1232,7 +1267,7 @@ async def _proxy_v2_streaming(
                 detail,
             )
         finally:
-            if is_sse and not saw_done:
+            if is_sse and not saw_non_done_protocol and not saw_done:
                 inject_done = True
             await exit_stack.aclose()
         if exact_decoder is not None:
@@ -1384,7 +1419,9 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
 
     forward_headers = _build_forward_headers(request)
     client = await _get_v2_async_client()
-    if _request_prefers_streaming(request, outbound_body, original_content_type):
+    if _request_prefers_streaming(
+        request, outbound_body, original_content_type, target.original_url
+    ):
         return await _proxy_v2_streaming(
             request=request,
             client=client,

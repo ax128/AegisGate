@@ -8,6 +8,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
+from aegisgate.adapters.v2_proxy import router as v2_router
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.storage.kv import KVStore
@@ -1307,3 +1308,15 @@ async def test_chat_from_responses_preserves_structured_tool_output_for_upstream
     assert forwarded_payloads[0]["input"][1]["type"] == "function_call"
     assert forwarded_payloads[0]["input"][2]["type"] == "function_call_output"
     assert forwarded_payloads[0]["input"][2]["output"] == "[REDACTED:JWT]"
+
+
+def test_v2_redaction_preserves_tool_call_id() -> None:
+    # The generic proxy redactor must not rewrite tool_call_id (even when its value
+    # matches a secret pattern) — doing so breaks the tool call<->result linkage.
+    # Consistent with the Responses/chat non-content skip sets.
+    secret_like = "AKIAIOSFODNN7EXAMPLE"
+    obj = {"role": "tool", "tool_call_id": secret_like, "content": "ok"}
+
+    sanitized, _count, _ids, _markers = v2_router._sanitize_json_value(obj)
+
+    assert sanitized["tool_call_id"] == secret_like
