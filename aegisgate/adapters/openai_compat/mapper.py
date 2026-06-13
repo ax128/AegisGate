@@ -402,6 +402,20 @@ def _anthropic_content_block_to_responses_part(block: object) -> dict | None:
             url = source.get("url")
             if isinstance(url, str) and url.strip():
                 return {"type": "input_image", "image_url": url}
+            # Standard Anthropic base64 image: rebuild a data URL so the image
+            # is forwarded intact instead of being flattened to a placeholder.
+            media_type = source.get("media_type")
+            data = source.get("data")
+            if (
+                isinstance(media_type, str)
+                and media_type.strip()
+                and isinstance(data, str)
+                and data.strip()
+            ):
+                return {
+                    "type": "input_image",
+                    "image_url": f"data:{media_type};base64,{data}",
+                }
         placeholder = _flatten_part(block).strip()
         return {"type": "input_text", "text": placeholder} if placeholder else None
     if block_type == "tool_use":
