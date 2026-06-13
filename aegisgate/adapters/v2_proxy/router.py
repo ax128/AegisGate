@@ -21,7 +21,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.util.ip_safety import (
-    is_blocked_ip as _is_blocked_ip,
     resolve_public_ips,
     bound_connect_url,
     request_host_header,
