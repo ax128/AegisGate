@@ -2401,12 +2401,6 @@ def _sanitize_nested_text_value(value: Any, ctx: RequestContext) -> Any:
     return renderers.sanitize_nested_text_value(value, ctx, ops=_NON_STREAM_RENDER_OPS)
 
 
-def _patch_chat_tool_call(
-    tool_call: dict[str, Any], ctx: RequestContext
-) -> dict[str, Any]:
-    return renderers.patch_chat_tool_call(tool_call, ctx, ops=_NON_STREAM_RENDER_OPS)
-
-
 def _patch_chat_message(message: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
     return renderers.patch_chat_message(message, ctx, ops=_NON_STREAM_RENDER_OPS)
 
@@ -2502,12 +2496,12 @@ def _patch_chat_stream_payload(
         if isinstance(delta, dict):
             if isinstance(delta.get("content"), str):
                 delta["content"] = _sanitize_hit_fragments(str(delta["content"]), ctx)
-            tool_calls = delta.get("tool_calls")
-            if isinstance(tool_calls, list):
-                delta["tool_calls"] = [
-                    _patch_chat_tool_call(item, ctx) if isinstance(item, dict) else item
-                    for item in tool_calls
-                ]
+            # Streamed tool_call `name`/`arguments` arrive as fragments the client
+            # reassembles into one JSON string; per-fragment sanitization corrupts
+            # that reassembly. Leave them untouched here — same decision as the
+            # Responses argument-delta path (see _patch_responses_stream_payload).
+            # Complete tool_calls carried in a non-stream `message` envelope are
+            # still sanitized via _patch_chat_message below.
             updated["delta"] = delta
         message = updated.get("message")
         if isinstance(message, dict):

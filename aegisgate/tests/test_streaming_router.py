@@ -19,6 +19,7 @@ from aegisgate.adapters.openai_compat.router import (
     _execute_responses_stream_once,
     _extract_sse_data_payload,
     _iter_forward_stream_with_pinning,
+    _patch_chat_stream_payload,
     _run_request_pipeline,
     _run_response_pipeline,
     _stream_block_reason,
@@ -253,6 +254,44 @@ def test_coerce_responses_stream_to_chat_stream_handles_split_frames() -> None:
     assert '"object": "chat.completion.chunk"' in body
     assert '"content": "hello"' in body
     assert "data: [DONE]" in body
+
+
+def test_chat_stream_tool_call_arguments_forwarded_intact() -> None:
+    # In streaming, a tool_call's `arguments` arrives as fragments the client
+    # reassembles into one JSON string. Per-fragment response-side sanitization
+    # corrupts that reassembly, so the chat stream patcher must leave streamed
+    # tool_call name/arguments untouched (mirrors the Responses-path decision to
+    # skip argument deltas). `delta.content` text is still sanitized elsewhere.
+    ctx = RequestContext(
+        request_id="tc-stream",
+        session_id="tc-stream",
+        route="/v1/chat/completions",
+    )
+    arguments = '{"cmd":"rm -rf /tmp/demo"}'
+    chunk = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": arguments},
+                        }
+                    ]
+                },
+                "finish_reason": None,
+            }
+        ]
+    }
+
+    patched = _patch_chat_stream_payload(chunk, ctx)
+
+    fn = patched["choices"][0]["delta"]["tool_calls"][0]["function"]
+    assert fn["name"] == "bash"
+    assert fn["arguments"] == arguments
 
 
 def test_coerce_responses_stream_incremental_tool_calls() -> None:
