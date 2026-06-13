@@ -708,3 +708,47 @@ async def test_messages_compat_response_sanitize_preserves_messages_shape(monkey
     assert openai_router._DANGER_FRAGMENT_NOTICE in text_block
     assert result["aegisgate"]["action"] == "sanitize"
     assert audit_calls[0]["request_id"] == "messages-compat-response-route"
+
+
+@pytest.mark.asyncio
+async def test_chat_response_sanitize_keeps_tool_call_arguments_valid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `arguments` is a JSON string the client parses with json.loads(). When the
+    # sanitizer obfuscates a fragment that spans JSON structure/escapes, naive
+    # per-char obfuscation breaks the JSON. The arguments must stay parseable.
+    arguments = '{"query": "alpha beta gamma"}'
+    fragment = 'gamma"}'  # spans the closing quote+brace; naive obfuscation breaks it
+    result, _audit = await _run_route_once(
+        monkeypatch,
+        route_name="chat",
+        upstream_body={
+            "id": "chat-tc",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "search", "arguments": arguments},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+        response_pipeline=_sanitize_pipeline(fragment),
+    )
+
+    sanitized_arguments = result["choices"][0]["message"]["tool_calls"][0]["function"][
+        "arguments"
+    ]
+    # Must remain parseable JSON for the client.
+    json.loads(sanitized_arguments)

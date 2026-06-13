@@ -85,6 +85,32 @@ def sanitize_nested_text_value(
     return value
 
 
+def _sanitize_tool_call_arguments(
+    arguments: str, ctx: RequestContext, *, ops: NonStreamRenderOps
+) -> str:
+    """Sanitize a tool-call ``arguments`` JSON string without breaking JSON validity.
+
+    Fragment obfuscation runs on the serialized string and can split JSON
+    structure or escape sequences. When the original was valid JSON but the
+    obfuscated form is not, fall back to sanitizing the decoded string values and
+    re-serializing (``json.dumps`` re-escapes safely) so the client can still
+    parse the tool call.
+    """
+    sanitized = ops.sanitize_text(arguments, ctx)
+    if sanitized == arguments:
+        return arguments
+    try:
+        decoded = json.loads(arguments)
+    except (ValueError, TypeError):
+        return sanitized  # not JSON to begin with — nothing to protect
+    try:
+        json.loads(sanitized)
+    except (ValueError, TypeError):
+        cleaned = sanitize_nested_text_value(decoded, ctx, ops=ops)
+        return json.dumps(cleaned, ensure_ascii=False)
+    return sanitized
+
+
 def patch_chat_tool_call(
     tool_call: dict[str, Any],
     ctx: RequestContext,
@@ -111,7 +137,9 @@ def patch_chat_tool_call(
         if isinstance(function.get("name"), str):
             function["name"] = ops.sanitize_text(str(function["name"]), ctx)
         if isinstance(function.get("arguments"), str):
-            function["arguments"] = ops.sanitize_text(str(function["arguments"]), ctx)
+            function["arguments"] = _sanitize_tool_call_arguments(
+                str(function["arguments"]), ctx, ops=ops
+            )
         patched["function"] = function
     return patched
 
@@ -169,7 +197,9 @@ def patch_responses_output_item(
         if isinstance(patched.get("name"), str):
             patched["name"] = ops.sanitize_text(str(patched["name"]), ctx)
         if isinstance(patched.get("arguments"), str):
-            patched["arguments"] = ops.sanitize_text(str(patched["arguments"]), ctx)
+            patched["arguments"] = _sanitize_tool_call_arguments(
+                str(patched["arguments"]), ctx, ops=ops
+            )
         return patched
 
     if item_type in {"bash", "computer_call"}:
