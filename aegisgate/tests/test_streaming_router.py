@@ -862,6 +862,50 @@ async def test_v2_stream_does_not_inject_done_into_anthropic_sse(
 
 
 @pytest.mark.asyncio
+async def test_v2_stream_does_not_inject_done_into_responses_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OpenAI Responses SSE (Codex) terminates with a response.completed event and
+    # never emits [DONE] (confirmed against CLIProxyAPI). The OpenAI-chat recovery
+    # sentinel must not be appended to a Responses stream.
+    async def fake_open_v2_stream(**kwargs):
+        return _FakeV2ExitStack(), _FakeV2StreamResponse(
+            [
+                b'event: response.output_text.delta\n'
+                b'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+                b'event: response.completed\n'
+                b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+            ],
+            content_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    target = v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+    response = await v2_router._proxy_v2_streaming(
+        request=request,
+        client=object(),
+        target=target,
+        forward_headers={},
+        outbound_body=b"",
+        redaction_count=0,
+    )
+
+    body = await _collect_execute_stream(response)
+    assert b"data: [DONE]" not in body
+    assert b"response.completed" in body
+
+
+@pytest.mark.asyncio
 async def test_v2_stream_injects_done_for_openai_stream_missing_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

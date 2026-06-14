@@ -435,6 +435,27 @@ def _anthropic_content_block_to_responses_part(block: object) -> dict | None:
                 }
         placeholder = _flatten_part(block).strip()
         return {"type": "input_text", "text": placeholder} if placeholder else None
+    if block_type == "document":
+        source = block.get("source")
+        if isinstance(source, dict):
+            # Standard Anthropic base64 document (PDF, etc.): forward as a
+            # Responses input_file data URL. A Claude-backed upstream maps this
+            # back to a document block; other upstreams drop input_file silently
+            # (never an error), so this is safe and strictly improves fidelity.
+            media_type = source.get("media_type")
+            data = source.get("data")
+            if (
+                isinstance(media_type, str)
+                and media_type.strip()
+                and isinstance(data, str)
+                and data.strip()
+            ):
+                return {
+                    "type": "input_file",
+                    "file_data": f"data:{media_type};base64,{data}",
+                }
+        placeholder = _flatten_part(block).strip()
+        return {"type": "input_text", "text": placeholder} if placeholder else None
     if block_type == "tool_use":
         name = str(block.get("name") or "").strip()
         raw_input = block.get("input")
