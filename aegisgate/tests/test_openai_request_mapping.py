@@ -218,6 +218,47 @@ def test_messages_payload_to_responses_payload_preserves_base64_image() -> None:
     ]
 
 
+def test_messages_payload_to_responses_payload_preserves_base64_document() -> None:
+    # Anthropic document (PDF) block uses a base64 source; it must be forwarded as
+    # a Responses input_file (data URL in file_data) so a Claude-backed upstream
+    # receives the document instead of a dropped placeholder.
+    b64 = "JVBERi0xLjQKJ"  # truncated base64 PDF marker
+    payload = {
+        "model": "claude-sonnet-4.5",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Summarize this"},
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64,
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+    result = messages_payload_to_responses_payload(payload, default_model="gpt-5.4")
+
+    assert result["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize this"},
+                {
+                    "type": "input_file",
+                    "file_data": f"data:application/pdf;base64,{b64}",
+                },
+            ],
+        }
+    ]
+
+
 def test_responses_response_to_messages_response_preserves_function_calls() -> None:
     resp = {
         "id": "resp-tool-1",

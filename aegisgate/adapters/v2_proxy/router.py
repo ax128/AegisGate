@@ -1062,13 +1062,18 @@ _NON_DONE_SSE_MARKERS: tuple[bytes, ...] = (
     b"message_delta",
     b"message_stop",
     b'"candidates"',
+    # OpenAI Responses (Codex) events terminate with response.completed and never
+    # emit [DONE] (confirmed against CLIProxyAPI); match the typed event object in
+    # compact and spaced JSON so the OpenAI-chat recovery sentinel is not appended.
+    b'"type":"response.',
+    b'"type": "response.',
 )
 
 
 def _sse_chunk_is_non_done_protocol(chunk: bytes) -> bool:
     """True when an SSE chunk reveals a protocol that terminates WITHOUT a
-    ``data: [DONE]`` sentinel — Anthropic Messages (message_*/content_block_*) or
-    Gemini (candidates).
+    ``data: [DONE]`` sentinel — Anthropic Messages (message_*/content_block_*),
+    Gemini (candidates), or OpenAI Responses (response.* typed events).
 
     The recovery sentinel is injected on early EOF by default (OpenAI and
     OpenAI-compatible streams expect it), but never for these protocols, where a
