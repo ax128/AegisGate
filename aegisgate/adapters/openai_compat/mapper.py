@@ -310,12 +310,6 @@ def to_responses_output(resp: InternalResponse) -> dict:
 # Anthropic Messages <-> OpenAI Chat payload-level conversion
 # ---------------------------------------------------------------------------
 
-_ANTHROPIC_STOP_REASON_MAP = {
-    "stop": "end_turn",
-    "length": "max_tokens",
-    "content_filter": "end_turn",
-}
-
 # compat=openai_chat 时允许的目标模型白名单
 COMPAT_ALLOWED_MODELS = frozenset({
     "gpt-5",
@@ -501,41 +495,6 @@ def _responses_arguments_to_anthropic_input(arguments: object) -> dict:
     if isinstance(parsed, dict):
         return parsed
     return {"value": parsed}
-
-
-def chat_response_to_messages_response(
-    chat_resp: dict,
-    *,
-    original_model: str,
-) -> dict:
-    """Convert OpenAI /v1/chat/completions response → Anthropic /v1/messages response."""
-    choice = (chat_resp.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    content_text = message.get("content") or ""
-    finish_reason = choice.get("finish_reason", "stop")
-
-    usage = chat_resp.get("usage") or {}
-    anthropic_usage = {
-        "input_tokens": usage.get("prompt_tokens", 0),
-        "output_tokens": usage.get("completion_tokens", 0),
-    }
-
-    result: dict = {
-        "id": f"msg_{chat_resp.get('id', str(uuid.uuid4()))}",
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": content_text}],
-        "model": original_model,
-        "stop_reason": _ANTHROPIC_STOP_REASON_MAP.get(finish_reason, "end_turn"),
-        "stop_sequence": None,
-        "usage": anthropic_usage,
-    }
-
-    # Preserve aegisgate metadata if present
-    if chat_resp.get("aegisgate"):
-        result["aegisgate"] = chat_resp["aegisgate"]
-
-    return result
 
 
 def messages_payload_to_responses_payload(
