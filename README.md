@@ -1,3 +1,5 @@
+
+
 # AegisGate
 
 > **English** | **[中文](README_zh.md)**
@@ -414,7 +416,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_SEMANTIC_SERVICE_URL` | _(empty)_ | Semantic service endpoint. When empty, gray-zone cases record `semantic_service_unconfigured` and skip semantic escalation |
 | `AEGIS_SEMANTIC_GRAY_LOW` | `0.25` | Lower bound for triggering semantic review (only when `risk_score` is between low/high) |
 | `AEGIS_SEMANTIC_GRAY_HIGH` | `0.75` | Upper bound for triggering semantic review (only when `risk_score` is between low/high) |
-| `AEGIS_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` |
+| `AEGIS_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` (`postgresql` also accepted) |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | `true` | Restrict access to loopback; set `false` for Docker |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | `false` | Enable numeric token host-port fallback such as `/v1/__gw__/t/8317/...` |
 | `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS` | `false` | Allow numeric tokens (1024–65535) from public/non-internal clients (default: internal-only) |
