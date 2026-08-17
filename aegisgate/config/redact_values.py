@@ -34,13 +34,16 @@ def _config_path() -> Path:
     ``Path.resolve()`` walks the whole realpath chain, and this runs on the
     per-response hot path via :func:`load_redact_values`. Keying the cache on
     the env var and cwd keeps it reactive to both (tests change either one).
+    cwd stays in the key even when the env var is set, because a relative
+    ``AEGIS_CONFIG_DIR`` resolves against cwd too; ``Path.cwd()`` is ~3 orders
+    of magnitude cheaper than the ``resolve()`` this cache exists to avoid.
     Stored as a single tuple so concurrent readers never see a key/path pair
     from two different snapshots.
     """
     global _cached_path
 
     env = os.environ.get("AEGIS_CONFIG_DIR", "").strip()
-    key = (env, "" if env else str(Path.cwd()))
+    key = (env, str(Path.cwd()))
     cached = _cached_path
     if cached is not None and cached[0] == key:
         return cached[1]
