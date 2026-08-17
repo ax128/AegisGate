@@ -399,6 +399,12 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 - **Crypto**: BTC/ETH/SOL/TRON addresses, WIF/xprv/xpub, seed phrases, exchange API keys
 - **Infrastructure** (relaxed mode): hostnames, OS versions, container IDs, K8s resources, internal URLs
 
+Request fields covered before forwarding: chat `messages`, Responses `input` and
+`instructions`, Anthropic `system`, tool/function definitions (`tools`), multipart
+form fields, and the full JSON body on generic `/v1/<subpath>` provider routes.
+Tool names, tool-call linkage ids and media locators (`image_url` / `file_id`)
+are always forwarded verbatim so upstream calls keep working.
+
 ## Configuration
 
 Key environment variables (set in `config/.env`):

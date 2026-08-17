@@ -19,13 +19,19 @@ _init_log_lock = threading.Lock()
 _init_logged: bool = False
 
 # H-07: Security-critical filters must never be silently forward-degraded when
-# storage_failure_action=forward.  Only storage-backed filters (e.g. RedactionFilter
-# with a storage dependency) should benefit from the forward fallback; pure security
-# logic filters must always block on error.
+# storage_failure_action=forward.  A filter that raises here has not finished its
+# work, so continuing would forward whatever it left half-applied.
+# The redaction filters belong in this set: an exception mid-way through the
+# message loop leaves part of the request unredacted, and forwarding that is a
+# cleartext leak.  Their *storage* dependency is handled inside RedactionFilter,
+# which honours storage_failure_action itself and degrades to a redacted but
+# non-restorable request instead of raising.
 _SECURITY_CRITICAL_FILTER_NAMES: frozenset[str] = frozenset({
+    "exact_value_redaction",
     "injection_detector",
     "privilege_guard",
     "rag_poison_guard",
+    "redaction",
     "request_sanitizer",
     "system_prompt_guard",
     "tool_call_guard",

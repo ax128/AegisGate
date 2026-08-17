@@ -7,6 +7,7 @@ function output sanitization, and request payload log sanitization.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -321,6 +322,118 @@ def _sanitize_text_for_upstream_with_hits(
     return cleaned, hits
 
 
+def _skip_non_content_field(field: str | None) -> bool:
+    """Structural / tool-linkage fields that must be forwarded verbatim."""
+    return str(field or "").strip().lower() in _NON_CONTENT_KEYS
+
+
+def _never_skip_field(field: str | None) -> bool:  # noqa: ARG001
+    return False
+
+
+def _merge_redaction_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-match hits into one row per (path, field, role, pattern)."""
+    dedup: dict[tuple[str, str, str, str], int] = {}
+    for item in hits:
+        key = (
+            str(item.get("path") or ""),
+            str(item.get("field") or ""),
+            str(item.get("role") or ""),
+            str(item.get("pattern") or ""),
+        )
+        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
+    return [
+        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
+        for (path, field, role, pattern), count in dedup.items()
+    ]
+
+
+def _sanitize_structured_node(
+    node: Any,
+    *,
+    path: str,
+    role: str,
+    field: str,
+    hits: list[dict[str, Any]],
+    whitelist_keys: set[str] | None = None,
+    media_block_type: str | None = None,
+    skip_field: Callable[[str | None], bool] = _skip_non_content_field,
+) -> Any:
+    """Walk a JSON-like node and redact every string leaf, preserving the shape.
+
+    Shared by the chat / messages-system / tool-definition / generic-payload
+    entry points so they cannot drift apart on skip rules or hit accounting.
+    """
+    if isinstance(node, str):
+        if skip_field(field):
+            return node
+        # Media locator fields (image_url/file_id) must be forwarded as-is.
+        # We still scan and record redaction hits for audit visibility.
+        if _is_media_locator_field(
+            path=path,
+            field=field,
+            media_block_type=media_block_type,
+        ):
+            _, node_hits = _sanitize_text_for_upstream_with_hits(
+                node,
+                role=role,
+                path=path,
+                field=field,
+                whitelist_keys=whitelist_keys,
+            )
+            hits.extend(node_hits)
+            return node
+
+        cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+            node,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+        )
+        hits.extend(node_hits)
+        return cleaned
+
+    if isinstance(node, list):
+        return [
+            _sanitize_structured_node(
+                item,
+                path=f"{path}[{idx}]",
+                role=role,
+                field=field,
+                hits=hits,
+                whitelist_keys=whitelist_keys,
+                media_block_type=media_block_type,
+                skip_field=skip_field,
+            )
+            for idx, item in enumerate(node)
+        ]
+
+    if not isinstance(node, dict):
+        return node
+
+    next_media_block_type = media_block_type
+    if _is_media_block_container_path(path):
+        block_type = str(node.get("type", "")).strip().lower()
+        if block_type:
+            next_media_block_type = block_type
+
+    copied: dict[str, Any] = dict(node)
+    for key, item in node.items():
+        if isinstance(item, (str, list, dict)):
+            copied[key] = _sanitize_structured_node(
+                item,
+                path=f"{path}.{key}" if path else key,
+                role=role,
+                field=key,
+                hits=hits,
+                whitelist_keys=whitelist_keys,
+                media_block_type=next_media_block_type,
+                skip_field=skip_field,
+            )
+    return copied
+
+
 def _sanitize_function_output_value(value: Any) -> Any:
     if isinstance(value, str):
         cleaned, _ = _sanitize_text_for_upstream_with_hits(
@@ -347,81 +460,6 @@ def _sanitize_chat_messages_for_upstream_with_hits(
     """Sanitize structured chat message content without flattening payload shape."""
     hits: list[dict[str, Any]] = []
 
-    def _sanitize_structured_part(
-        node: Any,
-        *,
-        path: str,
-        role: str,
-        field: str,
-        media_block_type: str | None = None,
-    ) -> Any:
-        if isinstance(node, str):
-            # Tool-call linkage / structural fields (id, tool_call_id, name, ...)
-            # must be forwarded verbatim; redacting them breaks the call<->result
-            # linkage. Mirrors the Responses-path skip set.
-            if str(field or "").strip().lower() in _NON_CONTENT_KEYS:
-                return node
-            # Media locator fields (image_url/file_id) must be forwarded as-is.
-            # We still scan and record redaction hits for audit visibility.
-            if _is_media_locator_field(
-                path=path,
-                field=field,
-                media_block_type=media_block_type,
-            ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
-                    node,
-                    role=role,
-                    path=path,
-                    field=field,
-                    whitelist_keys=whitelist_keys,
-                )
-                hits.extend(node_hits)
-                return node
-
-            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                node,
-                role=role,
-                path=path,
-                field=field,
-                whitelist_keys=whitelist_keys,
-            )
-            hits.extend(node_hits)
-            return cleaned
-
-        if isinstance(node, list):
-            return [
-                _sanitize_structured_part(
-                    item,
-                    path=f"{path}[{idx}]",
-                    role=role,
-                    field=field,
-                    media_block_type=media_block_type,
-                )
-                for idx, item in enumerate(node)
-            ]
-
-        if not isinstance(node, dict):
-            return node
-
-        next_media_block_type = media_block_type
-        if _is_media_block_container_path(path):
-            block_type = str(node.get("type", "")).strip().lower()
-            if block_type:
-                next_media_block_type = block_type
-
-        copied: dict[str, Any] = dict(node)
-        for key, item in node.items():
-            child_path = f"{path}.{key}" if path else key
-            if isinstance(item, (str, list, dict)):
-                copied[key] = _sanitize_structured_part(
-                    item,
-                    path=child_path,
-                    role=role,
-                    field=key,
-                    media_block_type=next_media_block_type,
-                )
-        return copied
-
     sanitized_messages: list[Any] = []
     for idx, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -433,29 +471,17 @@ def _sanitize_chat_messages_for_upstream_with_hits(
             if key == "role":
                 continue
             if isinstance(item, (str, list, dict)):
-                copied_message[key] = _sanitize_structured_part(
+                copied_message[key] = _sanitize_structured_node(
                     item,
                     path=f"messages[{idx}].{key}",
                     role=role,
                     field=key,
-                    media_block_type=None,
+                    hits=hits,
+                    whitelist_keys=whitelist_keys,
                 )
         sanitized_messages.append(copied_message)
 
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized_messages, merged_hits
+    return sanitized_messages, _merge_redaction_hits(hits)
 
 
 def _sanitize_messages_system_for_upstream_with_hits(
@@ -464,87 +490,87 @@ def _sanitize_messages_system_for_upstream_with_hits(
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        value,
+        path="system",
+        role="system",
+        field="system",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+        skip_field=_never_skip_field,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-    def _sanitize_system_part(
-        node: Any,
-        *,
-        path: str,
-        field: str,
-        media_block_type: str | None = None,
-    ) -> Any:
-        if isinstance(node, str):
-            if _is_media_locator_field(
-                path=path,
-                field=field,
-                media_block_type=media_block_type,
-            ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
-                    node,
-                    role="system",
-                    path=path,
-                    field=field,
-                    whitelist_keys=whitelist_keys,
-                )
-                hits.extend(node_hits)
-                return node
 
-            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                node,
-                role="system",
-                path=path,
-                field=field,
-                whitelist_keys=whitelist_keys,
-            )
-            hits.extend(node_hits)
-            return cleaned
+def _sanitize_instructions_for_upstream_with_hits(
+    value: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact the Responses-API ``instructions`` field before forwarding.
 
-        if isinstance(node, list):
-            return [
-                _sanitize_system_part(
-                    item,
-                    path=f"{path}[{idx}]",
-                    field=field,
-                    media_block_type=media_block_type,
-                )
-                for idx, item in enumerate(node)
-            ]
+    ``instructions`` carries the system prompt on the Responses path, which is
+    where coding clients put environment details, absolute paths and internal
+    service URLs — it has to go through the same redaction as ``input``.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        value,
+        path="instructions",
+        role="system",
+        field="instructions",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-        if not isinstance(node, dict):
-            return node
 
-        next_media_block_type = media_block_type
-        if _is_media_block_container_path(path):
-            block_type = str(node.get("type", "")).strip().lower()
-            if block_type:
-                next_media_block_type = block_type
+def _sanitize_tool_definitions_for_upstream_with_hits(
+    tools: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact tool/function definitions before forwarding.
 
-        copied: dict[str, Any] = dict(node)
-        for key, item in node.items():
-            child_path = f"{path}.{key}" if path else key
-            if isinstance(item, (str, list, dict)):
-                copied[key] = _sanitize_system_part(
-                    item,
-                    path=child_path,
-                    field=key,
-                    media_block_type=next_media_block_type,
-                )
-        return copied
+    Descriptions, parameter defaults and enum values routinely carry sample
+    credentials and internal hostnames. Tool names stay verbatim (they are in
+    the non-content key set) so the upstream tool-call linkage is unaffected.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        tools,
+        path="tools",
+        role="system",
+        field="tools",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-    sanitized = _sanitize_system_part(value, path="system", field="system")
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized, merged_hits
+
+def _sanitize_generic_payload_for_upstream_with_hits(
+    payload: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact an arbitrary provider payload forwarded by the generic proxy.
+
+    The generic ``/v1/<subpath>`` routes (embeddings, rerank, provider-native
+    endpoints) have no known message schema, so every string leaf is walked with
+    the same skip rules the Responses path uses for cipher blobs and structural
+    keys.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        payload,
+        path="$",
+        role="user",
+        field="",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+        skip_field=_should_skip_responses_field_redaction,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
 
 def _should_skip_responses_field_redaction(field: str | None) -> bool:
@@ -711,20 +737,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
         return node
 
     sanitized = _sanitize(value, path="input", media_block_type=None)
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized, merged_hits
+    return sanitized, _merge_redaction_hits(hits)
 
 
 def _sanitize_responses_input_for_upstream(

@@ -112,9 +112,12 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _responses_function_output_redaction_patterns,
     _responses_relaxed_redaction_patterns,
     _sanitize_chat_messages_for_upstream_with_hits,
+    _sanitize_generic_payload_for_upstream_with_hits,
+    _sanitize_instructions_for_upstream_with_hits,
     _sanitize_messages_system_for_upstream_with_hits,
     _sanitize_function_output_value,
     _sanitize_payload_for_log,
+    _sanitize_tool_definitions_for_upstream_with_hits,
     _sanitize_responses_input_for_upstream,
     _sanitize_responses_input_for_upstream_with_hits,
     _sanitize_text_for_upstream_with_hits,
@@ -857,6 +860,31 @@ def _is_structured_content(value: Any) -> bool:
 _GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy", "metadata"})
 
 
+def _apply_tool_definition_redaction(
+    upstream_payload: dict[str, Any],
+    *,
+    whitelist_keys: set[str] | None,
+    violation_reason: str,
+) -> list[dict[str, Any]]:
+    """Redact tool definitions in the upstream payload in place.
+
+    Tool descriptions, parameter defaults and enum values are request-side
+    content just like messages are, so they go through the same redaction.
+    Returns the recorded hits so the caller can fold them into its audit log.
+    """
+    tools = upstream_payload.get("tools")
+    if not isinstance(tools, (list, dict)):
+        return []
+    sanitized_tools, hits = _sanitize_tool_definitions_for_upstream_with_hits(
+        tools,
+        whitelist_keys=whitelist_keys,
+    )
+    if not _preserves_json_shape(tools, sanitized_tools):
+        raise ValueError(violation_reason)
+    upstream_payload["tools"] = sanitized_tools
+    return hits
+
+
 def _build_chat_upstream_payload(
     payload: dict[str, Any],
     sanitized_req_messages: list,
@@ -902,6 +930,13 @@ def _build_chat_upstream_payload(
         # messages — unknown fields may cause upstream API rejections.
         updated_messages.append(merged)
     upstream_payload["messages"] = updated_messages
+    redaction_hits.extend(
+        _apply_tool_definition_redaction(
+            upstream_payload,
+            whitelist_keys=whitelist_keys,
+            violation_reason="chat_tools_shape_violation",
+        )
+    )
     if redaction_hits:
         sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
         logger.warning(
@@ -930,10 +965,11 @@ def _build_responses_upstream_payload(
     upstream_payload = sanitize_for_responses(
         {k: v for k, v in payload.items() if k not in _GATEWAY_INTERNAL_KEYS},
     )
+    redaction_hits: list[dict[str, Any]] = []
     if sanitized_req_messages:
         original_input = payload.get("input")
         if _is_structured_content(original_input):
-            sanitized_input, redaction_hits = (
+            sanitized_input, input_hits = (
                 _sanitize_responses_input_for_upstream_with_hits(
                     original_input,
                     whitelist_keys=whitelist_keys,
@@ -942,22 +978,47 @@ def _build_responses_upstream_payload(
             if not _preserves_json_shape(original_input, sanitized_input):
                 raise ValueError("responses_input_shape_violation")
             upstream_payload["input"] = sanitized_input
-            if redaction_hits:
-                sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
-                # WARNING level: a request carrying sensitive fields is a security audit event
-                logger.warning(
-                    "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
-                    request_id,
-                    session_id,
-                    route,
-                    len(redaction_hits),
-                    sample,
-                    len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
-                )
+            redaction_hits.extend(input_hits)
         else:
             upstream_payload["input"] = _strip_system_exec_runtime_lines(
                 str(sanitized_req_messages[0].content)
             )
+
+    original_instructions = upstream_payload.get("instructions")
+    if isinstance(original_instructions, (str, list, dict)):
+        sanitized_instructions, instruction_hits = (
+            _sanitize_instructions_for_upstream_with_hits(
+                original_instructions,
+                whitelist_keys=whitelist_keys,
+            )
+        )
+        if not _preserves_json_shape(original_instructions, sanitized_instructions):
+            raise ValueError("responses_instructions_shape_violation")
+        upstream_payload["instructions"] = sanitized_instructions
+        redaction_hits.extend(instruction_hits)
+
+    # Redact tool definitions before the cache below stores them, so a cached
+    # copy re-injected on a later turn is redacted too.
+    redaction_hits.extend(
+        _apply_tool_definition_redaction(
+            upstream_payload,
+            whitelist_keys=whitelist_keys,
+            violation_reason="responses_tools_shape_violation",
+        )
+    )
+
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        # WARNING level: a request carrying sensitive fields is a security audit event
+        logger.warning(
+            "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            session_id,
+            route,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
 
     # Tool definition caching for stateless proxy chains.
     # Clients like Cursor send full tool definitions on the first turn and
@@ -1075,6 +1136,13 @@ def _build_messages_upstream_payload(
             merged["content"] = message.content
         updated_messages.append(merged)
     upstream_payload["messages"] = updated_messages
+    redaction_hits.extend(
+        _apply_tool_definition_redaction(
+            upstream_payload,
+            whitelist_keys=whitelist_keys,
+            violation_reason="messages_tools_shape_violation",
+        )
+    )
     if redaction_hits:
         sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
         logger.warning(
@@ -1087,6 +1155,41 @@ def _build_messages_upstream_payload(
             len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
         )
     return upstream_payload
+
+
+def _build_generic_upstream_payload(
+    payload: dict[str, Any],
+    *,
+    request_id: str = "-",
+    session_id: str = "-",
+    route: str = "-",
+    whitelist_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    """Redact an arbitrary provider payload before it leaves the gateway.
+
+    The generic proxy has no message schema to work from, so the whole JSON body
+    is walked. Without this the request pipeline only scored the payload for
+    risk while the untouched original was forwarded.
+    """
+    sanitized, redaction_hits = _sanitize_generic_payload_for_upstream_with_hits(
+        payload,
+        whitelist_keys=whitelist_keys,
+    )
+    if not isinstance(sanitized, dict) or not _preserves_json_shape(payload, sanitized):
+        raise ValueError("generic_input_shape_violation")
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        # WARNING level: a request carrying sensitive fields is a security audit event
+        logger.warning(
+            "generic input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            session_id,
+            route,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
+    return sanitized
 
 
 def _build_chat_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -5450,6 +5553,22 @@ async def _execute_generic_stream_once(
             boundary=boundary,
         )
 
+    try:
+        upstream_payload = await _run_payload_transform(
+            _build_generic_upstream_payload,
+            payload,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=request_path,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc, ctx=ctx, boundary=boundary
+            )
+        raise
+
     base_reports = list(ctx.report_items)
 
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
@@ -5459,7 +5578,7 @@ async def _execute_generic_stream_once(
             async for line in _iter_sse_frames(
                 _iter_forward_stream_with_pinning(
                     url=upstream_url,
-                    payload=payload,
+                    payload=upstream_payload,
                     headers=forward_headers,
                     connect_urls=connect_urls,
                     host_header=host_header,
@@ -5726,9 +5845,25 @@ async def _execute_generic_once(
         )
 
     try:
+        upstream_payload = await _run_payload_transform(
+            _build_generic_upstream_payload,
+            payload,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            route=request_path,
+            whitelist_keys=ctx.redaction_whitelist_keys,
+        )
+    except ValueError as exc:
+        if _is_payload_shape_violation_error(exc):
+            return _payload_shape_violation_response(
+                exc=exc, ctx=ctx, boundary=boundary
+            )
+        raise
+
+    try:
         status_code, upstream_body = await _forward_json_with_pinning(
             url=upstream_url,
-            payload=payload,
+            payload=upstream_payload,
             headers=forward_headers,
             connect_urls=connect_urls,
             host_header=host_header,

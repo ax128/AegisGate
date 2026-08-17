@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **请求侧脱敏覆盖修复（P0）**
+  - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）
+  - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）
+  - 通用代理子路径（`/v1/embeddings`、`/v1/rerank` 等）接入保形脱敏：此前流水线只对展平文本打分，转发的仍是原始 payload
+  - Responses `instructions`（系统提示词）与三条路由的工具定义（`tools` 的 `description`、`parameters` 默认值/枚举值）纳入脱敏；工具名、tool call 关联 id、媒体定位符仍原样转发
+  - 脱敏过滤器纳入 `_SECURITY_CRITICAL_FILTER_NAMES`：过滤器异常时一律 fail-closed，不再受 `AEGIS_STORAGE_FAILURE_ACTION=forward` 影响而转发半脱敏内容；映射持久化失败仍遵循该开关，降级为「已脱敏但不可还原」并打审计标记 `redaction_mapping_persist_failed`
+
 ### Breaking Changes
 
 - **移除 Token 映射中的 `gateway_key` 字段**

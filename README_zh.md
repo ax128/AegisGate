@@ -218,6 +218,11 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
 - 电脑/基础设施（宽松模式，仅 `field: value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
 
+转发前覆盖的请求字段：chat `messages`、responses `input` 与 `instructions`、Anthropic `system`、
+工具/函数定义（`tools`：`description`、`parameters` 默认值与枚举值）、multipart 表单字段，
+以及通用 `/v1/<子路径>` 路由（embeddings、rerank 等）的完整 JSON body。
+工具名、tool call 关联 id 与媒体定位符（`image_url` / `file_id`）始终原样转发，避免破坏上游调用。
+
 `responses` 结构化输入补充说明（当前）：
 
 - 全节点文本扫描：`role=user/developer/system/assistant` + `type=function_call_output/tool_result/tool_output/computer_call_output`
