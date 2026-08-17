@@ -55,7 +55,6 @@ from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - 
     prune_expired_mappings,
     prune_pending_confirmations,
     reload_runtime_dependencies,
-    store,
 )
 from aegisgate.adapters.openai_compat.security_view import (
     SecurityPreviewError,
@@ -2720,7 +2719,6 @@ async def _execute_chat_stream_once(
         return transport_or_response
 
     transport = transport_or_response
-    upstream_base = transport.upstream_base
     upstream_url = transport.upstream_url
     connect_urls = transport.connect_urls
     host_header = transport.host_header
@@ -3255,7 +3253,6 @@ async def _execute_responses_stream_once(
         return transport_or_response
 
     transport = transport_or_response
-    upstream_base = transport.upstream_base
     upstream_url = transport.upstream_url
     connect_urls = transport.connect_urls
     host_header = transport.host_header
@@ -4551,7 +4548,6 @@ async def _execute_messages_stream_once(
         return transport_or_response
 
     transport = transport_or_response
-    upstream_base = transport.upstream_base
     upstream_url = transport.upstream_url
     connect_urls = transport.connect_urls
     host_header = transport.host_header
@@ -6057,7 +6053,6 @@ async def chat_completions(payload: dict, request: Request):
             boundary=boundary,
         )
     ctx_preview = preview.ctx
-    req_preview = preview.request
     tenant_id = ctx_preview.tenant_id
 
     if _should_stream(payload):
@@ -6211,7 +6206,6 @@ async def messages(payload: dict, request: Request):
             boundary=boundary,
         )
     ctx_preview = preview.ctx
-    req_preview = preview.request
     tenant_id = ctx_preview.tenant_id
 
     compat_mode = str(request.scope.get("aegis_compat") or "")

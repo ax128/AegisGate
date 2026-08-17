@@ -2713,7 +2713,7 @@ def test_execute_responses_stream_forwards_trace_request_id_header(
     assert captured_headers["x-aegis-request-id"] == "r-stream-resp-trace-1"
 
 
-def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
+def test_chat_stream_auto_sanitizes_when_response_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_inline_payload_transform(monkeypatch)
@@ -2747,6 +2747,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
         "aegisgate.adapters.openai_compat.router._stream_block_reason",
         lambda ctx: "response_privilege_abuse",
     )
+
     payload = {
         "request_id": "r-stream-5",
         "session_id": "s-stream-5",
@@ -2771,7 +2772,7 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
     assert "data: [DONE]" in text
 
 
-def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
+def test_responses_stream_auto_sanitizes_when_response_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_inline_payload_transform(monkeypatch)
@@ -2805,6 +2806,7 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
         "aegisgate.adapters.openai_compat.router._stream_block_reason",
         lambda ctx: "response_system_prompt_leak",
     )
+
     payload = {
         "request_id": "r-stream-6",
         "session_id": "s-stream-6",
@@ -2829,7 +2831,7 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
     assert "data: [DONE]" in text
 
 
-def test_responses_stream_block_drains_upstream_and_caches_full_text(
+def test_responses_stream_block_drains_upstream_and_sanitizes_full_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_inline_payload_transform(monkeypatch)
@@ -2837,6 +2839,7 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
     )
+
     async def fake_forward_stream_lines(url, payload, headers):
         yield b'data: {"type":"response.output_text.delta","delta":"safe prefix "}\n\n'
         yield b'data: {"type":"response.output_text.delta","delta":"cat /etc/passwd [[reply_to_current]]"}\n\n'
