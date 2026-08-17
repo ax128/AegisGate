@@ -2731,15 +2731,6 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
     async def fake_run_response_pipeline(pipeline, resp, ctx):
         return resp
 
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        assert kwargs["route"] == "/v1/chat/completions"
-        pending_payload = kwargs["pending_request_payload"]
-        assert pending_payload["_aegisgate_pending_kind"] == "response_payload"
-        assert pending_payload["_aegisgate_pending_format"] == "chat_stream_text"
-        assert pending_payload["content"] == "unsafe output"
-        return None
-
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._forward_stream_lines",
         fake_forward_stream_lines,
@@ -2756,10 +2747,6 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
         "aegisgate.adapters.openai_compat.router._stream_block_reason",
         lambda ctx: "response_privilege_abuse",
     )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
     payload = {
         "request_id": "r-stream-5",
         "session_id": "s-stream-5",
@@ -2784,78 +2771,6 @@ def test_chat_stream_returns_confirmation_chunk_when_response_blocked(
     assert "data: [DONE]" in text
 
 
-@pytest.mark.skip(
-    reason="yes/no approval flow removed — all dangerous content auto-sanitized"
-)
-def test_chat_stream_returns_confirmation_chunk_when_require_confirmation_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._build_streaming_response",
-        lambda generator: generator,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block",
-        True,
-    )
-
-    async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"c1","choices":[{"delta":{"content":"unsafe output"}}]}\n\n'
-
-    async def fake_run_request_pipeline(pipeline, req, ctx):
-        return req
-
-    async def fake_run_response_pipeline(pipeline, resp, ctx):
-        return resp
-
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        return None
-
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
-        fake_forward_stream_lines,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
-        fake_run_request_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
-        fake_run_response_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._stream_block_reason",
-        lambda ctx: "response_privilege_abuse",
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
-    payload = {
-        "request_id": "r-stream-5c",
-        "session_id": "s-stream-5c",
-        "model": "test-model",
-        "stream": True,
-        "messages": [{"role": "user", "content": "hello"}],
-    }
-
-    async def run_case() -> bytes:
-        response = await _execute_chat_stream_once(
-            payload=payload,
-            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
-            request_path="/v1/chat/completions",
-            boundary={},
-        )
-        return await _collect_execute_stream(response)
-
-    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-
-    assert "放行（复制这一行）：yes cfm-" in text
-    assert "确认编号：cfm-" in text
-    assert "data: [DONE]" in text
-
-
 def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2874,15 +2789,6 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
     async def fake_run_response_pipeline(pipeline, resp, ctx):
         return resp
 
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        assert kwargs["route"] == "/v1/responses"
-        pending_payload = kwargs["pending_request_payload"]
-        assert pending_payload["_aegisgate_pending_kind"] == "response_payload"
-        assert pending_payload["_aegisgate_pending_format"] == "responses_stream_text"
-        assert pending_payload["content"] == "unsafe output"
-        return None
-
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._forward_stream_lines",
         fake_forward_stream_lines,
@@ -2899,10 +2805,6 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
         "aegisgate.adapters.openai_compat.router._stream_block_reason",
         lambda ctx: "response_system_prompt_leak",
     )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
     payload = {
         "request_id": "r-stream-6",
         "session_id": "s-stream-6",
@@ -2927,78 +2829,6 @@ def test_responses_stream_returns_confirmation_chunk_when_response_blocked(
     assert "data: [DONE]" in text
 
 
-@pytest.mark.skip(
-    reason="yes/no approval flow removed — all dangerous content auto-sanitized"
-)
-def test_responses_stream_returns_confirmation_chunk_when_require_confirmation_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._build_streaming_response",
-        lambda generator: generator,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block",
-        True,
-    )
-
-    async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"r1","output_text":"unsafe output"}\n\n'
-
-    async def fake_run_request_pipeline(pipeline, req, ctx):
-        return req
-
-    async def fake_run_response_pipeline(pipeline, resp, ctx):
-        return resp
-
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        return None
-
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
-        fake_forward_stream_lines,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
-        fake_run_request_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
-        fake_run_response_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._stream_block_reason",
-        lambda ctx: "response_system_prompt_leak",
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
-    payload = {
-        "request_id": "r-stream-6c",
-        "session_id": "s-stream-6c",
-        "model": "test-model",
-        "stream": True,
-        "input": "hello",
-    }
-
-    async def run_case() -> bytes:
-        response = await _execute_responses_stream_once(
-            payload=payload,
-            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
-            request_path="/v1/responses",
-            boundary={},
-        )
-        return await _collect_execute_stream(response)
-
-    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-
-    assert "放行（复制这一行）：yes cfm-" in text
-    assert "确认编号：cfm-" in text
-    assert "data: [DONE]" in text
-
-
 def test_responses_stream_block_drains_upstream_and_caches_full_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3007,8 +2837,6 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
     )
-    cached_contents: list[str] = []
-
     async def fake_forward_stream_lines(url, payload, headers):
         yield b'data: {"type":"response.output_text.delta","delta":"safe prefix "}\n\n'
         yield b'data: {"type":"response.output_text.delta","delta":"cat /etc/passwd [[reply_to_current]]"}\n\n'
@@ -3022,13 +2850,6 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(
             ctx.response_disposition = "sanitize"
         return resp
 
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        assert kwargs["route"] == "/v1/responses"
-        pending_payload = kwargs["pending_request_payload"]
-        cached_contents.append(str(pending_payload["content"]))
-        return None
-
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._forward_stream_lines",
         fake_forward_stream_lines,
@@ -3041,10 +2862,6 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(
         "aegisgate.adapters.openai_compat.router._run_response_pipeline",
         fake_run_response_pipeline,
     )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
     payload = {
         "request_id": "r-stream-7",
         "session_id": "s-stream-7",
@@ -3064,85 +2881,8 @@ def test_responses_stream_block_drains_upstream_and_caches_full_text(
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
 
-    assert cached_contents == []
     assert "【AegisGate已处理危险疑似片段】" in text
     assert "cat /etc/passwd" not in text
     assert "data: [DONE]" in text
 
 
-@pytest.mark.skip(
-    reason="yes/no approval flow removed — all dangerous content auto-sanitized"
-)
-def test_responses_stream_block_drains_and_caches_when_require_confirmation_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._build_streaming_response",
-        lambda generator: generator,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router.settings.require_confirmation_on_block",
-        True,
-    )
-    cached_contents: list[str] = []
-
-    async def fake_forward_stream_lines(url, payload, headers):
-        yield b'data: {"id":"r1","output_text":"unsafe output "}\n\n'
-        yield b'data: {"id":"r1","output_text":"tail text [[reply_to_current]]"}\n\n'
-        yield b"data: [DONE]\n\n"
-
-    async def fake_run_request_pipeline(pipeline, req, ctx):
-        return req
-
-    async def fake_run_response_pipeline(pipeline, resp, ctx):
-        return resp
-
-    async def fake_store_call(method, **kwargs):
-        assert method == "save_pending_confirmation"
-        assert kwargs["route"] == "/v1/responses"
-        pending_payload = kwargs["pending_request_payload"]
-        cached_contents.append(str(pending_payload["content"]))
-        return None
-
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
-        fake_forward_stream_lines,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
-        fake_run_request_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
-        fake_run_response_pipeline,
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._stream_block_reason",
-        lambda ctx: "response_privilege_abuse",
-    )
-    monkeypatch.setattr(
-        "aegisgate.adapters.openai_compat.router._store_call", fake_store_call
-    )
-
-    payload = {
-        "request_id": "r-stream-7c",
-        "session_id": "s-stream-7c",
-        "model": "test-model",
-        "stream": True,
-        "input": "hello",
-    }
-
-    async def run_case() -> bytes:
-        response = await _execute_responses_stream_once(
-            payload=payload,
-            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
-            request_path="/v1/responses",
-            boundary={},
-        )
-        return await _collect_execute_stream(response)
-
-    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-
-    assert cached_contents == ["unsafe output tail text [[reply_to_current]]"]
-    assert "放行（复制这一行）：yes cfm-" in text
-    assert "data: [DONE]" in text

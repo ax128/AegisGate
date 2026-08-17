@@ -285,9 +285,6 @@ async def test_chat_endpoint_mixed_payload_fail_closes_to_native_path_when_rollo
     }
     log_messages: list[str] = []
 
-    async def fake_run_store_io(*args, **kwargs):
-        return None
-
     async def fake_execute_chat_once(**kwargs):
         return {"native": "chat"}
 
@@ -313,7 +310,6 @@ async def test_chat_endpoint_mixed_payload_fail_closes_to_native_path_when_rollo
             stream=False,
         ),
     )
-    monkeypatch.setattr(openai_router, "run_store_io", fake_run_store_io)
     monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
     monkeypatch.setattr(
         openai_router, "_handle_responses_payload_on_chat_endpoint", fake_redirect
@@ -344,9 +340,6 @@ async def test_responses_endpoint_mixed_payload_fail_closes_to_native_path_when_
     }
     log_messages: list[str] = []
 
-    async def fake_run_store_io(*args, **kwargs):
-        return None
-
     async def fake_execute_responses_once(**kwargs):
         return {"native": "responses"}
 
@@ -374,7 +367,6 @@ async def test_responses_endpoint_mixed_payload_fail_closes_to_native_path_when_
             stream=False,
         ),
     )
-    monkeypatch.setattr(openai_router, "run_store_io", fake_run_store_io)
     monkeypatch.setattr(
         openai_router, "_execute_responses_once", fake_execute_responses_once
     )
@@ -407,9 +399,6 @@ async def test_chat_endpoint_keeps_legacy_safe_path_when_private_rollout_gate_is
         assert payload_arg is payload
         return _preview_request(payload=payload_arg, route="/v1/chat/completions")
 
-    async def fake_run_store_io(*args, **kwargs):
-        return None
-
     async def fake_execute_chat_once(**kwargs):
         return {"native": "chat"}
 
@@ -429,7 +418,6 @@ async def test_chat_endpoint_keeps_legacy_safe_path_when_private_rollout_gate_is
         ),
     )
     monkeypatch.setattr(openai_router, "_run_payload_transform", fake_run_payload_transform)
-    monkeypatch.setattr(openai_router, "run_store_io", fake_run_store_io)
     monkeypatch.setattr(openai_router, "_execute_chat_once", fake_execute_chat_once)
     monkeypatch.setattr(
         openai_router, "_handle_responses_payload_on_chat_endpoint", fake_redirect
@@ -459,9 +447,6 @@ async def test_responses_endpoint_keeps_legacy_safe_path_when_private_rollout_ga
         assert payload_arg is payload
         return _preview_request(payload=payload_arg, route="/v1/responses")
 
-    async def fake_run_store_io(*args, **kwargs):
-        return None
-
     async def fake_execute_responses_once(**kwargs):
         return {"native": "responses"}
 
@@ -481,7 +466,6 @@ async def test_responses_endpoint_keeps_legacy_safe_path_when_private_rollout_ga
         ),
     )
     monkeypatch.setattr(openai_router, "_run_payload_transform", fake_run_payload_transform)
-    monkeypatch.setattr(openai_router, "run_store_io", fake_run_store_io)
     monkeypatch.setattr(
         openai_router, "_execute_responses_once", fake_execute_responses_once
     )
