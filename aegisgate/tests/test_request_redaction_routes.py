@@ -111,33 +111,6 @@ class _MemoryKVStore(KVStore):
     def consume_mapping(self, session_id: str, request_id: str) -> dict[str, str]:
         return self._mappings.pop((session_id, request_id), {})
 
-    def save_pending_confirmation(self, **kwargs) -> None:  # pragma: no cover
-        raise AssertionError(
-            "unexpected confirmation persistence in request redaction test"
-        )
-
-    def get_latest_pending_confirmation(self, *args, **kwargs):  # pragma: no cover
-        return None
-
-    def get_single_pending_confirmation(self, *args, **kwargs):  # pragma: no cover
-        return None
-
-    def compare_and_update_pending_confirmation_status(
-        self, **kwargs
-    ) -> bool:  # pragma: no cover
-        return False
-
-    def get_pending_confirmation(self, confirm_id: str):  # pragma: no cover
-        return None
-
-    def update_pending_confirmation_status(self, **kwargs) -> None:  # pragma: no cover
-        raise AssertionError(
-            "unexpected confirmation status update in request redaction test"
-        )
-
-    def delete_pending_confirmation(self, **kwargs) -> bool:  # pragma: no cover
-        return False
-
     def prune_pending_confirmations(self, now_ts: int) -> int:  # pragma: no cover
         return 0
 
