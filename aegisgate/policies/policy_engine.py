@@ -18,7 +18,8 @@ from aegisgate.core.errors import PolicyResolutionError
 from aegisgate.util.logger import logger
 
 
-# 当策略文件不存在（如 config 挂载为空）时使用的内置默认，与 default.yaml 一致
+# Built-in default used when the policy file is missing (e.g. an empty config mount); matches
+# default.yaml
 _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "exact_value_redaction",
@@ -38,7 +39,7 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "risk_threshold": 0.85,
 }
 
-# 已打过「policy file not found」的 policy 名，进程内只打一次
+# Policy names already warned about with "policy file not found"; warn once per process
 _builtin_policy_warned: set[str] = set()
 _builtin_policy_warned_lock = Lock()
 _POLICY_STAT_TTL_SECONDS = 1.0

@@ -8,12 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml README.md /app/
-# 根目录所有 Markdown 文档，供内置 UI 文档页展示（_EXCLUDED_ROOT_DOCS 控制哪些不展示）
+# Every Markdown doc at the repo root, shown on the built-in UI docs page (_EXCLUDED_ROOT_DOCS controls which are hidden)
 COPY *.md /app/
 COPY aegisgate /app/aegisgate
-# 首次启动时 init_config 会从本路径复制 .env 与策略 YAML 到挂载目录（若缺失）
+# On first start, init_config copies .env and the policy YAML from this path into the mounted directory (when missing)
 COPY config/.env.example /app/config/.env.example
-# 镜像内保留一份只读策略模板，避免 rules 目录被 volume 挂载覆盖后无法回填
+# Keep a read-only policy template inside the image, so a volume mount over the rules directory can still be refilled
 COPY aegisgate/policies/rules /app/bootstrap/rules
 
 COPY aegisgate/models /app/aegisgate/models

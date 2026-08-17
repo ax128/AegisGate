@@ -1,6 +1,7 @@
 """Request-side redaction using externalized rules.
 
-仅做占位替换，不拦截请求；不受 security_level 放宽影响，规则保持原样。
+Placeholder substitution only; requests are never blocked. Relaxing security_level does not affect
+it, and the rules stay as written.
 """
 
 from __future__ import annotations
@@ -221,7 +222,8 @@ class RedactionFilter(BaseFilter):
                 "replacements": len(mapping),
             }
             ctx.security_tags.add("redaction_applied")
-            # WARNING 级别：含敏感字段的请求属于安全审计事件，需要可见
+            # WARNING level: a request carrying sensitive fields is a security audit event and
+            # must stay visible
             logger.warning(
                 "redaction request_id=%s session_id=%s route=%s replacements=%d markers=%s truncated=%s",
                 ctx.request_id,

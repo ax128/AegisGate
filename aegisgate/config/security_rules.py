@@ -201,7 +201,7 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "claude_tool_call_xml", "regex": r"<\s*tool_call\s*>"},
             {"id": "claude_invoke_xml", "regex": r"<\s*invoke\s+name\s*="},
             {"id": "claude_function_calls_xml", "regex": r"<\s*function_calls?\s*>"},
-            # --- ReAct pattern (需要 Action + Action Input 同时出现) ---
+            # --- ReAct pattern (requires both Action and Action Input) ---
             {"id": "react_action_input", "regex": r"Action\s*:\s*\w+[\s\S]{0,60}?Action\s+Input\s*:"},
             {"id": "react_fake_observation", "regex": r"Observation\s*:\s*[\s\S]{0,80}?(?:Final\s+Answer|Action)\s*:"},
             # --- Gemini / Bedrock camelCase ---

@@ -1,24 +1,24 @@
-# Caddy + AegisGate 对公网暴露示例
+# Example of exposing Caddy + AegisGate to the public internet
 #
-# 架构：客户端 → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
+# Architecture: client → https://api.example.com/v1/__gw__/t/8317/... → Caddy → AegisGate:18080 → localhost:8317
 #
-# reverse_proxy 目标地址按部署方式选择：
-#   - Caddy 与网关在同一 docker compose 网络：aegisgate:18080（Docker 服务名解析）
-#   - Caddy 在宿主机，网关在 Docker：127.0.0.1:18080（compose 已映射端口）
-#   - Caddy 与网关都在宿主机：127.0.0.1:18080
-#   - Caddy 在另一台机器：<网关机器IP>:18080
+# Pick the reverse_proxy target to match your deployment:
+#   - Caddy and the gateway on the same docker compose network: aegisgate:18080 (Docker service-name resolution)
+#   - Caddy on the host, gateway in Docker: 127.0.0.1:18080 (compose already maps the port)
+#   - Caddy and the gateway both on the host: 127.0.0.1:18080
+#   - Caddy on another machine: <gateway-machine-IP>:18080
 #
-# 要点：
-#   - flush_interval -1：SSE 流式不缓冲，必须设置
-#   - response_header_timeout 660s：长时间推理不超时
-#   - /__gw__/* 返回 403：管理接口不暴露到公网
-#   - X-Aegis-Proxy-Token：Caddy ↔ AegisGate 信任凭证（可选，启用后网关可识别来自 Caddy 的请求）
-#   - 管理后台建议单独域名直连上游，不经网关
-#   - Caddy 只做 TLS + 转发，路由逻辑全在网关内部
+# Key points:
+#   - flush_interval -1: required, so SSE streams are not buffered
+#   - response_header_timeout 660s: long inference runs must not time out
+#   - /__gw__/* returns 403: the admin API is never exposed publicly
+#   - X-Aegis-Proxy-Token: the Caddy ↔ AegisGate trust credential (optional; once enabled the gateway can recognise requests coming from Caddy)
+#   - Give the admin console its own domain pointing straight at the upstream, bypassing the gateway
+#   - Caddy only does TLS + forwarding; all routing logic lives inside the gateway
 #
-# 需 80/443 开放；证书由 Caddy 自动申请
+# Ports 80/443 must be open; Caddy requests the certificate automatically
 
-# 前端静态站点（可选，与网关无关；如不需要可删除整段）
+# Static frontend site (optional, unrelated to the gateway; delete the whole block if unused)
 # example.com, www.example.com {
 #     header {
 #         X-Content-Type-Options "nosniff"
@@ -32,8 +32,8 @@
 #     file_server
 # }
 
-# API：先经 AegisGate 安检与过滤，再由网关转发到上游
-# reverse_proxy 目标按实际部署方式填写（见文件头部说明）
+# API: inspected and filtered by AegisGate first, then forwarded upstream by the gateway
+# Fill in the reverse_proxy target for your deployment (see the notes at the top of this file)
 api.example.com {
     header {
         X-Content-Type-Options "nosniff"
@@ -43,11 +43,11 @@ api.example.com {
         -Server
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     }
-    # 管理端点不对公网开放，避免通过反代触发 /__gw__ 管理操作
+    # The admin endpoints stay off the public internet, so /__gw__ admin operations cannot be triggered through the proxy
     @gw_admin path /__gw__ /__gw__/*
     respond @gw_admin "forbidden" 403
 
-    # 拦截扫描器探测的静态资源路径，不转发到网关（减少日志噪音）
+    # Absorb the static-asset paths scanners probe instead of forwarding them to the gateway (less log noise)
     @scanner_probe {
         path /assets/* /static/* /js/* /css/* /images/* /img/* /fonts/*
         path /robots.txt /favicon.ico /sitemap.xml /.env /wp-login.php /wp-admin/*
@@ -56,20 +56,20 @@ api.example.com {
     }
     respond @scanner_probe 404
 
-    # 仅允许 API 路径（/v1/ /v2/）通过，其余非 API 路径直接 404
+    # Allow only the API paths (/v1/, /v2/) through; every other path returns 404
     @not_api {
         not path /v1/* /v2/*
     }
     respond @not_api 404
 
-    # Caddy 在宿主机时改为 127.0.0.1:18080（见文件头部说明）
+    # Use 127.0.0.1:18080 when Caddy runs on the host (see the notes at the top of this file)
     reverse_proxy 127.0.0.1:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Real-IP {remote_host}
-        # Caddy ↔ AegisGate 信任凭证（可选）
-        # 值来自 config/aegis_proxy_token.key（首次启动自动生成）
-        # 启用方式：设置 Caddy 环境变量 AEGIS_PROXY_TOKEN 后取消下行注释
+        # Caddy ↔ AegisGate trust credential (optional)
+        # The value comes from config/aegis_proxy_token.key (generated on first start)
+        # To enable: set the AEGIS_PROXY_TOKEN environment variable for Caddy, then uncomment the line below
         # header_up X-Aegis-Proxy-Token {env.AEGIS_PROXY_TOKEN}
         flush_interval -1
         transport http {
@@ -80,11 +80,11 @@ api.example.com {
     }
 }
 
-# 上游管理后台（可选）：直连上游，不经过网关。
-# 按实际上游地址和端口替换（CLIProxyAPI=8317, Sub2API=8080, AIClient-2-API=3000）。
-# 生产环境建议加 IP 白名单限制公网访问。
+# Upstream admin console (optional): connects straight to the upstream, bypassing the gateway.
+# Replace with your real upstream address and port (CLIProxyAPI=8317, Sub2API=8080, AIClient-2-API=3000).
+# In production, add an IP allowlist to restrict public access.
 # panel.example.com {
-#     @allowed remote_ip 你的管理IP/32
+#     @allowed remote_ip <your-admin-IP>/32
 #     handle @allowed {
 #         reverse_proxy localhost:8317 {
 #             flush_interval -1

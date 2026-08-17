@@ -1,6 +1,7 @@
 """
-网关 Token 映射：注册口子返回短 token，请求时通过 /v1/__gw__/t/{token}/... 解析上游。
-映射表存 config/gw_tokens.json，启动时加载，支持手动编辑。
+Gateway token mapping: the register endpoint returns a short token, and requests resolve their
+upstream through /v1/__gw__/t/{token}/... .
+The mapping table lives in config/gw_tokens.json, is loaded at startup, and can be hand-edited.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ except Exception:
     def decrypt_whitelist_key(v: str) -> str:  # type: ignore[misc]
         return v
 
-# 内存映射：token -> {"upstream_base": str, "whitelist_key": list[str]}
+# In-memory mapping: token -> {"upstream_base": str, "whitelist_key": list[str]}
 _tokens: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _TOKEN_LEN = 24
@@ -39,7 +40,7 @@ _WHITELIST_UNSET = object()
 
 
 def _generate_alnum_token(length: int) -> str:
-    """生成纯字母数字 token（a-zA-Z0-9），不含 - _ 等符号。"""
+    """Generate a purely alphanumeric token (a-zA-Z0-9), free of symbols such as - and _."""
     chars: list[str] = []
     while len(chars) < length:
         raw = secrets.token_urlsafe(length * 2)
@@ -53,11 +54,12 @@ def _path() -> Path:
 
 
 def load(*, replace: bool = False) -> None:
-    """从磁盘加载映射表。
+    """Load the mapping table from disk.
 
-    ``replace=False`` 时保留原有兼容行为：文件缺失或解析失败只记录日志，不清空内存。
-    ``replace=True`` 时以磁盘内容为准；文件缺失、格式非法或解析失败都会清空内存映射，
-    以避免热重载后继续放行已被删除的旧 token。
+    With ``replace=False`` the legacy behaviour is kept: a missing file or a parse failure is only
+    logged and the in-memory table is left alone.
+    With ``replace=True`` disk wins; a missing file, an invalid format, or a parse failure all clear
+    the in-memory mapping, so a hot reload cannot keep honouring tokens that were deleted.
     """
     path = _path()
     with _lock:
@@ -81,7 +83,7 @@ def load(*, replace: bool = False) -> None:
             for k, v in tokens.items():
                 if not isinstance(v, dict):
                     continue
-                # compat token 允许省略 upstream_base（走端口路径时动态覆盖）
+                # compat tokens may omit upstream_base (port routing overrides it at request time)
                 if "upstream_base" not in v and not v.get("compat"):
                     continue
                 raw_wk = v.get("whitelist_key")
@@ -93,7 +95,7 @@ def load(*, replace: bool = False) -> None:
                     "upstream_base": str(v.get("upstream_base") or ""),
                     "whitelist_key": normalize_whitelist_keys(raw_wk),
                 }
-                # 协议兼容层：compat 模式 + 模型映射
+                # Protocol compatibility layer: compat mode + model mapping
                 if v.get("compat"):
                     entry["compat"] = str(v["compat"])
                 if v.get("default_model"):
@@ -157,17 +159,17 @@ def _restore_tokens(snapshot: dict[str, dict[str, Any]]) -> None:
 
 
 def get(token: str) -> dict[str, Any] | None:
-    """根据 token 取映射，不存在返回 None。
+    """Look up the mapping for a token, returning None when it does not exist.
 
-    当 ``settings.enable_local_port_routing`` 为 True 且 token 为纯数字端口
-    （1024-65535）时，自动生成本地端口映射，无需预注册。
+    When ``settings.enable_local_port_routing`` is True and the token is a purely numeric port
+    (1024-65535), a local port mapping is generated on the fly, so no pre-registration is needed.
     """
     with _lock:
         mapping = _tokens.get(token)
         if mapping is not None:
             return copy.deepcopy(mapping)
 
-    # 本地端口自动路由 fallback
+    # Automatic local-port routing fallback
     if settings.enable_local_port_routing and token.isdigit():
         port = int(token)
         if 1024 <= port <= 65535:
@@ -184,7 +186,7 @@ def _normalize_upstream(s: str) -> str:
 
 
 def _find_token_holding_lock(ub: str) -> str | None:
-    """在已持有 _lock 时根据 upstream_base 查找 token。"""
+    """Find a token by upstream_base; callers must already hold ``_lock``."""
     for token, m in _tokens.items():
         if _normalize_upstream(m["upstream_base"]) == ub:
             return token
@@ -193,10 +195,10 @@ def _find_token_holding_lock(ub: str) -> str | None:
 
 def find_token(upstream_base: str, gateway_key: str | None = None, **_kwargs: Any) -> str | None:
     """
-    根据 upstream_base 查找已注册的 token。
-    不存在返回 None。比较时做与 register 一致的规范化。
+    Find the registered token for an upstream_base.
+    Returns None when there is none. The comparison normalises the value the same way register does.
 
-    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
+    .. deprecated:: the gateway_key parameter is obsolete and ignored when passed.
     """
     ub = _normalize_upstream(upstream_base)
     if not ub:
@@ -207,11 +209,12 @@ def find_token(upstream_base: str, gateway_key: str | None = None, **_kwargs: An
 
 def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _WHITELIST_UNSET, **_kwargs: Any) -> tuple[str, bool]:
     """
-    注册：同一 upstream_base 只保留一个 token。
-    若已存在则返回 (已有 token, True)，否则新建并返回 (新 token, False)。
-    未传 whitelist_key 时，已存在映射的 whitelist_key 保持不变。
+    Register: each upstream_base keeps exactly one token.
+    Returns (existing token, True) when one already exists, otherwise creates one and returns
+    (new token, False).
+    When whitelist_key is not supplied, an existing mapping keeps its current whitelist_key.
 
-    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
+    .. deprecated:: the gateway_key parameter is obsolete and ignored when passed.
     """
     # Backward compat: register(ub, ["key1"]) — positional list was whitelist_key
     if whitelist_key is _WHITELIST_UNSET and gateway_key is not None and not isinstance(gateway_key, str):
@@ -257,7 +260,8 @@ def register(upstream_base: str, gateway_key: Any = None, whitelist_key: Any = _
 
 
 def unregister(token: str) -> bool:
-    """删除 token 映射，存在则删并写回文件返回 True，否则返回 False。"""
+    """Delete a token mapping: if present, remove it, write the file back, and return True;
+    otherwise return False."""
     with _lock:
         if token not in _tokens:
             return False
@@ -272,9 +276,9 @@ def unregister(token: str) -> bool:
 
 
 def update(token: str, *, upstream_base: str | None = None, gateway_key: str | None = None, whitelist_key: Any = None, **_kwargs: Any) -> bool:
-    """按 token 更新映射并持久化。token 不存在返回 False。
+    """Update the mapping for a token and persist it. Returns False when the token does not exist.
 
-    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
+    .. deprecated:: the gateway_key parameter is obsolete and ignored when passed.
     """
     with _lock:
         mapping = _tokens.get(token)
@@ -307,10 +311,11 @@ def update_and_rename(
     new_token: str | None = None,
     **_kwargs: Any,
 ) -> bool:
-    """在单一锁内同时更新映射字段并可选地重命名 token，保证原子性。
-    token 不存在返回 False；new_token 已存在或字段非法抛 ValueError。
+    """Update mapping fields and optionally rename the token under a single lock, atomically.
+    Returns False when the token does not exist; raises ValueError when new_token already exists or
+    a field is invalid.
 
-    .. deprecated:: gateway_key 参数已废弃，传入时忽略。
+    .. deprecated:: the gateway_key parameter is obsolete and ignored when passed.
     """
     with _lock:
         mapping = _tokens.get(token)
@@ -341,15 +346,16 @@ def update_and_rename(
 
 
 def list_tokens() -> dict[str, dict[str, Any]]:
-    """返回当前所有 token 映射（副本）。"""
+    """Return a copy of every current token mapping."""
     with _lock:
         return copy.deepcopy(_tokens)
 
 
 def inject_builtin_compat_tokens() -> None:
-    """注入系统内置的 compat token（受配置开关控制）。
+    """Inject the built-in compat tokens (gated by a config switch).
 
-    若用户已在 gw_tokens.json 中自定义了同名 token，保留用户配置不覆盖。
+    If the user already defined a token with the same name in gw_tokens.json, their configuration
+    is kept and not overwritten.
     """
     if not bool(getattr(settings, "enable_builtin_compat_tokens", False)):
         return
@@ -378,14 +384,16 @@ def inject_builtin_compat_tokens() -> None:
 
 
 def inject_docker_upstreams() -> int:
-    """解析 AEGIS_DOCKER_UPSTREAMS 环境变量，自动注入 Docker 服务名 token 映射。
+    """Parse the AEGIS_DOCKER_UPSTREAMS environment variable and inject Docker service-name token
+    mappings automatically.
 
-    格式：逗号分隔，每项为 ``token:service[:port]``。port 省略时默认等于 token。
-    示例：``8317:cli-proxy-api,8080:sub2api,3000:aiclient2api:3000``
-    生成：token="8317" → upstream_base="http://cli-proxy-api:8317/v1"
+    Format: comma-separated, each item ``token:service[:port]``. An omitted port defaults to token.
+    Example: ``8317:cli-proxy-api,8080:sub2api,3000:aiclient2api:3000``
+    Produces: token="8317" → upstream_base="http://cli-proxy-api:8317/v1"
 
-    已存在的同名 token 会被**静默覆盖**（确保 compose 环境变量始终是权威来源）。
-    返回注入的条目数。
+    An existing token of the same name is **silently overwritten**, so the compose environment
+    variable always stays authoritative.
+    Returns the number of injected entries.
     """
     raw = (settings.docker_upstreams or "").strip()
     if not raw:

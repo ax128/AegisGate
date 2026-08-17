@@ -10,5 +10,5 @@ enabled_filters:
   - restoration
   - post_restore_guard
   - output_sanitizer
-# 0.85：仅较高风险时拦截，降低误拦（可改为 0.7 提高严格度）
+# 0.85: block only on higher-risk hits, which reduces false blocks (lower it to 0.7 to tighten).
 risk_threshold: 0.85

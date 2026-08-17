@@ -1,5 +1,6 @@
 """
-上游解析、网关校验与 HTTP 转发。从 router 拆出，便于维护与单测。
+Upstream resolution, gateway validation, and HTTP forwarding. Split out of router for
+maintainability and unit testing.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from aegisgate.util.ip_safety import (
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
-# 与 router 内路由前缀一致，用于从 request_path 剥掉网关前缀得到上游 path
+# Matches the route prefix used inside router; strips the gateway prefix from request_path to get
+# the upstream path
 GATEWAY_PREFIX = "/v1"
 
 _HOP_BY_HOP_HEADERS = {
@@ -139,7 +141,7 @@ def _trace_request_id(headers: Mapping[str, str]) -> str:
 
 
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
-    """从请求中取 headers 供网关校验与转发使用（仅 Header，不含 Query）。"""
+    """Take the headers from the request for gateway validation and forwarding (headers only, no query)."""
     headers = dict(request.headers)
     # Strip any client-supplied internal trust headers. These are only allowed
     # to be injected from the gateway middleware scope.
@@ -200,7 +202,8 @@ async def _resolve_upstream_base(
                 host_hdr = _ip_request_host_header(parsed)
                 return normalized, connect_urls, host_hdr
         return normalized, (), ""
-    # 未提供 x-upstream-base 时使用默认上游（如 AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1）
+    # Without an x-upstream-base, fall back to the default upstream
+    # (e.g. AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1)
     default = (settings.upstream_base_url or "").strip()
     if not default:
         raise ValueError("missing_upstream_base")

@@ -393,7 +393,7 @@ async def _iter_forward_stream_with_pinning(
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
-    """根据 x-aegis-filter-mode header 调整 ctx.enabled_filters。返回 mode 或 None。"""
+    """Adjust ctx.enabled_filters from the x-aegis-filter-mode header. Returns the mode or None."""
     mode = _filter_mode_from_headers(headers)
     if not mode:
         return None
@@ -648,7 +648,7 @@ def _build_upstream_eof_replay_text(cached_text: str) -> str:
     return f"{text}\n\n{_UPSTREAM_EOF_RECOVERY_NOTICE}"
 
 
-# 调试时完整请求内容最大输出长度，避免日志过长
+# Max characters of full request content emitted while debugging, so logs stay manageable
 _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
 _DEBUG_HEADERS_REDACT = frozenset(
     {
@@ -664,7 +664,7 @@ _DEBUG_HEADERS_REDACT = frozenset(
 def _log_request_if_debug(
     request: Request, payload: dict[str, Any], route: str
 ) -> None:
-    """当 AEGIS_LOG_LEVEL=debug 时打请求概要（method/path/route/headers）；正文按 log_full_request_body 决定是否打印、分段打印。"""
+    """When AEGIS_LOG_LEVEL=debug, log a request summary (method/path/route/headers); log_full_request_body decides whether the body is logged, in chunks."""
     if not logger.isEnabledFor(logging.DEBUG):
         return
     headers_safe = {}
@@ -944,7 +944,7 @@ def _build_responses_upstream_payload(
             upstream_payload["input"] = sanitized_input
             if redaction_hits:
                 sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
-                # WARNING 级别：含敏感字段的请求属于安全审计事件
+                # WARNING level: a request carrying sensitive fields is a security audit event
                 logger.warning(
                     "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
                     request_id,
@@ -1500,7 +1500,7 @@ def _extract_messages_user_text(payload: dict[str, Any]) -> str:
 
 
 def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
-    """取请求侧用户输入文本，用于 debug 原文摘要（截断展示）。"""
+    """Extract the request-side user input text for the truncated debug excerpt."""
     if route == "/v1/responses":
         return _extract_responses_user_text(payload)
     if route == "/v1/messages":
@@ -1509,7 +1509,7 @@ def _request_user_text_for_excerpt(payload: dict[str, Any], route: str) -> str:
 
 
 def _request_target_path(request: Request, *, fallback_path: str | None = None) -> str:
-    """返回 path+query 形式的上游目标路径，确保 query 参数可透传到上游。"""
+    """Return the upstream target path as path+query, so query parameters reach the upstream."""
     scope_override = request.scope.get("aegis_upstream_route_path")
     base_path = str(scope_override or fallback_path or request.url.path or "/")
     query = request.url.query
@@ -2559,7 +2559,7 @@ def _error_response(
     ctx.response_disposition = "block"
     ctx.disposition_reasons.append(reason)
     ctx.enforcement_actions.append(f"upstream:{reason}")
-    # 保证 agent 端能拿到非空原因（error + detail）
+    # Guarantee the agent side receives a non-empty reason (error + detail)
     detail_str = ((detail or "").strip() or reason)[:600]
     try:
         _write_audit_event(ctx, boundary=boundary)
@@ -3896,7 +3896,8 @@ async def _execute_chat_once(
             model=req.model,
         )
 
-    # 用户已确认放行（yes）：不再走请求侧过滤，直接转发，避免同一内容再次被拦截
+    # User already approved (yes): skip request-side filtering and forward directly, so the same
+    # content is not blocked a second time
     pipeline = _get_pipeline()
     audit_once = execution_common.OnceSyncCall(
         "chat_once_audit",
@@ -6185,9 +6186,11 @@ async def responses(payload: dict, request: Request):
 async def messages(payload: dict, request: Request):
     """Anthropic /v1/messages endpoint.
 
-    - 无 compat 标记：原样透传到 Anthropic 兼容上游（安全管道照常生效）。
-    - compat=openai_chat（通过 token 配置注入）：
-      Messages → Chat Completions 转换 → 转发上游 → 响应转回 Messages 格式。
+    - No compat marker: passed through as-is to an Anthropic-compatible upstream (the security
+      pipeline still applies).
+    - compat=openai_chat (injected through the token config):
+      Messages → Chat Completions conversion → forward upstream → response converted back to
+      Messages format.
     """
     _log_request_if_debug(request, payload, "/v1/messages")
     boundary = getattr(request.state, "security_boundary", {})
@@ -6247,7 +6250,7 @@ async def messages(payload: dict, request: Request):
                     path_version="forwarding_kernel",
                 )
 
-    # --- compat 检测：是否需要 Messages → Chat Completions 转换 ---
+    # --- compat detection: is a Messages → Chat Completions conversion needed? ---
     if should_redirect_to_responses:
         if not _forwarding_kernel_rollout_is_live(rollout_key):
             _log_forwarding_route_decision(
@@ -6266,7 +6269,7 @@ async def messages(payload: dict, request: Request):
             tenant_id=tenant_id,
         )
 
-    # --- 原样透传：上游是 Anthropic 兼容 API ---
+    # --- pass through as-is: the upstream is an Anthropic-compatible API ---
     request_path = _request_target_path(request, fallback_path="/v1/messages")
 
     if _should_stream(payload):
@@ -6295,17 +6298,17 @@ async def _messages_compat_openai_chat(
     boundary: dict | None,
     tenant_id: str,
 ) -> JSONResponse | StreamingResponse:
-    """Messages → Responses 转换链路。
+    """Messages → Responses conversion path.
 
-    1. 将 Anthropic Messages payload 转为 OpenAI Responses payload
-    2. 通过现有 responses 执行链路转发到上游
-    3. 将响应转回 Anthropic Messages 格式
+    1. Convert the Anthropic Messages payload into an OpenAI Responses payload
+    2. Forward it upstream through the existing responses execution path
+    3. Convert the response back into Anthropic Messages format
     """
     original_model = payload.get("model", "unknown-model")
     model_map = request.scope.get("aegis_model_map") or {}
     default_model = request.scope.get("aegis_default_model")
 
-    # 转换请求: Messages → Responses
+    # Convert the request: Messages → Responses
     try:
         resp_payload = messages_payload_to_responses_payload(
             payload,
@@ -6321,11 +6324,11 @@ async def _messages_compat_openai_chat(
         resp_payload.get("stream"),
     )
 
-    # 用 /v1/responses 路径转发
+    # Forward using the /v1/responses path
     responses_request_path = "/v1/responses"
 
     if _should_stream(resp_payload):
-        # 流式：Responses stream → Messages stream
+        # streaming: Responses stream → Messages stream
         resp_stream = await _execute_responses_stream_once(
             payload=resp_payload,
             request_headers=gateway_headers,
@@ -6341,7 +6344,7 @@ async def _messages_compat_openai_chat(
             )
         return resp_stream
 
-    # 非流式：Responses response → Messages response
+    # non-streaming: Responses response → Messages response
     resp_result = await _execute_responses_once(
         payload=resp_payload,
         request_headers=gateway_headers,

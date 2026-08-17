@@ -1,11 +1,11 @@
 {
-  "_说明": "多上游 Token 预配置模板。编辑后保存为 gw_tokens.json，重启网关自动加载。",
-  "_格式": "每个 key 是自定义 token 名称，客户端通过 /v1/__gw__/t/<token>/... 访问对应上游。",
-  "_compat说明": [
-    "设置 compat=openai_chat 后，/v1/messages 请求自动转换为 /v1/responses 格式。",
-    "模型映射由全局 config/model_map.json 管理，不绑定具体 token。",
-    "default_model 可选，覆盖全局映射未命中时的默认模型（默认 gpt-5.4）。",
-    "允许的目标模型: gpt-5, gpt-5.2, gpt-5.4, gpt-5.4-mini, gpt-5.2-codex, gpt-5.3-codex"
+  "_description": "Multi-upstream token pre-configuration template. Save it as gw_tokens.json and the gateway loads it on restart.",
+  "_format": "Each key is a custom token name; clients reach the matching upstream through /v1/__gw__/t/<token>/... .",
+  "_compat_notes": [
+    "With compat=openai_chat set, /v1/messages requests are converted to the /v1/responses format automatically.",
+    "Model mapping is managed globally in config/model_map.json and is not bound to a specific token.",
+    "default_model is optional and overrides the fallback model used when the global map has no hit (default gpt-5.4).",
+    "Allowed target models: gpt-5, gpt-5.2, gpt-5.4, gpt-5.4-mini, gpt-5.2-codex, gpt-5.3-codex"
   ],
   "tokens": {
     "sub2api": {
@@ -25,7 +25,7 @@
       "compat": "openai_chat"
     },
     "claude-to-gpt-codex": {
-      "_说明": "指定 default_model 覆盖默认的 gpt-5.4",
+      "_description": "Sets default_model to override the gpt-5.4 default",
       "upstream_base": "https://api.openai.com/v1",
       "compat": "openai_chat",
       "default_model": "gpt-5.3-codex"

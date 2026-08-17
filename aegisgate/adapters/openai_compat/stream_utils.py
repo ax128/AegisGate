@@ -1,5 +1,5 @@
 """
-流式 SSE 与 chunk 构建。从 router 拆出，便于维护与单测。
+Streaming SSE and chunk construction. Split out of router for maintainability and unit testing.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         return "response_blocked"
     if ctx.response_disposition == "sanitize":
         return "response_sanitized"
-    # tool_call_violation 仅在实际 block 动作时才阻断流；review 动作不阻断
+    # tool_call_violation only stops the stream on an actual block action; review does not
     if "tool_call_violation" in ctx.security_tags:
         has_block_action = any(
             a.endswith(":block") and a.startswith("tool_call_guard:")
@@ -179,7 +179,7 @@ def _stream_block_sse_chunk(
 
 
 def _stream_error_sse_chunk(message: str, code: str | None = None) -> bytes:
-    """SSE chunk 携带上游失败原因，兼容 error.message / error.code 解析。"""
+    """SSE chunk carrying the upstream failure reason, parseable as error.message / error.code."""
     error_code = (code or "upstream_error").strip() or "upstream_error"
     detail = (message or "upstream_error").strip() or "upstream_error"
     if error_code in {"gateway_internal_error", "stream_error"}:
@@ -234,7 +234,7 @@ def _stream_confirmation_sse_chunk(
     content: str,
     confirmation_meta: dict[str, Any] | None,
 ) -> bytes:
-    """流式返回一条「确认放行」或「直接拦截」内容。confirmation_meta 为 None 时不附带确认元数据。"""
+    """Stream back a single "approved" or "blocked" message. With confirmation_meta None, no confirmation metadata is attached."""
     aegis_meta: dict[str, Any] = {}
     if confirmation_meta is not None:
         aegis_meta["confirmation"] = confirmation_meta

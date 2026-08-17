@@ -43,7 +43,7 @@ class DailyRotatingFileHandler(logging.Handler):
         self._encoding = encoding
         self._current_date: str = ""
         self._inner: RotatingFileHandler | None = None
-        self._use_fallback = False  # 一旦文件写入失败，永久停用文件落盘
+        self._use_fallback = False  # once a file write fails, file logging stays off for good
         self._state_lock = threading.Lock()
 
     def _today(self) -> str:
@@ -142,7 +142,8 @@ def _build_logger() -> logging.Logger:
         daily_handler.setFormatter(formatter)
         configured_logger.addHandler(daily_handler)
     except (OSError, PermissionError):
-        # 无法写文件时仅使用 stderr（如 Docker 挂载的 logs 目录无写权限）
+        # Fall back to stderr alone when the file is unwritable (e.g. a Docker-mounted logs
+        # directory without write permission)
         pass
 
     configured_logger.propagate = False
