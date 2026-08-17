@@ -22,7 +22,6 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_internal_chat,
     to_internal_messages,
     to_internal_responses,
-    to_messages_response,
     to_responses_output,
 )
 from aegisgate.adapters.openai_compat.compat_bridge import (
@@ -63,8 +62,6 @@ from aegisgate.adapters.openai_compat.security_view import (
     _derive_session_id,
     _header_lookup,
     _resolve_tenant_id,
-    _serialized_payload_size,
-    _validate_payload_limits,
     prepare_chat_security_view,
     prepare_messages_security_view,
     prepare_responses_security_view,
@@ -126,17 +123,9 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _strip_system_exec_runtime_lines,
 )
 from aegisgate.core.audit import write_audit
-from aegisgate.core.confirmation import (
-    make_confirm_id,
-    make_action_bind_token,
-    parse_confirmation_decision,
-    payload_hash,
-)
 from aegisgate.core.confirmation_flow import (
     PHASE_REQUEST,
     PHASE_RESPONSE,
-    build_confirmation_message as _flow_confirmation_message,
-    build_confirmation_metadata as _flow_confirmation_metadata,
     get_reason_and_summary as _flow_reason_and_summary,
 )
 from aegisgate.core.context import RequestContext
@@ -147,7 +136,6 @@ from aegisgate.core.dangerous_response_log import (
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.core.semantic import SemanticServiceClient
 from aegisgate.policies.policy_engine import PolicyEngine
-from aegisgate.storage.offload import run_store_io
 from aegisgate.util.debug_excerpt import debug_log_original, info_log_sanitized
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
@@ -162,7 +150,6 @@ semantic_service_client = SemanticServiceClient(
     failure_threshold=settings.semantic_circuit_failure_threshold,
     open_seconds=settings.semantic_circuit_open_seconds,
 )
-_GATEWAY_PREFIX = "/v1"
 _STREAM_WINDOW_MAX_CHARS = 8000
 # H-15: Holdback buffer must be >= 2 * check_interval so that frames accumulated
 # between two consecutive probes are always held back until the second probe runs.
@@ -172,23 +159,6 @@ _STREAM_FILTER_CHECK_INTERVAL = 4
 _STREAM_BLOCK_HOLDBACK_EVENTS = _STREAM_FILTER_CHECK_INTERVAL * 2  # = 8
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
-_PENDING_PAYLOAD_OMITTED_KEY = "_aegisgate_pending_payload_omitted"
-_PENDING_PAYLOAD_KIND_KEY = "_aegisgate_pending_kind"
-_PENDING_PAYLOAD_KIND_RESPONSE = "response_payload"
-_PENDING_PAYLOAD_FORMAT_KEY = "_aegisgate_pending_format"
-_PENDING_PAYLOAD_ROUTE_KEY = "_aegisgate_pending_route"
-_PENDING_PAYLOAD_MODEL_KEY = "_aegisgate_pending_model"
-_PENDING_PAYLOAD_REQUEST_ID_KEY = "_aegisgate_pending_request_id"
-_PENDING_PAYLOAD_SESSION_ID_KEY = "_aegisgate_pending_session_id"
-_PENDING_PAYLOAD_CONTENT_KEY = "content"
-_PENDING_FORMAT_CHAT_JSON = "chat_json"
-_PENDING_FORMAT_RESPONSES_JSON = "responses_json"
-_PENDING_FORMAT_CHAT_STREAM_TEXT = "chat_stream_text"
-_PENDING_FORMAT_RESPONSES_STREAM_TEXT = "responses_stream_text"
-_CONFIRMATION_RELEASE_EMPTY_TEXT = (
-    "[AegisGate] 已放行该确认，但被拦截响应未包含可回放文本（可能仅包含工具调用事件）。"
-    "请重新发送上一条业务请求以继续执行。"
-)
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _CONFIRMATION_HIT_CONTEXT_CHARS = 40
 _GENERIC_BINARY_RE = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
@@ -832,60 +802,6 @@ def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
     return f"[status={status}]"
 
 
-def _passthrough_chat_response(
-    upstream_body: dict[str, Any] | str, req: Any
-) -> dict[str, Any]:
-    return passthrough_chat_response(
-        upstream_body,
-        request_id=req.request_id,
-        session_id=req.session_id,
-        model=req.model,
-    )
-
-
-def _passthrough_responses_output(
-    upstream_body: dict[str, Any] | str, req: Any
-) -> dict[str, Any]:
-    return passthrough_responses_output(
-        upstream_body,
-        request_id=req.request_id,
-        session_id=req.session_id,
-        model=req.model,
-    )
-
-
-def _coerce_responses_output_to_chat_output(
-    result: dict[str, Any] | JSONResponse,
-    *,
-    fallback_request_id: str,
-    fallback_session_id: str,
-    fallback_model: str,
-) -> dict[str, Any] | JSONResponse:
-    return coerce_responses_output_to_chat_output(
-        result,
-        fallback_request_id=fallback_request_id,
-        fallback_session_id=fallback_session_id,
-        fallback_model=fallback_model,
-        text_extractor=_extract_responses_output_text,
-    )
-
-
-def _coerce_chat_output_to_responses_output(
-    result: dict[str, Any] | JSONResponse,
-    *,
-    fallback_request_id: str,
-    fallback_session_id: str,
-    fallback_model: str,
-) -> dict[str, Any] | JSONResponse:
-    return coerce_chat_output_to_responses_output(
-        result,
-        fallback_request_id=fallback_request_id,
-        fallback_session_id=fallback_session_id,
-        fallback_model=fallback_model,
-        text_extractor=_extract_chat_output_text,
-    )
-
-
 def _coerce_responses_stream_to_chat_stream(
     response: StreamingResponse,
     *,
@@ -897,19 +813,6 @@ def _coerce_responses_stream_to_chat_stream(
         request_id=request_id,
         model=model,
         response_text_extractor=_extract_responses_output_text,
-    )
-
-
-def _coerce_chat_stream_to_responses_stream(
-    response: StreamingResponse,
-    *,
-    request_id: str,
-    model: str,
-) -> StreamingResponse:
-    return coerce_chat_stream_to_responses_stream(
-        response,
-        request_id=request_id,
-        model=model,
     )
 
 
@@ -1309,181 +1212,6 @@ def _cap_response_text(text: str, ctx: RequestContext) -> str:
     return f"{text[:max_len]}{_TRUNCATED_SUFFIX}"
 
 
-def _prepare_pending_payload(
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any], str, bool, int]:
-    payload_size = _serialized_payload_size(payload)
-    max_pending_bytes = int(settings.max_pending_payload_bytes)
-    if max_pending_bytes > 0 and payload_size > max_pending_bytes:
-        omitted_payload = {
-            _PENDING_PAYLOAD_OMITTED_KEY: True,
-            "payload_size_bytes": payload_size,
-        }
-        return omitted_payload, payload_hash(omitted_payload), True, payload_size
-    return payload, payload_hash(payload), False, payload_size
-
-
-def _build_response_pending_payload(
-    *,
-    route: str,
-    request_id: str,
-    session_id: str,
-    model: str,
-    fmt: str,
-    content: Any,
-) -> dict[str, Any]:
-    return {
-        _PENDING_PAYLOAD_KIND_KEY: _PENDING_PAYLOAD_KIND_RESPONSE,
-        _PENDING_PAYLOAD_FORMAT_KEY: fmt,
-        _PENDING_PAYLOAD_ROUTE_KEY: route,
-        _PENDING_PAYLOAD_REQUEST_ID_KEY: request_id,
-        _PENDING_PAYLOAD_SESSION_ID_KEY: session_id,
-        _PENDING_PAYLOAD_MODEL_KEY: model,
-        _PENDING_PAYLOAD_CONTENT_KEY: content,
-    }
-
-
-def _prepare_response_pending_payload(
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any], str, int]:
-    payload_size = _serialized_payload_size(payload)
-    return payload, payload_hash(payload), payload_size
-
-
-def _is_response_pending_payload(payload: Any) -> bool:
-    return (
-        isinstance(payload, dict)
-        and str(payload.get(_PENDING_PAYLOAD_KIND_KEY, "")).strip()
-        == _PENDING_PAYLOAD_KIND_RESPONSE
-    )
-
-
-def _confirmation_expires_at(now_ts: int, phase: str) -> int:
-    if phase == PHASE_RESPONSE:
-        return now_ts + max(60, int(settings.pending_data_ttl_seconds))
-    return now_ts + max(30, int(settings.confirmation_ttl_seconds))
-
-
-def _attach_executed_confirmation(
-    output: dict[str, Any], *, confirm_id: str, reason: str, summary: str
-) -> dict[str, Any]:
-    aegis = output.setdefault("aegisgate", {})
-    aegis["confirmation"] = {
-        "required": False,
-        "confirm_id": confirm_id,
-        "status": "executed",
-        "reason": reason,
-        "summary": summary,
-        "payload_omitted": False,
-    }
-    return output
-
-
-def _render_cached_chat_confirmation_output(
-    pending_payload: dict[str, Any],
-    *,
-    fallback_request_id: str,
-    fallback_session_id: str,
-    fallback_model: str,
-) -> dict[str, Any] | None:
-    if not _is_response_pending_payload(pending_payload):
-        return None
-    fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
-    content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
-    request_id = str(
-        pending_payload.get(_PENDING_PAYLOAD_REQUEST_ID_KEY) or fallback_request_id
-    )
-    session_id = str(
-        pending_payload.get(_PENDING_PAYLOAD_SESSION_ID_KEY) or fallback_session_id
-    )
-    model = str(pending_payload.get(_PENDING_PAYLOAD_MODEL_KEY) or fallback_model)
-    if fmt == _PENDING_FORMAT_CHAT_JSON and isinstance(content, dict):
-        return copy.deepcopy(content)
-    if fmt == _PENDING_FORMAT_CHAT_STREAM_TEXT and isinstance(content, str):
-        replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
-        return to_chat_response(
-            InternalResponse(
-                request_id=request_id,
-                session_id=session_id,
-                model=model,
-                output_text=replay_text,
-            )
-        )
-    return None
-
-
-def _render_cached_responses_confirmation_output(
-    pending_payload: dict[str, Any],
-    *,
-    fallback_request_id: str,
-    fallback_session_id: str,
-    fallback_model: str,
-) -> dict[str, Any] | None:
-    if not _is_response_pending_payload(pending_payload):
-        return None
-    fmt = str(pending_payload.get(_PENDING_PAYLOAD_FORMAT_KEY, "")).strip()
-    content = pending_payload.get(_PENDING_PAYLOAD_CONTENT_KEY)
-    request_id = str(
-        pending_payload.get(_PENDING_PAYLOAD_REQUEST_ID_KEY) or fallback_request_id
-    )
-    session_id = str(
-        pending_payload.get(_PENDING_PAYLOAD_SESSION_ID_KEY) or fallback_session_id
-    )
-    model = str(pending_payload.get(_PENDING_PAYLOAD_MODEL_KEY) or fallback_model)
-    if fmt == _PENDING_FORMAT_RESPONSES_JSON and isinstance(content, dict):
-        return copy.deepcopy(content)
-    if fmt == _PENDING_FORMAT_RESPONSES_STREAM_TEXT and isinstance(content, str):
-        replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
-        return to_responses_output(
-            InternalResponse(
-                request_id=request_id,
-                session_id=session_id,
-                model=model,
-                output_text=replay_text,
-            )
-        )
-    return None
-
-
-def _render_cached_chat_confirmation_stream_output(
-    *,
-    request_id: str,
-    model: str,
-    content: str,
-    confirm_id: str,
-    reason: str,
-    summary: str,
-) -> StreamingResponse:
-    replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
-    confirmation_meta = {
-        "required": False,
-        "confirm_id": confirm_id,
-        "status": "executed",
-        "reason": reason,
-        "summary": summary,
-        "payload_omitted": False,
-    }
-
-    def _generator() -> Generator[bytes, None, None]:
-        payload = {
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": replay_text},
-                    "finish_reason": "stop",
-                }
-            ],
-            "aegisgate": {"action": "allow", "confirmation": confirmation_meta},
-        }
-        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-        yield _stream_done_sse_chunk()
-
-    return _build_streaming_response(_generator())
-
-
 def _iter_responses_text_stream_replay(
     *,
     request_id: str,
@@ -1624,53 +1352,6 @@ def _iter_chat_stream_finalize(
     yield _stream_done_sse_chunk()
 
 
-def _render_cached_responses_confirmation_stream_output(
-    *,
-    request_id: str,
-    model: str,
-    content: str,
-    confirm_id: str,
-    reason: str,
-    summary: str,
-) -> StreamingResponse:
-    replay_text = content if content.strip() else _CONFIRMATION_RELEASE_EMPTY_TEXT
-    confirmation_meta = {
-        "required": False,
-        "confirm_id": confirm_id,
-        "status": "executed",
-        "reason": reason,
-        "summary": summary,
-        "payload_omitted": False,
-    }
-    logger.info(
-        "confirmation stream replay responses request_id=%s confirm_id=%s events=%s content_chars=%s",
-        request_id,
-        confirm_id,
-        "response.created,response.output_item.added,response.content_part.added,response.output_text.delta,response.output_text.done,response.content_part.done,response.output_item.done,response.completed,[DONE]",
-        len(replay_text),
-    )
-
-    def _generator() -> Generator[bytes, None, None]:
-        yield from _iter_responses_text_stream_replay(
-            request_id=request_id,
-            model=model,
-            replay_text=replay_text,
-            aegisgate_meta={"action": "allow", "confirmation": confirmation_meta},
-        )
-
-    return _build_streaming_response(_generator())
-
-
-def _is_pending_payload_omitted(payload: Any) -> bool:
-    return isinstance(payload, dict) and bool(payload.get(_PENDING_PAYLOAD_OMITTED_KEY))
-
-
-async def _maybe_offload(func: Any, *args: Any, **kwargs: Any) -> Any:
-    if settings.enable_thread_offload:
-        return await asyncio.to_thread(func, *args, **kwargs)
-    return func(*args, **kwargs)
-
-
 async def _run_payload_transform(func: Any, *args: Any, **kwargs: Any) -> Any:
     """Keep payload mapping/sanitization off the event loop."""
     return await run_payload_transform_offloop(func, *args, **kwargs)
@@ -1753,23 +1434,6 @@ async def _run_response_pipeline(
         ctx.disposition_reasons.append("filter_timeout")
         resp.output_text = "[AegisGate] response filter timed out."
         return resp
-
-
-async def _store_call(method_name: str, *args: Any, **kwargs: Any) -> Any:
-    method = getattr(store, method_name)
-    return await run_store_io(method, *args, **kwargs)
-
-
-async def _delete_pending_confirmation(confirm_id: str) -> bool:
-    try:
-        return bool(
-            await run_store_io(store.delete_pending_confirmation, confirm_id=confirm_id)
-        )
-    except Exception as exc:
-        logger.warning(
-            "delete pending confirmation failed confirm_id=%s error=%s", confirm_id, exc
-        )
-        return False
 
 
 def _extract_chat_user_text(payload: dict[str, Any]) -> str:
@@ -1861,15 +1525,6 @@ def _needs_confirmation(ctx: RequestContext) -> bool:
     if ctx.requires_human_review:
         return True
     return any(tag.startswith("response_") for tag in ctx.security_tags)
-
-
-def _confirmation_approval_enabled() -> bool:
-    """Whether the yes/no approval flow is enabled.
-
-    Always returns False — the approval flow has been removed.
-    All dangerous content is now auto-sanitized (redacted or split with ---).
-    """
-    return False
 
 
 def _confirmation_reason_and_summary(
@@ -2338,11 +1993,6 @@ def _build_sanitized_full_response(ctx: RequestContext, source_text: str = "") -
     return _sanitize_hit_fragments(source_text, ctx) if source_text else ""
 
 
-def _build_sanitized_warning_note(ctx: RequestContext, source_text: str = "") -> str:
-    """Non-confirmation mode no longer appends a tail warning block."""
-    return ""
-
-
 @lru_cache(maxsize=1)
 def _tool_call_guard_patterns() -> tuple[re.Pattern[str], ...]:
     rules = load_security_rules()
@@ -2397,10 +2047,6 @@ _NON_STREAM_RENDER_OPS = renderers.NonStreamRenderOps(
 )
 
 
-def _sanitize_nested_text_value(value: Any, ctx: RequestContext) -> Any:
-    return renderers.sanitize_nested_text_value(value, ctx, ops=_NON_STREAM_RENDER_OPS)
-
-
 def _patch_chat_message(message: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
     return renderers.patch_chat_message(message, ctx, ops=_NON_STREAM_RENDER_OPS)
 
@@ -2411,30 +2057,10 @@ def _patch_responses_output_item(
     return renderers.patch_responses_output_item(item, ctx, ops=_NON_STREAM_RENDER_OPS)
 
 
-def _patch_chat_response_body(
-    upstream_body: dict[str, Any], ctx: RequestContext
-) -> dict[str, Any]:
-    return renderers.patch_chat_response_body(upstream_body, ctx, ops=_NON_STREAM_RENDER_OPS)
-
-
-def _patch_responses_body(
-    upstream_body: dict[str, Any], ctx: RequestContext
-) -> dict[str, Any]:
-    return renderers.patch_responses_body(upstream_body, ctx, ops=_NON_STREAM_RENDER_OPS)
-
-
 def _patch_messages_content_block(
     block: dict[str, Any], ctx: RequestContext
 ) -> dict[str, Any]:
     return renderers.patch_messages_content_block(block, ctx, ops=_NON_STREAM_RENDER_OPS)
-
-
-def _patch_messages_response_body(
-    upstream_body: dict[str, Any], ctx: RequestContext
-) -> dict[str, Any]:
-    return renderers.patch_messages_response_body(
-        upstream_body, ctx, ops=_NON_STREAM_RENDER_OPS
-    )
 
 
 def _patch_messages_stream_payload(
@@ -2791,25 +2417,6 @@ async def _apply_semantic_review(ctx: RequestContext, text: str, phase: str) -> 
         ctx.requires_human_review = True
 
 
-def _to_status_code(reason: str) -> int:
-    if reason in {"invalid_parameters"}:
-        return 400
-    if reason in {"gateway_auth_failed"}:
-        return 401
-    if reason in {"gateway_misconfigured"}:
-        return 500
-    return 400
-
-
-def _extract_confirm_id(text: str) -> str:
-    import re
-
-    matches = re.findall(r"\bcfm-[a-f0-9]{12}\b", text.lower())
-    if not matches:
-        return ""
-    return str(matches[-1])
-
-
 _CONFIRMATION_TEMPLATE_PREFIX_MARKERS: tuple[str, ...] = (
     "copy this line",
     "复制这一行",
@@ -2820,239 +2427,6 @@ _CONFIRMATION_TEMPLATE_PREFIX_MARKERS: tuple[str, ...] = (
     "send only one standalone copy-ready line",
     "请单独发送以下可复制消息之一",
 )
-
-
-def _extract_action_token(text: str) -> str:
-    matches = re.findall(r"\bact-[a-f0-9]{8,16}\b", str(text or "").lower())
-    if not matches:
-        return ""
-    return str(matches[-1])
-
-
-def _extract_bound_confirm_and_action(text: str) -> tuple[str, str]:
-    source = str(text or "")
-    lowered = source.lower()
-    matches = list(
-        re.finditer(
-            r"(cfm-[a-f0-9]{12})\s*(?:--|——|—|–|[-_:/|：])+\s*(act-[a-f0-9]{8,16})\b",
-            lowered,
-            flags=re.IGNORECASE,
-        )
-    )
-    if not matches:
-        return "", ""
-    for match in reversed(matches):
-        line_start = source.rfind("\n", 0, match.start()) + 1
-        line_end = source.find("\n", match.end())
-        if line_end < 0:
-            line_end = len(source)
-        prefix = source[line_start : match.start()].lower()
-        line_lower = source[line_start:line_end].lower()
-        if any(
-            marker in prefix or marker in line_lower
-            for marker in _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
-        ):
-            continue
-        confirm_id = str(match.group(1) or "").lower()
-        action_token = str(match.group(2) or "").lower()
-        return confirm_id, action_token
-    return "", ""
-
-
-def _extract_decision_by_bound_token(
-    user_text: str, confirm_id: str, action_token: str
-) -> tuple[str, str]:
-    source = str(user_text or "")
-    cid = str(confirm_id or "").strip().lower()
-    act = str(action_token or "").strip().lower()
-    if not source or not cid or not act:
-        return "unknown", "missing_bind_components"
-    bind_re = re.compile(
-        rf"{re.escape(cid)}\s*(?:--|——|—|–|[-_:/|：])+\s*{re.escape(act)}\b",
-        flags=re.IGNORECASE,
-    )
-    matches = list(bind_re.finditer(source))
-    if not matches:
-        return "unknown", "bind_not_found"
-    match = matches[-1]
-    line_start = source.rfind("\n", 0, match.start()) + 1
-    prefix = source[line_start : match.start()]
-    marker_scope = prefix.lower()
-    if any(marker in marker_scope for marker in _CONFIRMATION_TEMPLATE_PREFIX_MARKERS):
-        return "unknown", "system_template_prefix"
-
-    cmd_tokens = re.findall(r"\b(?:yes|y|no|n)\b", prefix, flags=re.IGNORECASE)
-    if cmd_tokens:
-        cmd = str(cmd_tokens[-1]).lower()
-        if cmd in {"yes", "y"}:
-            return "yes", "bind_prefix_cmd"
-        if cmd in {"no", "n"}:
-            return "no", "bind_prefix_cmd"
-
-    decision = parse_confirmation_decision(prefix).value
-    if decision in {"yes", "no"}:
-        return decision, "bind_prefix_parse"
-    return "unknown", "missing_decision_before_bind"
-
-
-def _pending_action_bind_token(record: Mapping[str, Any]) -> str:
-    confirm_id = str(record.get("confirm_id", ""))
-    reason = str(record.get("reason", ""))
-    summary = str(record.get("summary", ""))
-    seed = f"{confirm_id}|{reason}|{summary}"
-    return make_action_bind_token(seed)
-
-
-def _extract_tail_confirmation_command(text: str) -> tuple[str, str]:
-    """
-    优先解析“最后几行”中的确认命令，避免把整段模板里的 yes/no 一起算成 ambiguous。
-    返回 (decision, confirm_id_hint)；decision in {"yes","no","unknown"}。
-    """
-    lines = [
-        line.strip() for line in str(text or "").splitlines() if line and line.strip()
-    ]
-    if not lines:
-        return "unknown", ""
-    cmd_re = re.compile(
-        r"^[\s`\"'*_=\-~>#\[\]\(\)\{\}\|:：,，]*?(?P<cmd>yes|y|no|n)\b(?P<tail>.*)$",
-        re.IGNORECASE,
-    )
-    bind_pair_re = re.compile(
-        r"(?P<confirm_id>cfm-[a-f0-9]{12})\s*(?:[-—–_:/|：]|\s){1,6}(?P<action>act-[a-f0-9]{8,16})\b",
-        re.IGNORECASE,
-    )
-    wrapped_cmd_re = re.compile(
-        r"(?:^|[\]\)\}>:：\|])\s*(?P<cmd>yes|y|no|n)\s+(?P<confirm_id>cfm-[a-f0-9]{12})\b(?:\s+act-[a-f0-9]{8,16})?\s*$",
-        re.IGNORECASE,
-    )
-    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
-    for raw in reversed(lines[-6:]):
-        line = raw.strip()
-        lowered = line.lower()
-        if any(marker in lowered for marker in template_markers):
-            continue
-        bind_match = bind_pair_re.search(line)
-        if bind_match:
-            confirm_id = str(bind_match.group("confirm_id") or "").lower()
-            prefix = line[: bind_match.start()]
-            decision = "unknown"
-            cmd_tokens = re.findall(r"\b(?:yes|y|no|n)\b", prefix, flags=re.IGNORECASE)
-            if cmd_tokens:
-                last_cmd = str(cmd_tokens[-1]).lower()
-                if last_cmd in {"yes", "y"}:
-                    decision = "yes"
-                elif last_cmd in {"no", "n"}:
-                    decision = "no"
-            if decision not in {"yes", "no"}:
-                decision = parse_confirmation_decision(prefix).value
-            if decision in {"yes", "no"} and confirm_id:
-                return decision, confirm_id
-        match = cmd_re.match(line)
-        if not match:
-            wrapped = wrapped_cmd_re.search(line)
-            if not wrapped:
-                continue
-            cmd = str(wrapped.group("cmd") or "").lower()
-            confirm_id = str(wrapped.group("confirm_id") or "").lower()
-            if cmd in {"yes", "y"}:
-                return "yes", confirm_id
-            if cmd in {"no", "n"}:
-                return "no", confirm_id
-            continue
-        cmd = str(match.group("cmd") or "").lower()
-        tail = str(match.group("tail") or "")
-        tail = re.sub(r"[\s`\"'*_=\-~>#\]\)\}\|:：,，.;。!！?？]+$", "", tail)
-        confirm_id = _extract_confirm_id(f"{cmd} {tail}")
-        if cmd in {"yes", "y"}:
-            return "yes", confirm_id
-        if cmd in {"no", "n"}:
-            return "no", confirm_id
-    return "unknown", ""
-
-
-def _confirmation_tail_preview(
-    text: str, max_lines: int = 4, max_chars: int = 120
-) -> str:
-    lines = [
-        line.strip() for line in str(text or "").splitlines() if line and line.strip()
-    ]
-    if not lines:
-        return "-"
-    previews: list[str] = []
-    for line in lines[-max_lines:]:
-        compact = re.sub(r"\s+", " ", line).strip()
-        lowered = compact.lower()
-        looks_like_command = (
-            bool(re.search(r"\b(?:yes|y|no|n)\b", lowered))
-            or "cfm-" in lowered
-            or "act-" in lowered
-        )
-        if looks_like_command:
-            if len(compact) > max_chars:
-                compact = f"{compact[:max_chars]}..."
-            previews.append(compact)
-        else:
-            previews.append(f"<non-command-line len={len(compact)}>")
-    return " || ".join(previews) if previews else "-"
-
-
-def _parse_explicit_confirmation_command(text: str) -> tuple[str, str]:
-    decision, confirm_id = _extract_tail_confirmation_command(text)
-    if decision in {"yes", "no"}:
-        return decision, confirm_id
-    return "unknown", ""
-
-
-def _extract_decision_before_confirm_id(text: str, confirm_id: str) -> str:
-    source = str(text or "")
-    cid = str(confirm_id or "").strip().lower()
-    if not source or not cid:
-        return "unknown"
-    lowered = source.lower()
-    idx = lowered.rfind(cid)
-    if idx < 0:
-        return "unknown"
-    line_start = source.rfind("\n", 0, idx) + 1
-    prefix_in_line = source[line_start:idx]
-    marker_scope = prefix_in_line.lower()
-    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
-    if any(marker in marker_scope for marker in template_markers):
-        return "unknown"
-    decision = parse_confirmation_decision(prefix_in_line).value
-    if decision in {"yes", "no"}:
-        return decision
-    window_start = max(0, idx - 120)
-    decision = parse_confirmation_decision(source[window_start:idx]).value
-    if decision in {"yes", "no"}:
-        return decision
-    return "unknown"
-
-
-def _has_explicit_confirmation_keyword(text: str) -> bool:
-    lines = [
-        line.strip() for line in str(text or "").splitlines() if line and line.strip()
-    ]
-    if not lines:
-        return False
-    template_markers = _CONFIRMATION_TEMPLATE_PREFIX_MARKERS
-    for line in lines[-6:]:
-        lowered = line.lower()
-        if any(marker in lowered for marker in template_markers):
-            continue
-        if re.search(r"\b(?:yes|y|no|n)\b", line, flags=re.IGNORECASE):
-            return True
-    return False
-
-
-def _resolve_pending_decision(
-    user_text: str, pending_confirm_id: str, base_decision: str
-) -> tuple[str, str]:
-    by_id_context = _extract_decision_before_confirm_id(user_text, pending_confirm_id)
-    if by_id_context not in {"yes", "no"}:
-        return base_decision, "base"
-    if base_decision in {"yes", "no"} and base_decision != by_id_context:
-        return "ambiguous", "conflict"
-    return by_id_context, "id_context"
 
 
 # C-02: Field names that must never be whitelisted from a client HTTP header.
@@ -3104,326 +2478,6 @@ def _extract_redaction_whitelist_keys(
         )
         keys -= dangerous
     return keys
-
-
-def _executing_recover_before(now_ts: int) -> int | None:
-    timeout_seconds = int(settings.confirmation_executing_timeout_seconds)
-    if timeout_seconds <= 0:
-        return None
-    return int(now_ts) - max(5, timeout_seconds)
-
-
-def _load_single_pending_for_session(
-    payload: dict[str, Any],
-    now_ts: int,
-    *,
-    expected_route: str,
-    tenant_id: str,
-) -> dict[str, Any] | None:
-    session_id = str(
-        payload.get("session_id") or payload.get("request_id") or ""
-    ).strip()
-    if not session_id:
-        return None
-    getter = getattr(store, "get_single_pending_confirmation", None)
-    if not callable(getter):
-        return None
-    recover_before = _executing_recover_before(now_ts)
-    record = getter(
-        session_id=session_id,
-        route=expected_route,
-        now_ts=now_ts,
-        tenant_id=tenant_id,
-        recover_executing_before=recover_before,
-    )
-    if not isinstance(record, dict) or not record:
-        return None
-    if str(record.get("status")) != "pending":
-        return None
-    if int(record.get("expires_at", 0)) <= int(now_ts):
-        store.update_pending_confirmation_status(
-            confirm_id=str(record.get("confirm_id", "")),
-            status="expired",
-            now_ts=now_ts,
-        )
-        return None
-    return record
-
-
-def _resolve_pending_confirmation(
-    payload: dict[str, Any],
-    user_text: str,
-    now_ts: int,
-    *,
-    expected_route: str,
-    tenant_id: str,
-) -> dict[str, Any] | None:
-    explicit_decision, explicit_confirm_id = _parse_explicit_confirmation_command(
-        user_text
-    )
-    bind_confirm_id, bind_action_token = _extract_bound_confirm_and_action(user_text)
-    confirm_id = bind_confirm_id or explicit_confirm_id
-    if not confirm_id:
-        return None
-
-    record = store.get_pending_confirmation(confirm_id)
-    if not record:
-        return None
-    if str(record.get("tenant_id") or "default") != tenant_id:
-        return None
-    status = str(record.get("status"))
-    recover_before = _executing_recover_before(now_ts)
-    if (
-        status == "executing"
-        and recover_before is not None
-        and int(record.get("updated_at", 0)) <= int(recover_before)
-    ):
-        changed = bool(
-            store.compare_and_update_pending_confirmation_status(
-                confirm_id=confirm_id,
-                expected_status="executing",
-                new_status="pending",
-                now_ts=now_ts,
-            )
-        )
-        if changed:
-            record = store.get_pending_confirmation(confirm_id) or {}
-            status = str(record.get("status"))
-    if status != "pending":
-        return None
-    if int(record.get("expires_at", 0)) <= int(now_ts):
-        store.update_pending_confirmation_status(
-            confirm_id=confirm_id, status="expired", now_ts=now_ts
-        )
-        return None
-    merged = dict(record)
-    merged["_aegisgate_bind_action_token"] = bind_action_token
-    merged["_aegisgate_explicit_decision"] = explicit_decision
-    return merged
-
-
-def _attach_confirmation_metadata(
-    resp: InternalResponse,
-    *,
-    confirm_id: str,
-    status: str,
-    reason: str,
-    summary: str,
-    phase: str = PHASE_RESPONSE,
-    payload_omitted: bool = False,
-    action_token: str = "",
-) -> None:
-    resolved_action_token = action_token
-    if not resolved_action_token and confirm_id and reason and summary:
-        resolved_action_token = make_action_bind_token(
-            f"{confirm_id}|{reason}|{summary}"
-        )
-    metadata = resp.metadata.setdefault("aegisgate", {})
-    metadata["confirmation"] = _flow_confirmation_metadata(
-        confirm_id=confirm_id,
-        status=status,
-        reason=reason,
-        summary=summary,
-        phase=phase,
-        payload_omitted=payload_omitted,
-        action_token=resolved_action_token,
-    )
-
-
-def _build_confirmation_message(
-    confirm_id: str,
-    reason: str,
-    summary: str,
-    phase: str = PHASE_RESPONSE,
-    note: str = "",
-    action_token: str = "",
-) -> str:
-    resolved_action_token = action_token
-    if not resolved_action_token and confirm_id and reason and summary:
-        resolved_action_token = make_action_bind_token(
-            f"{confirm_id}|{reason}|{summary}"
-        )
-    return _flow_confirmation_message(
-        confirm_id=confirm_id,
-        reason=reason,
-        summary=summary,
-        phase=phase,
-        note=note,
-        action_token=resolved_action_token,
-    )
-
-
-def _pending_payload_omitted_text(confirm_id: str) -> str:
-    return (
-        "该确认编号对应的原始请求体过大，网关未缓存完整原文，当前无法直接放行执行。\n"
-        f"确认编号：{confirm_id}\n"
-        "请重新发送原始请求，再按确认提示操作。\n"
-        "后续普通消息不受该确认记录影响（除非再次携带该确认编号）。\n\n"
-        "The original payload for this confirmation was too large and was not fully cached.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        "Please resend the original request, then follow the confirmation prompt again.\n"
-        "Subsequent normal messages are not blocked by this confirmation unless you include this ID again."
-    )
-
-
-def _confirmation_already_processed_text(confirm_id: str) -> str:
-    return (
-        "该确认请求已被处理（可能已执行、取消或过期），请勿重复确认。\n"
-        f"确认编号：{confirm_id}\n\n"
-        "This confirmation has already been processed (executed, canceled, or expired).\n"
-        f"Confirmation ID: {confirm_id}"
-    )
-
-
-def _confirmation_execute_failed_text(confirm_id: str) -> str:
-    return (
-        "确认已收到，但执行上游请求失败，请稍后重试。\n"
-        f"确认编号：{confirm_id}\n\n"
-        "Confirmation received, but executing the upstream request failed.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        "Please retry later."
-    )
-
-
-def _confirmation_action_token_required_text(confirm_id: str, action_token: str) -> str:
-    bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
-    return (
-        "确认消息缺少动作摘要码，无法校验放行目标。\n"
-        f"确认编号：{confirm_id}\n"
-        f"动作摘要码：{action_token}\n\n"
-        "请单独发送以下任一可复制消息：\n"
-        f"yes {bind}\n"
-        f"no {bind}\n\n"
-        "Missing action bind token in confirmation message.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        f"Action Bind Token: {action_token}\n"
-        "Send one standalone line:\n"
-        f"yes {bind}\n"
-        f"no {bind}"
-    )
-
-
-def _confirmation_action_token_mismatch_text(
-    confirm_id: str, provided: str, expected: str
-) -> str:
-    return (
-        "动作摘要码不匹配，已拒绝执行。\n"
-        f"确认编号：{confirm_id}\n"
-        f"提供：{provided or '-'}\n"
-        f"期望：{expected}\n\n"
-        "Action bind token mismatch; execution rejected.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        f"Provided: {provided or '-'}\n"
-        f"Expected: {expected}"
-    )
-
-
-def _confirmation_id_mismatch_hint_text(provided_id: str, expected_id: str) -> str:
-    return (
-        "未找到你提供的确认编号，当前会话存在唯一待确认请求。\n"
-        f"你提供的确认编号：{provided_id}\n"
-        f"可用确认编号：{expected_id}\n\n"
-        "请单独发送以下任一可复制消息：\n"
-        f"yes {expected_id}\n"
-        f"no {expected_id}\n\n"
-        "The provided confirmation ID was not found, but this session has exactly one pending confirmation.\n"
-        f"Provided ID: {provided_id}\n"
-        f"Expected ID: {expected_id}\n\n"
-        "Send one standalone copy-ready line:\n"
-        f"yes {expected_id}\n"
-        f"no {expected_id}"
-    )
-
-
-def _confirmation_command_requirements_text(
-    *,
-    detail: str,
-    confirm_id: str = "",
-    action_token: str = "",
-) -> str:
-    if confirm_id:
-        bind = f"{confirm_id}--{action_token}" if action_token else confirm_id
-        yes_line = f"yes {bind}"
-        no_line = f"no {bind}"
-        id_line_cn = f"确认编号：{confirm_id}\n"
-        id_line_en = f"Confirmation ID: {confirm_id}\n"
-        token_line_cn = f"动作摘要码：{action_token}\n" if action_token else ""
-        token_line_en = f"Action Bind Token: {action_token}\n" if action_token else ""
-    else:
-        yes_line = "yes cfm-<12hex> [act-<token>]"
-        no_line = "no cfm-<12hex> [act-<token>]"
-        id_line_cn = ""
-        id_line_en = ""
-        token_line_cn = ""
-        token_line_en = ""
-    return (
-        "确认指令不符合放行要求，未执行。\n"
-        f"原因：{detail}\n"
-        f"{id_line_cn}{token_line_cn}"
-        "请单独发送以下任一可复制消息：\n"
-        f"{yes_line}\n"
-        f"{no_line}\n\n"
-        "Confirmation command does not meet release requirements; execution was not performed.\n"
-        f"Reason: {detail}\n"
-        f"{id_line_en}{token_line_en}"
-        "Send one standalone copy-ready line:\n"
-        f"{yes_line}\n"
-        f"{no_line}"
-    )
-
-
-def _confirmation_route_mismatch_text(
-    confirm_id: str, pending_route: str, current_route: str
-) -> str:
-    return (
-        "确认编号与当前接口不匹配，无法执行。\n"
-        f"确认编号：{confirm_id}\n"
-        f"确认原路由：{pending_route}\n"
-        f"当前路由：{current_route}\n\n"
-        "The confirmation ID does not match the current endpoint.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        f"Pending route: {pending_route}\n"
-        f"Current route: {current_route}"
-    )
-
-
-def _pending_payload_invalid_text(confirm_id: str) -> str:
-    return (
-        "该确认编号对应的待执行请求数据已损坏，无法放行执行。\n"
-        f"确认编号：{confirm_id}\n"
-        "请重新发送原始请求。\n\n"
-        "The pending payload for this confirmation is invalid and cannot be executed.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        "Please resend the original request."
-    )
-
-
-def _pending_hash_mismatch_text(confirm_id: str) -> str:
-    return (
-        "该确认编号的请求校验失败（hash 不一致），为安全起见已拒绝执行。\n"
-        f"确认编号：{confirm_id}\n"
-        "请重新发送原始请求。\n\n"
-        "Pending request hash verification failed for this confirmation.\n"
-        f"Confirmation ID: {confirm_id}\n"
-        "Please resend the original request."
-    )
-
-
-async def _try_transition_pending_status(
-    *,
-    confirm_id: str,
-    expected_status: str,
-    new_status: str,
-    now_ts: int,
-) -> bool:
-    result = await run_store_io(
-        store.compare_and_update_pending_confirmation_status,
-        confirm_id=confirm_id,
-        expected_status=expected_status,
-        new_status=new_status,
-        now_ts=now_ts,
-    )
-    return bool(result)
 
 
 def _resolve_action(ctx: RequestContext) -> str:
@@ -3768,84 +2822,23 @@ async def _execute_chat_stream_once(
             source_text=request_user_text,
         )
 
-        if not _confirmation_approval_enabled():
-            block_text = f"[AegisGate] {reason}: {summary}"
-            ctx.enforcement_actions.append("auto_block:no_confirmation")
+        block_text = f"[AegisGate] {reason}: {summary}"
+        ctx.enforcement_actions.append("auto_block:no_confirmation")
 
-            def request_block_generator() -> Generator[bytes, None, None]:
-                try:
-                    yield _stream_confirmation_sse_chunk(
-                        ctx, req.model, req.route, block_text, None
-                    )
-                    yield _stream_done_sse_chunk()
-                finally:
-                    audit_once()
-
-            logger.info(
-                "chat stream request blocked (no confirmation) request_id=%s",
-                ctx.request_id,
-            )
-            return _build_streaming_response(request_block_generator())
-
-        confirm_id = make_confirm_id()
-        now_ts = int(time.time())
-        (
-            pending_payload,
-            pending_payload_hash,
-            pending_payload_omitted,
-            pending_payload_size,
-        ) = _prepare_pending_payload(payload)
-        await _store_call(
-            "save_pending_confirmation",
-            confirm_id=confirm_id,
-            session_id=req.session_id,
-            route=req.route,
-            request_id=req.request_id,
-            model=req.model,
-            upstream_base=upstream_base,
-            pending_request_payload=pending_payload,
-            pending_request_hash=pending_payload_hash,
-            reason=reason,
-            summary=summary,
-            tenant_id=ctx.tenant_id,
-            created_at=now_ts,
-            expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
-            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-        )
-        if pending_payload_omitted:
-            summary = (
-                f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-            )
-        ctx.disposition_reasons.append("awaiting_user_confirmation")
-        ctx.security_tags.add("confirmation_required")
-        confirmation_meta = _flow_confirmation_metadata(
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason,
-            summary=summary,
-            phase=PHASE_REQUEST,
-            payload_omitted=pending_payload_omitted,
-            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
-        )
-        message_text = _build_confirmation_message(
-            confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST
-        )
-
-        def request_confirmation_generator() -> Generator[bytes, None, None]:
+        def request_block_generator() -> Generator[bytes, None, None]:
             try:
                 yield _stream_confirmation_sse_chunk(
-                    ctx, req.model, req.route, message_text, confirmation_meta
+                    ctx, req.model, req.route, block_text, None
                 )
                 yield _stream_done_sse_chunk()
             finally:
                 audit_once()
 
         logger.info(
-            "chat stream request blocked, confirmation required request_id=%s confirm_id=%s",
+            "chat stream request blocked (no confirmation) request_id=%s",
             ctx.request_id,
-            confirm_id,
         )
-        return _build_streaming_response(request_confirmation_generator())
+        return _build_streaming_response(request_block_generator())
 
     try:
         upstream_payload = await _run_payload_transform(
@@ -4019,7 +3012,7 @@ async def _execute_chat_stream_once(
                     yield pending_frames.pop(0)
                 yield line
 
-            if blocked_reason and not _confirmation_approval_enabled():
+            if blocked_reason:
                 _maybe_log_dangerous_response_sample(
                     ctx,
                     stream_window,
@@ -4364,84 +3357,23 @@ async def _execute_responses_stream_once(
             source_text=request_user_text,
         )
 
-        if not _confirmation_approval_enabled():
-            block_text = f"[AegisGate] {reason}: {summary}"
-            ctx.enforcement_actions.append("auto_block:no_confirmation")
+        block_text = f"[AegisGate] {reason}: {summary}"
+        ctx.enforcement_actions.append("auto_block:no_confirmation")
 
-            def request_block_generator() -> Generator[bytes, None, None]:
-                try:
-                    yield _stream_confirmation_sse_chunk(
-                        ctx, req.model, req.route, block_text, None
-                    )
-                    yield _stream_done_sse_chunk()
-                finally:
-                    audit_once()
-
-            logger.info(
-                "responses stream request blocked (no confirmation) request_id=%s",
-                ctx.request_id,
-            )
-            return _build_streaming_response(request_block_generator())
-
-        confirm_id = make_confirm_id()
-        now_ts = int(time.time())
-        (
-            pending_payload,
-            pending_payload_hash,
-            pending_payload_omitted,
-            pending_payload_size,
-        ) = _prepare_pending_payload(payload)
-        await _store_call(
-            "save_pending_confirmation",
-            confirm_id=confirm_id,
-            session_id=req.session_id,
-            route=req.route,
-            request_id=req.request_id,
-            model=req.model,
-            upstream_base=upstream_base,
-            pending_request_payload=pending_payload,
-            pending_request_hash=pending_payload_hash,
-            reason=reason,
-            summary=summary,
-            tenant_id=ctx.tenant_id,
-            created_at=now_ts,
-            expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
-            retained_until=now_ts + max(60, int(settings.pending_data_ttl_seconds)),
-        )
-        if pending_payload_omitted:
-            summary = (
-                f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-            )
-        ctx.disposition_reasons.append("awaiting_user_confirmation")
-        ctx.security_tags.add("confirmation_required")
-        confirmation_meta = _flow_confirmation_metadata(
-            confirm_id=confirm_id,
-            status="pending",
-            reason=reason,
-            summary=summary,
-            phase=PHASE_REQUEST,
-            payload_omitted=pending_payload_omitted,
-            action_token=make_action_bind_token(f"{confirm_id}|{reason}|{summary}"),
-        )
-        message_text = _build_confirmation_message(
-            confirm_id=confirm_id, reason=reason, summary=summary, phase=PHASE_REQUEST
-        )
-
-        def request_confirmation_generator() -> Generator[bytes, None, None]:
+        def request_block_generator() -> Generator[bytes, None, None]:
             try:
                 yield _stream_confirmation_sse_chunk(
-                    ctx, req.model, req.route, message_text, confirmation_meta
+                    ctx, req.model, req.route, block_text, None
                 )
                 yield _stream_done_sse_chunk()
             finally:
                 audit_once()
 
         logger.info(
-            "responses stream request blocked, confirmation required request_id=%s confirm_id=%s",
+            "responses stream request blocked (no confirmation) request_id=%s",
             ctx.request_id,
-            confirm_id,
         )
-        return _build_streaming_response(request_confirmation_generator())
+        return _build_streaming_response(request_block_generator())
 
     try:
         upstream_payload = await _run_payload_transform(
@@ -4711,44 +3643,43 @@ async def _execute_responses_stream_once(
                         if blocked_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(blocked_reason)
                 if blocked_reason:
-                    if not _confirmation_approval_enabled():
-                        ctx.response_disposition = "sanitize"
-                        ctx.enforcement_actions.append(
-                            "auto_sanitize:stream_buffered_patch"
+                    ctx.response_disposition = "sanitize"
+                    ctx.enforcement_actions.append(
+                        "auto_sanitize:stream_buffered_patch"
+                    )
+                    _maybe_log_dangerous_response_sample(
+                        ctx,
+                        stream_window,
+                        route=req.route,
+                        model=req.model,
+                        source="responses_stream_buffered_patch",
+                        log_key="responses_stream_buffered_patch",
+                    )
+                    logger.info(
+                        "responses stream auto-sanitized (final tail) request_id=%s reason=%s",
+                        ctx.request_id,
+                        blocked_reason,
+                    )
+                    sanitized_window = (
+                        _build_sanitized_full_response(
+                            ctx, source_text=stream_window
                         )
-                        _maybe_log_dangerous_response_sample(
-                            ctx,
-                            stream_window,
-                            route=req.route,
-                            model=req.model,
-                            source="responses_stream_buffered_patch",
-                            log_key="responses_stream_buffered_patch",
+                        if stream_window
+                        else ""
+                    )
+                    info_log_sanitized(
+                        "responses_stream_sanitized",
+                        sanitized_window,
+                        request_id=ctx.request_id,
+                        reason=blocked_reason,
+                    )
+                    while pending_frames:
+                        yield _sanitize_stream_event_line(
+                            pending_frames.pop(0), route=req.route, ctx=ctx
                         )
-                        logger.info(
-                            "responses stream auto-sanitized (final tail) request_id=%s reason=%s",
-                            ctx.request_id,
-                            blocked_reason,
-                        )
-                        sanitized_window = (
-                            _build_sanitized_full_response(
-                                ctx, source_text=stream_window
-                            )
-                            if stream_window
-                            else ""
-                        )
-                        info_log_sanitized(
-                            "responses_stream_sanitized",
-                            sanitized_window,
-                            request_id=ctx.request_id,
-                            reason=blocked_reason,
-                        )
-                        while pending_frames:
-                            yield _sanitize_stream_event_line(
-                                pending_frames.pop(0), route=req.route, ctx=ctx
-                            )
-                        yield _stream_done_sse_chunk()
-                        stream_end_reason = "policy_auto_sanitize"
-                        return
+                    yield _stream_done_sse_chunk()
+                    stream_end_reason = "policy_auto_sanitize"
+                    return
                 while pending_frames:
                     yield pending_frames.pop(0)
                 if saw_terminal_event:
@@ -5019,94 +3950,27 @@ async def _execute_chat_once(
                 source_text=request_user_text,
             )
 
-            if not _confirmation_approval_enabled():
-                block_text = f"[AegisGate] {reason}: {summary}"
-                block_resp = InternalResponse(
-                    request_id=req.request_id,
-                    session_id=req.session_id,
-                    model=req.model,
-                    output_text=block_text,
-                )
-                ctx.enforcement_actions.append("auto_block:no_confirmation")
-                _attach_security_metadata(block_resp, ctx, boundary=boundary)
-                audit_once()
-                logger.info(
-                    "chat completion request blocked (no confirmation) request_id=%s",
-                    ctx.request_id,
-                )
-                info_log_sanitized(
-                    "chat_completion_request_blocked",
-                    block_text,
-                    request_id=ctx.request_id,
-                    reason=block_reason,
-                )
-                return execution_common.Finish(to_chat_response(block_resp))
-
-            confirm_id = make_confirm_id()
-            now_ts = int(time.time())
-            (
-                pending_payload,
-                pending_payload_hash,
-                pending_payload_omitted,
-                pending_payload_size,
-            ) = _prepare_pending_payload(payload)
-            save_pending_confirmation_once = execution_common.OnceAsyncCall(
-                "chat_request_pending_confirmation",
-                lambda: _store_call(
-                    "save_pending_confirmation",
-                    confirm_id=confirm_id,
-                    session_id=req.session_id,
-                    route=req.route,
-                    request_id=req.request_id,
-                    model=req.model,
-                    upstream_base=upstream_base,
-                    pending_request_payload=pending_payload,
-                    pending_request_hash=pending_payload_hash,
-                    reason=reason,
-                    summary=summary,
-                    tenant_id=ctx.tenant_id,
-                    created_at=now_ts,
-                    expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
-                    retained_until=now_ts
-                    + max(60, int(settings.pending_data_ttl_seconds)),
-                ),
-            )
-            await save_pending_confirmation_once()
-            if pending_payload_omitted:
-                summary = (
-                    f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-                )
-            ctx.disposition_reasons.append("awaiting_user_confirmation")
-            ctx.security_tags.add("confirmation_required")
-            ctx.enforcement_actions.append("confirmation:pending")
-            confirmation_resp = InternalResponse(
+            block_text = f"[AegisGate] {reason}: {summary}"
+            block_resp = InternalResponse(
                 request_id=req.request_id,
                 session_id=req.session_id,
                 model=req.model,
-                output_text=_build_confirmation_message(
-                    confirm_id=confirm_id,
-                    reason=reason,
-                    summary=summary,
-                    phase=PHASE_REQUEST,
-                ),
+                output_text=block_text,
             )
-            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-            _attach_confirmation_metadata(
-                confirmation_resp,
-                confirm_id=confirm_id,
-                status="pending",
-                reason=reason,
-                summary=summary,
-                phase=PHASE_REQUEST,
-                payload_omitted=pending_payload_omitted,
-            )
+            ctx.enforcement_actions.append("auto_block:no_confirmation")
+            _attach_security_metadata(block_resp, ctx, boundary=boundary)
             audit_once()
             logger.info(
-                "chat completion request blocked, confirmation required request_id=%s confirm_id=%s",
+                "chat completion request blocked (no confirmation) request_id=%s",
                 ctx.request_id,
-                confirm_id,
             )
-            return execution_common.Finish(to_chat_response(confirmation_resp))
+            info_log_sanitized(
+                "chat_completion_request_blocked",
+                block_text,
+                request_id=ctx.request_id,
+                reason=block_reason,
+            )
+            return execution_common.Finish(to_chat_response(block_resp))
 
         try:
             upstream_payload = await _run_payload_transform(
@@ -5222,118 +4086,34 @@ async def _execute_chat_once(
                 reason=resp_reason,
             )
 
-            if not _confirmation_approval_enabled():
-                _maybe_log_dangerous_response_sample(
-                    ctx,
-                    final_resp.output_text,
-                    route=req.route,
-                    model=req.model,
-                    source="chat_auto_sanitize",
-                    log_key="chat_auto_sanitize",
-                )
-                final_resp.output_text = _build_sanitized_full_response(
-                    ctx, source_text=final_resp.output_text
-                )
-                ctx.response_disposition = "sanitize"
-                ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
-                logger.info(
-                    "chat completion auto-sanitized (no confirmation) request_id=%s",
-                    ctx.request_id,
-                )
-                info_log_sanitized(
-                    "chat_completion_sanitized",
-                    final_resp.output_text,
-                    request_id=ctx.request_id,
-                    reason=resp_reason,
-                )
-                _attach_security_metadata(final_resp, ctx, boundary=boundary)
-                audit_once()
-                return _render_non_confirmation_chat_response(
-                    upstream_body, final_resp, ctx
-                )
-
-            reason, summary = _confirmation_reason_and_summary(
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                final_resp.output_text,
+                route=req.route,
+                model=req.model,
+                source="chat_auto_sanitize",
+                log_key="chat_auto_sanitize",
+            )
+            final_resp.output_text = _build_sanitized_full_response(
                 ctx, source_text=final_resp.output_text
             )
-            cached_output = passthrough_chat_response(
-                upstream_body,
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-            )
-            pending_payload = _build_response_pending_payload(
-                route=req.route,
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-                fmt=_PENDING_FORMAT_CHAT_JSON,
-                content=cached_output,
-            )
-            pending_payload, pending_payload_hash, pending_payload_size = (
-                _prepare_response_pending_payload(pending_payload)
-            )
-            confirm_id = make_confirm_id()
-            now_ts = int(time.time())
-            save_pending_confirmation_once = execution_common.OnceAsyncCall(
-                "chat_response_pending_confirmation",
-                lambda: _store_call(
-                    "save_pending_confirmation",
-                    confirm_id=confirm_id,
-                    session_id=req.session_id,
-                    route=req.route,
-                    request_id=req.request_id,
-                    model=req.model,
-                    upstream_base=upstream_base,
-                    pending_request_payload=pending_payload,
-                    pending_request_hash=pending_payload_hash,
-                    reason=reason,
-                    summary=summary,
-                    tenant_id=ctx.tenant_id,
-                    created_at=now_ts,
-                    expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                    retained_until=now_ts
-                    + max(60, int(settings.pending_data_ttl_seconds)),
-                ),
-            )
-            await save_pending_confirmation_once()
-            ctx.response_disposition = "block"
-            ctx.disposition_reasons.append("awaiting_user_confirmation")
-            ctx.security_tags.add("confirmation_required")
-            ctx.enforcement_actions.append("confirmation:pending")
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info(
-                "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                "chat completion auto-sanitized (no confirmation) request_id=%s",
                 ctx.request_id,
-                confirm_id,
-                req.route,
-                _PENDING_FORMAT_CHAT_JSON,
-                pending_payload_size,
             )
-
-            confirmation_resp = InternalResponse(
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-                output_text=_build_confirmation_message(
-                    confirm_id=confirm_id, reason=reason, summary=summary
-                ),
+            info_log_sanitized(
+                "chat_completion_sanitized",
+                final_resp.output_text,
+                request_id=ctx.request_id,
+                reason=resp_reason,
             )
-            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-            _attach_confirmation_metadata(
-                confirmation_resp,
-                confirm_id=confirm_id,
-                status="pending",
-                reason=reason,
-                summary=summary,
-                phase=PHASE_RESPONSE,
-                payload_omitted=False,
-            )
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            logger.info(
-                "chat completion requires confirmation request_id=%s confirm_id=%s",
-                ctx.request_id,
-                confirm_id,
+            return _render_non_confirmation_chat_response(
+                upstream_body, final_resp, ctx
             )
-            return to_chat_response(confirmation_resp)
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
@@ -5529,88 +4309,21 @@ async def _execute_responses_once(
                 source_text=request_user_text,
             )
 
-            if not _confirmation_approval_enabled():
-                block_text = f"[AegisGate] {reason}: {summary}"
-                block_resp = InternalResponse(
-                    request_id=req.request_id,
-                    session_id=req.session_id,
-                    model=req.model,
-                    output_text=block_text,
-                )
-                ctx.enforcement_actions.append("auto_block:no_confirmation")
-                _attach_security_metadata(block_resp, ctx, boundary=boundary)
-                audit_once()
-                logger.info(
-                    "responses endpoint request blocked (no confirmation) request_id=%s",
-                    ctx.request_id,
-                )
-                return execution_common.Finish(to_responses_output(block_resp))
-
-            confirm_id = make_confirm_id()
-            now_ts = int(time.time())
-            (
-                pending_payload,
-                pending_payload_hash,
-                pending_payload_omitted,
-                pending_payload_size,
-            ) = _prepare_pending_payload(payload)
-            save_pending_confirmation_once = execution_common.OnceAsyncCall(
-                "responses_request_pending_confirmation",
-                lambda: _store_call(
-                    "save_pending_confirmation",
-                    confirm_id=confirm_id,
-                    session_id=req.session_id,
-                    route=req.route,
-                    request_id=req.request_id,
-                    model=req.model,
-                    upstream_base=upstream_base,
-                    pending_request_payload=pending_payload,
-                    pending_request_hash=pending_payload_hash,
-                    reason=reason,
-                    summary=summary,
-                    tenant_id=ctx.tenant_id,
-                    created_at=now_ts,
-                    expires_at=_confirmation_expires_at(now_ts, PHASE_REQUEST),
-                    retained_until=now_ts
-                    + max(60, int(settings.pending_data_ttl_seconds)),
-                ),
-            )
-            await save_pending_confirmation_once()
-            if pending_payload_omitted:
-                summary = (
-                    f"{summary}（请求体过大，未缓存原文：{pending_payload_size} bytes）"
-                )
-            ctx.disposition_reasons.append("awaiting_user_confirmation")
-            ctx.security_tags.add("confirmation_required")
-            ctx.enforcement_actions.append("confirmation:pending")
-            confirmation_resp = InternalResponse(
+            block_text = f"[AegisGate] {reason}: {summary}"
+            block_resp = InternalResponse(
                 request_id=req.request_id,
                 session_id=req.session_id,
                 model=req.model,
-                output_text=_build_confirmation_message(
-                    confirm_id=confirm_id,
-                    reason=reason,
-                    summary=summary,
-                    phase=PHASE_REQUEST,
-                ),
+                output_text=block_text,
             )
-            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-            _attach_confirmation_metadata(
-                confirmation_resp,
-                confirm_id=confirm_id,
-                status="pending",
-                reason=reason,
-                summary=summary,
-                phase=PHASE_REQUEST,
-                payload_omitted=pending_payload_omitted,
-            )
+            ctx.enforcement_actions.append("auto_block:no_confirmation")
+            _attach_security_metadata(block_resp, ctx, boundary=boundary)
             audit_once()
             logger.info(
-                "responses endpoint request blocked, confirmation required request_id=%s confirm_id=%s",
+                "responses endpoint request blocked (no confirmation) request_id=%s",
                 ctx.request_id,
-                confirm_id,
             )
-            return execution_common.Finish(to_responses_output(confirmation_resp))
+            return execution_common.Finish(to_responses_output(block_resp))
 
         try:
             upstream_payload = await _run_payload_transform(
@@ -5730,118 +4443,34 @@ async def _execute_responses_once(
                 reason=resp_reason,
             )
 
-            if not _confirmation_approval_enabled():
-                _maybe_log_dangerous_response_sample(
-                    ctx,
-                    final_resp.output_text,
-                    route=req.route,
-                    model=req.model,
-                    source="responses_auto_sanitize",
-                    log_key="responses_auto_sanitize",
-                )
-                final_resp.output_text = _build_sanitized_full_response(
-                    ctx, source_text=final_resp.output_text
-                )
-                ctx.response_disposition = "sanitize"
-                ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
-                logger.info(
-                    "responses endpoint auto-sanitized (no confirmation) request_id=%s",
-                    ctx.request_id,
-                )
-                info_log_sanitized(
-                    "responses_endpoint_sanitized",
-                    final_resp.output_text,
-                    request_id=ctx.request_id,
-                    reason=resp_reason,
-                )
-                _attach_security_metadata(final_resp, ctx, boundary=boundary)
-                audit_once()
-                return _render_non_confirmation_responses_output(
-                    upstream_body, final_resp, ctx
-                )
-
-            reason, summary = _confirmation_reason_and_summary(
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                final_resp.output_text,
+                route=req.route,
+                model=req.model,
+                source="responses_auto_sanitize",
+                log_key="responses_auto_sanitize",
+            )
+            final_resp.output_text = _build_sanitized_full_response(
                 ctx, source_text=final_resp.output_text
             )
-            cached_output = passthrough_responses_output(
-                upstream_body,
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-            )
-            pending_payload = _build_response_pending_payload(
-                route=req.route,
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-                fmt=_PENDING_FORMAT_RESPONSES_JSON,
-                content=cached_output,
-            )
-            pending_payload, pending_payload_hash, pending_payload_size = (
-                _prepare_response_pending_payload(pending_payload)
-            )
-            confirm_id = make_confirm_id()
-            now_ts = int(time.time())
-            save_pending_confirmation_once = execution_common.OnceAsyncCall(
-                "responses_response_pending_confirmation",
-                lambda: _store_call(
-                    "save_pending_confirmation",
-                    confirm_id=confirm_id,
-                    session_id=req.session_id,
-                    route=req.route,
-                    request_id=req.request_id,
-                    model=req.model,
-                    upstream_base=upstream_base,
-                    pending_request_payload=pending_payload,
-                    pending_request_hash=pending_payload_hash,
-                    reason=reason,
-                    summary=summary,
-                    tenant_id=ctx.tenant_id,
-                    created_at=now_ts,
-                    expires_at=_confirmation_expires_at(now_ts, PHASE_RESPONSE),
-                    retained_until=now_ts
-                    + max(60, int(settings.pending_data_ttl_seconds)),
-                ),
-            )
-            await save_pending_confirmation_once()
-            ctx.response_disposition = "block"
-            ctx.disposition_reasons.append("awaiting_user_confirmation")
-            ctx.security_tags.add("confirmation_required")
-            ctx.enforcement_actions.append("confirmation:pending")
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
             logger.info(
-                "confirmation response cached request_id=%s confirm_id=%s route=%s format=%s bytes=%s",
+                "responses endpoint auto-sanitized (no confirmation) request_id=%s",
                 ctx.request_id,
-                confirm_id,
-                req.route,
-                _PENDING_FORMAT_RESPONSES_JSON,
-                pending_payload_size,
             )
-
-            confirmation_resp = InternalResponse(
-                request_id=req.request_id,
-                session_id=req.session_id,
-                model=req.model,
-                output_text=_build_confirmation_message(
-                    confirm_id=confirm_id, reason=reason, summary=summary
-                ),
+            info_log_sanitized(
+                "responses_endpoint_sanitized",
+                final_resp.output_text,
+                request_id=ctx.request_id,
+                reason=resp_reason,
             )
-            _attach_security_metadata(confirmation_resp, ctx, boundary=boundary)
-            _attach_confirmation_metadata(
-                confirmation_resp,
-                confirm_id=confirm_id,
-                status="pending",
-                reason=reason,
-                summary=summary,
-                phase=PHASE_RESPONSE,
-                payload_omitted=False,
-            )
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            logger.info(
-                "responses endpoint requires confirmation request_id=%s confirm_id=%s",
-                ctx.request_id,
-                confirm_id,
+            return _render_non_confirmation_responses_output(
+                upstream_body, final_resp, ctx
             )
-            return to_responses_output(confirmation_resp)
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
@@ -6094,7 +4723,7 @@ async def _execute_messages_stream_once(
                         )
                         if decision and decision not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(decision)
-                        if decision and not _confirmation_approval_enabled():
+                        if decision:
                             debug_log_original(
                                 "response_stream_blocked",
                                 stream_window,
@@ -6215,85 +4844,76 @@ async def _execute_messages_stream_once(
                         )
                         if block_reason not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(block_reason)
-                        if not _confirmation_approval_enabled():
-                            ctx.response_disposition = "sanitize"
-                            ctx.enforcement_actions.append("stream:auto_sanitize")
-                            _maybe_log_dangerous_response_sample(
-                                ctx,
-                                stream_window,
-                                route=request_path,
-                                model=req.model,
-                                source="messages_stream_auto_sanitize",
-                                log_key="messages_stream_auto_sanitize",
-                            )
-                            sanitized_response = _build_sanitized_full_response(
-                                ctx, source_text=stream_window
-                            )
-                            logger.info(
-                                "messages stream auto-sanitized request_id=%s reason=%s",
-                                ctx.request_id,
-                                block_reason,
-                            )
-                            info_log_sanitized(
-                                "messages_stream_sanitized",
-                                sanitized_response,
-                                request_id=ctx.request_id,
-                                reason=block_reason,
-                            )
-                            pending_event_types = {
-                                _extract_stream_event_type(
-                                    _extract_sse_data_payload_from_chunk(frame) or ""
-                                )
-                                for frame in pending_frames
-                            }
-                            stream_meta = _build_stream_security_metadata(
-                                ctx=ctx,
-                                model=req.model,
-                                boundary=boundary,
-                            )
-                            if (
-                                not saw_message_start
-                                and "message_start" not in pending_event_types
-                            ):
-                                yield _stream_messages_message_start_sse_chunk(
-                                    req.request_id,
-                                    req.model,
-                                    message_id=message_id,
-                                )
-                                saw_message_start = True
-                            if (
-                                not saw_content_block_start
-                                and "content_block_start" not in pending_event_types
-                            ):
-                                yield _stream_messages_content_block_start_sse_chunk(
-                                    index=content_block_index,
-                                )
-                                saw_content_block_start = True
-                            while pending_frames:
-                                yield _sanitize_stream_event_line(
-                                    _mark_flushed_messages_frame(pending_frames.pop(0)),
-                                    route=req.route,
-                                    ctx=ctx,
-                                )
-                            yield _stream_messages_content_block_stop_sse_chunk(
-                                index=content_block_index,
-                            )
-                            yield _stream_messages_message_delta_sse_chunk(
-                                usage=usage_snapshot,
-                                aegisgate_meta=stream_meta,
-                            )
-                            yield _stream_messages_message_stop_sse_chunk(
-                                aegisgate_meta=stream_meta,
-                            )
-                            return
-                        ctx.response_disposition = "block"
-                        ctx.enforcement_actions.append("stream:block")
+                        ctx.response_disposition = "sanitize"
+                        ctx.enforcement_actions.append("stream:auto_sanitize")
+                        _maybe_log_dangerous_response_sample(
+                            ctx,
+                            stream_window,
+                            route=request_path,
+                            model=req.model,
+                            source="messages_stream_auto_sanitize",
+                            log_key="messages_stream_auto_sanitize",
+                        )
+                        sanitized_response = _build_sanitized_full_response(
+                            ctx, source_text=stream_window
+                        )
                         logger.info(
-                            "messages stream blocked request_id=%s reason=%s",
+                            "messages stream auto-sanitized request_id=%s reason=%s",
                             ctx.request_id,
                             block_reason,
                         )
-                        break
+                        info_log_sanitized(
+                            "messages_stream_sanitized",
+                            sanitized_response,
+                            request_id=ctx.request_id,
+                            reason=block_reason,
+                        )
+                        pending_event_types = {
+                            _extract_stream_event_type(
+                                _extract_sse_data_payload_from_chunk(frame) or ""
+                            )
+                            for frame in pending_frames
+                        }
+                        stream_meta = _build_stream_security_metadata(
+                            ctx=ctx,
+                            model=req.model,
+                            boundary=boundary,
+                        )
+                        if (
+                            not saw_message_start
+                            and "message_start" not in pending_event_types
+                        ):
+                            yield _stream_messages_message_start_sse_chunk(
+                                req.request_id,
+                                req.model,
+                                message_id=message_id,
+                            )
+                            saw_message_start = True
+                        if (
+                            not saw_content_block_start
+                            and "content_block_start" not in pending_event_types
+                        ):
+                            yield _stream_messages_content_block_start_sse_chunk(
+                                index=content_block_index,
+                            )
+                            saw_content_block_start = True
+                        while pending_frames:
+                            yield _sanitize_stream_event_line(
+                                _mark_flushed_messages_frame(pending_frames.pop(0)),
+                                route=req.route,
+                                ctx=ctx,
+                            )
+                        yield _stream_messages_content_block_stop_sse_chunk(
+                            index=content_block_index,
+                        )
+                        yield _stream_messages_message_delta_sse_chunk(
+                            usage=usage_snapshot,
+                            aegisgate_meta=stream_meta,
+                        )
+                        yield _stream_messages_message_stop_sse_chunk(
+                            aegisgate_meta=stream_meta,
+                        )
+                        return
 
                 if event_type.startswith(("message_", "content_block_")):
                     while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
@@ -6321,7 +4941,7 @@ async def _execute_messages_stream_once(
                 )
                 if decision and decision not in ctx.disposition_reasons:
                     ctx.disposition_reasons.append(decision)
-                if decision and not _confirmation_approval_enabled():
+                if decision:
                     ctx.response_disposition = "sanitize"
                     ctx.enforcement_actions.append("stream:auto_sanitize")
                     _maybe_log_dangerous_response_sample(
@@ -6629,43 +5249,34 @@ async def _execute_messages_once(
             )
 
         if _needs_confirmation(ctx):
-            if not _confirmation_approval_enabled():
-                _maybe_log_dangerous_response_sample(
-                    ctx,
-                    capped_upstream_text,
-                    route=request_path,
-                    model=req.model,
-                    source="messages_auto_sanitize",
-                    log_key="messages_auto_sanitize",
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                capped_upstream_text,
+                route=request_path,
+                model=req.model,
+                source="messages_auto_sanitize",
+                log_key="messages_auto_sanitize",
+            )
+            sanitized_text = _build_sanitized_full_response(
+                ctx, source_text=capped_upstream_text
+            )
+            if not isinstance(upstream_body, dict):
+                internal_resp.output_text = sanitized_text
+            ctx.response_disposition = "sanitize"
+            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+            logger.info(
+                "messages auto-sanitized (no confirmation) request_id=%s",
+                ctx.request_id,
+            )
+            info_log_sanitized(
+                "messages_sanitized", sanitized_text, request_id=ctx.request_id
+            )
+            _attach_security_metadata(internal_resp, ctx, boundary=boundary)
+            audit_once()
+            return _passthrough_any_response(
+                _render_non_confirmation_messages_output(
+                    upstream_body, internal_resp, ctx
                 )
-                sanitized_text = _build_sanitized_full_response(
-                    ctx, source_text=capped_upstream_text
-                )
-                if not isinstance(upstream_body, dict):
-                    internal_resp.output_text = sanitized_text
-                ctx.response_disposition = "sanitize"
-                ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
-                logger.info(
-                    "messages auto-sanitized (no confirmation) request_id=%s",
-                    ctx.request_id,
-                )
-                info_log_sanitized(
-                    "messages_sanitized", sanitized_text, request_id=ctx.request_id
-                )
-                _attach_security_metadata(internal_resp, ctx, boundary=boundary)
-                audit_once()
-                return _passthrough_any_response(
-                    _render_non_confirmation_messages_output(
-                        upstream_body, internal_resp, ctx
-                    )
-                )
-
-            return _error_response(
-                status_code=403,
-                reason="messages_response_blocked",
-                detail="messages response blocked by security policy",
-                ctx=ctx,
-                boundary=boundary,
             )
 
         audit_once()
@@ -6898,42 +5509,34 @@ async def _execute_generic_stream_once(
                             ctx.response_disposition = "block"
                             if block_reason not in ctx.disposition_reasons:
                                 ctx.disposition_reasons.append(block_reason)
-                            if not _confirmation_approval_enabled():
-                                ctx.enforcement_actions.append("stream:auto_sanitize")
-                                _maybe_log_dangerous_response_sample(
-                                    ctx,
-                                    stream_window,
-                                    route=request_path,
-                                    model=model,
-                                    source="generic_stream_auto_sanitize",
-                                    log_key="generic_stream_auto_sanitize",
-                                )
-                                sanitized_response = _build_sanitized_full_response(
-                                    ctx, source_text=stream_window
-                                )
-                                logger.info(
-                                    "generic stream auto-sanitized request_id=%s reason=%s",
-                                    ctx.request_id,
-                                    block_reason,
-                                )
-                                info_log_sanitized(
-                                    "generic_stream_sanitized",
-                                    sanitized_response,
-                                    request_id=ctx.request_id,
-                                    reason=block_reason,
-                                )
-                                yield _stream_confirmation_sse_chunk(
-                                    ctx, model, request_path, sanitized_response, None
-                                )
-                                yield _stream_done_sse_chunk()
-                                return
-                            ctx.enforcement_actions.append("stream:block")
+                            ctx.enforcement_actions.append("stream:auto_sanitize")
+                            _maybe_log_dangerous_response_sample(
+                                ctx,
+                                stream_window,
+                                route=request_path,
+                                model=model,
+                                source="generic_stream_auto_sanitize",
+                                log_key="generic_stream_auto_sanitize",
+                            )
+                            sanitized_response = _build_sanitized_full_response(
+                                ctx, source_text=stream_window
+                            )
                             logger.info(
-                                "generic stream blocked request_id=%s reason=%s",
+                                "generic stream auto-sanitized request_id=%s reason=%s",
                                 ctx.request_id,
                                 block_reason,
                             )
-                            break
+                            info_log_sanitized(
+                                "generic_stream_sanitized",
+                                sanitized_response,
+                                request_id=ctx.request_id,
+                                reason=block_reason,
+                            )
+                            yield _stream_confirmation_sse_chunk(
+                                ctx, model, request_path, sanitized_response, None
+                            )
+                            yield _stream_done_sse_chunk()
+                            return
 
                 yield line
         except RuntimeError as exc:
@@ -7190,40 +5793,31 @@ async def _execute_generic_once(
         )
 
     if _needs_confirmation(ctx):
-        if not _confirmation_approval_enabled():
-            _maybe_log_dangerous_response_sample(
-                ctx,
-                capped_upstream_text,
-                route=request_path,
-                model=model,
-                source="generic_auto_sanitize",
-                log_key="generic_auto_sanitize",
-            )
-            sanitized_text = _build_sanitized_full_response(
-                ctx, source_text=capped_upstream_text
-            )
-            ctx.response_disposition = "sanitize"
-            ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
-            logger.info(
-                "generic proxy auto-sanitized (no confirmation) request_id=%s",
-                ctx.request_id,
-            )
-            info_log_sanitized(
-                "generic_proxy_sanitized", sanitized_text, request_id=ctx.request_id
-            )
-            _write_audit_event(ctx, boundary=boundary)
-            return _passthrough_any_response(
-                {"sanitized_text": sanitized_text}
-                if isinstance(upstream_body, dict)
-                else sanitized_text
-            )
-
-        return _error_response(
-            status_code=403,
-            reason="generic_response_blocked",
-            detail="generic provider response blocked by security policy",
-            ctx=ctx,
-            boundary=boundary,
+        _maybe_log_dangerous_response_sample(
+            ctx,
+            capped_upstream_text,
+            route=request_path,
+            model=model,
+            source="generic_auto_sanitize",
+            log_key="generic_auto_sanitize",
+        )
+        sanitized_text = _build_sanitized_full_response(
+            ctx, source_text=capped_upstream_text
+        )
+        ctx.response_disposition = "sanitize"
+        ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
+        logger.info(
+            "generic proxy auto-sanitized (no confirmation) request_id=%s",
+            ctx.request_id,
+        )
+        info_log_sanitized(
+            "generic_proxy_sanitized", sanitized_text, request_id=ctx.request_id
+        )
+        _write_audit_event(ctx, boundary=boundary)
+        return _passthrough_any_response(
+            {"sanitized_text": sanitized_text}
+            if isinstance(upstream_body, dict)
+            else sanitized_text
         )
 
     _write_audit_event(ctx, boundary=boundary)
@@ -7466,186 +6060,6 @@ async def chat_completions(payload: dict, request: Request):
     req_preview = preview.request
     tenant_id = ctx_preview.tenant_id
 
-    now_ts = int(time.time())
-    user_text = _extract_chat_user_text(payload)
-    decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    filter_mode = _filter_mode_from_headers(gateway_headers)
-    pending = None
-    if filter_mode != "passthrough":
-        pending = await run_store_io(
-            _resolve_pending_confirmation,
-            payload,
-            user_text,
-            now_ts,
-            expected_route=req_preview.route,
-            tenant_id=tenant_id,
-        )
-    # Only log confirmation details when there's an actual pending or explicit command.
-    if pending or decision_value not in {"unknown", ""}:
-        logger.debug(
-            "confirmation incoming request_id=%s route=%s decision=%s pending_found=%s",
-            req_preview.request_id,
-            req_preview.route,
-            decision_value,
-            bool(pending),
-        )
-    confirmation_bypass_reason = "no_explicit_confirmation_command"
-
-    if pending:
-        pending_route = str(pending.get("route", ""))
-        confirm_id = str(pending["confirm_id"])
-        expected_action_token = _pending_action_bind_token(pending)
-        decision_value, decision_source = _extract_decision_by_bound_token(
-            user_text,
-            confirm_id,
-            expected_action_token,
-        )
-        reason_text = str(pending.get("reason", "高风险响应"))
-        summary_text = str(pending.get("summary", "检测到高风险信号"))
-        provided_action_token = str(
-            pending.get("_aegisgate_bind_action_token")
-            or _extract_action_token(user_text)
-        )
-        logger.info(
-            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            confirm_id,
-            pending_route,
-            decision_value,
-            decision_source,
-            bool(provided_action_token),
-        )
-        invalid_reason = ""
-        if pending_route != req_preview.route:
-            invalid_reason = "route_mismatch"
-        elif decision_value not in {"yes", "no"}:
-            invalid_reason = f"unsupported_decision_{decision_value}"
-        if invalid_reason:
-            confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
-            logger.info(
-                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                req_preview.route,
-                confirm_id,
-                decision_value,
-                decision_source,
-                invalid_reason,
-                bool(provided_action_token),
-                bool(
-                    provided_action_token
-                    and provided_action_token == expected_action_token
-                ),
-                _has_explicit_confirmation_keyword(user_text),
-            )
-        elif decision_value == "no":
-            changed = await _try_transition_pending_status(
-                confirm_id=confirm_id,
-                expected_status="pending",
-                new_status="canceled",
-                now_ts=now_ts,
-            )
-            if not changed:
-                done_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=_confirmation_already_processed_text(confirm_id),
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("confirmation_already_processed")
-                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    done_resp,
-                    confirm_id=confirm_id,
-                    status="already_processed",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_chat_response(done_resp)
-
-            deleted = await _delete_pending_confirmation(confirm_id)
-            canceled_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=f"已取消执行。确认编号：{confirm_id}\nCanceled. Confirmation ID: {confirm_id}",
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_canceled")
-            _attach_security_metadata(canceled_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                canceled_resp,
-                confirm_id=confirm_id,
-                status="canceled",
-                reason=reason_text,
-                summary=summary_text,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-            )
-            logger.info(
-                "confirmation pending cache deleted request_id=%s session_id=%s tenant_id=%s confirm_id=%s deleted=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-                deleted,
-            )
-            return to_chat_response(canceled_resp)
-
-        elif decision_value == "yes":
-            # Approval flow disabled — always reject with informational message.
-            logger.info(
-                "confirmation approve rejected (disabled) request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-            )
-            return to_chat_response(
-                InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=(
-                        f"⚠️ [AegisGate] 放行功能已禁用\n---\n"
-                        f"确认编号：{confirm_id}\n"
-                        f"所有危险内容已自动遮挡/分割处理，不支持手动放行。\n"
-                        f"如需查看完整原文，请联系安全管理员。\n\n"
-                        f"⚠️ [AegisGate] Approval Disabled\n---\n"
-                        f"Event ID: {confirm_id}\n"
-                        f"All dangerous content has been auto-redacted/split. Manual approval is not available."
-                    ),
-                )
-            )
-
-    elif decision_value in {"yes", "no"}:
-        if confirm_id_hint:
-            confirmation_bypass_reason = "confirmation_command_no_matching_pending"
-        else:
-            confirmation_bypass_reason = "confirmation_command_without_unique_pending"
-
-    # Skip logging the common no-op passthrough to reduce noise.
-    if confirmation_bypass_reason != "no_explicit_confirmation_command":
-        logger.debug(
-            "confirmation bypass request_id=%s route=%s reason=%s pending_found=%s",
-            req_preview.request_id,
-            req_preview.route,
-            confirmation_bypass_reason,
-            bool(pending),
-        )
-
     if _should_stream(payload):
         return await _execute_chat_stream_once(
             payload=payload,
@@ -7750,186 +6164,6 @@ async def responses(payload: dict, request: Request):
     ctx_preview = preview.ctx
     req_preview = preview.request
     tenant_id = ctx_preview.tenant_id
-
-    now_ts = int(time.time())
-    user_text = _extract_responses_user_text(payload)
-    decision_value, confirm_id_hint = _parse_explicit_confirmation_command(user_text)
-    filter_mode = _filter_mode_from_headers(gateway_headers)
-    pending = None
-    if filter_mode != "passthrough":
-        pending = await run_store_io(
-            _resolve_pending_confirmation,
-            payload,
-            user_text,
-            now_ts,
-            expected_route=req_preview.route,
-            tenant_id=tenant_id,
-        )
-    # Only log confirmation details when there's an actual pending or explicit command.
-    if pending or decision_value not in {"unknown", ""}:
-        logger.debug(
-            "confirmation incoming request_id=%s route=%s decision=%s pending_found=%s",
-            req_preview.request_id,
-            req_preview.route,
-            decision_value,
-            bool(pending),
-        )
-    confirmation_bypass_reason = "no_explicit_confirmation_command"
-
-    if pending:
-        pending_route = str(pending.get("route", ""))
-        confirm_id = str(pending["confirm_id"])
-        expected_action_token = _pending_action_bind_token(pending)
-        decision_value, decision_source = _extract_decision_by_bound_token(
-            user_text,
-            confirm_id,
-            expected_action_token,
-        )
-        reason_text = str(pending.get("reason", "高风险响应"))
-        summary_text = str(pending.get("summary", "检测到高风险信号"))
-        provided_action_token = str(
-            pending.get("_aegisgate_bind_action_token")
-            or _extract_action_token(user_text)
-        )
-        logger.info(
-            "confirmation pending matched request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s pending_route=%s decision=%s source=%s action_token_provided=%s",
-            req_preview.request_id,
-            req_preview.session_id,
-            tenant_id,
-            req_preview.route,
-            confirm_id,
-            pending_route,
-            decision_value,
-            decision_source,
-            bool(provided_action_token),
-        )
-        invalid_reason = ""
-        if pending_route != req_preview.route:
-            invalid_reason = "route_mismatch"
-        elif decision_value not in {"yes", "no"}:
-            invalid_reason = f"unsupported_decision_{decision_value}"
-        if invalid_reason:
-            confirmation_bypass_reason = f"pending_retained_{invalid_reason}"
-            logger.info(
-                "confirmation command not executable request_id=%s session_id=%s tenant_id=%s route=%s confirm_id=%s decision=%s source=%s invalid_reason=%s action_token_provided=%s action_token_match=%s forward_as_new_request=true pending_retained=true explicit_keyword=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                req_preview.route,
-                confirm_id,
-                decision_value,
-                decision_source,
-                invalid_reason,
-                bool(provided_action_token),
-                bool(
-                    provided_action_token
-                    and provided_action_token == expected_action_token
-                ),
-                _has_explicit_confirmation_keyword(user_text),
-            )
-        elif decision_value == "no":
-            changed = await _try_transition_pending_status(
-                confirm_id=confirm_id,
-                expected_status="pending",
-                new_status="canceled",
-                now_ts=now_ts,
-            )
-            if not changed:
-                done_resp = InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=_confirmation_already_processed_text(confirm_id),
-                )
-                ctx_preview.response_disposition = "block"
-                ctx_preview.disposition_reasons.append("confirmation_already_processed")
-                _attach_security_metadata(done_resp, ctx_preview, boundary=boundary)
-                _attach_confirmation_metadata(
-                    done_resp,
-                    confirm_id=confirm_id,
-                    status="already_processed",
-                    reason=reason_text,
-                    summary=summary_text,
-                )
-                _write_audit_event(ctx_preview, boundary=boundary)
-                return to_responses_output(done_resp)
-
-            deleted = await _delete_pending_confirmation(confirm_id)
-            canceled_resp = InternalResponse(
-                request_id=req_preview.request_id,
-                session_id=req_preview.session_id,
-                model=req_preview.model,
-                output_text=f"已取消执行。确认编号：{confirm_id}\nCanceled. Confirmation ID: {confirm_id}",
-            )
-            ctx_preview.response_disposition = "block"
-            ctx_preview.disposition_reasons.append("confirmation_canceled")
-            _attach_security_metadata(canceled_resp, ctx_preview, boundary=boundary)
-            _attach_confirmation_metadata(
-                canceled_resp,
-                confirm_id=confirm_id,
-                status="canceled",
-                reason=reason_text,
-                summary=summary_text,
-            )
-            _write_audit_event(ctx_preview, boundary=boundary)
-            logger.info(
-                "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-            )
-            logger.info(
-                "confirmation pending cache deleted request_id=%s session_id=%s tenant_id=%s confirm_id=%s deleted=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-                deleted,
-            )
-            return to_responses_output(canceled_resp)
-
-        elif decision_value == "yes":
-            # Approval flow disabled — always reject with informational message.
-            logger.info(
-                "confirmation approve rejected (disabled) request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
-                req_preview.request_id,
-                req_preview.session_id,
-                tenant_id,
-                confirm_id,
-            )
-            return to_responses_output(
-                InternalResponse(
-                    request_id=req_preview.request_id,
-                    session_id=req_preview.session_id,
-                    model=req_preview.model,
-                    output_text=(
-                        f"⚠️ [AegisGate] 放行功能已禁用\n---\n"
-                        f"确认编号：{confirm_id}\n"
-                        f"所有危险内容已自动遮挡/分割处理，不支持手动放行。\n"
-                        f"如需查看完整原文，请联系安全管理员。\n\n"
-                        f"⚠️ [AegisGate] Approval Disabled\n---\n"
-                        f"Event ID: {confirm_id}\n"
-                        f"All dangerous content has been auto-redacted/split. Manual approval is not available."
-                    ),
-                )
-            )
-
-    elif decision_value in {"yes", "no"}:
-        if confirm_id_hint:
-            confirmation_bypass_reason = "confirmation_command_no_matching_pending"
-        else:
-            confirmation_bypass_reason = "confirmation_command_without_unique_pending"
-
-    # Skip logging the common no-op passthrough to reduce noise.
-    if confirmation_bypass_reason != "no_explicit_confirmation_command":
-        logger.debug(
-            "confirmation bypass request_id=%s route=%s reason=%s pending_found=%s",
-            req_preview.request_id,
-            req_preview.route,
-            confirmation_bypass_reason,
-            bool(pending),
-        )
 
     if _should_stream(payload):
         return await _execute_responses_stream_once(

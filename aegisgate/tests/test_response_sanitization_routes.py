@@ -72,9 +72,6 @@ def _install_response_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[dict[
     async def _noop_semantic_review(*args, **kwargs):
         return None
 
-    async def _noop_store_io(*args, **kwargs):
-        return None
-
     def _record_audit(ctx, boundary=None) -> None:
         audit_calls.append(
             {
@@ -95,7 +92,6 @@ def _install_response_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[dict[
     monkeypatch.setattr(openai_router, "_run_payload_transform", _inline_payload_transform)
     monkeypatch.setattr(openai_router, "_run_request_pipeline", _identity_request_pipeline)
     monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
-    monkeypatch.setattr(openai_router, "run_store_io", _noop_store_io)
     monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
     monkeypatch.setattr(openai_router, "info_log_sanitized", lambda *args, **kwargs: None)
     monkeypatch.setattr(openai_router, "_maybe_log_dangerous_response_sample", lambda *args, **kwargs: None)

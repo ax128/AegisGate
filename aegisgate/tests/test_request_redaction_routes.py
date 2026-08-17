@@ -35,9 +35,6 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     async def _noop_semantic_review(*args, **kwargs):
         return None
 
-    async def _noop_store_io(*args, **kwargs):
-        return None
-
     monkeypatch.setattr(openai_router.policy_engine, "resolve", _seed_policy)
 
     async def _fake_resolve(headers):
@@ -59,7 +56,6 @@ def _install_route_mocks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         openai_router, "_run_response_pipeline", _identity_response_pipeline
     )
     monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
-    monkeypatch.setattr(openai_router, "run_store_io", _noop_store_io)
     monkeypatch.setattr(
         openai_router, "debug_log_original", lambda *args, **kwargs: None
     )
