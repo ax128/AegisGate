@@ -78,7 +78,13 @@ class RestorationFilter(BaseFilter):
         mapping = dict(ctx.redaction_mapping)
 
         # One-time consume prevents stale mappings from being applied in future requests.
-        consumed = self.store.consume_mapping(ctx.session_id, ctx.request_id)
+        # The streaming path re-runs the response pipeline once per probe (every few
+        # deltas) against the same context; since the consume reads and deletes, every
+        # repeat can only ever return an empty mapping. Do the round-trip once.
+        consumed: dict[str, str] = {}
+        if not ctx.restoration_store_consumed:
+            ctx.restoration_store_consumed = True
+            consumed = self.store.consume_mapping(ctx.session_id, ctx.request_id)
         if not mapping:
             mapping = consumed
 
