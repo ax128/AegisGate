@@ -295,13 +295,19 @@ def _sanitize_text_for_upstream_with_hits(
     normalized_field = str(field or "").strip().lower()
     if normalized_field and normalized_field in whitelist:
         return cleaned, []
-    for pattern_id, pattern in patterns:
-        protected_spans = protected_spans_for_text(cleaned, whitelist)
+    def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
         marker_spans = [
             (match.start(), match.end())
-            for match in _REDACTED_MARKER_RE.finditer(cleaned)
+            for match in _REDACTED_MARKER_RE.finditer(text)
         ]
-        protected_spans = _merge_spans(protected_spans + marker_spans)
+        return _merge_spans(protected_spans_for_text(text, whitelist) + marker_spans)
+
+    # Spans only move when a substitution actually rewrites `cleaned`, so compute
+    # them once and refresh after a pattern that changed the text. Recomputing per
+    # pattern re-scanned the same string once for every PII pattern (11+ by default)
+    # on every string node of every message.
+    protected_spans = _compute_protected_spans(cleaned)
+    for pattern_id, pattern in patterns:
         match_count = 0
         first_raw = ""
 
@@ -321,6 +327,7 @@ def _sanitize_text_for_upstream_with_hits(
         cleaned = pattern.sub(_repl, cleaned)
         if match_count <= 0:
             continue
+        protected_spans = _compute_protected_spans(cleaned)
         hits.append(
             {
                 "path": path,
