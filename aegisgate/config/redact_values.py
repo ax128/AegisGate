@@ -8,6 +8,7 @@ list and refreshes automatically when the file's mtime changes.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 from collections.abc import Iterable
@@ -24,12 +25,29 @@ _cached_values: list[str] | None = None
 _cached_mtime_ns: int = 0
 
 
+_cached_path: tuple[tuple[str, str], Path] | None = None
+
+
 def _config_path() -> Path:
-    import os
+    """Resolve the values file, memoised on ``(AEGIS_CONFIG_DIR, cwd)``.
+
+    ``Path.resolve()`` walks the whole realpath chain, and this runs on the
+    per-response hot path via :func:`load_redact_values`. Keying the cache on
+    the env var and cwd keeps it reactive to both (tests change either one).
+    Stored as a single tuple so concurrent readers never see a key/path pair
+    from two different snapshots.
+    """
+    global _cached_path
 
     env = os.environ.get("AEGIS_CONFIG_DIR", "").strip()
+    key = (env, "" if env else str(Path.cwd()))
+    cached = _cached_path
+    if cached is not None and cached[0] == key:
+        return cached[1]
     base = Path(env).resolve() if env else (Path.cwd() / "config").resolve()
-    return base / "redact_values.enc.json"
+    path = base / "redact_values.enc.json"
+    _cached_path = (key, path)
+    return path
 
 
 def load_redact_values() -> list[str]:

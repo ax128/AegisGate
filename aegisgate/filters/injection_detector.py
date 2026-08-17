@@ -11,6 +11,7 @@ import re
 import string
 import unicodedata
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Any, TypedDict
 from urllib.parse import unquote
 
@@ -58,6 +59,18 @@ def _extract_match_context(text: str, match: re.Match, context_chars: int = 20) 
     return _deform_text(excerpt)
 
 
+@lru_cache(maxsize=8192)
+def _script_prefix(char: str) -> str:
+    """First token of a character's Unicode name (``LATIN``, ``CYRILLIC``, …).
+
+    Returns ``""`` for characters with no name. Memoised because the response
+    scanner re-walks the same window on every streaming probe while real text
+    draws from a very small set of code points.
+    """
+    name = unicodedata.name(char, "")
+    return name.split()[0] if name else ""
+
+
 def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
     """Detect words that mix characters from multiple non-Latin alphabetic scripts."""
     hits: list[str] = []
@@ -68,13 +81,9 @@ def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
         for ch in word:
             if not ch.isalpha():
                 continue
-            try:
-                name = unicodedata.name(ch, "")
-            except ValueError:
+            script_prefix = _script_prefix(ch)
+            if not script_prefix:
                 continue
-            if not name:
-                continue
-            script_prefix = name.split()[0]
             if script_prefix not in _BENIGN_SCRIPT_PREFIXES:
                 exotic_scripts.add(script_prefix)
         if len(exotic_scripts) >= min_scripts:
@@ -94,13 +103,9 @@ def _detect_message_script_diversity(text: str) -> set[str]:
     for ch in text:
         if not ch.isalpha():
             continue
-        try:
-            name = unicodedata.name(ch, "")
-        except ValueError:
+        script_prefix = _script_prefix(ch)
+        if not script_prefix:
             continue
-        if not name:
-            continue
-        script_prefix = name.split()[0]
         if script_prefix not in _COMMON_SCRIPT_PREFIXES:
             exotic_scripts.add(script_prefix)
     return exotic_scripts
