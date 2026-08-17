@@ -1,17 +1,14 @@
 """
-风险可控 / 高风险确认放行 统一框架。
+拦截原因码 / 简述 的统一映射。
 
-所有「需用户确认后放行」的拦截（请求侧/响应侧）均经此模块格式化：
-- 统一原因码与描述（问题原因、简述）
-- 统一确认文案与元数据结构
-- 调用方负责：落库 pending、返回响应；本模块只提供文案与结构。
+所有安全拦截（请求侧/响应侧）均经此模块把内部原因码翻译成统一的
+「问题原因 + 简述」文案，供审计与响应渲染复用。
+
+注：yes/no 确认放行流程已移除，危险内容一律自动遮挡或分割，本模块
+不再提供确认文案与元数据结构。
 """
 
 from __future__ import annotations
-
-from typing import Any
-
-from aegisgate.core.confirmation import confirmation_template
 
 # 阶段：request = 请求侧拦截，response = 响应侧拦截
 PHASE_REQUEST = "request"
@@ -85,10 +82,6 @@ REASON_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "响应内容已触发安全清洗",
         "触发信号：response_sanitized",
     ),
-    "awaiting_user_confirmation": (
-        "等待用户确认",
-        "需用户确认后放行",
-    ),
 }
 
 
@@ -115,46 +108,3 @@ def get_reason_and_summary(
     else:
         summary = summary_prefix
     return reason_text, summary
-
-
-def build_confirmation_message(
-    confirm_id: str,
-    reason: str,
-    summary: str,
-    phase: str = PHASE_RESPONSE,
-    note: str = "",
-    action_token: str = "",
-) -> str:
-    """
-    生成统一的安全确认文案（中英双语）。
-    phase 仅用于可选差异化，目前共用同一模板。
-    """
-    base = confirmation_template(confirm_id=confirm_id, reason=reason, summary=summary, action_token=action_token)
-    if note:
-        return f"{note}\n\n{base}"
-    return base
-
-
-def build_confirmation_metadata(
-    confirm_id: str,
-    status: str,
-    reason: str,
-    summary: str,
-    phase: str = PHASE_RESPONSE,
-    payload_omitted: bool = False,
-    action_token: str = "",
-) -> dict[str, Any]:
-    """
-    生成响应中 aegisgate.confirmation 的统一结构。
-    便于客户端解析：问题原因、描述、是否需确认、confirm_id、阶段等。
-    """
-    return {
-        "required": status == "pending",
-        "confirm_id": confirm_id,
-        "status": status,
-        "reason": reason,
-        "summary": summary,
-        "phase": phase,
-        "payload_omitted": payload_omitted,
-        "action_token": action_token,
-    }
