@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
@@ -579,6 +581,30 @@ _CACHE_PATH = ""
 _CACHE_MTIME_NS = -1
 _CACHE_RULES: dict[str, Any] | None = None
 
+# Credential-only default for the low-false-positive surfaces (the /v1 chat,
+# responses and messages routes, plus the relaxed responses-API roles). Kept as
+# the fallback so deployments that never set redaction.relaxed_pii_ids behave
+# exactly as before.
+_DEFAULT_RELAXED_PII_IDS = frozenset(
+    {
+        "TOKEN",
+        "JWT",
+        "URL_TOKEN_QUERY",
+        "PRIVATE_KEY_PEM",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "SLACK_TOKEN",
+        "EXCHANGE_API_SECRET",
+        "CRYPTO_WIF_KEY",
+        "CRYPTO_XPRV",
+        "CRYPTO_SEED_PHRASE",
+    }
+)
+_RELAXED_PII_ALL = "*"
+# Config mistakes are logged once per distinct value, not per pipeline rebuild.
+_WARNED_RELAXED_PII_CONFIG: set[tuple[str, ...]] = set()
+
 
 def _resolve_rules_file(path: str) -> Path:
     candidate = Path(path)
@@ -633,3 +659,88 @@ def load_security_rules(path: str | None = None) -> dict[str, Any]:
         _CACHE_MTIME_NS = mtime_ns
         _CACHE_RULES = rules
         return deepcopy(rules)
+
+
+def _warn_relaxed_pii_config_once(key: tuple[str, ...], message: str, *args: Any) -> None:
+    if key in _WARNED_RELAXED_PII_CONFIG:
+        return
+    _WARNED_RELAXED_PII_CONFIG.add(key)
+    logger.warning(message, *args)
+
+
+def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
+    """Every pattern id the redaction config can produce, across both call sites.
+
+    The request filter compiles only ``pii_patterns`` while the responses-API
+    sanitizer also compiles ``field_value_patterns``, so validation has to look
+    at the config rather than at one caller's compiled list.
+    """
+    ids: set[str] = set()
+    for item in rules.get("pii_patterns", []) or []:
+        if isinstance(item, dict) and item.get("regex"):
+            ids.add(str(item.get("id", "PII")).upper())
+    field_patterns = rules.get("field_value_patterns", []) or []
+    if field_patterns:
+        for idx, item in enumerate(field_patterns, start=1):
+            if isinstance(item, dict):
+                if item.get("regex"):
+                    ids.add(str(item.get("id", f"FIELD_SECRET_{idx}")).upper())
+            elif item:
+                ids.add(f"FIELD_SECRET_{idx}")
+    else:
+        ids.update({"FIELD_SECRET", "AUTH_BEARER"})
+    return ids
+
+
+def _relaxed_pii_ids(rules: dict[str, Any]) -> tuple[frozenset[str] | None, bool]:
+    """Resolve redaction.relaxed_pii_ids.
+
+    Returns ``(ids, explicit)`` where ``ids`` is None when every configured
+    pattern should stay active (``relaxed_pii_ids: ["*"]``) and ``explicit``
+    tells whether the value came from the config file rather than the built-in
+    default.
+    """
+    raw = rules.get("relaxed_pii_ids")
+    if raw is None:
+        return _DEFAULT_RELAXED_PII_IDS, False
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        _warn_relaxed_pii_config_once(
+            ("<invalid-type>", type(raw).__name__),
+            "redaction.relaxed_pii_ids must be a list of pattern ids, falling back to defaults (got %s)",
+            type(raw).__name__,
+        )
+        return _DEFAULT_RELAXED_PII_IDS, False
+    ids = {str(item).strip().upper() for item in raw if str(item).strip()}
+    if _RELAXED_PII_ALL in ids:
+        return None, True
+    if not ids:
+        _warn_relaxed_pii_config_once(
+            ("<empty>",),
+            "redaction.relaxed_pii_ids is empty — PII redaction is disabled on low-false-positive routes",
+        )
+    return frozenset(ids), True
+
+
+def select_relaxed_pii_patterns(
+    patterns: Sequence[tuple[str, re.Pattern[str]]],
+    *,
+    redaction_rules: dict[str, Any] | None = None,
+) -> list[tuple[str, re.Pattern[str]]]:
+    """Filter compiled patterns down to the ids allowed on relaxed surfaces."""
+    rules = redaction_rules if isinstance(redaction_rules, dict) else load_security_rules().get("redaction", {})
+    if not isinstance(rules, dict):
+        rules = {}
+    selected_ids, explicit = _relaxed_pii_ids(rules)
+    if selected_ids is None:
+        return list(patterns)
+    if explicit:
+        unknown = tuple(sorted(selected_ids - _configured_redaction_pattern_ids(rules)))
+        if unknown:
+            _warn_relaxed_pii_config_once(
+                unknown,
+                "redaction.relaxed_pii_ids references unknown pattern id(s)=%s — no matching redaction.pii_patterns entry",
+                ",".join(unknown),
+            )
+    return [(pattern_id, pattern) for pattern_id, pattern in patterns if pattern_id in selected_ids]
