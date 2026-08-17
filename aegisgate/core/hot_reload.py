@@ -283,12 +283,14 @@ def _clear_openai_lru_caches() -> None:
             _responses_relaxed_redaction_patterns,
             _confirmation_hit_regex_patterns,
             _critical_danger_patterns,
+            _tool_call_guard_patterns,
         )
 
         _responses_function_output_redaction_patterns.cache_clear()
         _responses_relaxed_redaction_patterns.cache_clear()
         _confirmation_hit_regex_patterns.cache_clear()
         _critical_danger_patterns.cache_clear()
+        _tool_call_guard_patterns.cache_clear()
     except Exception:
         logger.exception("hot_reload openai lru cache clear failed")
 
