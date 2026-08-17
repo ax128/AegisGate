@@ -179,7 +179,7 @@ class RedisKVStore(KVStore):
         return removed
 
     def clear_all_pending_confirmations(self) -> int:
-        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        """Clear every pending-confirmation record at startup; after a restart only confirmations for new requests count."""
         retention_idx = self._pending_retention_key()
         all_ids = self.client.zrange(retention_idx, 0, -1)
         if not all_ids:

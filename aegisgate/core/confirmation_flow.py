@@ -1,22 +1,23 @@
 """
-拦截原因码 / 简述 的统一映射。
+Unified mapping from block reason code to description and summary.
 
-所有安全拦截（请求侧/响应侧）均经此模块把内部原因码翻译成统一的
-「问题原因 + 简述」文案，供审计与响应渲染复用。
+Every security block (request side or response side) goes through this module, which translates the
+internal reason code into a consistent "problem reason + summary" text that auditing and response
+rendering both reuse.
 
-注：yes/no 确认放行流程已移除，危险内容一律自动遮挡或分割，本模块
-不再提供确认文案与元数据结构。
+Note: the yes/no approval flow is gone. Dangerous content is always masked or split automatically,
+so this module no longer provides confirmation copy or its metadata structures.
 """
 
 from __future__ import annotations
 
-# 阶段：request = 请求侧拦截，response = 响应侧拦截
+# Phase: request = request-side block, response = response-side block
 PHASE_REQUEST = "request"
 PHASE_RESPONSE = "response"
 
-# reason_key -> (问题原因描述, 简述前缀/模板)
+# reason_key -> (problem description, summary prefix/template)
 REASON_DESCRIPTIONS: dict[str, tuple[str, str]] = {
-    # 请求侧
+    # request side
     "request_secret_exfiltration": (
         "请求疑似包含敏感信息外泄意图（如泄露 prompt、密钥、内部信息）",
         "触发信号：request_secret_exfiltration",
@@ -45,7 +46,7 @@ REASON_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "请求被安全策略拦截",
         "触发信号：request_blocked",
     ),
-    # 响应侧
+    # response side
     "response_high_risk": (
         "高风险响应",
         "检测到高风险指令/投毒信号",
@@ -91,7 +92,7 @@ def get_reason_and_summary(
     security_tags: set[str],
 ) -> tuple[str, str]:
     """
-    根据阶段与上下文得到统一的问题原因与简述。
+    Derive the unified problem reason and summary from the phase and context.
     phase: PHASE_REQUEST | PHASE_RESPONSE
     """
     reason_key = disposition_reasons[0] if disposition_reasons else (

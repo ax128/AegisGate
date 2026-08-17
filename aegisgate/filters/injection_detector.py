@@ -34,7 +34,7 @@ _BENIGN_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAK
 # For message-level script diversity: scripts that are expected in normal text.
 _COMMON_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL", "FULLWIDTH"})
 
-# 每 3 个字符插入 "-" 以变形展示，防止日志本身被利用
+# Insert "-" every 3 characters to deform the excerpt, so the log itself cannot be abused
 _DEFORM_CHUNK_SIZE = 3
 
 
@@ -47,12 +47,12 @@ class ScanDiagnostics(TypedDict):
 
 
 def _deform_text(text: str) -> str:
-    """每 3 个字符插入 '-'，用于安全日志展示。"""
+    """Insert '-' every 3 characters, for safe display in logs."""
     return "-".join(text[i:i + _DEFORM_CHUNK_SIZE] for i in range(0, len(text), _DEFORM_CHUNK_SIZE))
 
 
 def _extract_match_context(text: str, match: re.Match, context_chars: int = 20) -> str:
-    """提取匹配片段及前后 N 个字符，并变形展示。"""
+    """Extract the matched fragment plus N characters of surrounding context, deformed for display."""
     start = max(0, match.start() - context_chars)
     end = min(len(text), match.end() + context_chars)
     excerpt = text[start:end]

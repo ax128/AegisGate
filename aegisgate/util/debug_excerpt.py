@@ -1,12 +1,14 @@
 """
-日志摘要工具：拦截/脱敏/block 处记录内容时统一截断，只展示重要部分。
+Log excerpt helpers: truncate uniformly wherever block/redaction/sanitize paths log content, so
+only the important part is shown.
 
-- debug_log_original: DEBUG 级别，记录原文摘要
-- info_log_sanitized: INFO 级别，记录处理后（遮挡/分割）的内容摘要
+- debug_log_original: DEBUG level, logs an excerpt of the original text
+- info_log_sanitized: INFO level, logs an excerpt of the processed (masked/split) content
 
-环境变量（可选）：
-- AEGIS_DEBUG_EXCERPT_MAX_LEN: 覆盖默认截断长度。仅接受正整数；
-  非法值、0 或负数都会回退到调用方默认值，避免误输出完整原文。
+Environment variables (optional):
+- AEGIS_DEBUG_EXCERPT_MAX_LEN: override the default truncation length. Only positive integers are
+  accepted; invalid values, 0, and negatives fall back to the caller's default, so the full
+  original text is never logged by accident.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import os
 
 from aegisgate.util.logger import logger
 
-# 除「收到转发请求」外，其余原文展示最大长度（字符）
+# Maximum length (characters) for showing original text, except for the "forward request received" log
 DEFAULT_EXCERPT_MAX_LEN = 500
 
 
@@ -35,8 +37,8 @@ def _resolve_max_len(default: int) -> int:
 
 def excerpt_for_debug(text: str, max_len: int = DEFAULT_EXCERPT_MAX_LEN) -> str:
     """
-    将原文截断为可读摘要，便于 DEBUG 日志。不修改原字符串。
-    max_len <= 0 表示不截断，返回全文。
+    Truncate the original text into a readable excerpt for DEBUG logs. The input string is not
+    modified. max_len <= 0 means no truncation and returns the full text.
     """
     if not text:
         return ""
@@ -54,10 +56,10 @@ def debug_log_original(
     max_len: int = DEFAULT_EXCERPT_MAX_LEN,
 ) -> None:
     """
-    仅当 DEBUG 开启时，打一条「原文」摘要日志。
-    label: 如 "request_blocked", "response_sanitized"
-    original_text: 原文内容（会被截断；环境变量不能关闭截断）
-    reason: 可选，拦截/处理原因
+    Log an excerpt of the original text, only when DEBUG is enabled.
+    label: e.g. "request_blocked", "response_sanitized"
+    original_text: the original content (always truncated; the env var cannot disable truncation)
+    reason: optional block/processing reason
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return
@@ -76,7 +78,7 @@ def debug_log_original(
         )
 
 
-# 处理后内容日志默认截断长度（比原文短，因为已遮挡过的内容更安全）
+# Default truncation length for processed content (shorter than the original, since masked content is safer)
 DEFAULT_SANITIZED_EXCERPT_MAX_LEN = 800
 
 
@@ -89,8 +91,8 @@ def info_log_sanitized(
     max_len: int = DEFAULT_SANITIZED_EXCERPT_MAX_LEN,
 ) -> None:
     """
-    INFO 级别日志：记录处理后（遮挡/分割）的内容摘要。
-    用于审计追踪，确认网关确实对危险内容进行了处理。
+    INFO-level log: record an excerpt of the processed (masked/split) content.
+    Used for audit trails, to confirm the gateway really did act on the dangerous content.
     """
     if not logger.isEnabledFor(logging.INFO):
         return

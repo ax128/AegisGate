@@ -310,7 +310,7 @@ def to_responses_output(resp: InternalResponse) -> dict:
 # Anthropic Messages <-> OpenAI Chat payload-level conversion
 # ---------------------------------------------------------------------------
 
-# compat=openai_chat 时允许的目标模型白名单
+# Allowed target models when compat=openai_chat
 COMPAT_ALLOWED_MODELS = frozenset({
     "gpt-5",
     "gpt-5.2",
@@ -321,20 +321,21 @@ COMPAT_ALLOWED_MODELS = frozenset({
 })
 COMPAT_DEFAULT_MODEL = "gpt-5.4"
 
-# 全局模型映射（从 config/model_map.json 加载）
+# Global model map (loaded from config/model_map.json)
 _global_model_map: dict[str, str] = {}
-# compat 目标模型白名单的可配置扩展（model_map.json 的 allowed_models）。与内置
-# COMPAT_ALLOWED_MODELS 取并集——内置集合为下限，配置只增不减，不能被配空。
+# Configurable extension of the compat target-model allowlist (allowed_models in model_map.json).
+# It is unioned with the built-in COMPAT_ALLOWED_MODELS: the built-in set is the lower bound, so
+# configuration can only add, never remove, and cannot empty the list.
 _configured_allowed_models: frozenset[str] = frozenset()
 
 
 def _effective_allowed_models() -> frozenset[str]:
-    """内置白名单(下限) ∪ 配置扩展。"""
+    """Built-in allowlist (lower bound) ∪ configured extension."""
     return COMPAT_ALLOWED_MODELS | _configured_allowed_models
 
 
 def load_global_model_map() -> None:
-    """从 config/model_map.json 加载全局模型映射与白名单扩展。启动和热重载时调用。"""
+    """Load the global model map and allowlist extension from config/model_map.json. Called at startup and on hot reload."""
     global _global_model_map, _configured_allowed_models
     p = settings.compat_model_map_path
     path = Path(p) if os.path.isabs(p) else Path.cwd() / p
@@ -365,7 +366,7 @@ def load_global_model_map() -> None:
 
 
 def get_global_model_map() -> dict[str, str]:
-    """返回当前全局模型映射（只读引用）。"""
+    """Return the current global model map (read-only reference)."""
     return _global_model_map
 
 

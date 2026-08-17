@@ -1,6 +1,6 @@
 """
-请求统计收集器：线程安全的内存计数，按小时分桶，保留 7 天。
-数据持久化到 config/stats.json，重启后自动恢复。
+Request statistics collector: thread-safe in-memory counters, bucketed by hour, retained 7 days.
+Data is persisted to config/stats.json and restored automatically after a restart.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.util.logger import logger
 
 _RETENTION_HOURS = 168  # 7 days
-_PERSIST_INTERVAL = 30  # 每 30 次 record 写一次磁盘
+_PERSIST_INTERVAL = 30  # flush to disk every 30 records
 _STATS_FILE = (Path.cwd() / "config" / "stats.json").resolve()
 _STATS_FALLBACK = (Path.cwd() / ".cache" / "aegisgate" / "stats.json").resolve()
 
@@ -46,11 +46,11 @@ def _date_key(hour_key: str) -> str:
 
 
 def _resolve_stats_path() -> Path:
-    """返回可写的持久化路径，优先 config/stats.json，不可写时 fallback。"""
+    """Return a writable persistence path, preferring config/stats.json and falling back when it is not writable."""
     for idx, candidate in enumerate((_STATS_FILE, _STATS_FALLBACK)):
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
-            # 测试可写
+            # probe writability
             test_path = candidate.parent / ".stats_write_test"
             test_path.write_text("ok", encoding="utf-8")
             test_path.unlink(missing_ok=True)
@@ -62,11 +62,11 @@ def _resolve_stats_path() -> Path:
             return candidate
         except OSError:
             continue
-    return _STATS_FILE  # 返回默认，写入时会静默失败
+    return _STATS_FILE  # return the default; writes will fail silently
 
 
 class StatsCollector:
-    """线程安全的请求统计收集器，支持持久化。"""
+    """Thread-safe request statistics collector with persistence."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -82,7 +82,7 @@ class StatsCollector:
         self._load()
 
     def _load(self) -> None:
-        """启动时从磁盘加载持久化数据。"""
+        """Load persisted data from disk at startup."""
         for candidate in (self._persist_path, _STATS_FILE, _STATS_FALLBACK):
             if not candidate.is_file():
                 continue
@@ -90,13 +90,13 @@ class StatsCollector:
                 raw = json.loads(candidate.read_text(encoding="utf-8"))
                 if not isinstance(raw, dict):
                     continue
-                # 恢复 totals
+                # restore totals
                 saved_totals = raw.get("totals")
                 if isinstance(saved_totals, dict):
                     for key in _EMPTY_BUCKET:
                         if key in saved_totals and isinstance(saved_totals[key], (int, float)):
                             self._totals[key] = int(saved_totals[key])
-                # 恢复 hourly
+                # restore hourly
                 saved_hourly = raw.get("hourly")
                 if isinstance(saved_hourly, dict):
                     for hour_key, bucket in saved_hourly.items():
@@ -107,7 +107,7 @@ class StatsCollector:
                             if field in bucket and isinstance(bucket[field], (int, float)):
                                 restored[field] = int(bucket[field])
                         self._hourly[str(hour_key)] = restored
-                # 恢复 since
+                # restore since
                 saved_since = raw.get("since")
                 if isinstance(saved_since, str) and saved_since:
                     self._since = saved_since
@@ -137,7 +137,7 @@ class StatsCollector:
         }
 
     def _save_payload(self, data: dict[str, Any]) -> None:
-        """将当前数据写入磁盘（原子写入）。"""
+        """Write the current data to disk (atomic write)."""
         path = self._persist_path
         tmp_path: Path | None = None
         try:
@@ -204,7 +204,7 @@ class StatsCollector:
             self._save_payload(data)
 
     def record(self, ctx: RequestContext) -> None:
-        """从已完成的请求上下文中提取计数并累加。"""
+        """Extract counters from a finished request context and accumulate them."""
         redactions = 0
         dangerous = 0
         for item in ctx.report_items:
@@ -245,15 +245,15 @@ class StatsCollector:
             self._persist_async(persist_payload)
 
     def snapshot(self) -> dict[str, Any]:
-        """返回当前统计快照。"""
+        """Return a snapshot of the current statistics."""
         with self._lock:
             totals = dict(self._totals)
             hourly_raw = {k: dict(v) for k, v in sorted(self._hourly.items())}
 
-        # 按小时
+        # per hour
         hourly = [{"hour": k, **v} for k, v in hourly_raw.items()]
 
-        # 按天汇总
+        # aggregated per day
         daily_agg: dict[str, dict[str, int]] = defaultdict(lambda: dict(_EMPTY_BUCKET))
         for k, v in hourly_raw.items():
             day = _date_key(k)
@@ -269,13 +269,13 @@ class StatsCollector:
         }
 
     def clear(self) -> None:
-        """清除所有统计数据并删除持久化文件。"""
+        """Clear all statistics and delete the persistence files."""
         with self._lock:
             self._totals = dict(_EMPTY_BUCKET)
             self._hourly = defaultdict(lambda: dict(_EMPTY_BUCKET))
             self._since = datetime.now(timezone.utc).isoformat()
             self._record_count = 0
-        # 删除持久化文件
+        # delete the persistence files
         for path in (self._persist_path, _STATS_FILE, _STATS_FALLBACK):
             try:
                 if path.is_file():
@@ -285,7 +285,7 @@ class StatsCollector:
         logger.info("stats cleared")
 
     def flush(self) -> None:
-        """强制写盘（用于优雅关闭）。"""
+        """Force a flush to disk (used during graceful shutdown)."""
         self._ensure_persist_runtime()
         self._persist_queue.join()
         with self._lock:
@@ -303,7 +303,7 @@ class StatsCollector:
         )
 
     def _prune(self) -> None:
-        """删除超过 7 天的小时桶（需在锁内调用）。"""
+        """Drop hourly buckets older than 7 days (must be called while holding the lock)."""
         cutoff = _hour_key(datetime.now(timezone.utc) - timedelta(hours=_RETENTION_HOURS))
         stale = [k for k in self._hourly if k < cutoff]
         for k in stale:
@@ -318,26 +318,26 @@ def _resolve_action(ctx: RequestContext) -> str:
     return "allow"
 
 
-# ── 模块级单例 ──
+# ── module-level singleton ──
 
 _collector = StatsCollector()
 
 
 def record(ctx: RequestContext) -> None:
-    """记录一次请求的统计数据。"""
+    """Record the statistics for one request."""
     _collector.record(ctx)
 
 
 def snapshot() -> dict[str, Any]:
-    """获取当前统计快照。"""
+    """Get a snapshot of the current statistics."""
     return _collector.snapshot()
 
 
 def clear() -> None:
-    """清除所有统计数据和持久化文件。"""
+    """Clear all statistics and the persistence files."""
     _collector.clear()
 
 
 def flush() -> None:
-    """强制将统计数据写入磁盘。"""
+    """Force the statistics to be written to disk."""
     _collector.flush()

@@ -1,64 +1,65 @@
-"""Chat Completions <-> Responses API payload 兼容层。
+"""Chat Completions <-> Responses API payload compatibility layer.
 
-集中管理两种 API 格式之间的参数差异，在构建上游 payload 前
-剥离目标 API 不支持的字段、重命名参数、转换内容类型。
+Centralises the parameter differences between the two API formats: before the upstream payload is
+built, it strips fields the target API does not accept, renames parameters, and converts content
+types.
 
-参考: https://github.com/teabranch/open-responses-server
-参考: https://github.com/openai/completions-responses-migration-pack
+Reference: https://github.com/teabranch/open-responses-server
+Reference: https://github.com/openai/completions-responses-migration-pack
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# ─── Chat Completions 专有字段（Responses API 不接受） ──────────────
+# ─── Chat Completions-only fields (rejected by the Responses API) ──────────────
 _CHAT_ONLY_KEYS: frozenset[str] = frozenset({
-    # 流式控制
+    # streaming control
     "stream_options",
-    # token 概率
+    # token probabilities
     "logprobs",
     "top_logprobs",
     "logit_bias",
-    # 消息体系
+    # message model
     "messages",
-    # 旧版 function calling
+    # legacy function calling
     "functions",
     "function_call",
-    # 响应格式（Chat 为顶层 string/object，Responses 为 text.format）
+    # response format (top-level string/object in Chat, text.format in Responses)
     "response_format",
-    # Chat 专有命名
+    # Chat-specific naming
     "max_tokens",
     "max_completion_tokens",
-    # 其他 Chat 专有
+    # other Chat-only fields
     "n",
     "seed",
     "service_tier",
     "suffix",
 })
 
-# ─── Responses API 专有字段（Chat Completions 不接受） ─────────────
+# ─── Responses API-only fields (rejected by Chat Completions) ─────────────
 _RESPONSES_ONLY_KEYS: frozenset[str] = frozenset({
-    # 输入体系
+    # input model
     "input",
     "instructions",
-    # Responses 专有命名
+    # Responses-specific naming
     "max_output_tokens",
-    # 上下文管理
+    # context management
     "previous_response_id",
     "truncation",
-    # 存储与元数据
+    # storage and metadata
     "store",
     "include",
-    # 内容格式
+    # content format
     "text",
-    # 推理控制
+    # reasoning control
     "reasoning",
-    # 并行工具调用
+    # parallel tool calls
     "parallel_tool_calls",
 })
 
-# ─── 参数重命名映射 ──────────────────────────────────────────────
-# (source_key, target_key) — 转换方向由调用函数决定
+# ─── Parameter rename map ────────────────────────────────────────────────
+# (source_key, target_key) — the calling function decides the direction
 _CHAT_TO_RESPONSES_RENAMES: dict[str, str] = {
     "max_tokens": "max_output_tokens",
 }
@@ -69,13 +70,14 @@ _RESPONSES_TO_CHAT_RENAMES: dict[str, str] = {
 
 
 def sanitize_for_responses(payload: dict[str, Any]) -> dict[str, Any]:
-    """剥离 Chat Completions 专有字段，使 payload 可安全转发至 Responses API。
+    """Strip Chat Completions-only fields so the payload can be safely forwarded to the Responses API.
 
-    仅移除不兼容的参数，不做深度内容转换（如 messages -> input）。
+    Only incompatible parameters are removed; no deep content conversion (such as messages -> input)
+    is performed.
     """
     result = {k: v for k, v in payload.items() if k not in _CHAT_ONLY_KEYS}
 
-    # 参数重命名：若原 payload 含 Chat 专有命名，转为 Responses 对应名称
+    # Rename parameters: Chat-specific names in the original payload become their Responses equivalents
     for src, dst in _CHAT_TO_RESPONSES_RENAMES.items():
         if src in payload and dst not in result:
             result[dst] = payload[src]
@@ -84,19 +86,20 @@ def sanitize_for_responses(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_for_chat(payload: dict[str, Any]) -> dict[str, Any]:
-    """剥离 Responses API 专有字段，使 payload 可安全转发至 Chat Completions。
+    """Strip Responses API-only fields so the payload can be safely forwarded to Chat Completions.
 
-    仅移除不兼容的参数，不做深度内容转换（如 input -> messages）。
+    Only incompatible parameters are removed; no deep content conversion (such as input -> messages)
+    is performed.
     """
     result = {k: v for k, v in payload.items() if k not in _RESPONSES_ONLY_KEYS}
 
-    # 参数重命名
+    # Rename parameters
     for src, dst in _RESPONSES_TO_CHAT_RENAMES.items():
         if src in payload and dst not in result:
             result[dst] = payload[src]
 
-    # reasoning 参数 Chat API 不支持，但部分上游（如 Azure）可能接受；
-    # 仅当所有值均为 None 时移除，避免上游拒绝空 reasoning
+    # The Chat API does not support the reasoning parameter, but some upstreams (Azure, for example)
+    # may accept it; drop it only when every value is None, so upstreams do not reject an empty one.
     reasoning = result.get("reasoning")
     if isinstance(reasoning, dict) and all(v is None for v in reasoning.values()):
         del result["reasoning"]
@@ -105,7 +108,7 @@ def sanitize_for_chat(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_tools_for_chat(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """将 Responses API 扁平 tool 格式转换为 Chat Completions 嵌套 function 格式。
+    """Convert the flat Responses API tool format into the nested Chat Completions function format.
 
     Responses: {"type": "function", "name": "foo", "description": "...", "parameters": {...}}
     Chat:      {"type": "function", "function": {"name": "foo", "description": "...", "parameters": {...}}}
@@ -115,7 +118,7 @@ def sanitize_tools_for_chat(tools: list[dict[str, Any]]) -> list[dict[str, Any]]
         if tool.get("type") != "function":
             converted.append(tool)
             continue
-        # 已经是嵌套格式，跳过
+        # already nested, skip
         if "function" in tool:
             converted.append(tool)
             continue
@@ -133,7 +136,7 @@ def sanitize_tools_for_chat(tools: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def sanitize_tools_for_responses(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """将 Chat Completions 嵌套 function 格式转换为 Responses API 扁平格式。
+    """Convert the nested Chat Completions function format into the flat Responses API format.
 
     Chat:      {"type": "function", "function": {"name": "foo", ...}}
     Responses: {"type": "function", "name": "foo", ...}

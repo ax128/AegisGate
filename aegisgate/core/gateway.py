@@ -278,8 +278,8 @@ def _observe_response(
 # Simple in-memory rate limiter for admin endpoints
 # ---------------------------------------------------------------------------
 class _AdminRateLimiter:
-    _EVICT_INTERVAL = 300.0  # 每 5 分钟清理一次过期 bucket
-    _MAX_BUCKETS = 50_000  # 防止唯一 IP 洪水导致内存无限增长
+    _EVICT_INTERVAL = 300.0  # evict expired buckets every 5 minutes
+    _MAX_BUCKETS = 50_000  # keeps a flood of unique IPs from growing memory without bound
 
     def __init__(self, max_per_minute: int = 30) -> None:
         self._max = max(1, max_per_minute)
@@ -460,7 +460,7 @@ _PASSTHROUGH_PATHS = frozenset(
 # GWTokenRewriteMiddleware
 # ---------------------------------------------------------------------------
 class GWTokenRewriteMiddleware:
-    """在路由匹配前重写 token 路径。"""
+    """Rewrite the token path before route matching."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -486,7 +486,7 @@ class GWTokenRewriteMiddleware:
             matched.group(3),
             matched.group(4),
         )
-        # 验证 filter_mode
+        # validate filter_mode
         if filter_mode and filter_mode not in _VALID_FILTER_MODES:
             with trace_span(
                 "gateway.request",
@@ -537,9 +537,9 @@ class GWTokenRewriteMiddleware:
                 await response(scope, receive, send)
                 return
 
-        # --- compat + 本地端口: /v1/__gw__/t/claude-to-gpt/8317__redact/messages
-        # 当 token 有 compat 配置且 rest 第一段是 {port} 或 {port}__{mode} 时，
-        # 用端口覆盖 upstream_base，用 mode 覆盖 filter_mode。
+        # --- compat + local port: /v1/__gw__/t/claude-to-gpt/8317__redact/messages
+        # When the token carries a compat config and the first segment of rest is {port} or
+        # {port}__{mode}, the port overrides upstream_base and the mode overrides filter_mode.
         _COMPAT_PORT_RE = re.compile(r"^(\d+)(?:__([a-z]+))?(?:/(.*))?$")
         if mapping.get("compat") and rest:
             port_match = _COMPAT_PORT_RE.match(rest)
@@ -604,8 +604,8 @@ class GWTokenRewriteMiddleware:
                             )
                             await response(scope, receive, send)
                             return
-                    # 优先复用已注册的端口 token（如 docker_upstreams 注入的），
-                    # 否则用 local_port_routing_host 构造
+                    # Prefer an already registered port token (e.g. injected by docker_upstreams),
+                    # otherwise build one from local_port_routing_host
                     port_mapping = gw_tokens_get(port_str)
                     if port_mapping and port_mapping.get("upstream_base"):
                         resolved_ub = port_mapping["upstream_base"]
@@ -616,7 +616,7 @@ class GWTokenRewriteMiddleware:
                         resolved_ub = f"http://{host}:{port}/v1"
                     mapping = dict(mapping)
                     mapping["upstream_base"] = resolved_ub
-                    # 端口级 filter_mode 覆盖 token 级
+                    # a port-level filter_mode overrides the token-level one
                     if port_mode:
                         if port_mode not in _VALID_FILTER_MODES:
                             with trace_span(
@@ -642,7 +642,7 @@ class GWTokenRewriteMiddleware:
                                 await response(scope, receive, send)
                                 return
                         filter_mode = port_mode
-                    rest = port_rest  # 剩余路径，如 "messages"
+                    rest = port_rest  # remaining path, e.g. "messages"
                     logger.debug(
                         "compat_port_rewrite token=%s… port=%d mode=%s rest=%s",
                         token[:6],
@@ -671,7 +671,7 @@ class GWTokenRewriteMiddleware:
         )
 
         ub = mapping.get("upstream_base") or ""
-        # compat token 省略 upstream_base 且未走端口路径时，拒绝请求
+        # Reject the request when a compat token omits upstream_base and no port path was used
         if not ub and mapping.get("compat"):
             with trace_span(
                 "gateway.request", http_method=method, http_route=route_label
@@ -704,7 +704,7 @@ class GWTokenRewriteMiddleware:
         new_scope["aegis_upstream_base"] = ub
         new_scope["aegis_redaction_whitelist_keys"] = wk
         new_scope["aegis_filter_mode"] = filter_mode  # None | "redact" | "passthrough"
-        # 协议兼容层
+        # Protocol compatibility layer
         compat = mapping.get("compat")
         if compat:
             new_scope["aegis_compat"] = str(compat)
@@ -1374,7 +1374,7 @@ async def security_boundary_middleware(request: Request, call_next):
 
 @app.post("/__gw__/register")
 async def gw_register(request: Request) -> JSONResponse:
-    """一次性注册：返回短 token 与 baseUrl，映射写入 config/gw_tokens.json。"""
+    """One-shot registration: returns a short token and baseUrl, writing the mapping to config/gw_tokens.json."""
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -1456,7 +1456,7 @@ async def gw_register(request: Request) -> JSONResponse:
 
 @app.post("/__gw__/add")
 async def gw_add(request: Request) -> JSONResponse:
-    """对指定 token 追加 whitelist_key；可选替换 upstream_base。"""
+    """Append whitelist_key entries to a token; optionally replace its upstream_base."""
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -1536,7 +1536,7 @@ async def gw_add(request: Request) -> JSONResponse:
 
 @app.post("/__gw__/remove")
 async def gw_remove(request: Request) -> JSONResponse:
-    """仅对指定 token 移除 whitelist_key。"""
+    """Remove whitelist_key entries from a token only."""
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -1594,7 +1594,7 @@ async def gw_remove(request: Request) -> JSONResponse:
 
 @app.post("/__gw__/lookup")
 async def gw_lookup(request: Request) -> JSONResponse:
-    """根据 upstream_base 查询已注册的 token。"""
+    """Look up the registered token for an upstream_base."""
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -1644,7 +1644,7 @@ async def gw_lookup(request: Request) -> JSONResponse:
 
 @app.post("/__gw__/unregister")
 async def gw_unregister(request: Request) -> JSONResponse:
-    """删除 token 映射。"""
+    """Delete a token mapping."""
     try:
         body = await request.json()
     except (ValueError, TypeError):
@@ -1785,5 +1785,5 @@ def favicon() -> Response:
     return Response(status_code=204)
 
 
-# Token 重写必须最先执行：用 ASGI middleware 在路由匹配前直接改写 scope.path。
+# Token rewriting must run first: an ASGI middleware rewrites scope.path before route matching.
 app.add_middleware(GWTokenRewriteMiddleware)

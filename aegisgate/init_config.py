@@ -1,7 +1,8 @@
 """
-首次启动时自动生成必须的配置文件：若运行时 config 目录缺少 .env，或策略目录缺少策略 YAML，
-则从内置默认复制，保证 Docker 挂载或本地直接启动都能跑通。
-可在应用 startup 时调用，也可单独执行：python -m aegisgate.init_config
+Generate the required config files on first start: when the runtime config directory has no .env,
+or the policy directory has no policy YAML, they are copied from the built-in defaults, so both a
+Docker mount and a plain local start work.
+Call it during application startup, or run it standalone: python -m aegisgate.init_config
 """
 
 from __future__ import annotations
@@ -14,17 +15,17 @@ from pathlib import Path
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
-# 必须存在的策略 YAML（少则从内置复制）
+# Policy YAML files that must exist (missing ones are copied from the built-in defaults)
 _POLICY_YAML = ("default.yaml", "permissive.yaml", "strict.yaml")
 _SECURITY_RULES_YAML = "security_filters.yaml"
 _REQUIRED_YAML = (*_POLICY_YAML, _SECURITY_RULES_YAML)
-# 内置策略目录（包内）
+# Built-in policy directory (inside the package)
 _PACKAGE_RULES_DIR = Path(__file__).resolve().parent / "policies" / "rules"
-# 项目根目录（如 /app）
+# Project root directory (e.g. /app)
 _APP_ROOT_DIR = Path(__file__).resolve().parent.parent
-# Docker 镜像内的只读 bootstrap 目录（避免被 rules 挂载覆盖）
+# Read-only bootstrap directory inside the Docker image (never shadowed by a rules mount)
 _BOOTSTRAP_RULES_DIR = _APP_ROOT_DIR / "bootstrap" / "rules"
-# 内置 .env 示例名
+# Name of the bundled .env example
 _ENV_EXAMPLE = ".env.example"
 _RUNTIME_FALLBACK_DIR = Path("/tmp") / "aegisgate"
 
@@ -51,7 +52,7 @@ def _runtime_env_dir() -> Path:
 
 
 def _env_example_path() -> Path | None:
-    """内置 .env.example 路径：先 cwd/config，再包上级 config（本地开发）。"""
+    """Path to the bundled .env.example: first cwd/config, then the package parent config (local development)."""
     cwd = Path.cwd()
     for base in (cwd, cwd.parent, Path(__file__).resolve().parent.parent):
         p = base / "config" / _ENV_EXAMPLE
@@ -107,7 +108,8 @@ def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
     rules_dir = config_dir or _config_dir()
     missing: list[str] = []
 
-    # PolicyEngine 只要发现挂载目录没有 default.yaml，就会整体回退到 bootstrap 目录。
+    # As soon as PolicyEngine finds no default.yaml in the mounted directory, it falls back to the
+    # bootstrap directory as a whole.
     if _file_ready(rules_dir / "default.yaml"):
         for name in _POLICY_YAML:
             if not _file_ready(rules_dir / name):
@@ -117,7 +119,7 @@ def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
             name for name in _POLICY_YAML if not _file_ready(rules_dir / name)
         )
 
-    # security_filters.yaml 单文件独立解析；缺失时允许单独回退到 bootstrap。
+    # security_filters.yaml is parsed on its own; when missing it may fall back to bootstrap alone.
     if (
         not _file_ready(rules_dir / _SECURITY_RULES_YAML)
         and not _bootstrap_has_security_rules()
@@ -132,13 +134,14 @@ def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
 
 def ensure_config_dir() -> None:
     """
-    若 config/策略 目录缺少必须文件，则从内置默认复制，不覆盖已有文件。
-    Docker 下挂载的目录首次为空时会被自动填充；本地首次启动同理。
+    Copy the built-in defaults into the config/policy directory for any required file that is
+    missing, never overwriting an existing file.
+    A Docker mount that starts out empty is populated automatically, as is a first local start.
     """
     config_dir = _config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. 策略 YAML：从包内 aegisgate/policies/rules 复制
+    # 1. Policy YAML: copied from aegisgate/policies/rules inside the package
     src_dir = _rules_source_dir()
     if src_dir is not None:
         for name in _REQUIRED_YAML:
@@ -242,7 +245,7 @@ def ensure_runtime_storage_paths() -> None:
 
 
 def main() -> None:
-    """命令行或 one-off 容器执行时调用。"""
+    """Entry point for command-line or one-off container runs."""
     ensure_config_dir()
     ensure_runtime_storage_paths()
     strict = os.environ.get("AEGIS_INIT_STRICT", "true").strip().lower() not in {

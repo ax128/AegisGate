@@ -30,31 +30,32 @@ _DANGEROUS_TOOL_NAMES: frozenset[str] = frozenset({
 
 _READ_ONLY_CONTENT_TOOLS = frozenset(
     {
-        # 只读文件操作
+        # read-only file operations
         "read",
         "read_file",
         "glob",
         "grep",
-        # 只读搜索/浏览
+        # read-only search/browsing
         "web_search",
         "webfetch",
         "web_fetch",
         "browser",
         "search",
-        # 通用 Agent 工具（非执行类）
+        # general agent tools (non-executing)
         "todowrite",
         "task",
         "submit",
         "multi_tool_use.parallel",
-        # Notebook（只读查看）
+        # Notebook (read-only viewing)
         "notebook_edit",
         "notebookedit",
     }
 )
 
-# 文件写入工具：内容为代码/文档，可能引用敏感路径但不构成实际攻击。
-# 对这些工具仅检查注入链模式（shell_injection 等），跳过路径引用模式
-# （sensitive_file_access、ssh_key_access、path_traversal）以避免误拦。
+# File-writing tools: their content is code or documentation, which may reference a sensitive path
+# without being an actual attack. For these tools only the injection-chain patterns (shell_injection
+# and friends) are checked; the path-reference patterns (sensitive_file_access, ssh_key_access,
+# path_traversal) are skipped to avoid false blocks.
 _FILE_WRITE_CONTENT_TOOLS = frozenset(
     {
         "write",
@@ -71,7 +72,7 @@ _FILE_WRITE_CONTENT_TOOLS = frozenset(
     }
 )
 
-# 路径引用类规则 ID — 在文件写入工具的参数中这些是 false positive 高发区
+# Path-reference rule IDs — a hotspot for false positives in file-writing tool arguments
 _PATH_REFERENCE_PATTERN_IDS = frozenset(
     {"sensitive_file_access", "path_traversal", "ssh_key_access"}
 )
@@ -294,7 +295,8 @@ class ToolCallGuard(BaseFilter):
                         action,
                     )
             if lowered_name not in _READ_ONLY_CONTENT_TOOLS:
-                # 文件写入工具仅检查注入链规则，跳过路径引用规则以降低误拦
+                # File-writing tools check only injection-chain rules and skip path-reference
+                # rules, which lowers false blocks
                 patterns = (
                     self._dangerous_param_patterns_exec_only
                     if lowered_name in _FILE_WRITE_CONTENT_TOOLS

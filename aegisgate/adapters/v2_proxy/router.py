@@ -680,7 +680,8 @@ def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, re.Pattern[str
             pattern.search(text) for pattern in _XSS_HIGH_CONFIDENCE_PATTERNS
         )
         if not high_conf_xss:
-            # 普通网页经常包含 <script> 等标记；只有高置信载荷形态才作为注入拦截。
+            # Ordinary web pages often contain markup such as <script>; only high-confidence
+            # payload shapes are blocked as injection.
             raw_patterns = [
                 (match_id, pattern)
                 for match_id, pattern in raw_patterns
@@ -1409,7 +1410,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
         if redaction_count > 0:
             client_ip = (request.client.host if request.client else None) or "-"
             user_agent = request.headers.get("user-agent", "-")
-            # WARNING 级别：含敏感字段的请求属于安全审计事件
+            # WARNING level: a request carrying sensitive fields is a security audit event
             logger.warning(
                 "v2 redaction method=%s path=%s target=%s client_ip=%s user_agent=%s replacements=%d hit_ids=%s markers=%s",
                 request.method,

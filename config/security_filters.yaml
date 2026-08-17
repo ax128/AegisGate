@@ -7,7 +7,7 @@ redaction:
   request_prefix_max_len: 12
   normalize_nfkc: true
   strip_invisible_chars: true
-  # 字段感知脱敏阈值：避免把过短普通值误判为敏感数据
+  # Field-aware redaction threshold: avoids treating very short ordinary values as sensitive
   field_value_min_len: 12
   # Pattern ids that stay active on the low-false-positive surfaces:
   # the /v1/chat/completions, /v1/responses and /v1/messages request routes,
@@ -118,7 +118,7 @@ redaction:
       regex: '(?i)\b(?:plate|license[_\-\s]?plate|车牌)\b\s*[:=]\s*[A-Za-z0-9\u4e00-\u9fff\-]{5,12}'
     - id: BIOMETRIC_TEMPLATE
       regex: '(?i)\b(?:fingerprint|faceprint|voiceprint|iris|retina|biometric|指纹|面纹|声纹|虹膜|生物特征)\b\s*[:=]\s*[A-Za-z0-9+/=._\-]{8,}'
-    # ── 电脑 / 基础设施信息（宽松模式：仅匹配 field: value 格式） ──
+    # ── Host / infrastructure info (loose mode: only matches the "field: value" form) ──
     - id: SYS_HOSTNAME
       regex: '(?i)\b(?:hostname|host[_\-\s]?name|主机名|计算机名)\b\s*[:=]\s*[A-Za-z0-9._\-]{2,60}'
     - id: SYS_USERNAME
@@ -298,42 +298,42 @@ injection_detector:
       regex: '(根据|按照).{0,10}(链接|文档|网页).{0,10}(调用|执行).{0,10}(工具|函数|接口)'
   tool_call_injection_patterns:
     # ===== OpenAI internal =====
-    # to=multi_tool_use.parallel 及拼写变体
+    # to=multi_tool_use.parallel and spelling variants
     - id: multi_tool_use_parallel
       regex: 'to\s*=\s*mult[i_]*[_\s]*tool[_\s]*use[\._\s]*parall'
-    # "tool_uses": / "tool_use": JSON 注入
+    # "tool_uses": / "tool_use": JSON injection
     - id: tool_uses_json
       regex: '[("'']\s*tool_uses?\s*[)"'']\s*[:=\[]'
-    # "function_call(s)": JSON 注入
+    # "function_call(s)": JSON injection
     - id: function_call_json
       regex: '[("'']\s*function_calls?\s*[)"'']\s*[:=\[]'
-    # D("tool_uses":...) 序列化劫持
+    # D("tool_uses":...) serialization hijack
     - id: fake_assistant_tool_block
       regex: 'D\s*\(\s*["'']\s*tool_uses?\s*["'']'
-    # recipient_name: "functions.xxx" 内部字段
+    # recipient_name: "functions.xxx" internal field
     - id: recipient_name
       regex: 'recipient_name["'']\s*:\s*["'']functions?\.'
-    # functions.危险命令 命名空间
+    # functions.<dangerous-command> namespace
     - id: functions_namespace
       regex: 'functions?\.\s*(?:ls|exec|eval|run|read|write|delete|rm|cat|curl|wget|sh|bash|python|node|open|spawn|system)\b'
-    # tool_call:functions.xxx 前缀
+    # tool_call:functions.xxx prefix
     - id: tool_call_prefix
       regex: 'tool_call\s*[:]\s*(?:functions?\.?\w+|\w+\.\w+)'
     # ===== Anthropic Claude XML =====
-    # <tool_call> 标签
+    # <tool_call> tag
     - id: claude_tool_call_xml
       regex: '<\s*tool_call\s*>'
-    # <invoke name="xxx"> 标签
+    # <invoke name="xxx"> tag
     - id: claude_invoke_xml
       regex: '<\s*invoke\s+name\s*='
-    # <function_calls> 标签
+    # <function_calls> tag
     - id: claude_function_calls_xml
       regex: '<\s*function_calls?\s*>'
     # ===== ReAct agent pattern =====
-    # Action: xxx ... Action Input: (需同时出现)
+    # Action: xxx ... Action Input: (both must be present)
     - id: react_action_input
       regex: 'Action\s*:\s*\w+[\s\S]{0,60}?Action\s+Input\s*:'
-    # Observation: ... Final Answer: (伪造观察结果)
+    # Observation: ... Final Answer: (forged observation)
     - id: react_fake_observation
       regex: 'Observation\s*:\s*[\s\S]{0,80}?(?:Final\s+Answer|Action)\s*:'
     # ===== Google Gemini / AWS Bedrock =====
@@ -350,20 +350,20 @@ injection_detector:
     - id: bedrock_tool_result
       regex: '["'']toolResult["'']\s*:\s*\{'
     # ===== vLLM / Hermes / Gorilla =====
-    # <|tool_call|> 或 <tool_call> 特殊 token
+    # <|tool_call|> or <tool_call> special token
     - id: vllm_tool_call_tag
       regex: '<\|?\s*tool_call\s*\|?>'
-    # <<function>> Gorilla 格式
+    # <<function>> Gorilla format
     - id: gorilla_function_tag
       regex: '<<\s*function\s*>>'
     # ===== AutoGPT / OpenDevin / SWE-agent =====
-    # "command": {"name": ...} AutoGPT 格式
+    # "command": {"name": ...} AutoGPT format
     - id: autogpt_command
       regex: '["'']command["'']\s*:\s*\{\s*["'']name["'']'
-    # "action": "run" OpenDevin 格式
+    # "action": "run" OpenDevin format
     - id: opendevin_action_run
       regex: '["'']action["'']\s*:\s*["'']run["'']'
-    # 独立行 COMMAND (SWE-agent)
+    # standalone COMMAND line (SWE-agent)
     - id: swe_agent_command
       regex: '^\s*COMMAND\s*$'
     # ===== MCP JSON-RPC =====
@@ -373,15 +373,15 @@ injection_detector:
     # "method": "resources/read"
     - id: mcp_resources_read
       regex: '["'']method["'']\s*:\s*["'']resources/read["'']'
-    # ===== 垃圾词组合 =====
+    # ===== spam-keyword combinations =====
     - id: tool_call_with_spam
       regex: '(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时).{0,60}(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.)'
     - id: spam_with_tool_call
       regex: '(?:tool_use|function_call|tool_calls?|multi_tool|functions?\.).{0,60}(?:彩票|赛车|大发|快三|彩神|时时彩|一本道|毛片|无码|一级特黄|免费视频|天天中|争霸|官网群|福利彩|北京赛车|重庆时时)'
-    # --- to=functions.xxx 格式伪造 ---
+    # --- to=functions.xxx forged format ---
     - id: to_eq_functions
       regex: 'to\s*=\s*functions?\.\s*\w+'
-  # ===== 垃圾内容噪声检测（独立信号） =====
+  # ===== spam-noise detection (independent signal) =====
   spam_noise_patterns:
     - id: gambling_zh
       regex: '(?:彩神争霸|大发快三|北京赛车|重庆时时彩|天天中彩票|天天爱彩票|腾讯分分彩|大发时时彩|大发彩票|六合彩|大发快|香港赛马会|福利彩票天天|天天乐彩票|全民彩票|彩票平台注册|彩票平台开户|彩票娱乐注册)'
@@ -389,9 +389,9 @@ injection_detector:
       regex: '(?:毛片|无码|一级特黄|一本道|久久精品|久久综合|男人天堂|做爰片|黄色录像|高清无码|免费视频观看|AV不卡免费|夫妻性生活|中文字幕无码)'
     - id: spam_platform
       regex: '(?:菲律宾申博|娱乐平台注册|娱乐平台招商|娱乐平台开户|棋牌游戏官网|娱乐官方网站|娱乐彩票注册|娱乐平台主管)'
-  # 同一消息内命中 >=2 个不同 spam 类别时触发
+  # Triggers when >=2 distinct spam categories match inside the same message
   spam_noise_min_distinct_hits: 2
-  # 同一消息内出现 >=3 种非常见 Unicode 脚本族时触发混淆信号
+  # Raises the obfuscation signal when >=3 uncommon Unicode script families appear in one message
   message_script_diversity_threshold: 3
   typoglycemia_targets:
     - ignore
@@ -432,10 +432,10 @@ injection_detector:
         severity: 5
       system_exfil:
         bucket: intent
-        severity: 10      # 系统提示泄露：保持最高（disposition=block 强制拦截）
+        severity: 10      # System-prompt leak: keep at max (disposition=block forces a hard block)
       obfuscated:
         bucket: payload
-        severity: 9       # 编码混淆攻击：保持高（disposition=block 强制拦截）
+        severity: 9       # Encoding obfuscation: keep high (disposition=block forces a hard block)
       html_markdown:
         bucket: payload
         severity: 3
@@ -456,13 +456,13 @@ injection_detector:
         severity: 4
       tool_call_injection:
         bucket: hijack
-        severity: 9       # 伪造工具调用：高危
+        severity: 9       # Forged tool call: high risk
       spam_noise:
         bucket: hijack
-        severity: 7        # 垃圾内容噪声：高危，与 tool injection 组合时强制拦截
+        severity: 7        # Spam noise: high risk; forced block when combined with tool injection
       unicode_bidi:
         bucket: anomaly
-        severity: 10      # bidi 攻击：保持最高（disposition=block 强制拦截）
+        severity: 10      # Bidi attack: keep at max (disposition=block forces a hard block)
   false_positive_mitigation:
     enabled: true
     max_risk_reduction: 0.45
@@ -565,9 +565,10 @@ anomaly_detector:
       - "\u2068"
       - "\u2069"
     invisible_char_threshold: 6
-  # 仅保留高置信攻击特征；sqli_tautology/xss_script_event/path_traversal 等
-  # 教学类模式在 AI 响应中高频出现（代码示例、安全讲解），已由 injection_detector
-  # 在请求侧覆盖，anomaly_detector 不重复检测以避免响应侧误判。
+  # Keep only high-confidence attack signatures. Teaching-oriented patterns such as
+  # sqli_tautology/xss_script_event/path_traversal show up constantly in AI responses (code
+  # samples, security explanations) and are already covered request-side by injection_detector,
+  # so anomaly_detector does not re-check them, which avoids response-side false positives.
   command_patterns:
     - id: sqli_union_select
       regex: '\bunion\s+select\b'
@@ -740,7 +741,7 @@ sanitizer:
   discussion_context_patterns:
     - '(用于|用于研究|安全研究|教学|示例|样例|引用|分析|解释|检测|防护|OWASP|论文)'
     - '(for\s+research|for\s+analysis|for\s+education|for\s+teaching|for\s+example|quoted|citation|security\s+testing|owasp|case\s+study)'
-  # v1/v2 共享：仅保留协议层高危 HTTP 报文特征，降低正常网页误触。
+  # Shared by v1/v2: keep only high-risk protocol-level HTTP message signatures, to reduce false hits on ordinary web content.
   command_patterns:
     - id: web_http_smuggling_cl_te
       regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
@@ -752,9 +753,11 @@ sanitizer:
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
     - id: web_http_obs_fold_header
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
-  # 独立开关控制：AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true 时，命中即直接拦截（不依赖 security_level）
-  # 仅保留协议层攻击特征；Docker 运维命令（stop/restart/down/exec）在代码助手场景中属正常
-  # 讨论，不做 force block。如需拦截 Docker 命令可另行添加 action_map 条目。
+  # Controlled by its own switch: with AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true a match blocks
+  # outright (independent of security_level).
+  # Keep only protocol-level attack signatures; Docker ops commands (stop/restart/down/exec) are
+  # normal discussion in coding-assistant scenarios and are not force-blocked. To block Docker
+  # commands, add an explicit action_map entry.
   force_block_command_patterns:
     - id: web_http_smuggling_cl_te
       regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
@@ -781,13 +784,13 @@ sanitizer:
     spam: '[AegisGate:spam-content-removed]'
   block_message: '[AegisGate] response blocked by security policy.'
   sanitize_prefix: '[AegisGate] content sanitized: '
-  # 仅在 LLM 明确「泄露」系统提示词时拦截；普通提及（如解释 AI 原理）不触发
+  # Block only when the LLM actually discloses the system prompt; ordinary mentions (e.g. explaining how AI works) do not trigger.
   system_leak_patterns:
     - id: system_leak_disclosure_en
       regex: '(?:my\s+(?:system\s+)?(?:prompt|instructions?)\s+(?:say|says|read|state|include|tell\s+me)\s*[:：]|(?:here\s+is|following\s+is|below\s+is)\s+my\s+(?:system\s+)?(?:prompt|instructions?)\s*[:：]|i\s+(?:was|am|have\s+been)\s+(?:told|instructed|configured|programmed)\s+(?:not\s+)?to\s+(?:reveal|share|disclose|discuss|mention)\s)'
     - id: system_leak_disclosure_zh
       regex: '(?:(?:这里是|以下是|如下是|我的)系统提示词\s*[：:]|我的(?:指令|提示词)\s*(?:是|说|要求|内容)\s*[：:]|我被(?:告知|指示|设置|配置)(?:不要|不能|要|必须)(?:透露|分享|泄露|说|提及))'
-  # <img> 在 LLM 代码示例中属正常 HTML，不做脱敏；<script>/<iframe> 可执行/嵌入外部内容，保留
+  # <img> is normal HTML in LLM code samples and is not redacted; <script>/<iframe> can execute or embed external content, so they are kept.
   unsafe_markup_patterns:
     - id: script
       regex: '<\s*(script|iframe)\b'
@@ -796,7 +799,7 @@ sanitizer:
       regex: '(javascript:|data:text/html)'
 
 tool_call_guard:
-  # 默认不做工具名白名单阻断；如需收紧，请按业务显式配置。
+  # No tool-name whitelist blocking by default; configure one explicitly to tighten this.
   tool_whitelist: []
   parameter_rules:
     - tool: search
@@ -806,8 +809,9 @@ tool_call_guard:
       param: location
       regex: '^.{1,120}$'
   dangerous_param_patterns:
-    # 只拦截真正危险的 shell 注入链：分隔符 + 已知危险命令
-    # curl/wget/bash/sh/nc 等独立即危险；python/perl/ruby/php 仅在 -c/-e 内联执行时才危险
+    # Block only genuinely dangerous shell-injection chains: separator + known dangerous command.
+    # curl/wget/bash/sh/nc are dangerous on their own; python/perl/ruby/php only when they run
+    # inline code via -c/-e.
     - id: shell_injection
       regex: '(?:;|\|\||&&|\|)\s*(?:curl|wget|bash|sh|nc|ncat|powershell|cmd(?:\.exe)?)\b'
     - id: shell_injection_scripting
@@ -878,7 +882,7 @@ action_map:
     typoglycemia: review
     tool_call_injection: block
     spam_noise: block
-    # html_markdown 不设 action：让评分模型自然计算风险；避免 <img>/<script> 代码示例被硬推至 0.85
+    # No action for html_markdown: let the scoring model weigh the risk, so <img>/<script> code samples are not forced up to 0.85
   rag_poison_guard:
     ingestion_poison: block
     retrieval_poison: review
@@ -898,7 +902,7 @@ action_map:
   sanitizer:
     system_leak: block
   request_sanitizer:
-    # review=仅记录不拦截，降低误拦；改为 block 可恢复严格拦截
+    # review = record only, do not block (fewer false blocks); switch to block to restore strict blocking
     secret_exfiltration: review
     privilege_escalation: review
     rule_bypass: review

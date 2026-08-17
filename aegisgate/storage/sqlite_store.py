@@ -252,7 +252,7 @@ class SqliteKVStore(KVStore):
         return self._with_retry(_delete)
 
     def clear_all_pending_confirmations(self) -> int:
-        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        """Clear every pending-confirmation record at startup; after a restart only confirmations for new requests count."""
 
         def _delete() -> int:
             with self._managed_connection() as conn:

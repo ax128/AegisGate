@@ -43,7 +43,7 @@ _DOC_ORDER: tuple[str, ...] = (
 
 
 def _docs_catalog() -> list[dict[str, str]]:
-    """返回 UI 文档目录：按 _DOC_ORDER 排序，仅包含实际存在的文件。"""
+    """Return the UI document catalogue: sorted by _DOC_ORDER, including only files that exist."""
     available: set[str] = {
         p.name for p in _PROJECT_ROOT.glob("*.md") if p.name not in _EXCLUDED_ROOT_DOCS
     }

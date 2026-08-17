@@ -204,5 +204,5 @@ def prune_expired_mappings(max_age_seconds: int) -> int:
 
 
 def clear_pending_confirmations_on_startup() -> int:
-    """启动时清空所有待确认记录，使重启后仅新请求的确认有效。"""
+    """Clear every pending-confirmation record at startup, so only confirmations for new requests count after a restart."""
     return int(store.clear_all_pending_confirmations())

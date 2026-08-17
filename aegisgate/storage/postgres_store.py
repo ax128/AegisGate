@@ -335,7 +335,7 @@ class PostgresKVStore(KVStore):
         return removed
 
     def clear_all_pending_confirmations(self) -> int:
-        """启动时清空所有待确认记录，重启后仅新请求的确认有效。"""
+        """Clear every pending-confirmation record at startup; after a restart only confirmations for new requests count."""
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(self._sql("DELETE FROM {pt}"))
