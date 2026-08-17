@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, cast
+from typing import cast
 
 from aegisgate.core.pipeline import Pipeline
 from aegisgate.filters.anomaly_detector import AnomalyDetector
@@ -98,138 +98,6 @@ class RuntimeStoreProxy(KVStore):
             if mapping:
                 return mapping
         return {}
-
-    def save_pending_confirmation(
-        self,
-        *,
-        confirm_id: str,
-        session_id: str,
-        route: str,
-        request_id: str,
-        model: str,
-        upstream_base: str,
-        pending_request_payload: dict[str, Any],
-        pending_request_hash: str,
-        reason: str,
-        summary: str,
-        created_at: int,
-        expires_at: int,
-        retained_until: int,
-        tenant_id: str = "default",
-    ) -> None:
-        self._typed_backend().save_pending_confirmation(
-            confirm_id=confirm_id,
-            session_id=session_id,
-            route=route,
-            request_id=request_id,
-            model=model,
-            upstream_base=upstream_base,
-            pending_request_payload=pending_request_payload,
-            pending_request_hash=pending_request_hash,
-            reason=reason,
-            summary=summary,
-            created_at=created_at,
-            expires_at=expires_at,
-            retained_until=retained_until,
-            tenant_id=tenant_id,
-        )
-
-    def get_latest_pending_confirmation(
-        self,
-        session_id: str,
-        now_ts: int,
-        *,
-        tenant_id: str = "default",
-    ) -> dict[str, Any] | None:
-        latest: dict[str, Any] | None = None
-        for backend in self._backend_candidates():
-            record = backend.get_latest_pending_confirmation(
-                session_id, now_ts, tenant_id=tenant_id
-            )
-            if record is None:
-                continue
-            if latest is None or int(record.get("created_at", 0)) > int(
-                latest.get("created_at", 0)
-            ):
-                latest = record
-        return latest
-
-    def get_single_pending_confirmation(
-        self,
-        *,
-        session_id: str,
-        route: str,
-        now_ts: int,
-        tenant_id: str = "default",
-        recover_executing_before: int | None = None,
-    ) -> dict[str, Any] | None:
-        match: dict[str, Any] | None = None
-        seen_confirm_ids: set[str] = set()
-        for backend in self._backend_candidates():
-            record = backend.get_single_pending_confirmation(
-                session_id=session_id,
-                route=route,
-                now_ts=now_ts,
-                tenant_id=tenant_id,
-                recover_executing_before=recover_executing_before,
-            )
-            if record is None:
-                continue
-            confirm_id = str(record.get("confirm_id", ""))
-            if confirm_id and confirm_id in seen_confirm_ids:
-                # After hot-reload, current and retired backends can point to the
-                # same persistent record. Treat that as one logical match.
-                continue
-            if match is not None:
-                return None
-            match = record
-            if confirm_id:
-                seen_confirm_ids.add(confirm_id)
-        return match
-
-    def compare_and_update_pending_confirmation_status(
-        self,
-        *,
-        confirm_id: str,
-        expected_status: str,
-        new_status: str,
-        now_ts: int,
-    ) -> bool:
-        for backend in self._backend_candidates():
-            changed = backend.compare_and_update_pending_confirmation_status(
-                confirm_id=confirm_id,
-                expected_status=expected_status,
-                new_status=new_status,
-                now_ts=now_ts,
-            )
-            if changed:
-                return True
-        return False
-
-    def get_pending_confirmation(self, confirm_id: str) -> dict[str, Any] | None:
-        for backend in self._backend_candidates():
-            record = backend.get_pending_confirmation(confirm_id)
-            if record is not None:
-                return record
-        return None
-
-    def update_pending_confirmation_status(
-        self, *, confirm_id: str, status: str, now_ts: int
-    ) -> None:
-        for backend in self._backend_candidates():
-            if backend.get_pending_confirmation(confirm_id) is None:
-                continue
-            backend.update_pending_confirmation_status(
-                confirm_id=confirm_id, status=status, now_ts=now_ts
-            )
-            return
-
-    def delete_pending_confirmation(self, *, confirm_id: str) -> bool:
-        for backend in self._backend_candidates():
-            deleted = backend.delete_pending_confirmation(confirm_id=confirm_id)
-            if deleted:
-                return True
-        return False
 
     def prune_pending_confirmations(self, now_ts: int) -> int:
         removed = 0
