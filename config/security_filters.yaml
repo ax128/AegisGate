@@ -9,6 +9,20 @@ redaction:
   strip_invisible_chars: true
   # 字段感知脱敏阈值：避免把过短普通值误判为敏感数据
   field_value_min_len: 12
+  # Pattern ids that stay active on the low-false-positive surfaces:
+  # the /v1/chat/completions, /v1/responses and /v1/messages request routes,
+  # plus the relaxed responses-API roles. Everything else below is applied on
+  # the remaining routes only.
+  # Omit the key to keep the built-in credential-only default (TOKEN, JWT,
+  # URL_TOKEN_QUERY, PRIVATE_KEY_PEM, AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY,
+  # GITHUB_TOKEN, SLACK_TOKEN, EXCHANGE_API_SECRET, CRYPTO_WIF_KEY,
+  # CRYPTO_XPRV, CRYPTO_SEED_PHRASE). Use ["*"] to run every pattern listed
+  # below on those routes too — stricter, at the cost of more false positives.
+  # relaxed_pii_ids:
+  #   - TOKEN
+  #   - JWT
+  #   - EMAIL
+  #   - IBAN
   pii_patterns:
     - id: EMAIL
       regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'

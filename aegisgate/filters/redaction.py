@@ -10,7 +10,7 @@ import time
 import unicodedata
 from typing import Any
 
-from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.security_rules import load_security_rules, select_relaxed_pii_patterns
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
@@ -24,22 +24,6 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys, protect
 _MAX_LOG_MARKERS = 10
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
-_RESPONSES_RELAXED_PII_IDS = frozenset(
-    {
-        "TOKEN",
-        "JWT",
-        "URL_TOKEN_QUERY",
-        "PRIVATE_KEY_PEM",
-        "AWS_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "GITHUB_TOKEN",
-        "SLACK_TOKEN",
-        "EXCHANGE_API_SECRET",
-        "CRYPTO_WIF_KEY",
-        "CRYPTO_XPRV",
-        "CRYPTO_SEED_PHRASE",
-    }
-)
 _LOW_FALSE_POSITIVE_V1_ROUTES = frozenset(
     {
         "/v1/chat/completions",
@@ -80,9 +64,10 @@ class RedactionFilter(BaseFilter):
                     (regex[:80] + "…") if len(regex) > 80 else regex,
                 )
         self._pii_patterns = compiled_patterns
-        self._responses_relaxed_pii_patterns = [
-            (pattern_id, pattern) for pattern_id, pattern in compiled_patterns if pattern_id in _RESPONSES_RELAXED_PII_IDS
-        ]
+        self._responses_relaxed_pii_patterns = select_relaxed_pii_patterns(
+            compiled_patterns,
+            redaction_rules=redaction_rules,
+        )
 
         self._strip_table = str.maketrans("", "", "".join(self._invisible_chars | self._bidi_chars))
 

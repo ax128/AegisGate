@@ -23,6 +23,7 @@ aegisgate/tests/*
 !aegisgate/tests/test_injection_detector.py
 !aegisgate/tests/test_sqlite_mapping_prune.py
 !aegisgate/tests/test_doc_alignment.py
+!aegisgate/tests/test_relaxed_pii_ids_config.py
 
 # Virtual env
 .venv/

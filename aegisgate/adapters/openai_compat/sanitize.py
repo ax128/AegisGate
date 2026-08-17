@@ -10,7 +10,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.security_rules import load_security_rules, select_relaxed_pii_patterns
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -29,22 +29,6 @@ _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
 )
 _RESPONSES_RELAXED_REDACTION_ROLES = frozenset(
     {"system", "developer", "assistant", "user", "tool"}
-)
-_RESPONSES_RELAXED_PII_IDS = frozenset(
-    {
-        "TOKEN",
-        "JWT",
-        "URL_TOKEN_QUERY",
-        "PRIVATE_KEY_PEM",
-        "AWS_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "GITHUB_TOKEN",
-        "SLACK_TOKEN",
-        "EXCHANGE_API_SECRET",
-        "CRYPTO_WIF_KEY",
-        "CRYPTO_XPRV",
-        "CRYPTO_SEED_PHRASE",
-    }
 )
 _NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
@@ -261,11 +245,7 @@ def _responses_function_output_redaction_patterns() -> tuple[
 
 @lru_cache(maxsize=1)
 def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
-    selected: list[tuple[str, re.Pattern[str]]] = []
-    for pattern_id, pattern in _responses_function_output_redaction_patterns():
-        if pattern_id in _RESPONSES_RELAXED_PII_IDS:
-            selected.append((pattern_id, pattern))
-    return tuple(selected)
+    return tuple(select_relaxed_pii_patterns(_responses_function_output_redaction_patterns()))
 
 
 def _sanitize_text_for_upstream_with_hits(
