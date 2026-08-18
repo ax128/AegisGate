@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from aegisgate.config.settings import settings
 from aegisgate.storage.crypto import (
     decrypt_mapping,
     encrypt_mapping,

@@ -7,7 +7,6 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
 from aegisgate.storage._helpers import LRUMappingCache

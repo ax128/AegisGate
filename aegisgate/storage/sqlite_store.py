@@ -8,8 +8,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, TypeVar
 
-from aegisgate.config.settings import settings
-
 from aegisgate.storage._helpers import LRUMappingCache
 from aegisgate.storage.crypto import (
     decrypt_mapping,
@@ -20,11 +18,6 @@ from aegisgate.util.logger import logger
 
 
 T = TypeVar("T")
-_PENDING_CONFIRMATION_COLUMNS = """
-confirm_id, session_id, route, request_id, model, upstream_base,
-pending_request_payload, pending_request_hash, reason, summary,
-status, created_at, expires_at, retained_until, updated_at, tenant_id
-"""
 
 
 class SqliteKVStore(KVStore):
