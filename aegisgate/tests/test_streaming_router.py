@@ -2238,8 +2238,57 @@ def test_execute_chat_stream_injects_done_on_upstream_eof_without_done(
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
 
     assert "hello" in text
+    assert text.count("hello") == 1
     assert "上游流提前断开" in text
     assert '"recovered": true' in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_chat_stream_eof_recovery_does_not_duplicate_after_holdback_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More than 8 content chunks flush holdback before EOF; recovery must not replay them."""
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+    tokens = [f"tok{i}" for i in range(9)]
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        for token in tokens:
+            yield (
+                f'data: {{"id":"c1","choices":[{{"delta":{{"content":"{token}"}}}}]}}\n\n'
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    payload = {
+        "request_id": "r-stream-chat-eof-holdback",
+        "session_id": "s-stream-chat-eof-holdback",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    for token in tokens:
+        assert text.count(token) == 1
+    assert "上游流提前断开" in text
     assert "data: [DONE]" in text
 
 

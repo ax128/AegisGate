@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **EOF 无 `[DONE]` 时不再把已刷出的流式正文再播一遍（P7 H2 / B9）**
+  - chat 恢复分支此前会先刷出 holdback，再把整个 `stream_window` 放进合成 chunk，客户端看到重复正文
+  - 抽共享 helper `_eof_recovery_replay_text`：已发出或即将刷出内容时只补断开提示；responses 有正文时本就走 finalize-only，空流仍只补提示
+  - 不给 messages / generic 新增 EOF 恢复（B9'，本轮不做）
+
 ### Security
 
 - **合并两份分叉的 `security_filters.yaml`（P0）**
