@@ -123,7 +123,9 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 - `AEGIS_ENFORCE_LOOPBACK_ONLY`（仅本机访问）
 - `AEGIS_TRUSTED_PROXY_IPS`（可信反向代理 IP）
 
-改完这三项，请用本页的「重启网关」按钮，或执行 `docker compose restart aegisgate` / `python aegisgate-local.py restart`。完整的不可热更新清单见 [config/README.md](config/README.md) 的「热更新说明」。
+另有一项不在配置页、同样需重启：`AEGIS_XFF_STRICT_INTERNAL`（默认 `true`：带 `X-Forwarded-For` 且直连不在可信代理列表时，admin / 默认 `/v1` / UI 按公网处理）。
+
+改完这些项，请用本页的「重启网关」按钮，或执行 `docker compose restart aegisgate` / `python aegisgate-local.py restart`。**注意**：设了 `AEGIS_TRUSTED_PROXY_IPS` 之后，仅把 `AEGIS_XFF_STRICT_INTERNAL=false` **回滚不了** client IP 与限流键的变化；配置侧回退是清空该变量并重启。完整的不可热更新清单见 [config/README.md](config/README.md) 的「热更新说明」。
 
 ## 5. 安全说明
 

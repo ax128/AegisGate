@@ -356,6 +356,16 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             "Set a strong secret in config/.env or AEGIS_REQUEST_HMAC_SECRET env var."
         )
 
+    if (settings.upstream_base_url or "").strip() and not (
+        settings.trusted_proxy_ips or ""
+    ).strip():
+        logger.warning(
+            "SECURITY WARNING: AEGIS_UPSTREAM_BASE_URL is set but "
+            "AEGIS_TRUSTED_PROXY_IPS is empty. If clients reach the gateway "
+            "through a reverse proxy, set AEGIS_TRUSTED_PROXY_IPS (e.g. 127.0.0.1); "
+            "otherwise admin endpoints and the default upstream are treated as public."
+        )
+
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
@@ -839,6 +849,43 @@ async def _read_request_body_limited(
     return body, total, False
 
 
+def _xff_from_untrusted_direct_peer(request: Request) -> bool:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+    direct_ip = (request.client.host if request.client else "").strip()
+    return bool(forwarded_for) and not _is_trusted_proxy(direct_ip)
+
+
+def _internal_after_xff_downgrade(request: Request) -> tuple[str, bool]:
+    """Return (client_ip, is_internal) with reverse-proxy misconfig downgrade.
+
+    ``_real_client_ip`` already ignores XFF from untrusted peers. This helper
+    answers a different question: *carrying* XFF from an untrusted direct peer
+    is itself a signal that the reverse proxy is not in
+    ``AEGIS_TRUSTED_PROXY_IPS``, so treat the client as public.
+    """
+    client_ip = _real_client_ip(request)
+    if not settings.xff_strict_internal:
+        return client_ip, _is_internal_ip(client_ip)
+    if not _is_internal_ip(client_ip):
+        return client_ip, False
+    if _xff_from_untrusted_direct_peer(request):
+        return client_ip, False
+    return client_ip, True
+
+
+def _ui_network_allowed_after_xff_downgrade(request: Request) -> tuple[str, bool]:
+    """UI gate keeps loopback-vs-internal, then layers the XFF downgrade."""
+    client_ip = _real_client_ip(request)
+    if settings.xff_strict_internal and _xff_from_untrusted_direct_peer(request):
+        return client_ip, False
+    allowed = (
+        _is_internal_ip(client_ip)
+        if settings.local_ui_allow_internal_network
+        else _is_loopback_ip(client_ip)
+    )
+    return client_ip, allowed
+
+
 @app.middleware("http")
 async def security_boundary_middleware(request: Request, call_next):
     boundary: dict[str, object] = {
@@ -914,12 +961,7 @@ async def security_boundary_middleware(request: Request, call_next):
             return finish(response)
 
         if request.url.path.startswith("/__ui__"):
-            client_ip = _real_client_ip(request)
-            ui_allowed = (
-                _is_internal_ip(client_ip)
-                if settings.local_ui_allow_internal_network
-                else _is_loopback_ip(client_ip)
-            )
+            client_ip, ui_allowed = _ui_network_allowed_after_xff_downgrade(request)
             if not ui_allowed:
                 boundary["rejected_reason"] = "local_ui_network_restricted"
                 logger.warning(
@@ -1015,7 +1057,7 @@ async def security_boundary_middleware(request: Request, call_next):
                 return await finish_drain("loopback_only_reject", 403)
 
         if request.url.path in _ADMIN_ENDPOINTS and method == "POST":
-            client_ip = _real_client_ip(request)
+            client_ip, admin_internal = _internal_after_xff_downgrade(request)
             if not _admin_rate_limiter.is_allowed(client_ip):
                 logger.warning(
                     "boundary reject admin rate limit host=%s path=%s",
@@ -1027,7 +1069,7 @@ async def security_boundary_middleware(request: Request, call_next):
                     429,
                     "too many requests",
                 )
-            if not _is_internal_ip(client_ip):
+            if not admin_internal:
                 logger.warning(
                     "boundary reject admin endpoint from non-internal host=%s path=%s",
                     client_ip,
@@ -1066,8 +1108,8 @@ async def security_boundary_middleware(request: Request, call_next):
         if protected_v1 and not bool(request.scope.get("aegis_token_authenticated")):
             default_base = (settings.upstream_base_url or "").strip()
             if default_base:
-                client_ip = _real_client_ip(request)
-                if _is_internal_ip(client_ip):
+                client_ip, default_internal = _internal_after_xff_downgrade(request)
+                if default_internal:
                     request.scope["aegis_upstream_base"] = default_base
                     request.scope["aegis_token_authenticated"] = True
                     _assign_boundary_tenant_scope(
@@ -1289,10 +1331,11 @@ async def security_boundary_middleware(request: Request, call_next):
                 is_port_token = 1024 <= port <= 65535
 
             if is_port_token or filter_mode == "passthrough":
-                client_ip = _real_client_ip(request)
-                trusted_proxy = _is_trusted_proxy(direct_ip)
-                is_internal = _is_internal_ip(client_ip)
-                if forwarded_for and not trusted_proxy:
+                client_ip, is_internal = _internal_after_xff_downgrade(request)
+                # Numeric/passthrough already applied this downgrade before A3.
+                # Keep it even when xff_strict_internal=false so the transition
+                # switch cannot weaken that path.
+                if forwarded_for and not _is_trusted_proxy(direct_ip):
                     is_internal = False
                 is_public = not is_internal
 

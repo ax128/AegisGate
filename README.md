@@ -459,7 +459,8 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_COMPAT_ALLOWED_PORTS` | _(empty)_ | Required allowlist for compat token port routing; empty = deny all compat port routing |
 | `AEGIS_ENABLE_RELAY_ENDPOINT` | `false` | Enable optional `POST /relay/generate` relay-compatible endpoint |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
-| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For |
+| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. Behind Caddy on localhost use `127.0.0.1`. Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it |
+| `AEGIS_XFF_STRICT_INTERNAL` | `true` | Treat X-Forwarded-For from an untrusted direct peer as a public client (admin, default `/v1`, UI). Set `false` to restore the old checks without setting trusted proxies. Restart required |
 
 Full configuration reference: [`aegisgate/config/settings.py`](aegisgate/config/settings.py) and [`config/.env.example`](config/.env.example).
 
