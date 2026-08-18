@@ -11,13 +11,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **合并两份分叉的 `security_filters.yaml`（P0）**
   - 此前 `config/security_filters.yaml` 与 `aegisgate/policies/rules/security_filters.yaml` 都在版本控制内，且内容已经分叉。Docker 部署把 `./config` 挂载覆盖到包内规则目录（`AEGIS_SECURITY_RULES_PATH` 指向那里），裸机部署读包内那份，于是同一条安全修复只落到其中一份，两种部署加载了**不同的安全规则**
   - 以严格的那份为准合并，包内副本随之变化：`action_map.injection_detector.tool_call_injection` `review` → `block`，`tool_call_injection` severity `6` → `9`，`non_reducible_categories` 增加 `obfuscated` 与 `tool_call_injection`
-  - 同一次合并中，`action_map.tool_call_guard.dangerous_param` 由 `block` 改为 `review`。这不是新的放宽，而是补上一个早就定下、却只落到 config 副本的调整（见下方 [Previous] 中「`dangerous_param` action 从 `block` 降为 `review`」）。`aegisgate/config/security_rules.py` 的内置默认值同步改为 `review`，避免 YAML 缺失时行为翻转
+  - 同一次合并中，`action_map.tool_call_guard.dangerous_param` 由 `block` 改为 `review`。这不是新的放宽，而是补上一个早就定下、却只落到 config 副本的调整（见下方本节 `### Fixed` →「tool_call_guard 对编码工具参数的误拦截」中「`dangerous_param` action 从 `block` 降为 `review`」）。`aegisgate/config/security_rules.py` 的内置默认值同步改为 `review`，避免 YAML 缺失时行为翻转
   - `config/security_filters.yaml` 移出版本控制并加入 `.gitignore`，改由 `init_config` 在首次启动时从镜像内的只读模板生成。唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`
   - 新增 `test_config_rules_copy_matches_package_copy` 守卫：一旦 `config/` 下重新出现一份副本且与包内不一致，测试失败
 
   **升级动作（必读）**
 
   1. **Docker 必须重建镜像，不能只重启。** 补写规则的模板来自镜像内的 `/app/bootstrap/rules`（由 `Dockerfile` 烘焙）。`git pull` 会删掉宿主机上的 `config/security_filters.yaml`，若只执行 `docker compose up -d`，`init_config` 会用**旧镜像里的旧规则**补写，`tool_call_injection` 会被静默降回 `review`。正确步骤：`git pull && docker compose build aegisgate && docker compose up -d`
+     - **这一步做错不会自愈**：`init_config` 只在文件缺失或为空时写入，从不覆盖已存在的文件，所以事后再补 `build` 也不会把旧规则纠正回来。一旦踩中，需 `rm config/security_filters.yaml` 后重启，让新镜像重新生成。
+     - 起服务后建议验证一次：`docker compose exec aegisgate grep -n 'tool_call_injection' /app/aegisgate/policies/rules/security_filters.yaml`，确认 `action_map` 下是 `block` 而非 `review`
   2. **用 Web UI 改过规则的实例，`git pull` 会被 git 中止**（本地已修改的文件被上游删除）。先 `cp config/security_filters.yaml /tmp/rules.bak`，再 `git checkout -- config/security_filters.yaml && git pull`，然后把自定义项手工并回 `aegisgate/policies/rules/security_filters.yaml`
   3. **裸机部署的拦截行为会收紧**：`tool_call_injection` 变为强制拦截且不再被「研究/教学/引用」上下文降分，`obfuscated` 同样不再可降分。若上游会正常回传工具调用的文本表示，按 [config/README.md](config/README.md) 的说明放宽
 
@@ -155,6 +157,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `tool_call_injection`：severity 9→6，action block→review，从 non-reducible 移除
   - `obfuscated`：从 non-reducible 移除（讨论编码原理时可降分）
   - non-reducible 类别：5→3（仅保留 system_exfil, unicode_bidi, spam_noise）
+  - > **已过期**：上面三条对 `tool_call_injection` / `obfuscated` 的降敏，已被后续的 P1 安全审计修复撤销——severity 恢复 `9`、action 恢复 `block`，两者都加回 non-reducible。该修复当时只落到 `config/` 副本，包内副本一直停在降敏后的值，直到本次合并两份 YAML 时才同步过去（见上方 `### Security` 首条）。当前 `non_reducible_categories` 是 5 项：`system_exfil`、`obfuscated`、`unicode_bidi`、`tool_call_injection`、`spam_noise`。本条其余降敏（`dangerous_param_patterns`、`python`/`perl` 等、`semantic_approval_patterns`、`privilege_escalation`）仍然有效。
 
 ### Added
 
