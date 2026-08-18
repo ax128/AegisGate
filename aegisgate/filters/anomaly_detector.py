@@ -16,6 +16,7 @@ from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 from aegisgate.util.risk_scoring import points_to_score, weighted_nonlinear_score
+from aegisgate.util.text_normalize import pattern_hits
 
 
 class AnomalyDetector(BaseFilter):
@@ -114,7 +115,7 @@ class AnomalyDetector(BaseFilter):
     def _has_high_risk_command(self, text: str) -> tuple[bool, list[str]]:
         matches: list[str] = []
         for pattern_id, pattern in self._command_patterns:
-            if pattern.search(text):
+            if pattern_hits(pattern, text):
                 matches.append(pattern_id)
         return bool(matches), sorted(matches)
 

@@ -10,6 +10,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.text_normalize import normalize_for_match, pattern_hits
 
 
 # H-10: Unconditionally blocked tool names regardless of whitelist configuration.
@@ -265,6 +266,8 @@ class ToolCallGuard(BaseFilter):
             tool_name = str(tool_call.get("name", "")).strip()
             args = tool_call.get("arguments", {})
             args_text = self._as_text(args)
+            args_norm = normalize_for_match(args_text)
+            tool_norm = normalize_for_match(tool_name)
 
             if (
                 self._tool_whitelist
@@ -283,7 +286,9 @@ class ToolCallGuard(BaseFilter):
 
             # H-10: Blacklist check — applies even when no whitelist is configured.
             lowered_name = tool_name.lower()
-            if lowered_name and lowered_name in _DANGEROUS_TOOL_NAMES:
+            if lowered_name and (
+                lowered_name in _DANGEROUS_TOOL_NAMES or tool_norm in _DANGEROUS_TOOL_NAMES
+            ):
                 if not self._tool_whitelist or tool_name not in self._tool_whitelist:
                     violations.append(f"dangerous_tool_name:{tool_name}")
                     action = self._apply_action(ctx, "disallowed_tool")
@@ -294,29 +299,31 @@ class ToolCallGuard(BaseFilter):
                         tool_name,
                         action,
                     )
-            if lowered_name not in _READ_ONLY_CONTENT_TOOLS:
+            if lowered_name not in _READ_ONLY_CONTENT_TOOLS and tool_norm not in _READ_ONLY_CONTENT_TOOLS:
                 # File-writing tools check only injection-chain rules and skip path-reference
                 # rules, which lowers false blocks
                 patterns = (
                     self._dangerous_param_patterns_exec_only
                     if lowered_name in _FILE_WRITE_CONTENT_TOOLS
+                    or tool_norm in _FILE_WRITE_CONTENT_TOOLS
                     else self._dangerous_param_patterns
                 )
                 for _rule_id, pattern in patterns:
-                    match = pattern.search(args_text)
-                    if match:
-                        matched_text = match.group(0)[:120]
-                        violations.append(f"dangerous_param:{tool_name or 'unknown'}")
-                        action = self._apply_action(ctx, "dangerous_param")
-                        blocked = blocked or action == "block"
-                        logger.debug(
-                            "dangerous_param hit request_id=%s tool=%s pattern=%s matched=%s",
-                            ctx.request_id,
-                            tool_name,
-                            pattern.pattern[:60],
-                            matched_text,
-                        )
-                        break
+                    if not pattern_hits(pattern, args_text):
+                        continue
+                    match = pattern.search(args_text) or pattern.search(args_norm)
+                    matched_text = (match.group(0) if match else args_norm)[:120]
+                    violations.append(f"dangerous_param:{tool_name or 'unknown'}")
+                    action = self._apply_action(ctx, "dangerous_param")
+                    blocked = blocked or action == "block"
+                    logger.debug(
+                        "dangerous_param hit request_id=%s tool=%s pattern=%s matched=%s",
+                        ctx.request_id,
+                        tool_name,
+                        pattern.pattern[:60],
+                        matched_text,
+                    )
+                    break
 
             if isinstance(args, dict):
                 for (rule_tool, rule_param), rule_pattern in self._param_rules.items():
@@ -325,14 +332,17 @@ class ToolCallGuard(BaseFilter):
                     if rule_param not in args:
                         continue
                     value = str(args.get(rule_param, ""))
-                    if not rule_pattern.match(value):
+                    if not rule_pattern.match(value) and not rule_pattern.match(
+                        normalize_for_match(value)
+                    ):
                         violations.append(f"invalid_param:{tool_name}.{rule_param}")
                         action = self._apply_action(ctx, "invalid_param")
                         blocked = blocked or action == "block"
 
             semantic_input = f"{tool_name} {args_text}"
+            semantic_norm = normalize_for_match(semantic_input)
             for pattern in self._semantic_patterns:
-                match = pattern.search(semantic_input)
+                match = pattern.search(semantic_input) or pattern.search(semantic_norm)
                 if match:
                     matched_text = match.group(0)[:120]
                     violations.append(f"semantic_review:{tool_name or 'unknown'}")

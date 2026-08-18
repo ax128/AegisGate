@@ -11,6 +11,7 @@ from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.text_normalize import apply_rewrite_conservatively, pattern_hits
 
 
 class RequestSanitizer(BaseFilter):
@@ -129,12 +130,12 @@ class RequestSanitizer(BaseFilter):
         return compiled
 
     def _matches_any(self, text: str, patterns: list[re.Pattern[str]]) -> bool:
-        return any(pattern.search(text) for pattern in patterns)
+        return any(pattern_hits(pattern, text) for pattern in patterns)
 
     def _matched_categories(self, text: str) -> set[str]:
         categories: set[str] = set()
         for category, pattern in self._strong_intent_patterns:
-            if pattern.search(text):
+            if pattern_hits(pattern, text):
                 categories.add(category)
         return categories
 
@@ -174,12 +175,15 @@ class RequestSanitizer(BaseFilter):
         any_sanitized = False
         for msg in req.messages:
             updated = msg.content
-            for pattern in self._command_patterns:
-                updated = pattern.sub(self._command_replacement, updated)
-            for pattern in self._encoded_payload_patterns:
-                updated = pattern.sub(self._payload_replacement, updated)
-            for pattern in self._shape_anomaly_patterns:
-                updated = pattern.sub(self._shape_replacement, updated)
+            updated = apply_rewrite_conservatively(
+                updated, self._command_patterns, self._command_replacement
+            )
+            updated = apply_rewrite_conservatively(
+                updated, self._encoded_payload_patterns, self._payload_replacement
+            )
+            updated = apply_rewrite_conservatively(
+                updated, self._shape_anomaly_patterns, self._shape_replacement
+            )
 
             if any(
                 char in self._bidi_chars or char in self._invisible_chars
