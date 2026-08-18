@@ -21,7 +21,7 @@ def _flatten_stream_content(value: Any) -> str:
     if isinstance(value, dict):
         if isinstance(value.get("text"), str):
             return value["text"]
-        for key in ("content", "delta", "output_text", "text"):
+        for key in ("content", "delta", "output_text", "text", "partial_json"):
             if key in value:
                 text = _flatten_stream_content(value[key])
                 if text:
@@ -50,8 +50,17 @@ def _extract_stream_text_from_event(data_payload: str) -> str:
             text = _flatten_stream_content(event.get("delta"))
             return text if text else ""
         if event_type == "content_block_start":
-            text = _flatten_stream_content(event.get("content_block"))
-            return text if text else ""
+            block = event.get("content_block")
+            text = _flatten_stream_content(block)
+            if text:
+                return text
+            if isinstance(block, dict) and str(block.get("type") or "") == "tool_use":
+                inp = block.get("input")
+                if isinstance(inp, str) and inp:
+                    return inp
+                if inp:
+                    return json.dumps(inp, ensure_ascii=False)
+            return ""
         if event_type == "message_start":
             text = _flatten_stream_content(event.get("message"))
             return text if text else ""

@@ -2190,8 +2190,13 @@ def _patch_messages_stream_payload(
 
     if event_type == "content_block_delta":
         delta = patched.get("delta")
-        if isinstance(delta, dict) and isinstance(delta.get("text"), str):
-            delta["text"] = _sanitize_hit_fragments(str(delta["text"]), ctx)
+        if isinstance(delta, dict):
+            if isinstance(delta.get("text"), str):
+                delta["text"] = _sanitize_hit_fragments(str(delta["text"]), ctx)
+            if isinstance(delta.get("partial_json"), str):
+                delta["partial_json"] = _sanitize_hit_fragments(
+                    str(delta["partial_json"]), ctx
+                )
             patched["delta"] = delta
         return patched
 
@@ -2389,6 +2394,36 @@ def _extract_stream_tool_calls(
                 for item in tool_calls:
                     if isinstance(item, dict):
                         collected.append(copy.deepcopy(item))
+        return collected
+
+    event_type = str(payload.get("type") or "").strip().lower()
+    if event_type == "content_block_start":
+        block = payload.get("content_block")
+        if isinstance(block, dict) and str(block.get("type") or "") == "tool_use":
+            inp = block.get("input")
+            arguments = (
+                inp
+                if isinstance(inp, str)
+                else json.dumps(inp or {}, ensure_ascii=False)
+            )
+            collected.append(
+                {
+                    "type": "function_call",
+                    "name": str(block.get("name") or ""),
+                    "arguments": arguments,
+                }
+            )
+        return collected
+    if event_type == "content_block_delta":
+        delta = payload.get("delta")
+        if isinstance(delta, dict) and isinstance(delta.get("partial_json"), str):
+            collected.append(
+                {
+                    "type": "function_call",
+                    "name": "",
+                    "arguments": str(delta["partial_json"]),
+                }
+            )
         return collected
 
     item = payload.get("item")
@@ -4931,9 +4966,11 @@ async def _execute_messages_stream_once(
                 if event_type.startswith(("message_", "content_block_")):
                     pending_frames.append(line)
 
+                tool_calls = _extract_stream_tool_calls(payload_text, route=req.route)
                 chunk_text = _extract_stream_text_from_event(payload_text)
-                if chunk_text:
-                    stream_window = _trim_stream_window(stream_window, chunk_text)
+                if chunk_text or tool_calls:
+                    if chunk_text:
+                        stream_window = _trim_stream_window(stream_window, chunk_text)
                     chunk_count += 1
 
                     if (
@@ -4950,6 +4987,7 @@ async def _execute_messages_stream_once(
                             stream_window=stream_window,
                             chunk_count=chunk_count,
                             raw={"stream": True, "generic": True},
+                            tool_calls=tool_calls or None,
                         )
                     else:
                         block_reason = None
