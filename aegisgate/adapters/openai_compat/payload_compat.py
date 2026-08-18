@@ -52,15 +52,12 @@ _RESPONSES_ONLY_KEYS: frozenset[str] = frozenset({
     "include",
     # content format
     "text",
-    # reasoning control
-    "reasoning",
-    # parallel tool calls
-    "parallel_tool_calls",
 })
 
 # ─── Parameter rename map ────────────────────────────────────────────────
 # (source_key, target_key) — the calling function decides the direction
 _CHAT_TO_RESPONSES_RENAMES: dict[str, str] = {
+    "max_completion_tokens": "max_output_tokens",
     "max_tokens": "max_output_tokens",
 }
 

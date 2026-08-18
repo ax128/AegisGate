@@ -15,6 +15,7 @@ from typing import Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat.mapper import (
+    map_responses_tool_choice_to_chat,
     to_chat_response,
     to_responses_output,
 )
@@ -162,7 +163,7 @@ def convert_responses_payload_to_chat(payload: dict[str, Any]) -> dict[str, Any]
     # Field mappings
     if "max_output_tokens" in payload:
         chat_payload["max_tokens"] = payload["max_output_tokens"]
-    for key in ("temperature", "top_p", "stream", "tool_choice",
+    for key in ("temperature", "top_p", "stream",
                 "parallel_tool_calls", "stop", "seed",
                 "frequency_penalty", "presence_penalty"):
         if key in payload:
@@ -177,6 +178,19 @@ def convert_responses_payload_to_chat(payload: dict[str, Any]) -> dict[str, Any]
     for key in ("request_id", "session_id", "metadata"):
         if key in payload:
             chat_payload[key] = payload[key]
+    if "tool_choice" in payload:
+        mapped_choice, choice_tag = map_responses_tool_choice_to_chat(
+            payload["tool_choice"]
+        )
+        chat_payload["tool_choice"] = mapped_choice
+        if choice_tag:
+            meta = chat_payload.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+                chat_payload["metadata"] = meta
+            tags = meta.setdefault("aegisgate_compat_tags", [])
+            if isinstance(tags, list) and choice_tag not in tags:
+                tags.append(choice_tag)
 
     return chat_payload
 

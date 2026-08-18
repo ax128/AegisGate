@@ -46,6 +46,9 @@ def _is_binary_dict_part(part: dict) -> bool:
 
 def _flatten_part(part: object) -> str:
     if isinstance(part, dict):
+        part_type = str(part.get("type", "")).strip().lower()
+        if part_type in {"thinking", "redacted_thinking"}:
+            return ""
         if _is_binary_dict_part(part):
             return _IMAGE_PLACEHOLDER if "image" in str(part.get("type", "")).lower() or "image_url" in part else _BINARY_PLACEHOLDER
 
@@ -405,6 +408,8 @@ def _anthropic_content_block_to_responses_part(block: object) -> dict | None:
         return {"type": "input_text", "text": text} if text else None
 
     block_type = str(block.get("type", "")).strip().lower()
+    if block_type in {"thinking", "redacted_thinking"}:
+        return None
     if block_type == "text":
         text = str(block.get("text") or "").strip()
         return {"type": "input_text", "text": text} if text else None
@@ -498,6 +503,127 @@ def _responses_arguments_to_anthropic_input(arguments: object) -> dict:
     return {"value": parsed}
 
 
+def _append_compat_tag(result: dict, tag: str | None) -> None:
+    if not tag:
+        return
+    meta = result.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        result["metadata"] = meta
+    tags = meta.setdefault("aegisgate_compat_tags", [])
+    if isinstance(tags, list) and tag not in tags:
+        tags.append(tag)
+
+
+def map_anthropic_tool_choice_to_responses(
+    tool_choice: object,
+) -> tuple[object, str | None]:
+    """Map Anthropic tool_choice to OpenAI Responses. Unknown → auto + tag.
+
+    ``any`` is not Responses ``required``; it is mapped to ``auto`` so we do
+    not force a tool call the client did not require.
+    """
+    if tool_choice is None:
+        return "auto", None
+    if isinstance(tool_choice, str):
+        lowered = tool_choice.strip().lower()
+        if lowered in {"auto", "none", "required"}:
+            return lowered, None
+        if lowered == "any":
+            return "auto", "tool_choice_any_mapped_to_auto"
+        return "auto", "tool_choice_unknown_mapped_to_auto"
+    if isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip().lower()
+        if choice_type == "auto":
+            return "auto", None
+        if choice_type == "none":
+            return "none", None
+        if choice_type == "any":
+            return "auto", "tool_choice_any_mapped_to_auto"
+        if choice_type == "tool":
+            name = str(tool_choice.get("name") or "").strip()
+            if name:
+                return {"type": "function", "name": name}, None
+            return "auto", "tool_choice_unknown_mapped_to_auto"
+        if choice_type == "function":
+            return tool_choice, None
+        return "auto", "tool_choice_unknown_mapped_to_auto"
+    return "auto", "tool_choice_unknown_mapped_to_auto"
+
+
+def map_responses_tool_choice_to_anthropic(
+    tool_choice: object,
+) -> tuple[object, str | None]:
+    """Map OpenAI Responses/Chat tool_choice to Anthropic."""
+    if tool_choice is None or tool_choice == "auto":
+        return {"type": "auto"}, None
+    if isinstance(tool_choice, str):
+        lowered = tool_choice.strip().lower()
+        if lowered == "auto":
+            return {"type": "auto"}, None
+        if lowered == "none":
+            return {"type": "auto"}, "tool_choice_none_mapped_to_auto"
+        if lowered == "required":
+            return {"type": "any"}, "tool_choice_required_mapped_to_any"
+        if lowered == "any":
+            return {"type": "any"}, None
+        return {"type": "auto"}, "tool_choice_unknown_mapped_to_auto"
+    if isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip().lower()
+        if choice_type == "function":
+            name = str(tool_choice.get("name") or "").strip()
+            if not name:
+                func = tool_choice.get("function")
+                if isinstance(func, dict):
+                    name = str(func.get("name") or "").strip()
+            if name:
+                return {"type": "tool", "name": name}, None
+        if choice_type in {"auto", "any"}:
+            return {"type": choice_type}, None
+        if choice_type == "tool":
+            return tool_choice, None
+    return {"type": "auto"}, "tool_choice_unknown_mapped_to_auto"
+
+
+def map_responses_tool_choice_to_chat(
+    tool_choice: object,
+) -> tuple[object, str | None]:
+    """Map Responses (or leaked Anthropic) tool_choice into Chat Completions."""
+    if tool_choice is None:
+        return "auto", None
+    if isinstance(tool_choice, str):
+        lowered = tool_choice.strip().lower()
+        if lowered in {"auto", "none", "required"}:
+            return lowered, None
+        if lowered == "any":
+            return "auto", "tool_choice_any_mapped_to_auto"
+        return "auto", "tool_choice_unknown_mapped_to_auto"
+    if isinstance(tool_choice, dict):
+        choice_type = str(tool_choice.get("type") or "").strip().lower()
+        if choice_type == "function":
+            func = tool_choice.get("function")
+            if isinstance(func, dict) and str(func.get("name") or "").strip():
+                return tool_choice, None
+            name = str(tool_choice.get("name") or "").strip()
+            if name:
+                return {"type": "function", "function": {"name": name}}, None
+            return "auto", "tool_choice_unknown_mapped_to_auto"
+        if choice_type == "tool":
+            name = str(tool_choice.get("name") or "").strip()
+            if name:
+                return {"type": "function", "function": {"name": name}}, None
+            return "auto", "tool_choice_unknown_mapped_to_auto"
+        if choice_type == "auto":
+            return "auto", None
+        if choice_type == "none":
+            return "none", None
+        if choice_type == "required":
+            return "required", None
+        if choice_type == "any":
+            return "auto", "tool_choice_any_mapped_to_auto"
+    return "auto", "tool_choice_unknown_mapped_to_auto"
+
+
 def messages_payload_to_responses_payload(
     payload: dict,
     model_map: dict[str, str] | None = None,
@@ -547,6 +673,7 @@ def messages_payload_to_responses_payload(
         "model": model,
         "input": input_messages,
         "stream": payload.get("stream", False),
+        "store": False,
     }
 
     # system → instructions
@@ -575,11 +702,19 @@ def messages_payload_to_responses_payload(
         ]
         if converted_tools:
             result["tools"] = converted_tools
-    if "tool_choice" in payload:
-        result["tool_choice"] = payload["tool_choice"]
+    if isinstance(payload.get("stop_sequences"), list) and payload["stop_sequences"]:
+        result["stop"] = list(payload["stop_sequences"])
+    if "top_k" in payload:
+        result["top_k"] = payload["top_k"]
     for key in ("request_id", "session_id", "policy", "metadata"):
         if key in payload:
             result[key] = payload[key]
+    if "tool_choice" in payload:
+        mapped_choice, choice_tag = map_anthropic_tool_choice_to_responses(
+            payload["tool_choice"]
+        )
+        result["tool_choice"] = mapped_choice
+        _append_compat_tag(result, choice_tag)
 
     return result
 

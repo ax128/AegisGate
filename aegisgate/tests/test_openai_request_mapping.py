@@ -132,7 +132,8 @@ def test_messages_payload_to_responses_payload_preserves_context_and_structured_
     assert result["policy"] == "strict"
     assert result["metadata"] == {"tenant": "alpha"}
     assert result["instructions"] == "You are careful. Do not leak secrets."
-    assert result["tool_choice"] == {"type": "auto"}
+    assert result["store"] is False
+    assert result["tool_choice"] == "auto"
     assert result["max_output_tokens"] == 256
     assert result["temperature"] == 0.2
     assert result["tools"] == [
@@ -373,3 +374,171 @@ def test_load_global_model_map_loads_allowed_models(
 
     assert "gpt-5.5" in mapper._configured_allowed_models
     assert "gpt-5.6" in mapper._configured_allowed_models
+
+
+def test_messages_payload_sets_store_false_and_maps_stop_and_top_k() -> None:
+    result = messages_payload_to_responses_payload(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop_sequences": ["END", "STOP"],
+            "top_k": 8,
+        },
+        default_model="gpt-5.4",
+    )
+    assert result["store"] is False
+    assert result["stop"] == ["END", "STOP"]
+    assert result["top_k"] == 8
+
+
+def test_messages_payload_skips_thinking_blocks() -> None:
+    result = messages_payload_to_responses_payload(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "internal chain of thought"},
+                        {"type": "redacted_thinking", "data": "redacted"},
+                        {"type": "text", "text": "visible answer"},
+                    ],
+                }
+            ],
+        },
+        default_model="gpt-5.4",
+    )
+    assert result["input"][0]["content"] == [
+        {"type": "input_text", "text": "visible answer"}
+    ]
+    scanned = to_internal_messages(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "internal chain of thought"},
+                        {"type": "text", "text": "visible answer"},
+                    ],
+                }
+            ],
+        }
+    )
+    assert scanned.messages[0].content == "visible answer"
+    assert "[NON_TEXT_PART]" not in scanned.messages[0].content
+
+
+@pytest.mark.parametrize(
+    ("anthropic_choice", "expected_responses", "expected_tag"),
+    [
+        ({"type": "auto"}, "auto", None),
+        ({"type": "any"}, "auto", "tool_choice_any_mapped_to_auto"),
+        ({"type": "tool", "name": "lookup_profile"}, {"type": "function", "name": "lookup_profile"}, None),
+        ({"type": "mystery"}, "auto", "tool_choice_unknown_mapped_to_auto"),
+    ],
+)
+def test_anthropic_tool_choice_maps_to_responses(
+    anthropic_choice: object,
+    expected_responses: object,
+    expected_tag: str | None,
+) -> None:
+    mapped, tag = mapper.map_anthropic_tool_choice_to_responses(anthropic_choice)
+    assert mapped == expected_responses
+    assert tag == expected_tag
+    payload = messages_payload_to_responses_payload(
+        {
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": anthropic_choice,
+        },
+        default_model="gpt-5.4",
+    )
+    assert payload["tool_choice"] == expected_responses
+    tags = (payload.get("metadata") or {}).get("aegisgate_compat_tags")
+    if expected_tag is None:
+        assert not tags
+    else:
+        assert expected_tag in tags
+
+
+@pytest.mark.parametrize(
+    ("responses_choice", "expected_anthropic", "expected_tag"),
+    [
+        ("auto", {"type": "auto"}, None),
+        ("required", {"type": "any"}, "tool_choice_required_mapped_to_any"),
+        ({"type": "function", "name": "lookup_profile"}, {"type": "tool", "name": "lookup_profile"}, None),
+        ("mystery", {"type": "auto"}, "tool_choice_unknown_mapped_to_auto"),
+    ],
+)
+def test_responses_tool_choice_maps_to_anthropic(
+    responses_choice: object,
+    expected_anthropic: object,
+    expected_tag: str | None,
+) -> None:
+    mapped, tag = mapper.map_responses_tool_choice_to_anthropic(responses_choice)
+    assert mapped == expected_anthropic
+    assert tag == expected_tag
+
+
+def test_convert_responses_tool_choice_nests_function_for_chat() -> None:
+    from aegisgate.adapters.openai_compat.compat_bridge import (
+        convert_responses_payload_to_chat,
+    )
+
+    result = convert_responses_payload_to_chat(
+        {
+            "model": "gpt-5.4",
+            "input": "hi",
+            "tool_choice": {"type": "function", "name": "lookup_profile"},
+            "parallel_tool_calls": False,
+        }
+    )
+    assert result["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup_profile"},
+    }
+    assert result["parallel_tool_calls"] is False
+
+
+def test_sanitize_for_responses_renames_max_completion_tokens() -> None:
+    from aegisgate.adapters.openai_compat.payload_compat import sanitize_for_responses
+
+    result = sanitize_for_responses(
+        {
+            "model": "gpt-5.4",
+            "input": "hi",
+            "max_completion_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+    assert result["max_output_tokens"] == 128
+    assert "max_completion_tokens" not in result
+    assert "messages" not in result
+
+
+def test_sanitize_for_chat_keeps_parallel_tool_calls_and_reasoning() -> None:
+    from aegisgate.adapters.openai_compat.payload_compat import sanitize_for_chat
+
+    kept = sanitize_for_chat(
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "parallel_tool_calls": True,
+            "reasoning": {"effort": "low"},
+            "store": True,
+        }
+    )
+    assert kept["parallel_tool_calls"] is True
+    assert kept["reasoning"] == {"effort": "low"}
+    assert "store" not in kept
+
+    dropped = sanitize_for_chat(
+        {
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": None, "summary": None},
+        }
+    )
+    assert "reasoning" not in dropped
+
