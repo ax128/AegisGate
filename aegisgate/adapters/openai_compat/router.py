@@ -2740,12 +2740,13 @@ def _stream_runtime_reason(error_detail: str) -> str:
     return "upstream_stream_error"
 
 
-def _needs_final_stream_probe(*, chunk_count: int, pending_frames: list[bytes]) -> bool:
-    return (
-        bool(pending_frames)
-        and chunk_count > 0
-        and chunk_count % _STREAM_FILTER_CHECK_INTERVAL != 0
-    )
+def _needs_final_stream_probe(*, chunk_count: int, last_probed_chunk: int) -> bool:
+    """True when content arrived after the last response-side probe.
+
+    Independent terminal frames flush holdback, so this must not require
+    ``pending_frames`` to still be non-empty.
+    """
+    return chunk_count > last_probed_chunk
 
 
 async def _run_stream_response_probe(
@@ -2981,6 +2982,7 @@ async def _execute_chat_stream_once(
         stream_window = ""
         pending_frames: list[bytes] = []
         chunk_count = 0
+        last_probed_chunk = 0
         saw_tool_call_chunk = False
         saw_terminal_chunk = False
         saw_done = False
@@ -3009,7 +3011,7 @@ async def _execute_chat_stream_once(
                     stream_end_reason = "upstream_done"
                     if not blocked_reason and _needs_final_stream_probe(
                         chunk_count=chunk_count,
-                        pending_frames=pending_frames,
+                        last_probed_chunk=last_probed_chunk,
                     ):
                         decision = await _run_stream_response_probe(
                             ctx=ctx,
@@ -3022,6 +3024,7 @@ async def _execute_chat_stream_once(
                             chunk_count=chunk_count,
                             force_semantic=True,
                         )
+                        last_probed_chunk = chunk_count
                         if decision:
                             blocked_reason = decision
                             logger.info(
@@ -3088,6 +3091,7 @@ async def _execute_chat_stream_once(
                         chunk_count=chunk_count,
                         tool_calls=tool_calls,
                     )
+                    last_probed_chunk = chunk_count
                     if decision:
                         blocked_reason = decision
                         logger.info(
@@ -3125,6 +3129,33 @@ async def _execute_chat_stream_once(
                     while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
                         yield pending_frames.pop(0)
                     continue
+
+                if not blocked_reason and _needs_final_stream_probe(
+                    chunk_count=chunk_count,
+                    last_probed_chunk=last_probed_chunk,
+                ):
+                    decision = await _run_stream_response_probe(
+                        ctx=ctx,
+                        pipeline=pipeline,
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        base_reports=base_reports,
+                        stream_window=stream_window,
+                        chunk_count=chunk_count,
+                        force_semantic=True,
+                    )
+                    last_probed_chunk = chunk_count
+                    if decision:
+                        blocked_reason = decision
+                        if blocked_reason not in ctx.disposition_reasons:
+                            ctx.disposition_reasons.append(blocked_reason)
+                        ctx.response_disposition = "sanitize"
+                        ctx.enforcement_actions.append(
+                            "auto_sanitize:stream_buffered_patch"
+                        )
+                        stream_end_reason = "policy_auto_sanitize_buffered"
+                        break
 
                 while pending_frames:
                     yield pending_frames.pop(0)
@@ -3164,7 +3195,7 @@ async def _execute_chat_stream_once(
             if not saw_done and stream_end_reason == "upstream_eof_no_done":
                 if _needs_final_stream_probe(
                     chunk_count=chunk_count,
-                    pending_frames=pending_frames,
+                    last_probed_chunk=last_probed_chunk,
                 ):
                     decision = await _run_stream_response_probe(
                         ctx=ctx,
@@ -3177,6 +3208,7 @@ async def _execute_chat_stream_once(
                         chunk_count=chunk_count,
                         force_semantic=True,
                     )
+                    last_probed_chunk = chunk_count
                     if decision:
                         blocked_reason = decision
                         if blocked_reason not in ctx.disposition_reasons:
@@ -3529,6 +3561,7 @@ async def _execute_responses_stream_once(
         stream_window = ""
         pending_frames: list[bytes] = []
         chunk_count = 0
+        last_probed_chunk = 0
         saw_any_data_event = False
         saw_terminal_event = False
         saw_done = False
@@ -3559,7 +3592,7 @@ async def _execute_responses_stream_once(
                     stream_end_reason = "upstream_done"
                     if not blocked_reason and _needs_final_stream_probe(
                         chunk_count=chunk_count,
-                        pending_frames=pending_frames,
+                        last_probed_chunk=last_probed_chunk,
                     ):
                         decision = await _run_stream_response_probe(
                             ctx=ctx,
@@ -3572,6 +3605,7 @@ async def _execute_responses_stream_once(
                             chunk_count=chunk_count,
                             force_semantic=True,
                         )
+                        last_probed_chunk = chunk_count
                         if decision:
                             blocked_reason = decision
                             logger.info(
@@ -3665,6 +3699,7 @@ async def _execute_responses_stream_once(
                         chunk_count=chunk_count,
                         tool_calls=tool_calls,
                     )
+                    last_probed_chunk = chunk_count
                     if decision:
                         blocked_reason = decision
                         logger.info(
@@ -3702,6 +3737,33 @@ async def _execute_responses_stream_once(
                     while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
                         yield pending_frames.pop(0)
                     continue
+
+                if not blocked_reason and _needs_final_stream_probe(
+                    chunk_count=chunk_count,
+                    last_probed_chunk=last_probed_chunk,
+                ):
+                    decision = await _run_stream_response_probe(
+                        ctx=ctx,
+                        pipeline=pipeline,
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        base_reports=base_reports,
+                        stream_window=stream_window,
+                        chunk_count=chunk_count,
+                        force_semantic=True,
+                    )
+                    last_probed_chunk = chunk_count
+                    if decision:
+                        blocked_reason = decision
+                        if blocked_reason not in ctx.disposition_reasons:
+                            ctx.disposition_reasons.append(blocked_reason)
+                        ctx.response_disposition = "sanitize"
+                        ctx.enforcement_actions.append(
+                            "auto_sanitize:stream_buffered_patch"
+                        )
+                        stream_end_reason = "policy_auto_sanitize_buffered"
+                        break
 
                 while pending_frames:
                     yield pending_frames.pop(0)
@@ -3742,7 +3804,7 @@ async def _execute_responses_stream_once(
             elif not saw_done and stream_end_reason == "upstream_eof_no_done":
                 if _needs_final_stream_probe(
                     chunk_count=chunk_count,
-                    pending_frames=pending_frames,
+                    last_probed_chunk=last_probed_chunk,
                 ):
                     decision = await _run_stream_response_probe(
                         ctx=ctx,
@@ -3755,6 +3817,7 @@ async def _execute_responses_stream_once(
                         chunk_count=chunk_count,
                         force_semantic=True,
                     )
+                    last_probed_chunk = chunk_count
                     if decision:
                         blocked_reason = decision
                         if blocked_reason not in ctx.disposition_reasons:
@@ -4783,6 +4846,7 @@ async def _execute_messages_stream_once(
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         chunk_count = 0
+        last_probed_chunk = 0
         pending_frames: list[bytes] = []
         saw_message_start = False
         saw_content_block_start = False
@@ -4824,7 +4888,7 @@ async def _execute_messages_stream_once(
                 if payload_text == "[DONE]":
                     if _needs_final_stream_probe(
                         chunk_count=chunk_count,
-                        pending_frames=pending_frames,
+                        last_probed_chunk=last_probed_chunk,
                     ):
                         decision = await _run_stream_response_probe(
                             ctx=ctx,
@@ -4838,6 +4902,7 @@ async def _execute_messages_stream_once(
                             raw={"stream": True, "generic": True},
                             force_semantic=True,
                         )
+                        last_probed_chunk = chunk_count
                         if decision and decision not in ctx.disposition_reasons:
                             ctx.disposition_reasons.append(decision)
                         if decision:
@@ -4951,6 +5016,7 @@ async def _execute_messages_stream_once(
                             chunk_count=chunk_count,
                             raw={"stream": True, "generic": True},
                         )
+                        last_probed_chunk = chunk_count
                     else:
                         block_reason = None
                     if block_reason:
@@ -5042,7 +5108,7 @@ async def _execute_messages_stream_once(
                 yield line
             if _needs_final_stream_probe(
                 chunk_count=chunk_count,
-                pending_frames=pending_frames,
+                last_probed_chunk=last_probed_chunk,
             ):
                 decision = await _run_stream_response_probe(
                     ctx=ctx,
@@ -5056,6 +5122,7 @@ async def _execute_messages_stream_once(
                     raw={"stream": True, "generic": True},
                     force_semantic=True,
                 )
+                last_probed_chunk = chunk_count
                 if decision and decision not in ctx.disposition_reasons:
                     ctx.disposition_reasons.append(decision)
                 if decision:
@@ -5591,6 +5658,48 @@ async def _execute_generic_stream_once(
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         chunk_count = 0
+        last_probed_chunk = 0
+        pending_frames: list[bytes] = []
+
+        def _generic_sanitize_frames(block_reason: str) -> list[bytes]:
+            debug_log_original(
+                "response_stream_blocked",
+                stream_window,
+                reason=block_reason,
+            )
+            ctx.response_disposition = "block"
+            if block_reason not in ctx.disposition_reasons:
+                ctx.disposition_reasons.append(block_reason)
+            ctx.enforcement_actions.append("stream:auto_sanitize")
+            _maybe_log_dangerous_response_sample(
+                ctx,
+                stream_window,
+                route=request_path,
+                model=model,
+                source="generic_stream_auto_sanitize",
+                log_key="generic_stream_auto_sanitize",
+            )
+            sanitized_response = _build_sanitized_full_response(
+                ctx, source_text=stream_window
+            )
+            logger.info(
+                "generic stream auto-sanitized request_id=%s reason=%s",
+                ctx.request_id,
+                block_reason,
+            )
+            info_log_sanitized(
+                "generic_stream_sanitized",
+                sanitized_response,
+                request_id=ctx.request_id,
+                reason=block_reason,
+            )
+            return [
+                _stream_confirmation_sse_chunk(
+                    ctx, model, request_path, sanitized_response, None
+                ),
+                _stream_done_sse_chunk(),
+            ]
+
         try:
             async for line in _iter_sse_frames(
                 _iter_forward_stream_with_pinning(
@@ -5602,76 +5711,118 @@ async def _execute_generic_stream_once(
                 )
             ):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
-                if payload_text is not None and payload_text != "[DONE]":
-                    chunk_text = _extract_stream_text_from_event(payload_text)
-                    if chunk_text:
-                        stream_window = _trim_stream_window(stream_window, chunk_text)
-                        chunk_count += 1
+                if payload_text is None:
+                    yield line
+                    continue
 
-                        if (
-                            chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
-                            or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
-                        ):
-                            ctx.report_items = list(base_reports)
-                            probe_resp = InternalResponse(
-                                request_id=req.request_id,
-                                session_id=req.session_id,
-                                model=req.model,
-                                output_text=stream_window,
-                                raw={"stream": True, "generic": True},
-                            )
-                            await _run_response_pipeline(pipeline, probe_resp, ctx)
+                if payload_text == "[DONE]":
+                    if _needs_final_stream_probe(
+                        chunk_count=chunk_count,
+                        last_probed_chunk=last_probed_chunk,
+                    ):
+                        decision = await _run_stream_response_probe(
+                            ctx=ctx,
+                            pipeline=pipeline,
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            base_reports=base_reports,
+                            stream_window=stream_window,
+                            chunk_count=chunk_count,
+                            raw={"stream": True, "generic": True},
+                            force_semantic=True,
+                        )
+                        last_probed_chunk = chunk_count
+                        if decision:
+                            for frame in _generic_sanitize_frames(decision):
+                                yield frame
+                            return
+                    while pending_frames:
+                        yield pending_frames.pop(0)
+                    yield line
+                    continue
 
-                            if (
-                                settings.enable_semantic_module
-                                and chunk_count
-                                % max(1, _STREAM_SEMANTIC_CHECK_INTERVAL)
-                                == 0
-                            ):
-                                await _apply_semantic_review(
-                                    ctx, stream_window, phase="response"
-                                )
-
-                        block_reason = _stream_block_reason(ctx)
+                chunk_text = _extract_stream_text_from_event(payload_text)
+                is_content_event = bool(chunk_text)
+                if chunk_text:
+                    stream_window = _trim_stream_window(stream_window, chunk_text)
+                    chunk_count += 1
+                    if (
+                        chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
+                        or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
+                    ):
+                        block_reason = await _run_stream_response_probe(
+                            ctx=ctx,
+                            pipeline=pipeline,
+                            request_id=req.request_id,
+                            session_id=req.session_id,
+                            model=req.model,
+                            base_reports=base_reports,
+                            stream_window=stream_window,
+                            chunk_count=chunk_count,
+                            raw={"stream": True, "generic": True},
+                        )
+                        last_probed_chunk = chunk_count
                         if block_reason:
-                            debug_log_original(
-                                "response_stream_blocked",
-                                stream_window,
-                                reason=block_reason,
-                            )
-                            ctx.response_disposition = "block"
-                            if block_reason not in ctx.disposition_reasons:
-                                ctx.disposition_reasons.append(block_reason)
-                            ctx.enforcement_actions.append("stream:auto_sanitize")
-                            _maybe_log_dangerous_response_sample(
-                                ctx,
-                                stream_window,
-                                route=request_path,
-                                model=model,
-                                source="generic_stream_auto_sanitize",
-                                log_key="generic_stream_auto_sanitize",
-                            )
-                            sanitized_response = _build_sanitized_full_response(
-                                ctx, source_text=stream_window
-                            )
-                            logger.info(
-                                "generic stream auto-sanitized request_id=%s reason=%s",
-                                ctx.request_id,
-                                block_reason,
-                            )
-                            info_log_sanitized(
-                                "generic_stream_sanitized",
-                                sanitized_response,
-                                request_id=ctx.request_id,
-                                reason=block_reason,
-                            )
-                            yield _stream_confirmation_sse_chunk(
-                                ctx, model, request_path, sanitized_response, None
-                            )
-                            yield _stream_done_sse_chunk()
+                            for frame in _generic_sanitize_frames(block_reason):
+                                yield frame
                             return
 
+                if is_content_event:
+                    pending_frames.append(line)
+                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                        yield pending_frames.pop(0)
+                    continue
+
+                if _needs_final_stream_probe(
+                    chunk_count=chunk_count,
+                    last_probed_chunk=last_probed_chunk,
+                ):
+                    decision = await _run_stream_response_probe(
+                        ctx=ctx,
+                        pipeline=pipeline,
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        model=req.model,
+                        base_reports=base_reports,
+                        stream_window=stream_window,
+                        chunk_count=chunk_count,
+                        raw={"stream": True, "generic": True},
+                        force_semantic=True,
+                    )
+                    last_probed_chunk = chunk_count
+                    if decision:
+                        for frame in _generic_sanitize_frames(decision):
+                            yield frame
+                        return
+
+                while pending_frames:
+                    yield pending_frames.pop(0)
                 yield line
+
+            if _needs_final_stream_probe(
+                chunk_count=chunk_count,
+                last_probed_chunk=last_probed_chunk,
+            ):
+                decision = await _run_stream_response_probe(
+                    ctx=ctx,
+                    pipeline=pipeline,
+                    request_id=req.request_id,
+                    session_id=req.session_id,
+                    model=req.model,
+                    base_reports=base_reports,
+                    stream_window=stream_window,
+                    chunk_count=chunk_count,
+                    raw={"stream": True, "generic": True},
+                    force_semantic=True,
+                )
+                last_probed_chunk = chunk_count
+                if decision:
+                    for frame in _generic_sanitize_frames(decision):
+                        yield frame
+                    return
+            while pending_frames:
+                yield pending_frames.pop(0)
         except RuntimeError as exc:
             detail = str(exc)
             reason = _stream_runtime_reason(detail)
