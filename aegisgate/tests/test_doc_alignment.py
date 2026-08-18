@@ -1,17 +1,20 @@
 """Doc-code alignment regression guards.
 
-These tests pin a handful of facts that the user-facing docs rely on, so that
-documentation drift (filter count, compat model whitelist, default action_map
-disposition) is caught by CI instead of by a manual audit.
+These tests pin facts that the user-facing docs rely on, so that documentation
+drift (filter count, compat model whitelist, default action_map disposition,
+config-table variable names, link targets) is caught by CI instead of by a
+manual audit.
 
-If one of these fails, either the code changed on purpose — in which case update
-the cited docs and the expected value here — or a doc/code mismatch slipped in.
+If one of these fails, either the code changed on purpose — in which case
+update the cited docs and the expected value here — or a doc/code mismatch
+slipped in.
 """
 
 from __future__ import annotations
 
 import importlib
 import pkgutil
+import re
 from pathlib import Path
 
 import pytest
@@ -19,19 +22,45 @@ import yaml
 
 import aegisgate.filters
 from aegisgate.adapters.openai_compat.mapper import COMPAT_ALLOWED_MODELS
+from aegisgate.config.settings import Settings
 from aegisgate.filters.base import BaseFilter
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RULES = _REPO_ROOT / "aegisgate" / "policies" / "rules" / "security_filters.yaml"
 
-# Number of concrete BaseFilter subclasses. README pipeline section and
-# docs/prompts/audit_general.md both cite this count — update all three together.
+# Number of concrete BaseFilter subclasses. The README pipeline sections cite
+# this set — update both together.
 _EXPECTED_FILTER_CLASS_COUNT = 13
+
+# Markdown files that carry user-facing claims about the code.
+_DOC_FILES = (
+    "README.md",
+    "README_zh.md",
+    "SKILL.md",
+    "WEBUI-QUICKSTART.md",
+    "UPSTREAM-QUICKSTART.md",
+    "OTHER_TERMINAL_CLIENTS_USAGE.md",
+    "CHANGELOG.md",
+    "config/README.md",
+)
+
+# Subset that describes the *current* configuration surface. The changelog is
+# excluded because documenting a removed setting means naming it, which is the
+# whole point of a breaking-change entry.
+_CONFIG_DOC_FILES = tuple(name for name in _DOC_FILES if name != "CHANGELOG.md")
 
 
 def _import_all_filter_modules() -> None:
     for mod in pkgutil.iter_modules(aegisgate.filters.__path__):
         importlib.import_module(f"aegisgate.filters.{mod.name}")
+
+
+def _existing(names: tuple[str, ...]) -> list[Path]:
+    return [p for p in (_REPO_ROOT / name for name in names) if p.is_file()]
+
+
+def _existing_docs() -> list[Path]:
+    return _existing(_DOC_FILES)
 
 
 def test_filter_class_count_matches_docs() -> None:
@@ -40,8 +69,7 @@ def test_filter_class_count_matches_docs() -> None:
     assert len(concrete) == _EXPECTED_FILTER_CLASS_COUNT, (
         f"BaseFilter concrete subclasses are now {len(concrete)} "
         f"({sorted(concrete)}); update _EXPECTED_FILTER_CLASS_COUNT and the "
-        f"filter-count claims in README.md / README_zh.md / "
-        f"docs/prompts/audit_general.md."
+        f"filter-count claims in README.md / README_zh.md."
     )
 
 
@@ -99,4 +127,103 @@ def test_config_rules_copy_matches_package_copy() -> None:
         "aegisgate/policies/rules/security_filters.yaml. Docker and bare-metal "
         "deployments would load different security rules. Reconcile them, and do "
         "not commit the config/ copy — init_config regenerates it when missing."
+    )
+
+
+def test_documented_env_vars_exist_in_settings() -> None:
+    """Every AEGIS_* name in the config docs must map to a real Settings field.
+
+    Catches settings that were renamed or deleted in code while the config
+    tables kept advertising them. The changelog is out of scope — see
+    _CONFIG_DOC_FILES.
+    """
+    known = {f"AEGIS_{name.upper()}" for name in Settings.model_fields}
+    # Read directly from os.environ rather than through Settings, so they have
+    # no model field and must be allow-listed here.
+    known |= {
+        "AEGIS_DEBUG_EXCERPT_MAX_LEN",
+        "AEGIS_OTEL_CONSOLE_EXPORTER",
+        "AEGIS_CONFIG_DIR",
+        "AEGIS_BOOTSTRAP_RULES_DIR",
+        "AEGIS_INIT_STRICT",
+        "AEGIS_PROXY_TOKEN",
+        "AEGIS_ENCRYPTION_KEY",
+    }
+    pattern = re.compile(r"\bAEGIS_[A-Z0-9_]+\b")
+
+    unknown: dict[str, set[str]] = {}
+    for path in _existing(_CONFIG_DOC_FILES):
+        found = set(pattern.findall(path.read_text(encoding="utf-8"))) - known
+        if found:
+            unknown[path.name] = found
+
+    assert not unknown, (
+        "Docs reference AEGIS_* names with no matching Settings field: "
+        f"{ {k: sorted(v) for k, v in unknown.items()} }. Either the setting "
+        "was renamed/removed in code and the docs still advertise it, or a new "
+        "env var is read outside Settings and belongs in this allow-list."
+    )
+
+
+def test_documented_error_codes_exist_in_code() -> None:
+    """Error codes listed in the README tables must appear in the source."""
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    # The "Common current error codes" table rows look like: | `code` | meaning |
+    table_codes = set(re.findall(r"^\| `([a-z0-9_]+)` \|", readme, re.MULTILINE))
+    assert table_codes, "error-code table not found in README.md"
+
+    sources = " ".join(
+        p.read_text(encoding="utf-8")
+        for p in (_REPO_ROOT / "aegisgate").rglob("*.py")
+        if "tests" not in p.parts
+    )
+    missing = {code for code in table_codes if f'"{code}"' not in sources}
+    assert not missing, (
+        f"README.md documents error codes not present in the source: {sorted(missing)}"
+    )
+
+
+@pytest.mark.parametrize("doc", _existing_docs(), ids=lambda p: p.name)
+def test_relative_doc_links_resolve(doc: Path) -> None:
+    """Relative Markdown links must point at files that exist."""
+    text = doc.read_text(encoding="utf-8")
+    broken: list[str] = []
+    for target in re.findall(r"\]\(([^)\s]+)\)", text):
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        path_part = target.split("#", 1)[0]
+        if not path_part:
+            continue
+        if not (doc.parent / path_part).exists():
+            broken.append(target)
+    assert not broken, f"{doc.name} has broken relative links: {broken}"
+
+
+def _github_slug(heading: str) -> str:
+    """Approximate GitHub's heading slugger.
+
+    Punctuation is stripped, spaces become hyphens, and word characters —
+    underscores included — are kept.
+    """
+    slug = heading.strip().lower()
+    slug = re.sub(r"[^\w\s-]", "", slug, flags=re.UNICODE)
+    return re.sub(r"\s", "-", slug)
+
+
+@pytest.mark.parametrize("doc", _existing_docs(), ids=lambda p: p.name)
+def test_in_page_anchors_resolve(doc: Path) -> None:
+    """Same-document `#anchor` links must match a heading in that file."""
+    text = doc.read_text(encoding="utf-8")
+    headings = {
+        _github_slug(m.group(1))
+        for m in re.finditer(r"^#{1,6}\s+(.+?)\s*$", text, re.MULTILINE)
+    }
+    broken = [
+        target
+        for target in re.findall(r"\]\((#[^)\s]+)\)", text)
+        if target[1:] not in headings
+    ]
+    assert not broken, (
+        f"{doc.name} has in-page anchors matching no heading: {broken}. "
+        f"Note GitHub keeps underscores in slugs."
     )

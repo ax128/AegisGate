@@ -10,7 +10,6 @@ from aegisgate.observability.metrics import (
     inc_upstream_error,
     observe_pipeline_duration,
     observe_request_duration,
-    set_pending_confirmations,
 )
 from aegisgate.observability.tracing import (
     get_tracer,
@@ -33,7 +32,6 @@ __all__ = [
     "log_event",
     "observe_pipeline_duration",
     "observe_request_duration",
-    "set_pending_confirmations",
     "trace",
     "trace_span",
     "traced",

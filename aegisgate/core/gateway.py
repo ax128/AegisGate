@@ -25,11 +25,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from aegisgate.adapters.openai_compat.router import (
-    clear_pending_confirmations_on_startup,
     close_runtime_dependencies,
     close_semantic_async_client,
     prune_expired_mappings,
-    prune_pending_confirmations,
     reload_runtime_dependencies,
     router as openai_router,
 )
@@ -46,7 +44,7 @@ from aegisgate.adapters.v2_proxy.router import (
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.dangerous_response_log import shutdown_dangerous_response_log_worker
-from aegisgate.core.confirmation_cache_task import ConfirmationCacheTask
+from aegisgate.core.mapping_prune_task import MappingPruneTask
 from aegisgate.core.hot_reload import HotReloader, build_watcher
 
 # --- Re-exports from sub-modules (backward compatibility) ---
@@ -132,7 +130,7 @@ from aegisgate.core.security_boundary import (
     now_ts,
     verify_hmac_signature,
 )
-from aegisgate.storage.offload import run_store_io, shutdown_store_io_executor
+from aegisgate.storage.offload import shutdown_store_io_executor
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
@@ -143,7 +141,7 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+?)(?:__([a-z]+))?(?:/(.*))?$")
 _VALID_FILTER_MODES = frozenset({"redact", "passthrough"})
 
-_confirmation_cache_task: ConfirmationCacheTask | None = None
+_mapping_prune_task: MappingPruneTask | None = None
 _hot_reloader: HotReloader | None = None
 
 
@@ -376,20 +374,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         load_global_model_map()
     except Exception as exc:  # pragma: no cover
         logger.warning("global model_map load on startup failed: %s", exc)
-    if settings.clear_pending_on_startup:
-        try:
-            n = await run_store_io(clear_pending_confirmations_on_startup)
-            if n:
-                logger.info("cleared %d pending confirmation(s) on startup", n)
-        except Exception as exc:  # pragma: no cover
-            logger.warning("clear pending confirmations on startup failed: %s", exc)
-    global _confirmation_cache_task, _hot_reloader
-    if settings.enable_pending_prune_task and _confirmation_cache_task is None:
-        _confirmation_cache_task = ConfirmationCacheTask(
-            prune_func=prune_pending_confirmations,
+    global _mapping_prune_task, _hot_reloader
+    if settings.enable_mapping_prune_task and _mapping_prune_task is None:
+        _mapping_prune_task = MappingPruneTask(
             mapping_prune_func=prune_expired_mappings,
         )
-        await _confirmation_cache_task.start()
+        await _mapping_prune_task.start()
 
     if _hot_reloader is None:
         _hot_reloader = build_watcher()
@@ -403,9 +393,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     if _hot_reloader is not None:
         await _hot_reloader.stop()
         _hot_reloader = None
-    if _confirmation_cache_task is not None:
-        await _confirmation_cache_task.stop()
-        _confirmation_cache_task = None
+    if _mapping_prune_task is not None:
+        await _mapping_prune_task.stop()
+        _mapping_prune_task = None
     close_runtime_dependencies()
     shutdown_store_io_executor()
     shutdown_filter_pipeline_executor()

@@ -7,7 +7,6 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
 from aegisgate.storage._helpers import LRUMappingCache
@@ -61,13 +60,9 @@ class PostgresKVStore(KVStore):
             self._mapping_table = psycopg_sql_module.SQL("{}.{}").format(
                 _id(schema), _id("mapping_store")
             )
-            self._pending_table = psycopg_sql_module.SQL("{}.{}").format(
-                _id(schema), _id("pending_confirmation")
-            )
             self._schema_id = _id(schema)
         else:  # pragma: no cover - fallback when psycopg.sql unavailable
             self._mapping_table = psycopg_sql_module  # will fail at _init_db
-            self._pending_table = psycopg_sql_module
             self._schema_id = psycopg_sql_module
 
         self._pool = None
@@ -110,11 +105,10 @@ class PostgresKVStore(KVStore):
             self._pool = None
 
     def _sql(self, template: str) -> Any:
-        """Build a SQL composable by substituting {mt}/{pt}/{schema} placeholders."""
+        """Build a SQL composable by substituting {mt}/{schema} placeholders."""
         S = psycopg_sql_module.SQL
         return S(template).format(
             mt=self._mapping_table,
-            pt=self._pending_table,
             schema=self._schema_id,
         )
 
@@ -154,62 +148,6 @@ class PostgresKVStore(KVStore):
                 cur.execute(
                     self._sql("UPDATE {mt} SET created_at = %s WHERE created_at = 0"),
                     (int(time.time()),),
-                )
-                cur.execute(
-                    self._sql(
-                        """
-                    CREATE TABLE IF NOT EXISTS {pt} (
-                      confirm_id TEXT PRIMARY KEY,
-                      session_id TEXT NOT NULL,
-                      route TEXT NOT NULL,
-                      request_id TEXT NOT NULL,
-                      model TEXT NOT NULL,
-                      upstream_base TEXT NOT NULL,
-                      pending_request_payload TEXT NOT NULL,
-                      pending_request_hash TEXT NOT NULL,
-                      reason TEXT NOT NULL,
-                      summary TEXT NOT NULL,
-                      status TEXT NOT NULL,
-                      created_at BIGINT NOT NULL,
-                      expires_at BIGINT NOT NULL,
-                      retained_until BIGINT NOT NULL,
-                      updated_at BIGINT NOT NULL,
-                      tenant_id TEXT NOT NULL DEFAULT 'default'
-                    )
-                    """
-                    )
-                )
-                cur.execute(
-                    self._sql(
-                        """
-                    ALTER TABLE {pt}
-                    ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'
-                    """
-                    )
-                )
-                cur.execute(
-                    self._sql(
-                        """
-                    CREATE INDEX IF NOT EXISTS idx_pending_session_status
-                    ON {pt} (session_id, status, created_at DESC)
-                    """
-                    )
-                )
-                cur.execute(
-                    self._sql(
-                        """
-                    CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
-                    ON {pt} (tenant_id, session_id, route, status, created_at DESC)
-                    """
-                    )
-                )
-                cur.execute(
-                    self._sql(
-                        """
-                    CREATE INDEX IF NOT EXISTS idx_pending_retained_until
-                    ON {pt} (retained_until)
-                    """
-                    )
                 )
             conn.commit()
 
@@ -310,35 +248,4 @@ class PostgresKVStore(KVStore):
             conn.commit()
         if removed > 0:
             self._cache = LRUMappingCache(self.max_cache_entries)
-        return removed
-
-    def prune_pending_confirmations(self, now_ts: int) -> int:
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    self._sql("DELETE FROM {pt} WHERE retained_until <= %s"),
-                    (int(now_ts),),
-                )
-                removed = int(cur.rowcount or 0)
-                # Recover stale "executing" records back to "pending"
-                timeout = int(settings.confirmation_executing_timeout_seconds)
-                if timeout > 0:
-                    recover_before = int(now_ts) - max(5, timeout)
-                    cur.execute(
-                        self._sql(
-                            "UPDATE {pt} SET status = 'pending', updated_at = %s"
-                            " WHERE status = 'executing' AND updated_at <= %s"
-                        ),
-                        (now_ts, recover_before),
-                    )
-            conn.commit()
-        return removed
-
-    def clear_all_pending_confirmations(self) -> int:
-        """Clear every pending-confirmation record at startup; after a restart only confirmations for new requests count."""
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(self._sql("DELETE FROM {pt}"))
-                removed = int(cur.rowcount or 0)
-            conn.commit()
         return removed
