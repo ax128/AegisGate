@@ -358,6 +358,49 @@ class TestRedactionFailureIsFailClosed:
         assert "redaction:mapping_persist_failed:degraded" in ctx.enforcement_actions
 
 
+class _UnregisteredExplodingFilter:
+    name = "brand_new_request_filter"
+
+    def enabled(self, ctx: RequestContext) -> bool:  # noqa: ARG002
+        return True
+
+    def process_request(
+        self, req: InternalRequest, ctx: RequestContext
+    ) -> InternalRequest:
+        raise RuntimeError("unregistered boom")
+
+    def report(self) -> dict:
+        return {"filter": self.name, "hit": False, "risk_score": 0.0}
+
+
+class TestUnregisteredRequestFilterFailsClosed:
+    def test_unregistered_filter_error_blocks_in_forward_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_module.settings, "storage_failure_action", "forward"
+        )
+        ctx = RequestContext(
+            request_id="req-unreg",
+            session_id="sess-unreg",
+            route="/v1/chat/completions",
+        )
+        req = InternalRequest(
+            request_id="req-unreg",
+            session_id="sess-unreg",
+            route="/v1/chat/completions",
+            model="m",
+            messages=[InternalMessage(role="user", content="hello")],
+        )
+        Pipeline(
+            request_filters=[_UnregisteredExplodingFilter()],
+            response_filters=[],
+        ).run_request(req, ctx)
+        assert ctx.request_disposition == "block"
+        assert "request_pipeline:error:brand_new_request_filter" in ctx.enforcement_actions
+        assert "request_pipeline:degraded:brand_new_request_filter" not in ctx.enforcement_actions
+
+
 class TestToolsCacheReinjection:
     """A cached tools list is redacted at forward time, not only at cache time.
 

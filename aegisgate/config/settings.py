@@ -46,7 +46,9 @@ class Settings(BaseSettings):
     compose_dir: str = ""
     storage_backend: str = "sqlite"  # sqlite | redis | postgres
     # Behaviour when the storage backend fails: block = reject the request (default),
-    # forward = degrade to plain forwarding (no audit or redaction persistence).
+    # forward = skip persisting mapping/audit records only. It does not change
+    # filter verdicts or response-side block behaviour, and unregistered request
+    # filters still fail closed.
     storage_failure_action: str = "block"
     sqlite_db_path: str = (
         "logs/aegisgate.db"  # Under Docker, set to /tmp/aegisgate.db if logs is not writable

@@ -742,7 +742,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（仅 localhost / 内网客户端可直连 `/v1/...`） | 空 |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔）。命中的上游**整体跳过响应侧过滤管道**，效果等同 `__passthrough`，但没有公网客户端限制、也不产生 `filter_mode` 审计标签；仅用于完全受信的上游 | 空 |
-| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（降级为纯转发，不落审计与脱敏映射）。脱敏过滤器本身始终 fail-closed，不受此开关影响 | `block` |
+| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（**仅**豁免映射/审计的持久化失败，不改变过滤判定与响应侧 block；未登记的请求侧过滤器仍 fail-closed） | `block` |
 | `AEGIS_MAX_MULTIPART_BODY_BYTES` | multipart 请求体上限（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`） | `60000000` |
 | `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | v2 token 路由请求体上限（多模态负载会超过 v1 的 JSON 上限） | `64000000` |
 | `AEGIS_ENABLE_THREAD_OFFLOAD` | （保留字段）历史兼容开关；当前 Store I/O、payload transform 与过滤管道已通过专用执行器 offload，不依赖此项 | `false` |
