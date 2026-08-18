@@ -8,7 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Direct tests for SSRF IP checks, HMAC/nonce replay, v2 allowlist and DNS pinning, mapping encryption, UI login/CSRF/rules CRUD, and privilege/RAG/tool-call/anomaly guards (P14)
+- **关键安全模块的直接测试（P14）**
+  - `util/ip_safety.py`：内网/保留地址判定（含 IPv4-mapped IPv6）、DNS rebinding（域名过检但解析指向内网）、多记录应答中混入内网地址、解析失败 fail-closed
+  - `core/security_boundary.py`：HMAC 签名验证（`sha256=` 前缀、篡改、错密钥）、nonce 重放窗口、Redis nonce 后端不可用时 fail-closed
+  - 请求边界中间件：HMAC 缺头/错签名/时间戳越窗（含未来时间）/时间戳非法/密钥为空，UI 会话过期、会话指纹绑定、CSRF 缺失与错值、跨会话 CSRF、非 loopback 来源拒绝、登录限流的每 IP 配额边界
+  - `adapters/v2_proxy`：allowlist 精确与后缀匹配、留空即拒绝、目标 IP pinning 与 SNI/Host 绑定、解析结果指向内网时拒绝
+  - `storage/crypto.py` 与 `storage/redis_store.py`：映射加解密往返、非法密文、轮换后旧密钥仍可解、密钥文件 0600 权限、映射存取与一次性消费契约
+  - `gateway_ui_routes.py`：登录正负例、规则 CRUD 全生命周期、Fernet 密钥轮换
+  - `filters/`：privilege / rag_poison / tool_call / anomaly 四个过滤器的直接单测
+  - 测试内固定了 DNS 解析器与 Redis 客户端，安全用例不依赖真实网络或真实 Redis
 
 ### Security
 

@@ -182,6 +182,28 @@ def test_docs_pin_ui_csrf_header() -> None:
     assert "x-aegis-ui-csrf" in skill
 
 
+def test_hmac_primitives_live_in_security_boundary() -> None:
+    """Planning docs file the HMAC primitives under gateway_auth; the code disagrees.
+
+    gateway_auth owns UI sessions and CSRF only. Anyone auditing request signing
+    from the plan will look in the wrong module, so pin the real location here.
+    """
+    from aegisgate.core import gateway_auth, security_boundary
+
+    for symbol in (
+        "build_signature_payload",
+        "compute_hmac_sha256",
+        "verify_hmac_signature",
+        "NonceReplayCache",
+    ):
+        assert hasattr(security_boundary, symbol), (
+            f"{symbol} moved out of security_boundary"
+        )
+        assert not hasattr(gateway_auth, symbol), (
+            f"{symbol} now also exists in gateway_auth — collapse the duplication"
+        )
+
+
 def test_ui_editable_field_count_matches_docs() -> None:
     """WEBUI-QUICKSTART cites how many settings the config page exposes.
 
