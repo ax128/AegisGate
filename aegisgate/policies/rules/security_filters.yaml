@@ -1,4 +1,4 @@
-version: 2
+version: 3
 languages:
   - en
   - zh
@@ -598,11 +598,11 @@ anomaly_detector:
     - id: crlf_header_injection
       regex: '(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)'
     - id: http_smuggling_cl_te
-      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+      regex: '(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b'
     - id: http_smuggling_te_cl
-      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+'
     - id: http_smuggling_te_te
-      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+      regex: '(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b'
     - id: http_response_splitting
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
     - id: http_obs_fold_header
@@ -755,11 +755,11 @@ sanitizer:
   # Shared by v1/v2: keep only high-risk protocol-level HTTP message signatures, to reduce false hits on ordinary web content.
   command_patterns:
     - id: web_http_smuggling_cl_te
-      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+      regex: '(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b'
     - id: web_http_smuggling_te_cl
-      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+'
     - id: web_http_smuggling_te_te
-      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+      regex: '(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b'
     - id: web_http_response_splitting
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
     - id: web_http_obs_fold_header
@@ -771,11 +771,11 @@ sanitizer:
   # commands, add an explicit action_map entry.
   force_block_command_patterns:
     - id: web_http_smuggling_cl_te
-      regex: '(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b'
+      regex: '(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b'
     - id: web_http_smuggling_te_cl
-      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+'
+      regex: '(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+'
     - id: web_http_smuggling_te_te
-      regex: '(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b'
+      regex: '(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b'
     - id: web_http_response_splitting
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
     - id: web_http_obs_fold_header

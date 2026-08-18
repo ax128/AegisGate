@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **HTTP 走私检测正则线性化（P1 ReDoS）**
+  - `te_te` 改为逗号唯一切分，`cl_te` / `te_cl` 两侧空白收窄为水平空白，消除量词与换行类重叠。检测面保留数字后尾随空格、头名前缩进、以及 5 行以上空行
+  - 三处规则源同步：YAML 的 anomaly / sanitizer / force_block 三段、`security_rules.py` 代码默认（含此前缺失的 anomaly 走私 5 条）、以及 v2 代理硬编码 `_DEFAULT_DANGEROUS_COMMAND_PATTERNS`
+  - 本轮不加扫描窗口或 16KB 截断（那会在签名前填充即可绕过）；有界扫描与 v2 现有截断策略收敛到后续规则引擎工作
+
 - **合并两份分叉的 `security_filters.yaml`（P0）**
   - 此前 `config/security_filters.yaml` 与 `aegisgate/policies/rules/security_filters.yaml` 都在版本控制内，且内容已经分叉。Docker 部署把 `./config` 挂载覆盖到包内规则目录（`AEGIS_SECURITY_RULES_PATH` 指向那里），裸机部署读包内那份，于是同一条安全修复只落到其中一份，两种部署加载了**不同的安全规则**
   - 以严格的那份为准合并，包内副本随之变化：`action_map.injection_detector.tool_call_injection` `review` → `block`，`tool_call_injection` severity `6` → `9`，`non_reducible_categories` 增加 `obfuscated` 与 `tool_call_injection`
@@ -33,6 +38,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 通用代理的结构遍历加了嵌套深度上限（超限按 `payload_depth_shape_violation` 返回 400，而不是 `RecursionError` 500）与脱敏命中行数上限；`_preserves_json_shape` 改为短路比较，不再为两棵树各物化一份逐节点签名
 
 ### Breaking Changes
+
+- **HTTP 走私正则会定点改写现网 `config/security_filters.yaml`**
+  - Docker 挂载下该文件是 Web UI 规则 CRUD 的目标，`init_config` 从不整文件覆盖。升级后启动时只替换三段 `command_patterns` 里 id 为 `http_smuggling_*` / `web_http_smuggling_*` 的 regex，其余自定义规则原样保留
+  - 改写前另存 `security_filters.yaml.bak-<UTC>`。回滚 = 把备份拷回该路径并回退镜像。`config/*.yaml.bak-*` 已加入 `.gitignore`，避免 `git add -A` 带走含用户规则的备份
+  - YAML 顶层 `version:` 现为 `3`（仅作标记；迁移按规则 id，不按版本号门控）
 
 - **清理 yes/no 确认流程的最后残留**
   - 删除 `ConfirmationCacheTask`、`clear_pending_confirmations_on_startup()`、三个存储后端的 `prune_pending_confirmations()` / `clear_all_pending_confirmations()`，以及 `pending_confirmation` 建表语句。写入方在更早的版本就已删除，这些只剩清理旧数据的作用

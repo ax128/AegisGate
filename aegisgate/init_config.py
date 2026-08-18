@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
@@ -19,6 +22,12 @@ from aegisgate.util.logger import logger
 _POLICY_YAML = ("default.yaml", "permissive.yaml", "strict.yaml")
 _SECURITY_RULES_YAML = "security_filters.yaml"
 _REQUIRED_YAML = (*_POLICY_YAML, _SECURITY_RULES_YAML)
+_SMUGGLING_PATTERN_SECTIONS: tuple[tuple[str, ...], ...] = (
+    ("anomaly_detector", "command_patterns"),
+    ("sanitizer", "command_patterns"),
+    ("sanitizer", "force_block_command_patterns"),
+)
+_SMUGGLING_ID_PREFIXES = ("http_smuggling_", "web_http_smuggling_")
 # Built-in policy directory (inside the package)
 _PACKAGE_RULES_DIR = Path(__file__).resolve().parent / "policies" / "rules"
 # Project root directory (e.g. /app)
@@ -132,6 +141,113 @@ def assert_security_bootstrap_ready(config_dir: Path | None = None) -> None:
         )
 
 
+def _section_items(rules: dict, keys: tuple[str, ...]) -> list:
+    node: object = rules
+    for key in keys:
+        if not isinstance(node, dict):
+            return []
+        node = node.get(key)
+    return node if isinstance(node, list) else []
+
+
+def _smuggling_regex_index(rules: dict) -> dict[tuple[tuple[str, ...], str], str]:
+    index: dict[tuple[tuple[str, ...], str], str] = {}
+    for keys in _SMUGGLING_PATTERN_SECTIONS:
+        for item in _section_items(rules, keys):
+            if not isinstance(item, dict):
+                continue
+            pattern_id = str(item.get("id") or "")
+            regex = item.get("regex")
+            if not pattern_id.startswith(_SMUGGLING_ID_PREFIXES):
+                continue
+            if not isinstance(regex, str) or not regex:
+                continue
+            index[(keys, pattern_id)] = regex
+    return index
+
+
+def _is_package_rules_file(path: Path) -> bool:
+    package_copy = (_PACKAGE_RULES_DIR / _SECURITY_RULES_YAML).resolve()
+    try:
+        return path.resolve() == package_copy
+    except OSError:
+        return False
+
+
+def migrate_http_smuggling_regex(config_dir: Path | None = None) -> list[str]:
+    """Point-update http_smuggling_* regexes in the runtime YAML copy.
+
+    Existing Docker mounts keep a user-edited security_filters.yaml that
+    ``ensure_config_dir`` will not overwrite. Only matching rule ids in the
+    three command_patterns sections are rewritten; everything else is kept.
+    Returns the ids that actually changed.
+    """
+    rules_dir = config_dir or _config_dir()
+    dst = rules_dir / _SECURITY_RULES_YAML
+    if not _file_ready(dst) or _is_package_rules_file(dst):
+        return []
+
+    src_dir = _rules_source_dir() or _PACKAGE_RULES_DIR
+    src = src_dir / _SECURITY_RULES_YAML
+    if not _file_ready(src):
+        src = _PACKAGE_RULES_DIR / _SECURITY_RULES_YAML
+    if not _file_ready(src):
+        return []
+
+    try:
+        desired = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+        current = yaml.safe_load(dst.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning("init_config: smuggling regex migrate skipped parse error=%s", exc)
+        return []
+    if not isinstance(desired, dict) or not isinstance(current, dict):
+        return []
+
+    desired_index = _smuggling_regex_index(desired)
+    changed: list[str] = []
+    for keys in _SMUGGLING_PATTERN_SECTIONS:
+        for item in _section_items(current, keys):
+            if not isinstance(item, dict):
+                continue
+            pattern_id = str(item.get("id") or "")
+            new_regex = desired_index.get((keys, pattern_id))
+            if new_regex is None:
+                continue
+            if item.get("regex") == new_regex:
+                continue
+            item["regex"] = new_regex
+            changed.append(f"{'.'.join(keys)}:{pattern_id}")
+
+    if not changed:
+        return []
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = dst.with_name(f"{dst.name}.bak-{timestamp}")
+    try:
+        shutil.copy2(dst, backup)
+    except OSError as exc:
+        logger.warning("init_config: could not backup %s: %s", dst, exc)
+        return []
+
+    try:
+        tmp_path = dst.with_name(f"{dst.name}.migrate-tmp")
+        tmp_path.write_text(
+            yaml.dump(current, allow_unicode=True, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
+        tmp_path.replace(dst)
+    except OSError as exc:
+        logger.warning("init_config: smuggling regex migrate write failed path=%s error=%s", dst, exc)
+        return []
+
+    logger.warning(
+        "init_config: migrated http smuggling regex ids=%s backup=%s",
+        changed,
+        backup,
+    )
+    return changed
+
+
 def ensure_config_dir() -> None:
     """
     Copy the built-in defaults into the config/policy directory for any required file that is
@@ -155,6 +271,10 @@ def ensure_config_dir() -> None:
                     logger.info("init_config: created %s from default", dst)
                 except OSError as e:
                     logger.warning("init_config: could not write %s: %s", dst, e)
+        try:
+            migrate_http_smuggling_regex(config_dir)
+        except Exception as exc:  # pragma: no cover - operational safeguard
+            logger.warning("init_config: smuggling regex migrate failed: %s", exc)
     else:
         logger.warning(
             "init_config: no bootstrap rules source found candidates=%s,%s",

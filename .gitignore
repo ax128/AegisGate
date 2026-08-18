@@ -25,6 +25,7 @@ aegisgate/tests/*
 !aegisgate/tests/test_doc_alignment.py
 !aegisgate/tests/test_relaxed_pii_ids_config.py
 !aegisgate/tests/test_request_redaction_coverage.py
+!aegisgate/tests/test_redos_guard.py
 
 # Virtual env
 .venv/
@@ -50,6 +51,7 @@ config/security_filters.yaml
 config/default.yaml
 config/strict.yaml
 config/permissive.yaml
+config/*.yaml.bak-*
 
 # Encryption keys and token mappings (NEVER commit)
 config/aegis_fernet.key
@@ -88,5 +90,6 @@ DOC/
 PRODUCTION_READINESS_TEST_REPORT.md
 OPEN_SOURCE_CHECKLIST.md
 PR_DESCRIPTION_2026-02-26-security-hardening.md
+OPTIMIZATION_PLAN.md
 .github/pull_request_template.md
 .planning/
