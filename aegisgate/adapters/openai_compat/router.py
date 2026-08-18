@@ -92,7 +92,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _forward_multipart_pinned,
     _forward_stream_lines,
     _forward_stream_lines_pinned,
-    _is_upstream_whitelisted,
+    _should_bypass_filters_for_whitelist,
     _resolve_upstream_base,
     _safe_error_detail,
 )
@@ -2913,7 +2913,9 @@ async def _execute_chat_stream_once(
     bypass_response = stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
-        is_upstream_whitelisted=_is_upstream_whitelisted,
+        is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
+            base, boundary
+        ),
         build_passthrough_response=_build_passthrough_response,
         build_whitelist_response=_build_whitelist_response,
     )
@@ -3447,7 +3449,9 @@ async def _execute_responses_stream_once(
     bypass_response = stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
-        is_upstream_whitelisted=_is_upstream_whitelisted,
+        is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
+            base, boundary
+        ),
         build_passthrough_response=_build_passthrough_response,
         build_whitelist_response=_build_whitelist_response,
     )
@@ -3964,7 +3968,7 @@ async def _execute_chat_once(
             log_label="chat completion",
         )
 
-    if _is_upstream_whitelisted(upstream_base):
+    if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         try:
             status_code, upstream_body = await _forward_json_with_pinning(
                 url=upstream_url,
@@ -4323,7 +4327,7 @@ async def _execute_responses_once(
             log_label="responses endpoint",
         )
 
-    if _is_upstream_whitelisted(upstream_base):
+    if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         try:
             status_code, upstream_body = await _forward_json_with_pinning(
                 url=upstream_url,
@@ -4732,7 +4736,9 @@ async def _execute_messages_stream_once(
     bypass_response = stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
-        is_upstream_whitelisted=_is_upstream_whitelisted,
+        is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
+            base, boundary
+        ),
         build_passthrough_response=_build_passthrough_response,
         build_whitelist_response=_build_whitelist_response,
     )
@@ -5213,7 +5219,7 @@ async def _execute_messages_once(
             log_label="messages endpoint",
         )
 
-    if _is_upstream_whitelisted(upstream_base):
+    if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         try:
             status_code, upstream_body = await _forward_json_with_pinning(
                 url=upstream_url,
@@ -5478,7 +5484,7 @@ async def _execute_generic_stream_once(
             log_label="generic stream",
         )
 
-    if _is_upstream_whitelisted(upstream_base):
+    if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
         ctx.security_tags.add("upstream_whitelist_bypass")
 
@@ -5768,7 +5774,7 @@ async def _execute_generic_once(
             log_label="generic proxy",
         )
 
-    if _is_upstream_whitelisted(upstream_base):
+    if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         try:
             status_code, upstream_body = await _forward_json_with_pinning(
                 url=upstream_url,

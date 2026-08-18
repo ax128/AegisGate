@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # Allow `token__passthrough` mode from public/non-internal clients.
     # Default: False (internal-only) because passthrough disables all security filters.
     allow_public_passthrough_mode: bool = False
+    # Allow ``AEGIS_UPSTREAM_WHITELIST_URL_LIST`` bypass from public/non-internal
+    # clients. Default False: whitelist still skips both pipelines (including PII
+    # redaction) for internal clients, but public clients fall back to the normal
+    # filter path unless this is explicitly enabled.
+    allow_public_upstream_whitelist: bool = False
     # Custom host (defaults to host.docker.internal under Docker; use 127.0.0.1 on bare metal).
     local_port_routing_host: str = "host.docker.internal"
     # H-08: Comma-separated allowlist of ports permitted for compat port routing.

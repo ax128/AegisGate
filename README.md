@@ -226,7 +226,7 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 - **Anthropic Messages**: `POST /v1/messages` — full security pipeline; supports native pass-through to Anthropic-compatible upstreams, or protocol conversion to OpenAI Responses via token `compat` mode
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` — requires `x-target-url`, and the target host must also be present in `AEGIS_V2_TARGET_ALLOWLIST` because empty allowlist is fail-closed
 - **Multipart upload routes**: `POST /v1/files`, `POST /v1/images/edits`, `POST /v1/images/variations` — dedicated handlers registered ahead of the generic pass-through. Form fields go through PII redaction, and the body limit is `AEGIS_MAX_MULTIPART_BODY_BYTES` (60MB) rather than `AEGIS_MAX_REQUEST_BODY_BYTES`
-- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; by default it still runs the v1 request/response safety pipeline, and only `__passthrough` or an `AEGIS_UPSTREAM_WHITELIST_URL_LIST` match skips filtering
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; by default it still runs the v1 request/response safety pipeline, and only `__passthrough` or an `AEGIS_UPSTREAM_WHITELIST_URL_LIST` match skips **both** request and response filtering (including PII redaction)
 - **Relay-compatible endpoint**: `POST /relay/generate` — disabled by default; enable with `AEGIS_ENABLE_RELAY_ENDPOINT=true`. This endpoint maps relay-style payloads to `/v1/chat/completions` and requires internal `x-upstream-base` and `gateway-key` headers
 
 Compatibility notes:
@@ -428,7 +428,8 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_HOST` | `127.0.0.1` | Listen address |
 | `AEGIS_PORT` | `18080` | Listen port |
 | `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only (or from a reverse proxy presenting `x-aegis-proxy-token`) |
-| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | _(empty)_ | Comma-separated upstream bases that are forwarded **without the response-side filter pipeline**. Equivalent to `__passthrough` for those upstreams, but with no public-client restriction and no `filter_mode` audit tag — use only for fully trusted upstreams |
+| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | _(empty)_ | Comma-separated upstream bases that **bypass both request and response pipelines, including PII redaction**. Equivalent to `__passthrough` for those upstreams and intended only for fully trusted upstreams. Public clients do not get this bypass unless `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true` |
+| `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | `false` | Allow whitelist bypass from public/non-internal clients (dangerous; default: internal-only, same shape as `__passthrough`) |
 | `AEGIS_STORAGE_FAILURE_ACTION` | `block` | Behaviour when the storage backend fails: `block` rejects the request, `forward` degrades to plain forwarding (no audit or redaction-mapping persistence). Redaction filters are fail-closed regardless of this setting |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |

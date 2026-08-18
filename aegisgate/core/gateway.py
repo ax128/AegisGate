@@ -356,6 +356,17 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             "Set a strong secret in config/.env or AEGIS_REQUEST_HMAC_SECRET env var."
         )
 
+    whitelist = (settings.upstream_whitelist_url_list or "").strip()
+    if whitelist:
+        logger.warning(
+            "SECURITY WARNING: AEGIS_UPSTREAM_WHITELIST_URL_LIST is set (%s). "
+            "Matching upstreams receive the unredacted original request body and "
+            "skip both request and response filter pipelines, including PII "
+            "redaction. Use only for fully trusted upstreams. Public clients are "
+            "denied this bypass unless AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true.",
+            whitelist,
+        )
+
     try:
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
@@ -847,6 +858,7 @@ async def security_boundary_middleware(request: Request, call_next):
         "auth_verified": False,
         "replay_checked": False,
         "max_request_body_bytes": settings.max_request_body_bytes,
+        "client_is_internal": _is_internal_ip(_real_client_ip(request)),
     }
     injected_tenant_id = str(request.scope.get("aegis_tenant_id") or "").strip()
     if injected_tenant_id:
