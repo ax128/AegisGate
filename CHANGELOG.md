@@ -93,6 +93,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - DNS 解析失败时采用 fail-closed 策略（阻断请求），防止 DNS rebinding 攻击
   - `_is_ssrf_target()` 和 `_extract_target_url()` 改为 async，避免同步 DNS 阻塞事件循环
 
+### Added
+
+- **流式回归缺口补齐（A7 / P14 前置）**
+  - 扩展既有 `test_streaming_router.py`，补「独立终止帧 + 末块危险载荷」（chat/responses 标 xfail 留给 B1）以及 generic 五形态基线；messages 终止帧按代码现状写为绿（并不刷空 holdback）
+  - 记录 messages / generic 在 EOF 无 `[DONE]` 时没有恢复分支的当前行为，供后续 B9' 立项
+
 ### Fixed
 
 - **上游 400 错误：tool name 包含非法字符**
