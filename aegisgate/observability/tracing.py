@@ -7,12 +7,9 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Generator
-from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 from aegisgate.util.logger import logger
-
-F = TypeVar("F", bound=Callable[..., Any])
 
 try:
     from opentelemetry import trace as _otel_trace
@@ -101,23 +98,6 @@ def trace_span(name: str, **attributes: Any) -> Generator[Any, None, None]:
             yield span
     else:
         yield None
-
-
-def traced(span_name: str) -> Callable[[F], F]:
-    """Decorator that wraps a function in a trace span."""
-
-    def decorator(func: F) -> F:
-        if not _HAS_OTEL:
-            return func
-
-        @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with trace_span(span_name):
-                return func(*args, **kwargs)
-
-        return wrapper  # type: ignore[return-value]
-
-    return decorator
 
 
 # Legacy interface preserved for backward compatibility.
