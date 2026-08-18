@@ -17,6 +17,7 @@
   - 等号赋值：`field=value`
   - 冒号赋值：`field:value`
   - URL 查询参数：`?field=value`
+  - 字段名约束：会被统一转为小写，且必须匹配 `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`（首字符为字母/数字/下划线，总长 ≤64）。**不匹配的键会被静默丢弃**，注册接口不会报错——以 `/__gw__/register` 返回体中的 `whitelist_key` 为准，那是规范化后的实际生效值。
 - 管理接口（`/__gw__/register|lookup|unregister|add|remove`）应只允许内网/管理机访问。
 
 ## 1) What are the prerequisites? 环境检查
@@ -122,8 +123,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ```json
 {
-  "token": "Ab3k9Qx7Yp",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp",
+  "token": "ExampleToken24CharsAbc12",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/ExampleToken24CharsAbc12",
   "whitelist_key": []
 }
 ```

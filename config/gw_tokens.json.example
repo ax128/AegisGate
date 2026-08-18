@@ -3,9 +3,10 @@
   "_format": "Each key is a custom token name; clients reach the matching upstream through /v1/__gw__/t/<token>/... .",
   "_compat_notes": [
     "With compat=openai_chat set, /v1/messages requests are converted to the /v1/responses format automatically.",
-    "Model mapping is managed globally in config/model_map.json and is not bound to a specific token.",
-    "default_model is optional and overrides the fallback model used when the global map has no hit (default gpt-5.4).",
-    "Allowed target models: gpt-5, gpt-5.2, gpt-5.4, gpt-5.4-mini, gpt-5.2-codex, gpt-5.3-codex"
+    "Model mapping precedence: token-level model_map > global config/model_map.json > token-level default_model > gpt-5.4.",
+    "model_map is an optional per-token override; it wins over the global map for the model names it lists.",
+    "default_model is optional and overrides the fallback model used when neither map has a hit (default gpt-5.4).",
+    "Allowed target models are defined in code and extended via allowed_models in config/model_map.json — see that file."
   ],
   "tokens": {
     "sub2api": {
@@ -29,6 +30,15 @@
       "upstream_base": "https://api.openai.com/v1",
       "compat": "openai_chat",
       "default_model": "gpt-5.3-codex"
+    },
+    "claude-to-gpt-pinned": {
+      "_description": "Per-token model_map: wins over config/model_map.json for the names it lists",
+      "upstream_base": "https://api.openai.com/v1",
+      "compat": "openai_chat",
+      "model_map": {
+        "claude-opus-4-20250514": "gpt-5.2-codex"
+      },
+      "default_model": "gpt-5.4-mini"
     }
   }
 }

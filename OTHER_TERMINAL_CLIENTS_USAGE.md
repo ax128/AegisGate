@@ -75,6 +75,7 @@ curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
 Notes:
 - Use an upstream base that includes provider API prefix (e.g. `.../v1`).
 - This mode is internal-only. Public or reverse-proxied callers should use token mode instead of direct `/v1/...`.
+- Exception: a front reverse proxy may present `x-aegis-proxy-token` (value = `config/aegis_proxy_token.key`) to lift the internal-only check on `/v1/...` and `/v2/...`. Treat that key as equivalent to opening direct `/v1` access — never hand it to clients. See README "Custom HTTP Headers".
 - `v2` should still use token path: `/v2/__gw__/t/<TOKEN>/...` + `x-target-url`, and target hosts must be allowed by `AEGIS_V2_TARGET_ALLOWLIST`.
 
 ---

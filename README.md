@@ -72,7 +72,7 @@ flowchart LR
             S5[Restoration &<br/>Post-Restore Guard]
             S6[Output Sanitizer<br/>block / sanitize / pass]
         end
-        SR[Semantic Review (Gray Zone)<br/>optional service call]
+        SR["Semantic Review (Gray Zone)<br/>optional service call"]
 
         MW --> ReqPipeline
     end
@@ -225,7 +225,8 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 - **OpenAI-compatible** (full security pipeline): `POST /v1/chat/completions`, `POST /v1/responses`
 - **Anthropic Messages**: `POST /v1/messages` — full security pipeline; supports native pass-through to Anthropic-compatible upstreams, or protocol conversion to OpenAI Responses via token `compat` mode
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` — requires `x-target-url`, and the target host must also be present in `AEGIS_V2_TARGET_ALLOWLIST` because empty allowlist is fail-closed
-- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; by default it still runs the v1 request/response safety pipeline, and only `__passthrough` or upstream whitelist bypass skips filtering
+- **Multipart upload routes**: `POST /v1/files`, `POST /v1/images/edits`, `POST /v1/images/variations` — dedicated handlers registered ahead of the generic pass-through. Form fields go through PII redaction, and the body limit is `AEGIS_MAX_MULTIPART_BODY_BYTES` (60MB) rather than `AEGIS_MAX_REQUEST_BODY_BYTES`
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream; by default it still runs the v1 request/response safety pipeline, and only `__passthrough` or an `AEGIS_UPSTREAM_WHITELIST_URL_LIST` match skips filtering
 - **Relay-compatible endpoint**: `POST /relay/generate` — disabled by default; enable with `AEGIS_ENABLE_RELAY_ENDPOINT=true`. This endpoint maps relay-style payloads to `/v1/chat/completions` and requires internal `x-upstream-base` and `gateway-key` headers
 
 Compatibility notes:
@@ -287,6 +288,8 @@ When a token is configured with `"compat": "openai_chat"` in `config/gw_tokens.j
 
 **Allowed target models:** `gpt-5`, `gpt-5.2`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2-codex`, `gpt-5.3-codex`
 
+Extend the list without touching code by adding names to `allowed_models` in `config/model_map.json`; the built-in set above is a lower bound, so configuration can only add and can never empty the list. `config/model_map.json` is read at startup only — restart the gateway after editing it.
+
 ### Security Pipeline
 
 **Request side** (default policy): exact-value redaction → PII redaction → request sanitizer → RAG poison guard
@@ -346,6 +349,7 @@ Filter pipeline results may also include an `aegisgate` metadata object in succe
 | `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
 | `x-aegis-filter-mode` | Gateway internal | Derived from the token URL suffix (`__redact` / `__passthrough`) and re-injected by the gateway. Client-supplied values are stripped before inner handlers run. |
 | `x-aegis-redaction-whitelist` | Gateway internal | Derived from token `whitelist_key` bindings and injected by the gateway. Client-supplied values are stripped or ignored. |
+| `x-aegis-proxy-token` | Reverse proxy -> Gateway | Optional trust credential between a front reverse proxy and the gateway. Its value is `config/aegis_proxy_token.key` (generated on first start, chmod 600). When it matches, a non-token `/v1/...` or `/v2/...` request is accepted **regardless of client IP** and forwarded to `AEGIS_UPSTREAM_BASE_URL` — i.e. it lifts the internal-only restriction described below. Treat the key as equivalent to opening direct `/v1` access; rotate it like the gateway key and never expose it to clients. See [Caddyfile.example](Caddyfile.example) and `scripts/caddy-entrypoint.sh`. |
 
 ### Filter Modes (Passthrough / Redact-Only)
 
@@ -397,7 +401,7 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 - **Network & Devices**: IPv4/IPv6, MAC, IMEI/IMSI, device serial numbers
 - **Identity & Compliance**: SSN, tax IDs, passport/driver's license, medical records
 - **Crypto**: BTC/ETH/SOL/TRON addresses, WIF/xprv/xpub, seed phrases, exchange API keys
-- **Infrastructure** (relaxed mode): hostnames, OS versions, container IDs, K8s resources, internal URLs
+- **Infrastructure** (field-labelled only, i.e. `field: value` / `field=value` form): hostnames, OS versions, container IDs, K8s resources, internal URLs
 
 Request fields covered before forwarding: chat `messages`, Responses `input` and
 `instructions`, Anthropic `system`, tool/function definitions (`tools` and the
@@ -407,11 +411,13 @@ locators (`image_url` / `file_id`) are always forwarded verbatim so upstream
 calls keep working.
 
 Which patterns run depends on the route, and both the scoring pipeline and the
-forward path use the same rule: `/v1/chat/completions`, `/v1/responses` and
-`/v1/messages` carry structured conversation payloads where a false positive
-corrupts the prompt, so they run the relaxed id set (`redaction.relaxed_pii_ids`,
-credential-only by default). Every other route — the generic provider proxy
-included — runs the full set.
+forward path use the same rule (`is_low_false_positive_route`):
+`/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured
+conversation payloads where a false positive corrupts the prompt, so they run the
+**low-false-positive id set** (`redaction.relaxed_pii_ids`, credential-only by
+default). Every other route — the generic provider proxy included — runs the full
+set. Set `redaction.relaxed_pii_ids: ["*"]` to run every pattern on those three
+routes as well.
 
 ## Configuration
 
@@ -421,7 +427,9 @@ Key environment variables (set in `config/.env`):
 |----------|---------|-------------|
 | `AEGIS_HOST` | `127.0.0.1` | Listen address |
 | `AEGIS_PORT` | `18080` | Listen port |
-| `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only |
+| `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only (or from a reverse proxy presenting `x-aegis-proxy-token`) |
+| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | _(empty)_ | Comma-separated upstream bases that are forwarded **without the response-side filter pipeline**. Equivalent to `__passthrough` for those upstreams, but with no public-client restriction and no `filter_mode` audit tag — use only for fully trusted upstreams |
+| `AEGIS_STORAGE_FAILURE_ACTION` | `block` | Behaviour when the storage backend fails: `block` rejects the request, `forward` degrades to plain forwarding (no audit or redaction-mapping persistence). Redaction filters are fail-closed regardless of this setting |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | `true` | Enable semantic review (gray-zone gated; see `AEGIS_SEMANTIC_GRAY_LOW/HIGH`) |
@@ -439,7 +447,9 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_ENABLE_REDACTION` | `true` | Enable PII redaction |
 | `AEGIS_ENABLE_INJECTION_DETECTOR` | `true` | Enable prompt injection detection |
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | `false` | Force-block on dangerous command match |
-| `AEGIS_MAX_REQUEST_BODY_BYTES` | `12000000` | Maximum request body size in bytes |
+| `AEGIS_MAX_REQUEST_BODY_BYTES` | `12000000` | Maximum JSON request body size in bytes on v1 routes |
+| `AEGIS_MAX_MULTIPART_BODY_BYTES` | `60000000` | Maximum body size for the multipart routes (`/v1/files`, `/v1/images/edits`, `/v1/images/variations`) |
+| `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | `64000000` | Maximum request body size on v2 token routes (multimodal payloads exceed the v1 JSON limit) |
 | `AEGIS_MAX_MESSAGES_COUNT` | `500` | Maximum number of messages allowed in `/v1/chat/completions` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |

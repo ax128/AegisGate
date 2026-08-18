@@ -11,6 +11,9 @@ from aegisgate.util.logger import logger
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
 
+# Root-level Markdown that must never be served through the UI docs page.
+# The last three are gitignored local/internal reports: they are absent from a clean
+# checkout but may exist in a developer's working copy, so keep excluding them by name.
 _EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
     {
         "AGENTS.md",
@@ -23,23 +26,29 @@ _EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
 
 _DOC_FRIENDLY_TITLES: dict[str, str] = {
     "README.md": "README",
+    "README_zh.md": "README（中文）",
     "WEBUI-QUICKSTART.md": "Web UI 快速上手",
-    "CLIPROXY-QUICKSTART.md": "CLI Proxy 快速上手",
-    "SUB2API-QUICKSTART.md": "Sub2API 快速上手",
-    "AICLIENT2API-QUICKSTART.md": "AI Client→API 快速上手",
+    "UPSTREAM-QUICKSTART.md": "上游接入快速上手",
     "OTHER_TERMINAL_CLIENTS_USAGE.md": "其他终端客户端用法",
     "SKILL.md": "Skill 功能说明",
 }
 
 _DOC_ORDER: tuple[str, ...] = (
     "README.md",
+    "README_zh.md",
     "WEBUI-QUICKSTART.md",
-    "CLIPROXY-QUICKSTART.md",
-    "SUB2API-QUICKSTART.md",
-    "AICLIENT2API-QUICKSTART.md",
+    "UPSTREAM-QUICKSTART.md",
     "OTHER_TERMINAL_CLIENTS_USAGE.md",
     "SKILL.md",
 )
+
+
+def _doc_title(name: str) -> str:
+    """Friendly title for *name*, falling back to a readable form of the file name."""
+    known = _DOC_FRIENDLY_TITLES.get(name)
+    if known:
+        return known
+    return name.removesuffix(".md").replace("-", " ").replace("_", " ")
 
 
 def _docs_catalog() -> list[dict[str, str]]:
@@ -51,26 +60,10 @@ def _docs_catalog() -> list[dict[str, str]]:
     seen: set[str] = set()
     for name in _DOC_ORDER:
         if name in available:
-            docs.append(
-                {
-                    "id": name,
-                    "title": _DOC_FRIENDLY_TITLES.get(
-                        name, name.replace("-", " ").replace("_", " ").rstrip(".md")
-                    ),
-                    "path": name,
-                }
-            )
+            docs.append({"id": name, "title": _doc_title(name), "path": name})
             seen.add(name)
     for name in sorted(available - seen):
-        docs.append(
-            {
-                "id": name,
-                "title": _DOC_FRIENDLY_TITLES.get(
-                    name, name.replace("-", " ").replace("_", " ")
-                ),
-                "path": name,
-            }
-        )
+        docs.append({"id": name, "title": _doc_title(name), "path": name})
     return docs
 
 
