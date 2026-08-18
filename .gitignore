@@ -43,6 +43,14 @@ docker-compose-me.yml
 # Caddy config (local per-deployment)
 Caddyfile
 
+# Runtime copies of the rules the gateway generates into the mounted config dir.
+# The tracked source of truth is aegisgate/policies/rules/; init_config copies it in
+# on first start when missing. Tracking a second copy here let the two diverge.
+config/security_filters.yaml
+config/default.yaml
+config/strict.yaml
+config/permissive.yaml
+
 # Encryption keys and token mappings (NEVER commit)
 config/aegis_fernet.key
 config/aegis_gateway.key

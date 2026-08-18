@@ -554,7 +554,10 @@ _DEFAULT_RULES: dict[str, Any] = {
         },
         "tool_call_guard": {
             "disallowed_tool": "review",
-            "dangerous_param": "block",
+            # Matches security_filters.yaml. A hard block here over-triggers on
+            # code/diff arguments, so a hit raises the score and flags review
+            # instead, and the threshold decides.
+            "dangerous_param": "review",
             "invalid_param": "review",
             "semantic_review": "review",
         },

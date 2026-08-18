@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **合并两份分叉的 `security_filters.yaml`（P0）**
+  - 此前 `config/security_filters.yaml` 与 `aegisgate/policies/rules/security_filters.yaml` 都在版本控制内，且内容已经分叉。Docker 部署把 `./config` 挂载覆盖到包内规则目录（`AEGIS_SECURITY_RULES_PATH` 指向那里），裸机部署读包内那份，于是同一条安全修复只落到其中一份，两种部署加载了**不同的安全规则**
+  - 以严格的那份为准合并，包内副本随之变化：`action_map.injection_detector.tool_call_injection` `review` → `block`，`tool_call_injection` severity `6` → `9`，`non_reducible_categories` 增加 `obfuscated` 与 `tool_call_injection`
+  - 同一次合并中，`action_map.tool_call_guard.dangerous_param` 由 `block` 改为 `review`。这不是新的放宽，而是补上一个早就定下、却只落到 config 副本的调整（见下方 [Previous] 中「`dangerous_param` action 从 `block` 降为 `review`」）。`aegisgate/config/security_rules.py` 的内置默认值同步改为 `review`，避免 YAML 缺失时行为翻转
+  - `config/security_filters.yaml` 移出版本控制并加入 `.gitignore`，改由 `init_config` 在首次启动时从镜像内的只读模板生成。唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`
+  - 新增 `test_config_rules_copy_matches_package_copy` 守卫：一旦 `config/` 下重新出现一份副本且与包内不一致，测试失败
+
+  **升级动作（必读）**
+
+  1. **Docker 必须重建镜像，不能只重启。** 补写规则的模板来自镜像内的 `/app/bootstrap/rules`（由 `Dockerfile` 烘焙）。`git pull` 会删掉宿主机上的 `config/security_filters.yaml`，若只执行 `docker compose up -d`，`init_config` 会用**旧镜像里的旧规则**补写，`tool_call_injection` 会被静默降回 `review`。正确步骤：`git pull && docker compose build aegisgate && docker compose up -d`
+  2. **用 Web UI 改过规则的实例，`git pull` 会被 git 中止**（本地已修改的文件被上游删除）。先 `cp config/security_filters.yaml /tmp/rules.bak`，再 `git checkout -- config/security_filters.yaml && git pull`，然后把自定义项手工并回 `aegisgate/policies/rules/security_filters.yaml`
+  3. **裸机部署的拦截行为会收紧**：`tool_call_injection` 变为强制拦截且不再被「研究/教学/引用」上下文降分，`obfuscated` 同样不再可降分。若上游会正常回传工具调用的文本表示，按 [config/README.md](config/README.md) 的说明放宽
+
 - **请求侧脱敏覆盖修复（P0）**
   - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）。凭据探测覆盖**整个字符串**而非固定前缀：此前只看前 4096 字符，用 4KB base64 前缀垫一下就能让其后的密钥被整段跳过；改为 `str.find` 定位 + 定点匹配后，12MB 媒体的探测开销约 35ms
   - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）。块内间隔使用 `(?:[^-]|-(?!----))` 而非 `[\s\S]`，无法越过下一段 `-----`，因此没有 END 标记的头部会立即失配而不是探测 16384 个偏移——1MB 的 BEGIN 头部洪水从 ~6.2s 降到 ~8ms（正则本身），规则整体保持线性

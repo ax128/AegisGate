@@ -256,7 +256,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
 - 当前默认策略包含 `tool_call_guard`，但 **不包含** `system_prompt_guard` 与 `untrusted_content_guard`：
   - 若需要对 `retrieval/web/tool/document` 等不可信来源做包裹与风险抬升，需在策略 YAML 中显式加入 `untrusted_content_guard`，并保持对应 feature flag 开启。
-  - `tool_call_guard` 默认对未命中白名单的工具名仅做审查（`review`），但对危险参数默认直接按 `block` 处理；文件写入类工具（`apply_patch`/`write`/`edit` 等约 12 个）仅跳过“路径引用类”规则（`sensitive_file_access`/`path_traversal`/`ssh_key_access`），仍执行执行类危险参数扫描，避免代码 diff 内容误触发路径类规则；`bash`/`shell` 等执行类工具名列入危险工具名单（命中即标记，默认动作 `review`，可配为 `block`），且仍走完整危险参数扫描。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
+  - `tool_call_guard` 默认对未命中白名单的工具名和危险参数都按 `review` 处理（抬高风险分并标记复核，按阈值处置，而非无条件拦截）；文件写入类工具（`apply_patch`/`write`/`edit` 等约 12 个）仅跳过“路径引用类”规则（`sensitive_file_access`/`path_traversal`/`ssh_key_access`），仍执行执行类危险参数扫描，避免代码 diff 内容误触发路径类规则；`bash`/`shell` 等执行类工具名列入危险工具名单（命中即标记，默认动作 `review`，可配为 `block`），且仍走完整危险参数扫描。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。
 
 `v2` 链路（通用 HTTP 代理）：
 
@@ -836,9 +836,12 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 - `system_exfil`（系统提示泄露）
 - `obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）
 - `unicode_bidi`（bidi 方向控制攻击）
+- `tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等约 26 种模式）
 - `spam_noise`（赌博/色情/平台垃圾内容噪声，>=2 类别组合时触发）
 
-> 注：`tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等约 26 种模式）默认动作为 `review`（抬高风险分并标记复核，按阈值处置），**并非**无条件强制拦截；如需强拦，可在 `security_filters.yaml` 的 `action_map.injection_detector.tool_call_injection` 改为 `block`。
+以上五项同时列入 `non_reducible_categories`：即使命中「研究/教学/引用」等讨论上下文，风险分也不会被下调。
+
+> 如果你的场景确实需要放宽 `tool_call_injection`（例如上游会正常回传工具调用的文本表示），可在 `security_filters.yaml` 中把 `action_map.injection_detector.tool_call_injection` 改为 `review`，并把它从 `non_reducible_categories` 中移除。默认保持强拦截。
 
 ### 5.3 语义复核模块
 
