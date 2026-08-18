@@ -579,27 +579,13 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 
 仓库根目录提供了一键启动入口：`aegisgate-local.py`。
 
-常用命令：
-
 ```bash
-# 首次安装依赖
-python aegisgate-local.py install
-
-# 初始化 config/.env 和默认策略文件
-python aegisgate-local.py init
-
-# 后台启动网关
-python aegisgate-local.py start
-
-# 查看状态
-python aegisgate-local.py status
-
-# 查看日志路径，或输出 stdout 最后 50 行
-python aegisgate-local.py logs --tail 50
-
-# 停止网关
-python aegisgate-local.py stop
+python aegisgate-local.py install   # 首次安装依赖
+python aegisgate-local.py init      # 初始化 config/.env 和默认策略文件
+python aegisgate-local.py start     # 后台启动网关
 ```
+
+完整子命令（含 `status` / `logs` / `restart` / `stop` / `open-ui`）与可用参数见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)。
 
 启动成功后默认访问：
 
