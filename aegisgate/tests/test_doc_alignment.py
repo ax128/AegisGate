@@ -44,14 +44,23 @@ _DOC_FILES = (
     "config/README.md",
 )
 
+# Subset that describes the *current* configuration surface. The changelog is
+# excluded because documenting a removed setting means naming it, which is the
+# whole point of a breaking-change entry.
+_CONFIG_DOC_FILES = tuple(name for name in _DOC_FILES if name != "CHANGELOG.md")
+
 
 def _import_all_filter_modules() -> None:
     for mod in pkgutil.iter_modules(aegisgate.filters.__path__):
         importlib.import_module(f"aegisgate.filters.{mod.name}")
 
 
+def _existing(names: tuple[str, ...]) -> list[Path]:
+    return [p for p in (_REPO_ROOT / name for name in names) if p.is_file()]
+
+
 def _existing_docs() -> list[Path]:
-    return [p for p in (_REPO_ROOT / name for name in _DOC_FILES) if p.is_file()]
+    return _existing(_DOC_FILES)
 
 
 def test_filter_class_count_matches_docs() -> None:
@@ -85,10 +94,11 @@ def test_tool_call_injection_default_action_is_review() -> None:
 
 
 def test_documented_env_vars_exist_in_settings() -> None:
-    """Every AEGIS_* name in the docs must map to a real Settings field.
+    """Every AEGIS_* name in the config docs must map to a real Settings field.
 
     Catches settings that were renamed or deleted in code while the config
-    tables kept advertising them.
+    tables kept advertising them. The changelog is out of scope — see
+    _CONFIG_DOC_FILES.
     """
     known = {f"AEGIS_{name.upper()}" for name in Settings.model_fields}
     # Read directly from os.environ rather than through Settings, so they have
@@ -105,7 +115,7 @@ def test_documented_env_vars_exist_in_settings() -> None:
     pattern = re.compile(r"\bAEGIS_[A-Z0-9_]+\b")
 
     unknown: dict[str, set[str]] = {}
-    for path in _existing_docs():
+    for path in _existing(_CONFIG_DOC_FILES):
         found = set(pattern.findall(path.read_text(encoding="utf-8"))) - known
         if found:
             unknown[path.name] = found

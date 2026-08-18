@@ -19,6 +19,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Breaking Changes
 
+- **清理 yes/no 确认流程的最后残留**
+  - 删除 `ConfirmationCacheTask`、`clear_pending_confirmations_on_startup()`、三个存储后端的 `prune_pending_confirmations()` / `clear_all_pending_confirmations()`，以及 `pending_confirmation` 建表语句。写入方在更早的版本就已删除，这些只剩清理旧数据的作用
+  - 后台任务改名为 `MappingPruneTask`（`aegisgate/core/mapping_prune_task.py`），只负责脱敏映射的保留期清理
+  - 删除 `aegisgate/adapters/relay_compat/mapper.py`（无调用方）与 `scripts/redeploy.sh`（内容已随 compose 叠加文件失效）
+
+  **移除的配置项**（`Settings` 为 `extra="ignore"`，旧 `.env` 里的残留键不会导致启动失败）
+
+  | 环境变量 | 说明 |
+  |----------|------|
+  | `AEGIS_ENABLE_PENDING_PRUNE_TASK` | **改名**为 `AEGIS_ENABLE_MAPPING_PRUNE_TASK`。注意：此前显式设为 `false` 关闭后台清理的部署，升级后该值被忽略，映射清理任务会重新启用 |
+  | `AEGIS_PENDING_PRUNE_INTERVAL_SECONDS` | 已无消费者；映射清理周期由 `AEGIS_MAPPING_PRUNE_INTERVAL_SECONDS` 单独控制 |
+  | `AEGIS_CLEAR_PENDING_ON_STARTUP` | 启动清理逻辑已删除 |
+  | `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | 一并从 Web UI 配置页移除 |
+  | `AEGIS_CONFIRMATION_TTL_SECONDS` | 已无消费者 |
+  | `AEGIS_CONFIRMATION_EXECUTING_TIMEOUT_SECONDS` | 已无消费者 |
+  | `AEGIS_REDIS_PENDING_SCAN_BATCH_SIZE` | 已无消费者 |
+  | `AEGIS_REDIS_PENDING_SCAN_MAX_ENTRIES` | 已无消费者 |
+
+  **移除的可观测性接口**
+
+  - Prometheus gauge `aegisgate_pending_confirmations` 与 `aegisgate.observability.set_pending_confirmations()` 一并删除。引用该指标的 Grafana 面板/告警规则会变成无数据，需要自行摘除
+
+  **遗留数据需要手工清理**
+
+  本次没有附带 DROP/迁移脚本。从很早的版本一路升级上来的实例，可能还留有确认记录（含 `pending_request_payload`，即原始请求体）；清理入口已经删除，这些数据不会再被自动回收。确认无用后按存储后端执行：
+
+  ```sql
+  -- SQLite / PostgreSQL
+  DROP TABLE IF EXISTS pending_confirmation;
+  ```
+
+  ```bash
+  # Redis（前缀为 AEGIS_REDIS_KEY_PREFIX，默认 aegisgate）
+  redis-cli --scan --pattern 'aegisgate:pending:*' | xargs -r redis-cli DEL
+  ```
+
 - **移除 Token 映射中的 `gateway_key` 字段**
   - `gw_tokens.json` 不再包含 `gateway_key`，每个 token 仅绑定 `upstream_base` + `whitelist_key`
   - 同一 `upstream_base` 只保留一个 token（此前按 `upstream_base + gateway_key` 组合去重）
