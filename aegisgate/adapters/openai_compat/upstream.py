@@ -79,9 +79,28 @@ async def _get_upstream_async_client() -> httpx.AsyncClient:
 
 async def close_upstream_async_client() -> None:
     global _upstream_async_client
-    if _upstream_async_client is not None:
-        await _upstream_async_client.aclose()
+    async with _upstream_client_lock:
+        client = _upstream_async_client
         _upstream_async_client = None
+    if client is not None:
+        await client.aclose()
+
+
+def schedule_close_upstream_async_client() -> None:
+    """Drop the shared upstream client so the next request rebuilds it.
+
+    Hot reload is synchronous. If an event loop is already running, close the
+    client on that loop; otherwise drop the handle (tests / startup).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        loop.create_task(close_upstream_async_client())
+        return
+    global _upstream_async_client
+    _upstream_async_client = None
 
 
 def _normalize_upstream_base(raw_base: str) -> str:

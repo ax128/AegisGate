@@ -7,6 +7,9 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+# Shared floor for mapping retention math (prune cutoff / Redis expiry padding).
+MIN_MAPPING_TTL_SECONDS = 300
+
 
 def json_dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

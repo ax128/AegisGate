@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from aegisgate.storage._helpers import MIN_MAPPING_TTL_SECONDS
 from aegisgate.storage.crypto import (
     decrypt_mapping,
     encrypt_mapping,
@@ -56,7 +57,7 @@ class RedisKVStore(KVStore):
         # C-03/H-19: Always set a TTL so redaction mappings cannot accumulate
         # indefinitely in Redis memory.  Use pending_data_ttl_seconds with a
         # small safety buffer so in-flight restorations are not cut short.
-        ttl = max(3600, int(_settings.pending_data_ttl_seconds) + 300)
+        ttl = max(3600, int(_settings.pending_data_ttl_seconds) + MIN_MAPPING_TTL_SECONDS)
         self.client.set(self._mapping_key(session_id, request_id), payload, ex=ttl)
 
     def get_mapping(self, session_id: str, request_id: str) -> dict[str, str]:

@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from aegisgate.util.logger import logger
 
-from aegisgate.storage._helpers import LRUMappingCache
+from aegisgate.storage._helpers import LRUMappingCache, MIN_MAPPING_TTL_SECONDS
 from aegisgate.storage.crypto import (
     decrypt_mapping,
     encrypt_mapping,
@@ -234,7 +234,7 @@ class PostgresKVStore(KVStore):
         return decrypt_mapping(str(row[0]))
 
     def prune_expired_mappings(self, max_age_seconds: int) -> int:
-        ttl = max(300, int(max_age_seconds))
+        ttl = max(MIN_MAPPING_TTL_SECONDS, int(max_age_seconds))
         cutoff = int(time.time()) - ttl
         with self._connect() as conn:
             with conn.cursor() as cur:

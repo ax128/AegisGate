@@ -28,6 +28,16 @@ from aegisgate.util.logger import logger
 ensure_runtime_storage_paths()
 _pipeline_local = threading.local()
 
+_MAX_RETIRED_BACKENDS = 8
+_STORAGE_SETTINGS_FIELDS = (
+    "storage_backend",
+    "sqlite_db_path",
+    "redis_url",
+    "redis_key_prefix",
+    "postgres_dsn",
+    "postgres_schema",
+)
+
 
 def _close_store_backend(backend: object) -> None:
     close_method = getattr(backend, "close", None)
@@ -72,13 +82,27 @@ class RuntimeStoreProxy(KVStore):
         return cast(KVStore, self.backend)
 
     def swap(self, backend: object) -> None:
+        overflow: list[object] = []
+        retired_count = 0
         with self._lock:
             old_backend = self._backend
             self._backend = backend
             if old_backend is not backend:
-                # Keep old backends alive until shutdown so in-flight requests
-                # can finish on the object they already captured.
+                # Keep old backends alive so in-flight requests can finish on
+                # the object they already captured. Cap the list so repeated
+                # storage swaps cannot leak handles for the process lifetime.
                 self._retired_backends.append(old_backend)
+                while len(self._retired_backends) > _MAX_RETIRED_BACKENDS:
+                    overflow.append(self._retired_backends.pop(0))
+            retired_count = len(self._retired_backends)
+        for retired in overflow:
+            _close_store_backend(retired)
+        logger.info(
+            "runtime store swapped backend=%s retired_backends=%d closed_overflow=%d",
+            type(backend).__name__,
+            retired_count,
+            len(overflow),
+        )
 
     def set_mapping(
         self, session_id: str, request_id: str, mapping: dict[str, str]
@@ -162,11 +186,26 @@ def reset_pipeline_cache() -> None:
     _bump_pipeline_generation()
 
 
-def reload_runtime_dependencies() -> None:
-    """Rebuild runtime dependencies that are selected from mutable settings."""
+def _storage_settings_changed(previous: object, current: object) -> bool:
+    return any(
+        getattr(previous, name) != getattr(current, name)
+        for name in _STORAGE_SETTINGS_FIELDS
+    )
+
+
+def reload_runtime_dependencies(previous_settings: object | None = None) -> None:
+    """Rebuild runtime dependencies that are selected from mutable settings.
+
+    Store swap runs only when a storage-related setting changed. Log-level and
+    threshold reloads must not churn backends.
+    """
+    from aegisgate.config.settings import settings
+
     ensure_runtime_storage_paths()
-    new_store = create_store()
-    store.swap(new_store)
+    if previous_settings is None or _storage_settings_changed(
+        previous_settings, settings
+    ):
+        store.swap(create_store())
     reset_pipeline_cache()
 
 
