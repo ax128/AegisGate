@@ -22,6 +22,7 @@ import yaml
 
 import aegisgate.filters
 from aegisgate.adapters.openai_compat.mapper import COMPAT_ALLOWED_MODELS
+from aegisgate.config.security_rules import _DEFAULT_RULES
 from aegisgate.config.settings import Settings
 from aegisgate.filters.base import BaseFilter
 
@@ -197,6 +198,32 @@ def test_documented_error_codes_exist_in_code() -> None:
     missing = {code for code in table_codes if f'"{code}"' not in sources}
     assert not missing, (
         f"README.md documents error codes not present in the source: {sorted(missing)}"
+    )
+
+
+def test_placeholder_regex_copies_are_identical() -> None:
+    """YAML, code defaults, and restoration.py fallback must stay byte-identical.
+
+    A previous bug only changed the restoration.py fallback, which is unused
+    whenever YAML loads, so the runtime regex stayed blind to kinds like IPV4.
+    """
+    yaml_rules = yaml.safe_load(_RULES.read_text(encoding="utf-8"))
+    yaml_regex = yaml_rules["restoration"]["placeholder_regex"]
+    default_regex = _DEFAULT_RULES["restoration"]["placeholder_regex"]
+
+    restoration_src = (
+        _REPO_ROOT / "aegisgate" / "filters" / "restoration.py"
+    ).read_text(encoding="utf-8")
+    fallback_match = re.search(
+        r'get\(\s*"placeholder_regex"\s*,\s*r?"(.*)"\s*\)',
+        restoration_src,
+    )
+    assert fallback_match, "restoration.py placeholder_regex fallback not found"
+    fallback_regex = fallback_match.group(1)
+
+    assert yaml_regex == default_regex == fallback_regex
+    assert "[A-Z0-9_]+" in yaml_regex, (
+        "kind segment must allow digits so IPV4/IPV6 placeholders are visible"
     )
 
 

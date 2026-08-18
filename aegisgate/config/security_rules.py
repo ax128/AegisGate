@@ -37,7 +37,7 @@ _DEFAULT_RULES: dict[str, Any] = {
         ],
     },
     "restoration": {
-        "placeholder_regex": r"\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}",
+        "placeholder_regex": r"\{\{AG_[A-Z0-9]+_[A-Z0-9_]+_\d+\}\}",
         "suspicious_context_patterns": [
             {
                 "id": "exfiltration_en",

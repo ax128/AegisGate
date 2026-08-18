@@ -95,6 +95,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **占位符往返守卫对含数字 PII id 失明（B3 / P8 M-1）**
+  - `placeholder_regex` 的 kind 段从 `[A-Z_]+` 改为 `[A-Z0-9_]+`，否则 `IPV4` / `IPV6` 等占位符无法被 `findall` 识别，volume / partial / exfil 三个守卫全部失明，真实值仍被字符串替换还原
+  - 三份副本同步：YAML 运行时值、`security_rules.py` 代码默认、`restoration.py` 缺 key 时的兜底字面量
+
 - **上游 400 错误：tool name 包含非法字符**
   - OpenAI Responses API 要求 `input[].name` 匹配 `^[a-zA-Z0-9_-]+`，包含中文等字符时被拒绝
   - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）

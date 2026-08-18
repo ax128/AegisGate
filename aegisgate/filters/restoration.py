@@ -24,7 +24,7 @@ class RestorationFilter(BaseFilter):
         restoration_rules = rules.get(self.name, {})
         action_map = rules.get("action_map", {}).get(self.name, {})
 
-        placeholder_regex = restoration_rules.get("placeholder_regex", r"\{\{AG_[A-Z0-9]+_[A-Z_]+_\d+\}\}")
+        placeholder_regex = restoration_rules.get("placeholder_regex", r"\{\{AG_[A-Z0-9]+_[A-Z0-9_]+_\d+\}\}")
         self._placeholder_re = re.compile(placeholder_regex)
 
         suspicious_patterns: list[re.Pattern[str]] = []
