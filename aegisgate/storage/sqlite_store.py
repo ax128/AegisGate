@@ -83,56 +83,6 @@ class SqliteKVStore(KVStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_mapping_store_created_at ON mapping_store(created_at)"
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pending_confirmation (
-                  confirm_id TEXT PRIMARY KEY,
-                  session_id TEXT NOT NULL,
-                  route TEXT NOT NULL,
-                  request_id TEXT NOT NULL,
-                  model TEXT NOT NULL,
-                  upstream_base TEXT NOT NULL,
-                  pending_request_payload TEXT NOT NULL,
-                  pending_request_hash TEXT NOT NULL,
-                  reason TEXT NOT NULL,
-                  summary TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  created_at INTEGER NOT NULL,
-                  expires_at INTEGER NOT NULL,
-                  retained_until INTEGER NOT NULL,
-                  updated_at INTEGER NOT NULL,
-                  tenant_id TEXT NOT NULL DEFAULT 'default'
-                )
-                """
-            )
-            columns = {
-                str(row[1]).lower()
-                for row in conn.execute(
-                    "PRAGMA table_info(pending_confirmation)"
-                ).fetchall()
-            }
-            if "tenant_id" not in columns:
-                conn.execute(
-                    "ALTER TABLE pending_confirmation ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
-                )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pending_session_status
-                ON pending_confirmation (session_id, status, created_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pending_tenant_session_route_status
-                ON pending_confirmation (tenant_id, session_id, route, status, created_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pending_retained_until
-                ON pending_confirmation (retained_until)
-                """
-            )
             conn.commit()
         logger.info("sqlite store initialized path=%s", self.db_path)
 
@@ -222,45 +172,6 @@ class SqliteKVStore(KVStore):
         if not row:
             return {}
         return decrypt_mapping(row[0])
-
-    def prune_pending_confirmations(self, now_ts: int) -> int:
-        def _delete() -> int:
-            with self._managed_connection() as conn:
-                cursor = conn.execute(
-                    """
-                    DELETE FROM pending_confirmation
-                    WHERE retained_until <= ?
-                    """,
-                    (now_ts,),
-                )
-                removed = int(cursor.rowcount or 0)
-                # Recover stale "executing" records back to "pending"
-                timeout = int(settings.confirmation_executing_timeout_seconds)
-                if timeout > 0:
-                    recover_before = int(now_ts) - max(5, timeout)
-                    conn.execute(
-                        """
-                        UPDATE pending_confirmation
-                        SET status = 'pending', updated_at = ?
-                        WHERE status = 'executing' AND updated_at <= ?
-                        """,
-                        (now_ts, recover_before),
-                    )
-                conn.commit()
-                return removed
-
-        return self._with_retry(_delete)
-
-    def clear_all_pending_confirmations(self) -> int:
-        """Clear every pending-confirmation record at startup; after a restart only confirmations for new requests count."""
-
-        def _delete() -> int:
-            with self._managed_connection() as conn:
-                cursor = conn.execute("DELETE FROM pending_confirmation")
-                conn.commit()
-                return int(cursor.rowcount or 0)
-
-        return self._with_retry(_delete)
 
     def prune_expired_mappings(self, max_age_seconds: int = 86400) -> int:
         """C-03: Remove mapping_store rows older than max_age_seconds.

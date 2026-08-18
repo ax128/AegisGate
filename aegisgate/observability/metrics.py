@@ -9,7 +9,7 @@ from __future__ import annotations
 from aegisgate.util.logger import logger
 
 try:
-    from prometheus_client import Counter, Histogram, Gauge, REGISTRY  # noqa: F401
+    from prometheus_client import Counter, Histogram, REGISTRY  # noqa: F401
 
     _HAS_PROMETHEUS = True
 except ImportError:
@@ -66,18 +66,6 @@ else:
     PIPELINE_DURATION = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
-# Gauges
-# ---------------------------------------------------------------------------
-if _HAS_PROMETHEUS:
-    PENDING_CONFIRMATIONS = Gauge(
-        "aegisgate_pending_confirmations",
-        "Current number of pending human confirmations",
-    )
-else:
-    PENDING_CONFIRMATIONS = None  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
 # Convenience helpers (always safe to call)
 # ---------------------------------------------------------------------------
 
@@ -117,12 +105,6 @@ def inc_upstream_error(error_type: str) -> None:
     """Increment upstream error counter."""
     if UPSTREAM_ERROR_TOTAL is not None:
         UPSTREAM_ERROR_TOTAL.labels(error_type=error_type).inc()
-
-
-def set_pending_confirmations(count: int) -> None:
-    """Set the pending confirmations gauge."""
-    if PENDING_CONFIRMATIONS is not None:
-        PENDING_CONFIRMATIONS.set(count)
 
 
 # Legacy interface preserved for backward compatibility.

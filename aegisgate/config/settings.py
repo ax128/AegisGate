@@ -53,10 +53,6 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_key_prefix: str = "aegisgate"
-    redis_pending_scan_batch_size: int = 200
-    redis_pending_scan_max_entries: int = (
-        0  # <=0 means no scan limit, so busy sessions do not miss older pending entries
-    )
     postgres_dsn: str = ""
     postgres_schema: str = "public"
     max_request_body_bytes: int = 12_000_000
@@ -68,20 +64,18 @@ class Settings(BaseSettings):
     v2_max_request_body_bytes: int = 64_000_000
     max_messages_count: int = 500
     max_content_length_per_message: int = 250_000
-    max_pending_payload_bytes: int = 1_200_000
     max_response_length: int = 2_000_000
     gateway_key_header: str = "gateway-key"
     gateway_key: str = ""  # Loaded from config/aegis_gateway.key at startup
     tenant_id_header: str = "x-tenant-id"
-    confirmation_ttl_seconds: int = 600
-    confirmation_executing_timeout_seconds: int = 120
+    # Retention for redaction mappings; also drives the periodic mapping-store sweep.
     pending_data_ttl_seconds: int = 86400
     # Whether the confirmation text shows the "matched fragment (safely transformed)" preview; on by default.
     confirmation_show_hit_preview: bool = True
     # [DEPRECATED] require_confirmation_on_block — kept only for config compatibility.
     # Whether it is True or False, the behaviour matches False: on a block the dangerous fragment
     # is transformed and returned directly, and the yes/no approval commands are gone.
-    # The UI (.env.example, config/README.md) marks it deprecated; a future release may remove it.
+    # config/.env.example and config/README.md mark it deprecated; a future release may remove it.
     require_confirmation_on_block: bool = False
     # When on, matching a "force-block command" rule blocks outright (independent of
     # security_level and the risk threshold).
@@ -169,12 +163,12 @@ class Settings(BaseSettings):
     v2_response_filter_max_chars: int = 200_000
     v2_sse_filter_probe_max_chars: int = 4_000
 
-    enable_pending_prune_task: bool = True
-    pending_prune_interval_seconds: int = 60
-    # Interval (seconds) between periodic SQLite mapping_store cleanups. Deletes mappings older
-    # than pending_data_ttl_seconds so long-running instances do not grow the database forever.
+    # Periodic mapping_store cleanup: deletes mappings older than pending_data_ttl_seconds so
+    # long-running instances do not grow the database forever.
+    # (Renamed from enable_pending_prune_task, which also drove the removed pending-confirmation
+    # sweep; pending_prune_interval_seconds and clear_pending_on_startup are gone with it.)
+    enable_mapping_prune_task: bool = True
     mapping_prune_interval_seconds: int = 3600
-    clear_pending_on_startup: bool = False
     audit_log_path: str = (
         "logs/audit.jsonl"  # Empty string disables the audit file; under Docker use /tmp/audit.jsonl
     )

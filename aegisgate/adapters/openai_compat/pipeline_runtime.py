@@ -99,18 +99,6 @@ class RuntimeStoreProxy(KVStore):
                 return mapping
         return {}
 
-    def prune_pending_confirmations(self, now_ts: int) -> int:
-        removed = 0
-        for backend in self._backend_candidates():
-            removed += int(backend.prune_pending_confirmations(now_ts))
-        return removed
-
-    def clear_all_pending_confirmations(self) -> int:
-        removed = 0
-        for backend in self._backend_candidates():
-            removed += int(backend.clear_all_pending_confirmations())
-        return removed
-
     def close(self) -> None:
         with self._lock:
             current_backend = self._backend
@@ -188,10 +176,6 @@ def close_runtime_dependencies() -> None:
     reset_pipeline_cache()
 
 
-def prune_pending_confirmations(now_ts: int) -> int:
-    return int(store.prune_pending_confirmations(now_ts))
-
-
 def prune_expired_mappings(max_age_seconds: int) -> int:
     method = getattr(store, "prune_expired_mappings", None)
     if not callable(method):
@@ -202,7 +186,3 @@ def prune_expired_mappings(max_age_seconds: int) -> int:
         # Backward compatibility for implementations that only accept a positional argument.
         return int(method(int(max_age_seconds)))
 
-
-def clear_pending_confirmations_on_startup() -> int:
-    """Clear every pending-confirmation record at startup, so only confirmations for new requests count after a restart."""
-    return int(store.clear_all_pending_confirmations())

@@ -50,10 +50,8 @@ from aegisgate.adapters.openai_compat.payload_compat import (
 )
 from aegisgate.adapters.openai_compat.pipeline_runtime import (  # noqa: F401 - router re-exports for gateway startup hooks
     _get_pipeline,
-    clear_pending_confirmations_on_startup,
     close_runtime_dependencies,
     prune_expired_mappings,
-    prune_pending_confirmations,
     reload_runtime_dependencies,
 )
 from aegisgate.adapters.openai_compat.security_view import (

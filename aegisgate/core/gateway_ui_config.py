@@ -217,13 +217,6 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
         "section": "general",
     },
     {
-        "env": "AEGIS_MAX_PENDING_PAYLOAD_BYTES",
-        "field": "max_pending_payload_bytes",
-        "label": "Pending 最大字节",
-        "type": "int",
-        "section": "general",
-    },
-    {
         "env": "AEGIS_MAX_RESPONSE_LENGTH",
         "field": "max_response_length",
         "label": "最大响应字符",

@@ -76,7 +76,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - 客户端的 `Authorization: Bearer <key>` 直接透传到上游
 - 多个上游可同时使用，互不冲突
 - **无需注册 token、无需编辑配置、无需重启网关**
-- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.4 过滤模式](#24-过滤模式tokenredact--tokenpassthrough)
+- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.4 过滤模式](#24-过滤模式token__redact--token__passthrough)
 - **安全默认**：纯数字端口 token（1024–65535，例如 `/v1/__gw__/t/8317/...`）默认按**仅内网**处理。对公网暴露时建议注册随机 token（推荐）或启用请求 HMAC；如需强行放开可设置 `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`。
 - **安全默认**：`token__passthrough` 会禁用全部过滤器，默认按**仅内网**处理；如需对公网放开可设置 `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE=true`（危险）。
 
@@ -764,7 +764,6 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `12000000` |
 | `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `500` |
 | `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `250000` |
-| `AEGIS_MAX_PENDING_PAYLOAD_BYTES` | pending 存储体积上限 | `1200000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | 全局风险评分阈值（0–1），越低越严格；策略 YAML 的 `risk_threshold` 可按策略覆盖（默认策略为 0.85） | `0.7` |
