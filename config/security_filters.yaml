@@ -57,7 +57,18 @@ redaction:
     - id: COOKIE_SESSION
       regex: '\b(?:session(?:id)?|sid|set-cookie|csrftoken|xsrf-token)\b\s*[:=]\s*[A-Za-z0-9._%\-]{8,}\b'
     - id: PRIVATE_KEY_PEM
-      regex: '-----BEGIN (?:RSA|EC|DSA|OPENSSH|PGP|PRIVATE) KEY-----'
+      # Matches the whole PEM block when the END marker is present, so the key
+      # body is redacted too; falls back to the header for truncated pastes.
+      # The body gap is `(?:[^-]|-(?!----))` rather than `[\s\S]`: it cannot run
+      # past the next `-----` run, so a header with no END marker fails after a
+      # couple of steps instead of probing 16384 offsets.  That keeps the rule
+      # linear in input size — a 1MB paste of bare BEGIN headers costs ~8ms
+      # instead of ~6s.  A single `-` (Proc-Type/DEK-Info in encrypted PEMs) is
+      # still allowed inside the body.
+      # Bound: bodies longer than 16384 chars fall through to the header-only
+      # alternative and their key material is NOT redacted; that is ~5x an
+      # RSA-4096 PEM, so it only bites on pathological pastes.
+      regex: '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY[A-Z ]{0,16}-----(?:[^-]|-(?!----)){0,16384}?-----END [A-Z0-9 ]{0,40}PRIVATE KEY[A-Z ]{0,16}-----|-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY[A-Z ]{0,16}-----'
     - id: AWS_SECRET_ACCESS_KEY
       regex: '\baws[_-]?secret[_-]?access[_-]?key\b\s*[:=]\s*[A-Za-z0-9/+=]{40}\b'
     - id: BANK_ACCOUNT

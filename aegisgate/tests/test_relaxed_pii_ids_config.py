@@ -1,7 +1,7 @@
 """redaction.relaxed_pii_ids — the configurable low-false-positive pattern set.
 
 Covers the resolver semantics and the request-filter behaviour on the routes in
-_LOW_FALSE_POSITIVE_V1_ROUTES, including the backward-compatible default.
+LOW_FALSE_POSITIVE_V1_ROUTES, including the backward-compatible default.
 """
 
 from __future__ import annotations

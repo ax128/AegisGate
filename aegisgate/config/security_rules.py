@@ -605,6 +605,26 @@ _RELAXED_PII_ALL = "*"
 # Config mistakes are logged once per distinct value, not per pipeline rebuild.
 _WARNED_RELAXED_PII_CONFIG: set[tuple[str, ...]] = set()
 
+# Routes whose request bodies are structured conversation payloads: a false
+# positive there corrupts the prompt, so only the relaxed (credential-only by
+# default) id set runs on them.  Every other route — the generic
+# /v1/<subpath> provider proxy included — gets the full pattern set.
+# Single source of truth: both RedactionFilter (pipeline scoring) and the
+# forward-path payload sanitizers must agree, otherwise a route gets scored
+# with one set and redacted with another.
+LOW_FALSE_POSITIVE_V1_ROUTES: frozenset[str] = frozenset(
+    {
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/messages",
+    }
+)
+
+
+def is_low_false_positive_route(route: str) -> bool:
+    """Return True when *route* must use the relaxed (low-false-positive) id set."""
+    return str(route or "").strip().lower() in LOW_FALSE_POSITIVE_V1_ROUTES
+
 
 def _resolve_rules_file(path: str) -> Path:
     candidate = Path(path)

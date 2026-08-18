@@ -11,7 +11,12 @@ import time
 import unicodedata
 from typing import Any
 
-from aegisgate.config.security_rules import load_security_rules, select_relaxed_pii_patterns
+from aegisgate.config.security_rules import (
+    is_low_false_positive_route,
+    load_security_rules,
+    select_relaxed_pii_patterns,
+)
+from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
@@ -25,13 +30,6 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys, protect
 _MAX_LOG_MARKERS = 10
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
-_LOW_FALSE_POSITIVE_V1_ROUTES = frozenset(
-    {
-        "/v1/chat/completions",
-        "/v1/responses",
-        "/v1/messages",
-    }
-)
 
 
 class RedactionFilter(BaseFilter):
@@ -126,7 +124,30 @@ class RedactionFilter(BaseFilter):
 
     @staticmethod
     def _is_low_false_positive_v1_route(route: str) -> bool:
-        return str(route or "").strip().lower() in _LOW_FALSE_POSITIVE_V1_ROUTES
+        return is_low_false_positive_route(route)
+
+    def _persist_mapping(self, ctx: RequestContext, mapping: dict[str, str]) -> None:
+        """Store the restoration mapping, honouring storage_failure_action.
+
+        The request text is already redacted by the time this runs, so a storage
+        outage only costs response-side restoration — never the redaction itself.
+        With the default ``block`` the exception propagates and the pipeline
+        rejects the request; with ``forward`` the request goes on redacted but
+        non-restorable, and the degradation is tagged for audit.
+        """
+        try:
+            self.store.set_mapping(ctx.session_id, ctx.request_id, mapping)
+        except Exception:
+            if settings.storage_failure_action != "forward":
+                raise
+            ctx.security_tags.add("redaction_mapping_persist_failed")
+            ctx.enforcement_actions.append(f"{self.name}:mapping_persist_failed:degraded")
+            logger.exception(
+                "redaction mapping persist failed request_id=%s session_id=%s — forwarding redacted "
+                "request without restoration mapping (storage_failure_action=forward)",
+                ctx.request_id,
+                ctx.session_id,
+            )
 
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "replacements": 0}
@@ -199,7 +220,7 @@ class RedactionFilter(BaseFilter):
             # Keep request-scoped mapping in context to avoid extra DB read on the hot path.
             ctx.redaction_mapping = dict(mapping)
             ctx.redaction_created_at = time.time()
-            self.store.set_mapping(ctx.session_id, ctx.request_id, mapping)
+            self._persist_mapping(ctx, mapping)
             self._report = {
                 "filter": self.name,
                 "hit": True,

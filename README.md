@@ -399,6 +399,20 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 - **Crypto**: BTC/ETH/SOL/TRON addresses, WIF/xprv/xpub, seed phrases, exchange API keys
 - **Infrastructure** (relaxed mode): hostnames, OS versions, container IDs, K8s resources, internal URLs
 
+Request fields covered before forwarding: chat `messages`, Responses `input` and
+`instructions`, Anthropic `system`, tool/function definitions (`tools` and the
+legacy `functions`), multipart form fields, and the full JSON body on generic
+`/v1/<subpath>` provider routes. Tool names, tool-call linkage ids and media
+locators (`image_url` / `file_id`) are always forwarded verbatim so upstream
+calls keep working.
+
+Which patterns run depends on the route, and both the scoring pipeline and the
+forward path use the same rule: `/v1/chat/completions`, `/v1/responses` and
+`/v1/messages` carry structured conversation payloads where a false positive
+corrupts the prompt, so they run the relaxed id set (`redaction.relaxed_pii_ids`,
+credential-only by default). Every other route — the generic provider proxy
+included — runs the full set.
+
 ## Configuration
 
 Key environment variables (set in `config/.env`):

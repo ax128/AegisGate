@@ -7,6 +7,7 @@ function output sanitization, and request payload log sanitization.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -53,6 +54,15 @@ _RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
     }
 )
 _MAX_REDACTION_HIT_LOG_ITEMS = 24
+# Upper bound on hit rows kept in memory while walking one payload. Only
+# _MAX_REDACTION_HIT_LOG_ITEMS of them ever reach the audit log; the rest exist
+# to make the total count meaningful, and a generic provider payload can hold
+# far more string leaves than that number is worth.
+_MAX_COLLECTED_REDACTION_HITS = 2048
+# Nesting depth ceiling for the shared structured walker. Real payloads sit well
+# under 30 levels; the ceiling exists so a hostile body fails as a 400 instead
+# of exhausting the interpreter stack.
+_MAX_STRUCTURED_DEPTH = 128
 
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
@@ -255,7 +265,15 @@ def _sanitize_text_for_upstream_with_hits(
     path: str,
     field: str,
     whitelist_keys: set[str] | None = None,
+    relaxed_patterns: bool | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one string leaf.
+
+    ``relaxed_patterns`` overrides the role-derived choice between the relaxed
+    (credential-only by default) id set and the full one.  Callers that know the
+    route must pass it explicitly so the forward path uses the same set the
+    pipeline's RedactionFilter used for that route.
+    """
     if not text:
         return "", []
     if looks_like_base64_blob(text):
@@ -265,9 +283,14 @@ def _sanitize_text_for_upstream_with_hits(
     if not cleaned:
         return "", []
 
+    use_relaxed = (
+        role in _RESPONSES_RELAXED_REDACTION_ROLES
+        if relaxed_patterns is None
+        else relaxed_patterns
+    )
     patterns = (
         _responses_relaxed_redaction_patterns()
-        if role in _RESPONSES_RELAXED_REDACTION_ROLES
+        if use_relaxed
         else _responses_function_output_redaction_patterns()
     )
     hits: list[dict[str, Any]] = []
@@ -321,6 +344,148 @@ def _sanitize_text_for_upstream_with_hits(
     return cleaned, hits
 
 
+def _skip_non_content_field(field: str | None) -> bool:
+    """Structural / tool-linkage fields that must be forwarded verbatim."""
+    return str(field or "").strip().lower() in _NON_CONTENT_KEYS
+
+
+def _never_skip_field(field: str | None) -> bool:  # noqa: ARG001
+    return False
+
+
+def _record_hits(hits: list[dict[str, Any]], node_hits: list[dict[str, Any]]) -> None:
+    """Append node hits, keeping the accumulator bounded.
+
+    Hits exist for the audit log, which samples _MAX_REDACTION_HIT_LOG_ITEMS
+    rows anyway.  On a generic provider payload with tens of thousands of string
+    leaves an unbounded accumulator is pure memory growth on the hot path, so it
+    stops collecting once the cap is reached — the log line still reports that
+    the sample was truncated.
+    """
+    room = _MAX_COLLECTED_REDACTION_HITS - len(hits)
+    if room <= 0:
+        return
+    hits.extend(node_hits[:room])
+
+
+def _merge_redaction_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-match hits into one row per (path, field, role, pattern)."""
+    dedup: dict[tuple[str, str, str, str], int] = {}
+    for item in hits:
+        key = (
+            str(item.get("path") or ""),
+            str(item.get("field") or ""),
+            str(item.get("role") or ""),
+            str(item.get("pattern") or ""),
+        )
+        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
+    return [
+        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
+        for (path, field, role, pattern), count in dedup.items()
+    ]
+
+
+def _sanitize_structured_node(
+    node: Any,
+    *,
+    path: str,
+    role: str,
+    field: str,
+    hits: list[dict[str, Any]],
+    whitelist_keys: set[str] | None = None,
+    media_block_type: str | None = None,
+    skip_field: Callable[[str | None], bool] = _skip_non_content_field,
+    relaxed_patterns: bool | None = None,
+    depth: int = 0,
+) -> Any:
+    """Walk a JSON-like node and redact every string leaf, preserving the shape.
+
+    Shared by the chat / messages-system / tool-definition / generic-payload
+    entry points so they cannot drift apart on skip rules or hit accounting.
+
+    Raises ``ValueError("payload_depth_shape_violation")`` past
+    _MAX_STRUCTURED_DEPTH so a hostile nesting depth surfaces as the regular 400
+    shape-violation response instead of an uncaught RecursionError 500.
+    """
+    if depth > _MAX_STRUCTURED_DEPTH:
+        raise ValueError("payload_depth_shape_violation")
+
+    if isinstance(node, str):
+        if skip_field(field):
+            return node
+        # Media locator fields (image_url/file_id) must be forwarded as-is.
+        # We still scan and record redaction hits for audit visibility.
+        if _is_media_locator_field(
+            path=path,
+            field=field,
+            media_block_type=media_block_type,
+        ):
+            _, node_hits = _sanitize_text_for_upstream_with_hits(
+                node,
+                role=role,
+                path=path,
+                field=field,
+                whitelist_keys=whitelist_keys,
+                relaxed_patterns=relaxed_patterns,
+            )
+            _record_hits(hits, node_hits)
+            return node
+
+        cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+            node,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+            relaxed_patterns=relaxed_patterns,
+        )
+        _record_hits(hits, node_hits)
+        return cleaned
+
+    if isinstance(node, list):
+        return [
+            _sanitize_structured_node(
+                item,
+                path=f"{path}[{idx}]",
+                role=role,
+                field=field,
+                hits=hits,
+                whitelist_keys=whitelist_keys,
+                media_block_type=media_block_type,
+                skip_field=skip_field,
+                relaxed_patterns=relaxed_patterns,
+                depth=depth + 1,
+            )
+            for idx, item in enumerate(node)
+        ]
+
+    if not isinstance(node, dict):
+        return node
+
+    next_media_block_type = media_block_type
+    if _is_media_block_container_path(path):
+        block_type = str(node.get("type", "")).strip().lower()
+        if block_type:
+            next_media_block_type = block_type
+
+    copied: dict[str, Any] = dict(node)
+    for key, item in node.items():
+        if isinstance(item, (str, list, dict)):
+            copied[key] = _sanitize_structured_node(
+                item,
+                path=f"{path}.{key}" if path else key,
+                role=role,
+                field=key,
+                hits=hits,
+                whitelist_keys=whitelist_keys,
+                media_block_type=next_media_block_type,
+                skip_field=skip_field,
+                relaxed_patterns=relaxed_patterns,
+                depth=depth + 1,
+            )
+    return copied
+
+
 def _sanitize_function_output_value(value: Any) -> Any:
     if isinstance(value, str):
         cleaned, _ = _sanitize_text_for_upstream_with_hits(
@@ -347,81 +512,6 @@ def _sanitize_chat_messages_for_upstream_with_hits(
     """Sanitize structured chat message content without flattening payload shape."""
     hits: list[dict[str, Any]] = []
 
-    def _sanitize_structured_part(
-        node: Any,
-        *,
-        path: str,
-        role: str,
-        field: str,
-        media_block_type: str | None = None,
-    ) -> Any:
-        if isinstance(node, str):
-            # Tool-call linkage / structural fields (id, tool_call_id, name, ...)
-            # must be forwarded verbatim; redacting them breaks the call<->result
-            # linkage. Mirrors the Responses-path skip set.
-            if str(field or "").strip().lower() in _NON_CONTENT_KEYS:
-                return node
-            # Media locator fields (image_url/file_id) must be forwarded as-is.
-            # We still scan and record redaction hits for audit visibility.
-            if _is_media_locator_field(
-                path=path,
-                field=field,
-                media_block_type=media_block_type,
-            ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
-                    node,
-                    role=role,
-                    path=path,
-                    field=field,
-                    whitelist_keys=whitelist_keys,
-                )
-                hits.extend(node_hits)
-                return node
-
-            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                node,
-                role=role,
-                path=path,
-                field=field,
-                whitelist_keys=whitelist_keys,
-            )
-            hits.extend(node_hits)
-            return cleaned
-
-        if isinstance(node, list):
-            return [
-                _sanitize_structured_part(
-                    item,
-                    path=f"{path}[{idx}]",
-                    role=role,
-                    field=field,
-                    media_block_type=media_block_type,
-                )
-                for idx, item in enumerate(node)
-            ]
-
-        if not isinstance(node, dict):
-            return node
-
-        next_media_block_type = media_block_type
-        if _is_media_block_container_path(path):
-            block_type = str(node.get("type", "")).strip().lower()
-            if block_type:
-                next_media_block_type = block_type
-
-        copied: dict[str, Any] = dict(node)
-        for key, item in node.items():
-            child_path = f"{path}.{key}" if path else key
-            if isinstance(item, (str, list, dict)):
-                copied[key] = _sanitize_structured_part(
-                    item,
-                    path=child_path,
-                    role=role,
-                    field=key,
-                    media_block_type=next_media_block_type,
-                )
-        return copied
-
     sanitized_messages: list[Any] = []
     for idx, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -433,29 +523,17 @@ def _sanitize_chat_messages_for_upstream_with_hits(
             if key == "role":
                 continue
             if isinstance(item, (str, list, dict)):
-                copied_message[key] = _sanitize_structured_part(
+                copied_message[key] = _sanitize_structured_node(
                     item,
                     path=f"messages[{idx}].{key}",
                     role=role,
                     field=key,
-                    media_block_type=None,
+                    hits=hits,
+                    whitelist_keys=whitelist_keys,
                 )
         sanitized_messages.append(copied_message)
 
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized_messages, merged_hits
+    return sanitized_messages, _merge_redaction_hits(hits)
 
 
 def _sanitize_messages_system_for_upstream_with_hits(
@@ -464,87 +542,95 @@ def _sanitize_messages_system_for_upstream_with_hits(
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        value,
+        path="system",
+        role="system",
+        field="system",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+        skip_field=_never_skip_field,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-    def _sanitize_system_part(
-        node: Any,
-        *,
-        path: str,
-        field: str,
-        media_block_type: str | None = None,
-    ) -> Any:
-        if isinstance(node, str):
-            if _is_media_locator_field(
-                path=path,
-                field=field,
-                media_block_type=media_block_type,
-            ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
-                    node,
-                    role="system",
-                    path=path,
-                    field=field,
-                    whitelist_keys=whitelist_keys,
-                )
-                hits.extend(node_hits)
-                return node
 
-            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                node,
-                role="system",
-                path=path,
-                field=field,
-                whitelist_keys=whitelist_keys,
-            )
-            hits.extend(node_hits)
-            return cleaned
+def _sanitize_instructions_for_upstream_with_hits(
+    value: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact the Responses-API ``instructions`` field before forwarding.
 
-        if isinstance(node, list):
-            return [
-                _sanitize_system_part(
-                    item,
-                    path=f"{path}[{idx}]",
-                    field=field,
-                    media_block_type=media_block_type,
-                )
-                for idx, item in enumerate(node)
-            ]
+    ``instructions`` carries the system prompt on the Responses path, which is
+    where coding clients put environment details, absolute paths and internal
+    service URLs — it has to go through the same redaction as ``input``.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        value,
+        path="instructions",
+        role="system",
+        field="instructions",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-        if not isinstance(node, dict):
-            return node
 
-        next_media_block_type = media_block_type
-        if _is_media_block_container_path(path):
-            block_type = str(node.get("type", "")).strip().lower()
-            if block_type:
-                next_media_block_type = block_type
+def _sanitize_tool_definitions_for_upstream_with_hits(
+    tools: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact tool/function definitions before forwarding.
 
-        copied: dict[str, Any] = dict(node)
-        for key, item in node.items():
-            child_path = f"{path}.{key}" if path else key
-            if isinstance(item, (str, list, dict)):
-                copied[key] = _sanitize_system_part(
-                    item,
-                    path=child_path,
-                    field=key,
-                    media_block_type=next_media_block_type,
-                )
-        return copied
+    Descriptions, parameter defaults and enum values routinely carry sample
+    credentials and internal hostnames. Tool names stay verbatim (they are in
+    the non-content key set) so the upstream tool-call linkage is unaffected.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        tools,
+        path="tools",
+        role="system",
+        field="tools",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
-    sanitized = _sanitize_system_part(value, path="system", field="system")
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized, merged_hits
+
+def _sanitize_generic_payload_for_upstream_with_hits(
+    payload: Any,
+    *,
+    whitelist_keys: set[str] | None = None,
+    relaxed_patterns: bool = False,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Redact an arbitrary provider payload forwarded by the generic proxy.
+
+    The generic ``/v1/<subpath>`` routes (embeddings, rerank, provider-native
+    endpoints) have no known message schema, so every string leaf is walked with
+    the same skip rules the Responses path uses for cipher blobs and structural
+    keys.
+
+    ``relaxed_patterns`` must mirror what RedactionFilter uses for the same
+    route.  It defaults to False — the full id set — because generic routes are
+    not in LOW_FALSE_POSITIVE_V1_ROUTES: deriving the set from the node role
+    instead would silently drop EMAIL/PHONE/ID/CARD here while the pipeline
+    scored the very same request with all of them.
+    """
+    hits: list[dict[str, Any]] = []
+    sanitized = _sanitize_structured_node(
+        payload,
+        path="$",
+        role="user",
+        field="",
+        hits=hits,
+        whitelist_keys=whitelist_keys,
+        skip_field=_should_skip_responses_field_redaction,
+        relaxed_patterns=relaxed_patterns,
+    )
+    return sanitized, _merge_redaction_hits(hits)
 
 
 def _should_skip_responses_field_redaction(field: str | None) -> bool:
@@ -711,20 +797,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
         return node
 
     sanitized = _sanitize(value, path="input", media_block_type=None)
-    dedup: dict[tuple[str, str, str, str], int] = {}
-    for item in hits:
-        key = (
-            str(item.get("path") or ""),
-            str(item.get("field") or ""),
-            str(item.get("role") or ""),
-            str(item.get("pattern") or ""),
-        )
-        dedup[key] = dedup.get(key, 0) + int(item.get("count") or 0)
-    merged_hits = [
-        {"path": path, "field": field, "role": role, "pattern": pattern, "count": count}
-        for (path, field, role, pattern), count in dedup.items()
-    ]
-    return sanitized, merged_hits
+    return sanitized, _merge_redaction_hits(hits)
 
 
 def _sanitize_responses_input_for_upstream(
@@ -736,28 +809,35 @@ def _sanitize_responses_input_for_upstream(
     return sanitized
 
 
-def _shape_signature(value: Any) -> tuple[tuple[str, str], ...]:
-    """Return a deterministic structural signature for nested JSON-like payloads."""
-
-    signature: list[tuple[str, str]] = []
-
-    def _walk(node: Any, path: str) -> None:
-        if isinstance(node, dict):
-            signature.append((path, "dict"))
-            for key, item in node.items():
-                child = f"{path}.{key}" if path else str(key)
-                _walk(item, child)
-            return
-        if isinstance(node, list):
-            signature.append((path, f"list:{len(node)}"))
-            for idx, item in enumerate(node):
-                _walk(item, f"{path}[{idx}]")
-            return
-        signature.append((path, type(node).__name__))
-
-    _walk(value, "$")
-    return tuple(signature)
-
-
 def _preserves_json_shape(original: Any, sanitized: Any) -> bool:
-    return _shape_signature(original) == _shape_signature(sanitized)
+    """Return True when *sanitized* has exactly the structure of *original*.
+
+    Compares the two trees directly and returns on the first difference.  The
+    earlier implementation materialised a ``(path, type)`` tuple for every node
+    of both trees before comparing them, which on the generic proxy — where the
+    whole body is walked and bodies run to tens of megabytes — cost two extra
+    full traversals plus the allocations, on the request hot path.
+    """
+    if isinstance(original, dict):
+        if not isinstance(sanitized, dict) or len(original) != len(sanitized):
+            return False
+        for key, item in original.items():
+            if key not in sanitized:
+                return False
+            if not _preserves_json_shape(item, sanitized[key]):
+                return False
+        return True
+    if isinstance(sanitized, dict):
+        return False
+
+    if isinstance(original, list):
+        if not isinstance(sanitized, list) or len(original) != len(sanitized):
+            return False
+        return all(
+            _preserves_json_shape(item, other)
+            for item, other in zip(original, sanitized)
+        )
+    if isinstance(sanitized, list):
+        return False
+
+    return type(original) is type(sanitized)
