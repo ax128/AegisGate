@@ -14,6 +14,7 @@ import importlib
 import pkgutil
 from pathlib import Path
 
+import pytest
 import yaml
 
 import aegisgate.filters
