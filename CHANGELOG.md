@@ -95,6 +95,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **后台 worker 双启动竞态（A5 / P9）**
+  - `ensure_worker_thread` 原先按值接收 `worker`，锁内复查的是过期局部值；并发首启可拉起两个非 daemon 线程，关闭只发一个哨兵，另一个永阻塞在 `queue.get()`
+  - 改为在锁内通过 getter/setter 读写当前全局（或实例）持有的线程，赋值发生在 `start()` 之后、放锁之前
+
 - **上游 400 错误：tool name 包含非法字符**
   - OpenAI Responses API 要求 `input[].name` 匹配 `^[a-zA-Z0-9_-]+`，包含中文等字符时被拒绝
   - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）

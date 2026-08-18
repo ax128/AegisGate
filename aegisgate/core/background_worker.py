@@ -31,19 +31,34 @@ def run_queue_worker(
 
 
 def ensure_worker_thread(
-    worker: threading.Thread | None,
+    get_worker: Callable[[], threading.Thread | None],
+    set_worker: Callable[[threading.Thread], None],
     *,
     lock: threading.Lock,
     build_thread: Callable[[], threading.Thread],
 ) -> threading.Thread:
-    """Start a worker thread once using double-checked locking."""
+    """Start a worker thread once using double-checked locking.
+
+    The previous signature took ``worker`` by value, so the in-lock recheck
+    still saw the stale local copy from before the lock. Concurrent first
+    starts could then spawn two non-daemon threads; shutdown only sent one
+    sentinel and the leftover thread blocked on ``queue.get()`` forever.
+
+    ``get_worker`` / ``set_worker`` read and publish the live holder *inside*
+    the lock so the assignment is visible to the next waiter before we
+    release. ``set_worker`` must run after ``start()``: a not-yet-started
+    thread reports ``is_alive() is False`` and would look like a dead worker.
+    """
+    worker = get_worker()
     if worker is not None and worker.is_alive():
         return worker
     with lock:
+        worker = get_worker()
         if worker is not None and worker.is_alive():
             return worker
         worker = build_thread()
         worker.start()
+        set_worker(worker)
         return worker
 
 

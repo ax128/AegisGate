@@ -173,8 +173,9 @@ class StatsCollector:
     def _ensure_worker(self) -> None:
         self._ensure_persist_runtime()
         self._register_shutdown_handler()
-        self._persist_worker = ensure_worker_thread(
-            self._persist_worker,
+        ensure_worker_thread(
+            lambda: self._persist_worker,
+            lambda worker: setattr(self, "_persist_worker", worker),
             lock=self._persist_worker_lock,
             build_thread=lambda: threading.Thread(
                 target=self._stats_worker_loop,
