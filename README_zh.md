@@ -76,7 +76,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - 客户端的 `Authorization: Bearer <key>` 直接透传到上游
 - 多个上游可同时使用，互不冲突
 - **无需注册 token、无需编辑配置、无需重启网关**
-- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.4 过滤模式](#24-过滤模式tokenredact--tokenpassthrough)
+- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.4 过滤模式](#24-过滤模式token__redact--token__passthrough)
 - **安全默认**：纯数字端口 token（1024–65535，例如 `/v1/__gw__/t/8317/...`）默认按**仅内网**处理。对公网暴露时建议注册随机 token（推荐）或启用请求 HMAC；如需强行放开可设置 `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`。
 - **安全默认**：`token__passthrough` 会禁用全部过滤器，默认按**仅内网**处理；如需对公网放开可设置 `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE=true`（危险）。
 
@@ -148,7 +148,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/messages` — Anthropic Messages 专用端点（完整安全管道）；支持原样透传到 Anthropic 兼容上游，或通过 token `compat` 模式自动转换为 OpenAI Responses 格式
-  - `POST /v1/{subpath}` 通用透传路径；默认仍沿用 v1 请求/响应安全管道，只有 `__passthrough` 或上游白名单绕过时才跳过过滤
+  - `POST /v1/files`、`POST /v1/images/edits`、`POST /v1/images/variations` — multipart 上传专用路由（注册在通用透传之前）：表单字段参与脱敏，体积上限走 `AEGIS_MAX_MULTIPART_BODY_BYTES`（60MB）而非 `AEGIS_MAX_REQUEST_BODY_BYTES`
+  - `POST /v1/{subpath}` 通用透传路径；默认仍沿用 v1 请求/响应安全管道，只有 `__passthrough` 或命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时才跳过过滤
   - `POST /relay/generate` — 可选 Relay 兼容端点，默认关闭；需 `AEGIS_ENABLE_RELAY_ENDPOINT=true`
   - 若客户端把 `Responses API` 风格请求（仅 `input`）误发到 `/v1/chat/completions`，网关会转发到上游 `/v1/responses`，并把返回结果重新包装成 Chat Completions 的 JSON/SSE 形状
   - 若客户端把 `Chat Completions` 风格请求（`messages`）误发到 `/v1/responses`，网关会做反向兼容转换，并返回 Responses 风格结果
@@ -216,16 +217,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - 人员与地理：姓名字段、地址/经纬度/邮编字段、精确日期（生日/入院/出院/死亡）、传真字段
 - 车辆与生物：`VIN`、车牌字段、生物特征模板字段（文本形态）
 - Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
-- 电脑/基础设施（宽松模式，仅 `field: value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
+- 电脑/基础设施（仅带字段标签，即 `field: value` / `field=value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
 
 转发前覆盖的请求字段：chat `messages`、responses `input` 与 `instructions`、Anthropic `system`、
 工具/函数定义（`tools` 与旧版 `functions`：`description`、`parameters` 默认值与枚举值）、multipart 表单字段，
 以及通用 `/v1/<子路径>` 路由（embeddings、rerank 等）的完整 JSON body。
 工具名、tool call 关联 id 与媒体定位符（`image_url` / `file_id`）始终原样转发，避免破坏上游调用。
 
-具体启用哪些规则由路由决定，且打分流水线与转发路径使用同一判据：`/v1/chat/completions`、
-`/v1/responses`、`/v1/messages` 的请求体是结构化会话内容，误报会破坏提示词，因此只跑宽松 id 集
-（`redaction.relaxed_pii_ids`，默认仅凭据类）；其余路由（含通用代理）跑完整规则集。
+具体启用哪些规则由路由决定，且打分流水线与转发路径使用同一判据（`is_low_false_positive_route`）：
+`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 的请求体是结构化会话内容，误报会破坏提示词，
+因此只跑**低误报 id 集**（`redaction.relaxed_pii_ids`，默认仅凭据类）；其余路由（含通用代理）跑完整规则集。
+如需在这三条路由上也跑全量规则，可配置 `redaction.relaxed_pii_ids: ["*"]`。
 
 `responses` 结构化输入补充说明（当前）：
 
@@ -341,6 +343,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 | `x-aegis-request-id` | 网关 -> 上游 | 网关注入到上游请求中的追踪关联 ID。客户端无需设置，会出现在上游请求头和网关日志中。 |
 | `x-aegis-filter-mode` | 网关内部 | 由 token URL 后缀（`__redact` / `__passthrough`）解析后重新注入。客户端自带该 Header 会被剥离。 |
 | `x-aegis-redaction-whitelist` | 网关内部 | 由 token 绑定中的 `whitelist_key` 生成并注入。客户端自带该 Header 会被剥离或忽略。 |
+| `x-aegis-proxy-token` | 反向代理 -> 网关 | 可选的「代理↔网关」互信凭据，取值为 `config/aegis_proxy_token.key`（首启自动生成，权限 `0600`）。校验通过时，非 token 的 `/v1/...` 与 `/v2/...` 请求**不再检查来源 IP 是否内网**，直接按 `AEGIS_UPSTREAM_BASE_URL` 转发——即它会解除下文 §2.0 的「仅内网」限制。该 key 等价于放行公网直连 `/v1` 的凭据，需与网关密钥同等保管与轮换，且绝不能下发给客户端。用法见 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。 |
 
 补充：
 
@@ -349,7 +352,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 **分级变形策略**：
 
-- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等约 10 条命令模式）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。
+- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。该模式集由代码在启动时合成（`router.py::_critical_danger_patterns`），来源为 `anomaly_detector.command_patterns` 中的 8 类严重规则、`sanitizer.force_block_command_patterns`、`privilege_guard.blocked_patterns` 与 13 条硬编码 shell 模式；具体条数随 `security_filters.yaml` 变动。
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
@@ -380,7 +383,7 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
 建议：
 
 1. 上游使用 v1 基路径，例如 `AEGIS_UPSTREAM_BASE_URL=http://localhost:8317/v1`。
-2. 该模式只适合 localhost / 内网来源；外部来源访问非 token `/v1/...` 会收到 `403 token_route_required`。
+2. 该模式只适合 localhost / 内网来源；外部来源访问非 token `/v1/...` 会收到 `403 token_route_required`。**例外**：若请求携带正确的 `x-aegis-proxy-token`（值为 `config/aegis_proxy_token.key`），则不再校验来源 IP——这是给前置反向代理用的互信通道，详见 §1.7 自定义 HTTP 头。
 3. 该模式仅适用于 `v1`；`v2` 仍必须使用 token 路径，并额外配置 `AEGIS_V2_TARGET_ALLOWLIST`。
 4. 多上游场景建议使用 token 路径或端口路由（`/v1/__gw__/t/{端口号}/...`），而不是此模式。
 
@@ -412,13 +415,13 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 1. token 长度为 24 位纯字母数字（`a-zA-Z0-9`，不含 `-` `_` 等符号），约 142 位熵。
 2. `v1` 必须是一对一：一个 token 对应一个 `upstream_base` URL（不支持 `upstream_base` 传 list）。
 3. `v2` 可复用该 token，因为 v2 转发目标由 `x-target-url` 决定，不绑定 `upstream_base`。
-4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。
+4. `whitelist_key` 可选，支持字符串/数组（集合语义去重）。命中这些字段名的键值片段会跳过请求体脱敏，例如 `bn_key=...`、`"bn_key": {...}`、URL 参数 `?bn_key=...`。字段名会被统一转小写，且必须匹配 `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`；不匹配的键**会被静默丢弃**，请以返回体中的 `whitelist_key` 为准核对实际生效值。
 5. 所有管理端点（register/lookup/add/remove/unregister）都需要在请求体中提供 `gateway_key`，其值即 `config/aegis_gateway.key` 文件内容（`cat config/aegis_gateway.key` 查看）。
 
 然后请求：
 
 ```bash
-curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp/responses \
+curl -X POST http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/responses \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
@@ -426,7 +429,7 @@ curl -X POST http://127.0.0.1:18080/v1/__gw__/t/Ab3k9Qx7Yp/responses \
 v2 请求示例（原始目标放请求头）：
 
 ```bash
-curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
+curl -X POST http://127.0.0.1:18080/v2/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/proxy \
   -H "Content-Type: application/json" \
   -H "x-target-url: https://httpbin.org/post" \
   -d '{"api_key":"sk-test-1234567890","message":"hello"}'
@@ -448,7 +451,7 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/Ab3k9Qx7Yp/proxy \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/add \
   -H "Content-Type: application/json" \
-  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://remote-upstream-2.example.com/v1"}'
+  -d '{"token":"rQ5VZvassZsqAy1gAyondtS0","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://remote-upstream-2.example.com/v1"}'
 ```
 
 减少示例（从原 whitelist 中删除）：
@@ -456,7 +459,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/add \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/remove \
   -H "Content-Type: application/json" \
-  -d '{"token":"Ab3k9Qx7Yp","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
+  -d '{"token":"rQ5VZvassZsqAy1gAyondtS0","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
 ```
 
 ### 2.3 协议转换（Anthropic → OpenAI）
@@ -509,15 +512,17 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
 
 **允许的目标模型：** `gpt-5`、`gpt-5.2`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.2-codex`、`gpt-5.3-codex`
 
+接入新上游模型无需改代码：在 `config/model_map.json` 的 `allowed_models` 数组中追加即可，它与内置清单取并集——内置集合是下界，配置只能增加、不能删除或清空。注意 `config/model_map.json` 仅在启动时读取，修改后需重启网关。
+
 ### 2.4 过滤模式（`token__redact` / `token__passthrough`）
 
 在 token 后追加 `__redact` 或 `__passthrough` 后缀，可按需切换网关对该请求的过滤行为：
 
 | 模式 | URL 示例 | 行为 |
 |------|----------|------|
-| **默认**（全保护） | `/v1/__gw__/t/Ab3k9Qx7Yp/chat/completions` | 执行策略中全部已启用的过滤器 |
-| **仅脱敏**（`__redact`） | `/v1/__gw__/t/Ab3k9Qx7Yp__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
-| **直接穿透**（`__passthrough`） | `/v1/__gw__/t/Ab3k9Qx7Yp__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
+| **默认**（全保护） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/chat/completions` | 执行策略中全部已启用的过滤器 |
+| **仅脱敏**（`__redact`） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
+| **直接穿透**（`__passthrough`） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
 
 **使用示例（端口路由）：**
 
@@ -750,7 +755,10 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔，支持 CIDR 如 `172.16.0.0/12`）；仅这些 IP 的 XFF 会被信任 | 空 |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（仅 localhost / 内网客户端可直连 `/v1/...`） | 空 |
-| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔） | 空 |
+| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔）。命中的上游**整体跳过响应侧过滤管道**，效果等同 `__passthrough`，但没有公网客户端限制、也不产生 `filter_mode` 审计标签；仅用于完全受信的上游 | 空 |
+| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（降级为纯转发，不落审计与脱敏映射）。脱敏过滤器本身始终 fail-closed，不受此开关影响 | `block` |
+| `AEGIS_MAX_MULTIPART_BODY_BYTES` | multipart 请求体上限（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`） | `60000000` |
+| `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | v2 token 路由请求体上限（多模态负载会超过 v1 的 JSON 上限） | `64000000` |
 | `AEGIS_ENABLE_THREAD_OFFLOAD` | （保留字段）历史兼容开关；当前 Store I/O、payload transform 与过滤管道已通过专用执行器 offload，不依赖此项 | `false` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |

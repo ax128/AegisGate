@@ -35,8 +35,18 @@ UI:  http://127.0.0.1:18080/__ui__/login
 ```bash
 python aegisgate-local.py status
 python aegisgate-local.py logs --tail 50
+python aegisgate-local.py restart
 python aegisgate-local.py stop
+python aegisgate-local.py open-ui      # 在浏览器中打开本地 UI
 ```
+
+常用参数：
+
+- `start --foreground`：前台运行，便于直接看日志
+- `start --skip-install`：跳过 venv 安装步骤
+- `install --extras semantic,redis`：安装可选依赖组
+- `install --python /usr/bin/python3.12`：指定解释器
+- `stop --graceful-seconds 8`：强杀前的等待时间
 
 如果你使用手动开发方式，也可以直接运行：
 
@@ -95,13 +105,25 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 ## 4. UI 能力
 
 - 查看服务状态、监听地址、安全级别、默认上游
-- 编辑**主要**运行参数（基础设置、安全设置、v2 代理、功能开关、限流阈值等）
+- 编辑**主要**运行参数（基础设置、安全设置、v2 代理、功能开关、限流阈值等，共 60 项）
 - 安全过滤规则增删改查（PII 规则、工具注入规则、命令规则、动作映射）
+- 精确值脱敏列表（exact-value redaction）增删改查
+- 请求统计仪表盘：总请求、脱敏替换、危险内容替换、拦截、穿透五个维度，按小时/按天查看
 - Token 管理：注册/编辑/删除/重命名
 - 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
 - Docker Compose 配置文件在线编辑
 - 一键重启网关（SIGTERM，配合 Docker `restart: unless-stopped` 自动恢复）
 - 阅读仓库内嵌 Markdown 文档
+
+### 4.1 哪些配置改完需要重启
+
+保存配置会写入 `config/.env` 并触发热更新，但少数安全关键项在启动时固定，热更新不会生效。UI 上可编辑、却**需要重启才生效**的有三项：
+
+- `AEGIS_SECURITY_LEVEL`（安全级别）
+- `AEGIS_ENFORCE_LOOPBACK_ONLY`（仅本机访问）
+- `AEGIS_TRUSTED_PROXY_IPS`（可信反向代理 IP）
+
+改完这三项，请用本页的「重启网关」按钮，或执行 `docker compose restart aegisgate` / `python aegisgate-local.py restart`。完整的不可热更新清单见 [config/README.md](config/README.md) 的「热更新说明」。
 
 ## 5. 安全说明
 

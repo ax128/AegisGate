@@ -6,7 +6,23 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 
 **无需手动复制**：首次 Docker 或本地启动时，若本目录（或容器内挂载的策略目录）缺少策略 YAML，应用会从内置默认自动生成，不覆盖已有文件。若缺少 `config/.env`，应用也会基于 `config/.env.example` 自动生成一份默认 `.env`。
 
-## 两类配置
+## 目录内容
+
+| 文件 | 用途 | 是否入库 | 热更新 | 含密 |
+|------|------|:---:|:---:|:---:|
+| `default.yaml` / `strict.yaml` / `permissive.yaml` | 策略（启用哪些 filter、`risk_threshold`） | 否（首启生成） | 是 | 否 |
+| `security_filters.yaml` | 各 filter 规则与 `action_map` | 是 | 是 | 否 |
+| `.env` | 运行参数（见下方「运行参数」小节） | 否（从 `.env.example` 生成） | 部分 | 是 |
+| `.env.example` | 完整可调项清单与注释 | 是 | — | 否 |
+| `gw_tokens.json` | token → 上游映射 | 否 | 是 | 是 |
+| `gw_tokens.json.example` | token 映射模板 | 是 | — | 否 |
+| `model_map.json` | compat 模式的全局模型映射 + `allowed_models` 扩展 | 是 | **否，需重启** | 否 |
+| `stats.json` | 请求统计持久化（`core/stats.py` 运行时写入） | 否 | — | 否 |
+| `aegis_gateway.key` | 网关密钥 / UI 登录密码，首启生成 `0600` | 否 | 否 | **是** |
+| `aegis_fernet.key` | 脱敏映射加密密钥（Fernet），首启生成 `0600` | 否 | 否 | **是** |
+| `aegis_proxy_token.key` | 反向代理互信凭据（见 README §1.7），首启生成 `0600` | 否 | 否 | **是** |
+
+以下按四类展开说明。
 
 ### 1. 策略与规则（YAML）
 
@@ -48,7 +64,9 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 | `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` | 强制命令拦截开关（命中即直接拦截并自动遮挡/分割返回） | `false` / `true` |
 | `AEGIS_GATEWAY_KEY` | 网关密钥（可选，Docker/CI 覆盖用）；默认从 `config/aegis_gateway.key` 加载，首次启动自动生成 | 文件加载 |
 | `AEGIS_DEFAULT_POLICY` | 默认策略名 | `default` |
-| `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游；仅 localhost/内网客户端可直连 `/v1/...` | `http://localhost:8317/v1` |
+| `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游；仅 localhost/内网客户端可直连 `/v1/...`（或由反向代理携带 `x-aegis-proxy-token`） | `http://localhost:8317/v1` |
+| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 命中的上游整体跳过响应侧过滤管道（等同 `__passthrough`，但无公网限制、无审计标签）；仅用于完全受信上游 | 空 |
+| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时：`block`（安全默认）或 `forward`（降级纯转发） | `block` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | 上游超时秒数 | `600`（10 分钟） |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | 允许纯数字 token 回退到本地主机端口（如 `/v1/__gw__/t/8317/...`） | `false` / `true` |
 | `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS` | 是否允许公网/非内网客户端使用纯数字端口 token（默认仅内网） | `false` / `true` |
@@ -97,7 +115,15 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 - `/metrics` 没有单独鉴权，沿用网关普通请求的网络与鉴权控制；若关闭 loopback/HMAC 保护，端点可能被更广泛访问。
 - 未安装该 extra 时，metrics 与 tracing 会自动降级为 no-op，不影响网关启动。
 
-### 3. Token 映射表（gw_tokens.json）
+### 3. 全局模型映射（model_map.json）
+
+仅在 token 配置了 `"compat": "openai_chat"` 时生效，用于把 Anthropic 模型名转换为上游 OpenAI 模型名。
+
+- `map`：模型名映射表。优先级为 token 级 `model_map` > 本文件的 `map` > token 级 `default_model` > `gpt-5.4`。
+- `allowed_models`：compat 目标模型白名单的**扩展位**，与代码内置清单取并集。内置集合是下界，配置只能增加，不能删除或清空。接入新上游模型时在这里追加即可，无需改代码。
+- **该文件只在启动时读取**，不参与热更新；修改后需重启网关。
+
+### 4. Token 映射表（gw_tokens.json）
 
 通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，可手动编辑该文件，**同一 upstream_base 建议只保留一条**，重启后生效。
 
@@ -110,5 +136,8 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 热更新说明：
 - watcher 默认轮询以下文件：`config/.env`、`security_filters.yaml`、策略 YAML、`gw_tokens.json`。
 - `security_filters.yaml` 与策略 YAML 变更后，会清缓存并在下一次请求时重建 filter pipeline。
-- `.env` 仅支持**部分**参数热更新。`gateway_key`、`security_level`、`enforce_loopback_only`、HMAC 相关项、`trusted_proxy_ips`、`v2_block_internal_targets`、`local_ui_allow_internal_network` 等安全关键参数不会在热更新时生效。
+- `.env` 仅支持**部分**参数热更新。以下 10 项安全关键参数在启动时固定，热更新不会生效（以 `aegisgate/core/hot_reload.py` 的 `_IMMUTABLE_FIELDS` 为准）：
+  `gateway_key`、`security_level`、`enforce_loopback_only`、`allow_public_numeric_tokens`、`allow_public_passthrough_mode`、`enable_request_hmac_auth`、`request_hmac_secret`、`trusted_proxy_ips`、`v2_block_internal_targets`、`local_ui_allow_internal_network`。
+- **注意 Web UI 也受此限制**：配置页可以编辑 `AEGIS_SECURITY_LEVEL`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_TRUSTED_PROXY_IPS`，保存会写入 `config/.env` 并提示成功，但运行时取值要到**下次重启**才更新。改完这三项请用 UI 的「重启网关」或 `docker compose restart aegisgate`。
+- `config/model_map.json` **不在** watcher 监听范围内：修改模型映射或 `allowed_models` 后必须重启网关。
 - 对于长连接、流式会话或 Compose 环境，仍建议在变更后执行一次 `docker compose restart aegisgate` 作为稳妥做法。

@@ -78,6 +78,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `apply_patch` 等工具的参数是代码/diff 内容，其中可能包含看起来像危险命令的文本
   - 新增 `_CODE_CONTENT_TOOLS` 白名单（25+ 编码工具），跳过 `dangerous_param_patterns` 扫描
   - `dangerous_param` action 从 `block` 降为 `review`，避免过度拦截
+  - > **已过期**：常量现名为 `_FILE_WRITE_CONTENT_TOOLS`（11 项），且**不再**跳过全部 `dangerous_param_patterns`，只跳过 `sensitive_file_access` / `path_traversal` / `ssh_key_access` 三条路径引用类规则，执行类危险参数扫描仍然运行。另有独立的 `_READ_ONLY_CONTENT_TOOLS`。当前行为见 README_zh §1.3。
   - tool_call_guard 各类命中新增 DEBUG 日志，打印匹配的工具名、pattern、具体文本
 
 - **[Critical] SSE 流式 holdback 分隔符泄露导致客户端 JSON 解析失败**
@@ -116,6 +117,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 ## [Previous]
+
+> **历史记录（仅供追溯）**：以下条目描述的是当时的实现，其中部分行为已被后续提交推翻，请勿当作当前规格使用。已知与当前实现不符的条目已就地标注。**当前行为一律以 [README.md](README.md) / [README_zh.md](README_zh.md) 与代码为准。**
 
 ### Breaking Changes
 
@@ -183,7 +186,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `_sanitize_hit_fragments()` 辅助函数保留，作为自动遮挡的核心实现
 
 - **极度危险指令完全移除（分级变形策略）**
-  - 匹配约 45 条高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `【AegisGate已处理危险疑似片段】`，原文**不会出现在返回中**
+  - 匹配高危模式（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）的片段被替换为 `【AegisGate已处理危险疑似片段】`，原文**不会出现在返回中**（条数随 `security_filters.yaml` 变动，不再在文档中固化具体数字）
   - 一般危险片段仍使用 chunked-hyphen 分词变形
   - 模式来源：`anomaly_detector.command_patterns` + `sanitizer.force_block_command_patterns` + `privilege_guard.blocked_patterns` + 硬编码高危 shell 命令（13 条）
 
@@ -224,6 +227,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **默认安全级别改为 `medium`**：宽松模式，大部分"可能危险"指令不拦截，仅高危 + 脱敏；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。语义复核开关（`AEGIS_ENABLE_SEMANTIC_MODULE`，灰区门控）默认开启；未配置语义服务 URL 时仅在灰区触发降级记录，不做语义风险抬升。
 - **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认保持为 `false`**：当前 Store I/O 与过滤管道已通过独立执行器 offload；该开关主要作为兼容字段保留。
 - **`confirmation_ttl_seconds` 从 300s 增加到 600s**：给用户更充裕的时间做 yes/no 决策。
+  - > **已过期**：yes/no 确认流程已整体移除，该配置项已无运行期消费者。
 - **Stale executing 状态自动恢复**：prune 后台任务每 60s 自动将卡在 `executing` 超过 120s 的确认记录恢复为 `pending`，不再依赖下次请求触发。涉及 SQLite/Redis/PostgreSQL 三个存储后端。
 
 ### Previous Security
@@ -251,6 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **部署默认行为调整：默认不启用 Caddy / CLIProxyAPI**
   - `docker-compose.yml` 改为基础栈，仅启动 `aegisgate`。
   - 新增 `docker-compose.cliproxy.yml` 作为按需叠加文件，显式启用 `caddy + cli-proxy-api` 与 CLIProxy 代理优化参数。
+  - > **已过期**：该叠加文件已在后续版本移除，仓库当前只有 `docker-compose.yml`。Caddy 需自行部署，参考 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。
 
 ### Fixed
 
@@ -280,7 +285,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## 使用说明
+## 使用说明（历史）
+
+> 本节是随「修复卡死」变更一起写下的操作说明，保留在此仅供追溯。**当前的配置说明请看 [README.md](README.md) 的 Configuration 章节、[README_zh.md](README_zh.md) §5 与 [config/.env.example](config/.env.example)。**
 
 ### 修复卡死问题后的配置项
 
@@ -293,6 +300,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### 调试日志配置
 
-- **完整打印 request/response 原文**：启动前设置 `AEGIS_DEBUG_EXCERPT_MAX_LEN=0`（Docker 需在 compose 的 `environment` 中配置并重启容器）。
-- **仅放宽长度**：例如 `AEGIS_DEBUG_EXCERPT_MAX_LEN=20000`。
-- 若设置后仍看到截断，请查看同一次请求的 `debug_excerpt` 诊断行中 `AEGIS_DEBUG_EXCERPT_MAX_LEN` 与 `max_len_used` 的值，以判断是环境变量未生效还是下游日志层截断。
+> **以下两条已过期**：`AEGIS_DEBUG_EXCERPT_MAX_LEN=0` 不再关闭截断——出于防误配泄漏原文的考虑，`debug_excerpt.py::_resolve_max_len()` 现在只接受正整数，`0` 与负数一律回落到调用方默认值（原文摘要 500 字符，处理后内容 800 字符）。配套的 `debug_excerpt label=...` 诊断日志也已移除。
+
+- **放宽摘要长度**：设置正整数，例如 `AEGIS_DEBUG_EXCERPT_MAX_LEN=20000`（Docker 需在 compose 的 `environment` 中配置并重启容器）。这是目前唯一生效的调节方式。
+- ~~**完整打印 request/response 原文**：设置 `AEGIS_DEBUG_EXCERPT_MAX_LEN=0`。~~ 已失效，见上方说明。
+- ~~若设置后仍看到截断，请查看 `debug_excerpt` 诊断行。~~ 该诊断日志已移除。
+- 打印请求体本身仍需 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true`，仅建议在受控环境短时开启。

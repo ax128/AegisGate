@@ -12,7 +12,11 @@
 #   - flush_interval -1: required, so SSE streams are not buffered
 #   - response_header_timeout 660s: long inference runs must not time out
 #   - /__gw__/* returns 403: the admin API is never exposed publicly
-#   - X-Aegis-Proxy-Token: the Caddy ↔ AegisGate trust credential (optional; once enabled the gateway can recognise requests coming from Caddy)
+#   - X-Aegis-Proxy-Token: the Caddy ↔ AegisGate trust credential (optional). Once enabled, the gateway
+#     accepts non-token /v1/... and /v2/... from Caddy regardless of client IP and routes them to
+#     AEGIS_UPSTREAM_BASE_URL — i.e. it lifts the internal-only restriction, so guard the key accordingly.
+#     For container deployments, scripts/caddy-entrypoint.sh reads config/aegis_proxy_token.key from the
+#     shared config volume and exports it as AEGIS_PROXY_TOKEN before starting Caddy.
 #   - Give the admin console its own domain pointing straight at the upstream, bypassing the gateway
 #   - Caddy only does TLS + forwarding; all routing logic lives inside the gateway
 #
