@@ -191,11 +191,14 @@ class StatsCollector:
         except queue.Full:
             pass
         # Queue is full — discard the oldest pending snapshot so we can enqueue
-        # the latest one. Do NOT call task_done() here because the discarded
-        # item was never processed by the worker thread; calling task_done()
-        # would corrupt the join counter and may raise ValueError.
+        # the latest one. The discarded item has already been counted as
+        # unfinished (put_nowait increments the join counter) but the worker
+        # will never see it, so we must task_done() here to keep flush()/join()
+        # from hanging. The worker's finally: task_done() only covers items it
+        # itself get()s, so the two calls do not overlap.
         try:
             self._persist_queue.get_nowait()
+            self._persist_queue.task_done()
         except queue.Empty:
             pass
         try:

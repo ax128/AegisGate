@@ -25,6 +25,7 @@ aegisgate/tests/*
 !aegisgate/tests/test_doc_alignment.py
 !aegisgate/tests/test_relaxed_pii_ids_config.py
 !aegisgate/tests/test_request_redaction_coverage.py
+!aegisgate/tests/test_stats_flush_deadlock.py
 
 # Virtual env
 .venv/
