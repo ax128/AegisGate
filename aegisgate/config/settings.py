@@ -28,10 +28,6 @@ class Settings(BaseSettings):
     # has been sent to the client.
     # 0 disables it; enable explicitly and keep it small (1-2) so failing traffic is not amplified.
     stream_bootstrap_retries: int = 0
-    # Thread-pool offload is off by default: on the current Python 3.13 runtime, asyncio.to_thread
-    # can stall the event loop during shutdown, so pytest and short-lived scripts fail to exit.
-    # If production confirms its runtime is unaffected, enable it explicitly via the env var.
-    enable_thread_offload: bool = False
     # Maximum run time (seconds) allowed for the filter pipeline (request/response pipeline).
     # On timeout the request is rejected (response: block, request: pass-through) and the event
     # loop is no longer blocked.

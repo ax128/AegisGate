@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **删除无效配置 `AEGIS_ENABLE_THREAD_OFFLOAD`（P11 / B6）**
+  - 该字段从未接线，Web UI 可切换但不生效。`Settings` 为 `extra="ignore"`，旧 `.env` 里残留此键不会导致启动失败
+  - 历史 CHANGELOG 条目保留，不改
+
 ### Security
 
 - **合并两份分叉的 `security_filters.yaml`（P0）**
