@@ -404,8 +404,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ```json
 {
-  "token": "rQ5VZvassZsqAy1gAyondtS0",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0",
+  "token": "ExampleToken24CharsAbc12",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/ExampleToken24CharsAbc12",
   "whitelist_key": ["bn_key", "okx_key"]
 }
 ```
@@ -421,7 +421,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 然后请求：
 
 ```bash
-curl -X POST http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/responses \
+curl -X POST http://127.0.0.1:18080/v1/__gw__/t/ExampleToken24CharsAbc12/responses \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
@@ -429,7 +429,7 @@ curl -X POST http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/respons
 v2 请求示例（原始目标放请求头）：
 
 ```bash
-curl -X POST http://127.0.0.1:18080/v2/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/proxy \
+curl -X POST http://127.0.0.1:18080/v2/__gw__/t/ExampleToken24CharsAbc12/proxy \
   -H "Content-Type: application/json" \
   -H "x-target-url: https://httpbin.org/post" \
   -d '{"api_key":"sk-test-1234567890","message":"hello"}'
@@ -451,7 +451,7 @@ curl -X POST http://127.0.0.1:18080/v2/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/proxy \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/add \
   -H "Content-Type: application/json" \
-  -d '{"token":"rQ5VZvassZsqAy1gAyondtS0","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://remote-upstream-2.example.com/v1"}'
+  -d '{"token":"ExampleToken24CharsAbc12","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["bn_key","okx_key"],"upstream_base":"https://remote-upstream-2.example.com/v1"}'
 ```
 
 减少示例（从原 whitelist 中删除）：
@@ -459,7 +459,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/add \
 ```bash
 curl -X POST http://127.0.0.1:18080/__gw__/remove \
   -H "Content-Type: application/json" \
-  -d '{"token":"rQ5VZvassZsqAy1gAyondtS0","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
+  -d '{"token":"ExampleToken24CharsAbc12","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
 ```
 
 ### 2.3 协议转换（Anthropic → OpenAI）
@@ -520,9 +520,9 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
 
 | 模式 | URL 示例 | 行为 |
 |------|----------|------|
-| **默认**（全保护） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0/chat/completions` | 执行策略中全部已启用的过滤器 |
-| **仅脱敏**（`__redact`） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
-| **直接穿透**（`__passthrough`） | `/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
+| **默认**（全保护） | `/v1/__gw__/t/ExampleToken24CharsAbc12/chat/completions` | 执行策略中全部已启用的过滤器 |
+| **仅脱敏**（`__redact`） | `/v1/__gw__/t/ExampleToken24CharsAbc12__redact/chat/completions` | 仅执行脱敏相关过滤器（`exact_value_redaction`、`redaction`、`restoration`），跳过安全检测 |
+| **直接穿透**（`__passthrough`） | `/v1/__gw__/t/ExampleToken24CharsAbc12__passthrough/chat/completions` | 跳过所有过滤器，请求/响应直接转发到上游 |
 
 **使用示例（端口路由）：**
 

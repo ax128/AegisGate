@@ -123,8 +123,8 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 ```json
 {
-  "token": "rQ5VZvassZsqAy1gAyondtS0",
-  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/rQ5VZvassZsqAy1gAyondtS0",
+  "token": "ExampleToken24CharsAbc12",
+  "baseUrl": "http://127.0.0.1:18080/v1/__gw__/t/ExampleToken24CharsAbc12",
   "whitelist_key": []
 }
 ```
