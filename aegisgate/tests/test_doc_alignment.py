@@ -165,6 +165,23 @@ def test_documented_env_vars_exist_in_settings() -> None:
     )
 
 
+def test_docs_pin_v2_empty_allowlist_fail_closed() -> None:
+    """Empty AEGIS_V2_TARGET_ALLOWLIST is deny-all, not allow-all."""
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (_REPO_ROOT / "README_zh.md").read_text(encoding="utf-8")
+    assert "empty allowlist is fail-closed" in readme
+    assert "empty = deny all target hosts" in readme
+    assert "留空时默认拒绝全部目标" in readme_zh
+
+
+def test_docs_pin_ui_csrf_header() -> None:
+    """Write APIs under /__ui__/api require x-aegis-ui-csrf (WEBUI-QUICKSTART)."""
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    skill = (_REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "x-aegis-ui-csrf" in quickstart
+    assert "x-aegis-ui-csrf" in skill
+
+
 def test_ui_editable_field_count_matches_docs() -> None:
     """WEBUI-QUICKSTART cites how many settings the config page exposes.
 

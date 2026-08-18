@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -11,9 +12,15 @@ from fastapi.responses import JSONResponse, Response
 from starlette.requests import Request
 
 from aegisgate.core import gateway
+from aegisgate.core import gateway_auth
 from aegisgate.core import gateway_network
 from aegisgate.core import gateway_ui_routes
 from aegisgate.core import gw_tokens
+from aegisgate.core.security_boundary import (
+    NonceReplayCache,
+    build_signature_payload,
+    compute_hmac_sha256,
+)
 
 
 def _build_request(
@@ -821,3 +828,223 @@ async def test_boundary_keeps_text_limit_for_direct_non_token_requests(
 
     assert response.status_code == 413
     assert _response_json(response)["error"]["code"] == "request_body_too_large"
+
+
+def _hmac_headers(
+    *,
+    body: dict,
+    path: str,
+    secret: str,
+    nonce: str,
+    timestamp: str | None = None,
+    method: str = "POST",
+    content_type: str = "application/json",
+) -> dict[str, str]:
+    payload_body = json.dumps(body).encode("utf-8")
+    ts = timestamp if timestamp is not None else str(int(time.time()))
+    signed = build_signature_payload(
+        timestamp=ts,
+        nonce=nonce,
+        body=payload_body,
+        method=method,
+        path=path,
+        query="",
+        content_type=content_type,
+    )
+    return {
+        "x-aegis-signature": compute_hmac_sha256(secret, signed),
+        "x-aegis-timestamp": ts,
+        "x-aegis-nonce": nonce,
+        "user-agent": "b7-hmac-test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_hmac_missing_headers_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", "unit-hmac-secret")
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        body={"input": "hello"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 401
+    assert _response_json(response)["error"]["code"] == "hmac_header_missing"
+
+
+@pytest.mark.asyncio
+async def test_hmac_invalid_signature_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    headers = _hmac_headers(body=body, path="/v1/responses", secret=secret, nonce="n-bad-sig")
+    headers["x-aegis-signature"] = "0" * 64
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=headers,
+        body=body,
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 401
+    assert _response_json(response)["error"]["code"] == "hmac_signature_invalid"
+
+
+@pytest.mark.asyncio
+async def test_hmac_replayed_nonce_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    headers = _hmac_headers(body=body, path="/v1/responses", secret=secret, nonce="n-replay")
+    first = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=headers,
+        body=body,
+    )
+    second = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=headers,
+        body=body,
+    )
+
+    first_response = await gateway.security_boundary_middleware(first, _allow_next)
+    second_response = await gateway.security_boundary_middleware(second, _allow_next)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert _response_json(second_response)["error"]["code"] == "replay_nonce_detected"
+
+
+@pytest.mark.asyncio
+async def test_hmac_valid_signature_allows_token_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    headers = _hmac_headers(body=body, path="/v1/responses", secret=secret, nonce="n-ok")
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=headers,
+        body=body,
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+    assert request.state.security_boundary["auth_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_ui_write_without_session_is_unauthorized() -> None:
+    request = _build_request("/__ui__/api/tokens", method="POST", body={"upstream_base": "https://example.com"})
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 401
+    assert _response_json(response)["error"] == "ui_auth_required"
+
+
+@pytest.mark.asyncio
+async def test_ui_write_without_csrf_is_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway.settings, "gateway_key", "b7-ui-secret")
+    monkeypatch.setattr(gateway_auth.settings, "gateway_key", "b7-ui-secret")
+    import aegisgate.core.gateway_keys as gateway_keys
+
+    monkeypatch.setattr(gateway_keys, "_gateway_key_cached", "b7-ui-secret")
+    bootstrap = _build_request(
+        "/__ui__/api/tokens",
+        method="POST",
+        headers={"user-agent": "b7-ui"},
+        body={},
+    )
+    session = gateway_auth._create_ui_session_token(bootstrap)
+    request = _build_request(
+        "/__ui__/api/tokens",
+        method="POST",
+        headers={
+            "user-agent": "b7-ui",
+            "cookie": f"{gateway_auth._UI_SESSION_COOKIE}={session}",
+        },
+        body={"upstream_base": "https://example.com"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 403
+    assert _response_json(response)["error"] == "ui_csrf_invalid"
+
+
+@pytest.mark.asyncio
+async def test_ui_write_with_csrf_reaches_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway.settings, "gateway_key", "b7-ui-secret")
+    monkeypatch.setattr(gateway_auth.settings, "gateway_key", "b7-ui-secret")
+    import aegisgate.core.gateway_keys as gateway_keys
+
+    monkeypatch.setattr(gateway_keys, "_gateway_key_cached", "b7-ui-secret")
+    bootstrap = _build_request(
+        "/__ui__/api/tokens",
+        method="POST",
+        headers={"user-agent": "b7-ui"},
+        body={},
+    )
+    session = gateway_auth._create_ui_session_token(bootstrap)
+    csrf = gateway_auth._ui_csrf_token(session)
+    request = _build_request(
+        "/__ui__/api/tokens",
+        method="POST",
+        headers={
+            "user-agent": "b7-ui",
+            "cookie": f"{gateway_auth._UI_SESSION_COOKIE}={session}",
+            "x-aegis-ui-csrf": csrf,
+        },
+        body={"upstream_base": "https://example.com"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ui_login_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = gateway._AdminRateLimiter(max_per_minute=1)
+    monkeypatch.setattr(gateway, "_UI_LOGIN_RATE_LIMITER", limiter)
+    first = _build_request(
+        "/__ui__/api/login",
+        method="POST",
+        client_host="127.0.0.42",
+        body={"password": "x"},
+    )
+    second = _build_request(
+        "/__ui__/api/login",
+        method="POST",
+        client_host="127.0.0.42",
+        body={"password": "x"},
+    )
+
+    first_response = await gateway.security_boundary_middleware(first, _allow_next)
+    second_response = await gateway.security_boundary_middleware(second, _allow_next)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 429
+    assert _response_json(second_response)["error"] == "ui_login_rate_limited"

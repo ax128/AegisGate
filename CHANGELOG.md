@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Direct tests for SSRF IP checks, HMAC/nonce replay, v2 allowlist and DNS pinning, mapping encryption, UI login/CSRF/rules CRUD, and privilege/RAG/tool-call/anomaly guards (P14)
+
 ### Security
 
 - **合并两份分叉的 `security_filters.yaml`（P0）**
