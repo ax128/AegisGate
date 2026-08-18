@@ -11,7 +11,11 @@ import time
 import unicodedata
 from typing import Any
 
-from aegisgate.config.security_rules import load_security_rules, select_relaxed_pii_patterns
+from aegisgate.config.security_rules import (
+    is_low_false_positive_route,
+    load_security_rules,
+    select_relaxed_pii_patterns,
+)
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
@@ -26,13 +30,6 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys, protect
 _MAX_LOG_MARKERS = 10
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
-_LOW_FALSE_POSITIVE_V1_ROUTES = frozenset(
-    {
-        "/v1/chat/completions",
-        "/v1/responses",
-        "/v1/messages",
-    }
-)
 
 
 class RedactionFilter(BaseFilter):
@@ -127,7 +124,7 @@ class RedactionFilter(BaseFilter):
 
     @staticmethod
     def _is_low_false_positive_v1_route(route: str) -> bool:
-        return str(route or "").strip().lower() in _LOW_FALSE_POSITIVE_V1_ROUTES
+        return is_low_false_positive_route(route)
 
     def _persist_mapping(self, ctx: RequestContext, mapping: dict[str, str]) -> None:
         """Store the restoration mapping, honouring storage_failure_action.

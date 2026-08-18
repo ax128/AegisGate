@@ -219,9 +219,13 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 - 电脑/基础设施（宽松模式，仅 `field: value` 格式）：主机名、系统用户名、OS 版本、内核信息、用户目录路径（`/home/`、`/Users/`、`C:\Users\`）、环境变量、容器 ID、K8s 资源名、内部服务 URL（`*.internal`、`*.local`、`*.svc.cluster.local`）
 
 转发前覆盖的请求字段：chat `messages`、responses `input` 与 `instructions`、Anthropic `system`、
-工具/函数定义（`tools`：`description`、`parameters` 默认值与枚举值）、multipart 表单字段，
+工具/函数定义（`tools` 与旧版 `functions`：`description`、`parameters` 默认值与枚举值）、multipart 表单字段，
 以及通用 `/v1/<子路径>` 路由（embeddings、rerank 等）的完整 JSON body。
 工具名、tool call 关联 id 与媒体定位符（`image_url` / `file_id`）始终原样转发，避免破坏上游调用。
+
+具体启用哪些规则由路由决定，且打分流水线与转发路径使用同一判据：`/v1/chat/completions`、
+`/v1/responses`、`/v1/messages` 的请求体是结构化会话内容，误报会破坏提示词，因此只跑宽松 id 集
+（`redaction.relaxed_pii_ids`，默认仅凭据类）；其余路由（含通用代理）跑完整规则集。
 
 `responses` 结构化输入补充说明（当前）：
 

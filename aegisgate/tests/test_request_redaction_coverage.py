@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 
 import pytest
 
@@ -16,13 +17,16 @@ from aegisgate.adapters.openai_compat.router import (
     _build_chat_upstream_payload,
     _build_generic_upstream_payload,
     _build_messages_upstream_payload,
+    _build_responses_passthrough_payload,
     _build_responses_upstream_payload,
 )
 from aegisgate.adapters.openai_compat.sanitize import (
+    _MAX_STRUCTURED_DEPTH,
     _preserves_json_shape,
     _sanitize_text_for_upstream_with_hits,
 )
 from aegisgate.config import settings as settings_module
+from aegisgate.config.security_rules import is_low_false_positive_route
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest
 from aegisgate.core.pipeline import _SECURITY_CRITICAL_FILTER_NAMES, Pipeline
@@ -352,3 +356,251 @@ class TestRedactionFailureIsFailClosed:
         assert _SK_TOKEN not in result.messages[0].content
         assert "redaction_mapping_persist_failed" in ctx.security_tags
         assert "redaction:mapping_persist_failed:degraded" in ctx.enforcement_actions
+
+
+class TestToolsCacheReinjection:
+    """A cached tools list is redacted at forward time, not only at cache time.
+
+    The cache is shared with the passthrough builder, which stores the client's
+    raw tool definitions by design; a later filtered turn on the same
+    conversation re-injects them and must not forward them verbatim.
+    """
+
+    def test_tools_cached_by_passthrough_are_redacted_on_reinjection(self) -> None:
+        meta = {"conversationId": "conv-passthrough-reinjection"}
+        tools = [
+            {
+                "type": "function",
+                "name": "deploy",
+                "description": f"use {_GH_TOKEN}",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+        passthrough = _build_responses_passthrough_payload(
+            {"model": "gpt-5.4", "metadata": meta, "tools": tools, "input": "hi"},
+            tenant_id="default",
+            request_headers={},
+        )
+        # Passthrough itself is an explicit, tagged bypass — it stays verbatim.
+        assert _GH_TOKEN in passthrough["tools"][0]["description"]
+
+        upstream = _build_responses_upstream_payload(
+            {
+                "model": "gpt-5.4",
+                "metadata": meta,
+                "tools": [],
+                "input": [
+                    {
+                        "type": "function_call",
+                        "name": "deploy",
+                        "call_id": "c1",
+                        "arguments": "{}",
+                    }
+                ],
+            },
+            [InternalMessage(role="user", content="hi")],
+            request_id="req-cache-1",
+            session_id="sess-cache-1",
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )
+        injected = upstream["tools"][0]
+        assert _GH_TOKEN not in injected["description"]
+        assert "[REDACTED:GITHUB_TOKEN]" in injected["description"]
+        assert injected["name"] == "deploy"
+
+    def test_redaction_is_idempotent_across_turns(self) -> None:
+        meta = {"conversationId": "conv-idempotent"}
+        payload = {
+            "model": "gpt-5.4",
+            "metadata": meta,
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "t", "description": f"k {_GH_TOKEN}"}
+            ],
+        }
+        first = _build_responses_upstream_payload(
+            payload,
+            [InternalMessage(role="user", content="hi")],
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )
+        second = _build_responses_upstream_payload(
+            {**payload, "tools": first["tools"]},
+            [InternalMessage(role="user", content="hi")],
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )
+        # A second pass over already-redacted text must not double-wrap markers.
+        assert first["tools"][0]["description"] == second["tools"][0]["description"]
+        assert second["tools"][0]["description"].count("[REDACTED:") == 1
+
+
+class TestLegacyFunctionsField:
+    def test_chat_legacy_functions_are_redacted(self) -> None:
+        payload = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "functions": [
+                {
+                    "name": "deploy",
+                    "description": f"use {_GH_TOKEN}",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"t": {"type": "string", "default": _SK_TOKEN}},
+                    },
+                }
+            ],
+        }
+        upstream = _build_chat_upstream_payload(
+            payload,
+            [InternalMessage(role="user", content="hi")],
+            route="/v1/chat/completions",
+        )
+        function = upstream["functions"][0]
+        assert _GH_TOKEN not in function["description"]
+        assert _SK_TOKEN not in function["parameters"]["properties"]["t"]["default"]
+        # Linkage/structural fields survive verbatim.
+        assert function["name"] == "deploy"
+        assert _preserves_json_shape(payload["functions"], upstream["functions"])
+
+
+class TestGenericProxyUsesTheRouteAppropriatePatternSet:
+    """The generic routes are not low-false-positive routes.
+
+    RedactionFilter scores them with the full id set, so the forward path must
+    redact them with the full id set too — otherwise EMAIL/PHONE/ID/CARD are
+    scored but still forwarded verbatim.
+    """
+
+    def test_non_credential_pii_is_redacted_on_generic_routes(self) -> None:
+        payload = {
+            "model": "text-embedding-3-large",
+            "input": [
+                "mail alice@corp.internal id 110101199003074119 card 4111111111111111"
+            ],
+        }
+        upstream = _build_generic_upstream_payload(payload, route="/v1/embeddings")
+        redacted = upstream["input"][0]
+        for pattern_id in ("EMAIL", "CN_ID", "CARD"):
+            assert f"[REDACTED:{pattern_id}]" in redacted, pattern_id
+        assert "alice@corp.internal" not in redacted
+        assert "110101199003074119" not in redacted
+
+    def test_route_predicate_is_shared_with_the_redaction_filter(self) -> None:
+        for route in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
+            assert is_low_false_positive_route(route)
+            assert RedactionFilter._is_low_false_positive_v1_route(route)
+        for route in ("/v1/embeddings", "/v1/rerank", "/v1/anything"):
+            assert not is_low_false_positive_route(route)
+            assert not RedactionFilter._is_low_false_positive_v1_route(route)
+
+
+class TestBlobProbeCoversTheWholeString:
+    """The credential probe used to look at a fixed 4096-character prefix.
+
+    Padding the front of a message with base64 was enough to have the rest of it
+    — credential included — classified as a binary blob and skipped entirely.
+    """
+
+    @pytest.mark.parametrize("pad", [100, 4000, 4096, 8000, 200_000])
+    def test_credential_after_a_long_base64_prefix_is_still_redacted(
+        self, pad: int
+    ) -> None:
+        for credential in (_SK_TOKEN, _JWT, _PEM_KEY):
+            text = "A" * pad + "\n" + credential
+            assert looks_like_base64_blob(text) is False
+            cleaned, hits = _sanitize_text_for_upstream_with_hits(
+                text, role="user", path="messages[0].content", field="content"
+            )
+            assert credential.splitlines()[0] not in cleaned
+            assert hits
+
+    def test_genuine_media_is_still_skipped(self) -> None:
+        for blob in (
+            "data:image/png;base64," + base64.b64encode(os.urandom(64_000)).decode(),
+            base64.b64encode(os.urandom(64_000)).decode(),
+        ):
+            assert looks_like_base64_blob(blob) is True
+
+
+class TestRedactionCostStaysLinear:
+    def test_pem_header_flood_does_not_blow_up(self) -> None:
+        """Guards the PRIVATE_KEY_PEM body gap against quadratic backtracking.
+
+        A bounded `[\\s\\S]{0,16384}?` gap probed 16384 offsets for every BEGIN
+        header that had no END marker: 1MB of bare headers took ~6s per pass,
+        against a 4-worker payload-transform pool. The threshold is deliberately
+        loose — the point is to catch a return to that order of magnitude, not
+        to pin a number.
+        """
+        flood = "-----BEGIN RSA PRIVATE KEY-----\n" * 32_000
+        started = time.perf_counter()
+        _sanitize_text_for_upstream_with_hits(
+            flood, role="user", path="messages[0].content", field="content"
+        )
+        assert time.perf_counter() - started < 2.0
+
+    def test_whole_pem_block_still_redacted_including_encrypted_headers(self) -> None:
+        body = "\n".join(["MIIEowIBAAKCAQEAvJ8p1Kq3Zx8Q7Yb2Nn5Rr9Tt1Uu3Vv5Ww7Xx9"] * 8)
+        for label in (
+            "RSA PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+            "ENCRYPTED PRIVATE KEY",
+        ):
+            pem = (
+                f"-----BEGIN {label}-----\n"
+                "Proc-Type: 4,ENCRYPTED\n"
+                "DEK-Info: AES-128-CBC,9A1B2C3D\n\n"
+                f"{body}\n-----END {label}-----"
+            )
+            cleaned, _ = _sanitize_text_for_upstream_with_hits(
+                f"pre {pem} post",
+                role="user",
+                path="messages[0].content",
+                field="content",
+            )
+            assert cleaned == "pre [REDACTED:PRIVATE_KEY_PEM] post", label
+
+
+class TestStructuredWalkerGuards:
+    def test_excessive_nesting_is_a_shape_violation_not_a_recursion_error(
+        self,
+    ) -> None:
+        node: dict = {"leaf": "x"}
+        for _ in range(_MAX_STRUCTURED_DEPTH + 8):
+            node = {"n": node}
+        with pytest.raises(ValueError) as excinfo:
+            _build_generic_upstream_payload(node, route="/v1/rerank")
+        # Must map onto the existing 400 handler, not surface as a 500.
+        assert str(excinfo.value).endswith("_shape_violation")
+
+    def test_realistic_nesting_is_accepted(self) -> None:
+        node: dict = {"leaf": _SK_TOKEN}
+        for _ in range(30):
+            node = {"n": node}
+        upstream = _build_generic_upstream_payload(node, route="/v1/rerank")
+        probe = upstream
+        for _ in range(30):
+            probe = probe["n"]
+        assert _SK_TOKEN not in probe["leaf"]
+
+    @pytest.mark.parametrize(
+        "original,sanitized,expected",
+        [
+            ({"a": "x"}, {"a": "y"}, True),
+            ({"a": "x"}, {"b": "x"}, False),
+            ({"a": "x"}, {"a": "x", "b": "x"}, False),
+            ({"a": "x"}, {"a": ["x"]}, False),
+            ([1, 2], [1, 2], True),
+            ([1, 2], [1], False),
+            ({"a": 1}, {"a": True}, False),
+            ({"a": None}, {"a": None}, True),
+        ],
+    )
+    def test_shape_comparison(self, original, sanitized, expected) -> None:
+        assert _preserves_json_shape(original, sanitized) is expected

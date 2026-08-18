@@ -9,11 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **请求侧脱敏覆盖修复（P0）**
-  - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）
-  - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）
-  - 通用代理子路径（`/v1/embeddings`、`/v1/rerank` 等）接入保形脱敏：此前流水线只对展平文本打分，转发的仍是原始 payload
-  - Responses `instructions`（系统提示词）与三条路由的工具定义（`tools` 的 `description`、`parameters` 默认值/枚举值）纳入脱敏；工具名、tool call 关联 id、媒体定位符仍原样转发
+  - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）。凭据探测覆盖**整个字符串**而非固定前缀：此前只看前 4096 字符，用 4KB base64 前缀垫一下就能让其后的密钥被整段跳过；改为 `str.find` 定位 + 定点匹配后，12MB 媒体的探测开销约 35ms
+  - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）。块内间隔使用 `(?:[^-]|-(?!----))` 而非 `[\s\S]`，无法越过下一段 `-----`，因此没有 END 标记的头部会立即失配而不是探测 16384 个偏移——1MB 的 BEGIN 头部洪水从 ~6.2s 降到 ~8ms（正则本身），规则整体保持线性
+  - 通用代理子路径（`/v1/embeddings`、`/v1/rerank` 等）接入保形脱敏：此前流水线只对展平文本打分，转发的仍是原始 payload。转发路径与 `RedactionFilter` 共用同一条路由判据（`is_low_false_positive_route`），因此通用路由跑**完整**规则集——否则 EMAIL/手机/身份证/银行卡会被打分却仍以明文转发
+  - Responses `instructions`（系统提示词）与三条路由的工具定义（`tools` 与旧版 `functions` 的 `description`、`parameters` 默认值/枚举值）纳入脱敏；工具名、tool call 关联 id、媒体定位符仍原样转发
+  - 工具定义脱敏移到 tools 缓存回填**之后**：缓存与 passthrough 构造器共用，passthrough 回合按设计缓存原始 tools，此前只在写缓存前脱敏，导致同一 conversation 的后续「已过滤」请求回填时把原文转发出去
   - 脱敏过滤器纳入 `_SECURITY_CRITICAL_FILTER_NAMES`：过滤器异常时一律 fail-closed，不再受 `AEGIS_STORAGE_FAILURE_ACTION=forward` 影响而转发半脱敏内容；映射持久化失败仍遵循该开关，降级为「已脱敏但不可还原」并打审计标记 `redaction_mapping_persist_failed`
+  - 通用代理的结构遍历加了嵌套深度上限（超限按 `payload_depth_shape_violation` 返回 400，而不是 `RecursionError` 500）与脱敏命中行数上限；`_preserves_json_shape` 改为短路比较，不再为两棵树各物化一份逐节点签名
 
 ### Breaking Changes
 

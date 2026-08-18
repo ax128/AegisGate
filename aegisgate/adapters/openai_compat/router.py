@@ -99,7 +99,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _safe_error_detail,
 )
 from aegisgate.config.settings import settings
-from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.security_rules import is_low_false_positive_route, load_security_rules
 from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exports
     _MAX_REDACTION_HIT_LOG_ITEMS,
     _RESPONSES_SENSITIVE_OUTPUT_TYPES,
@@ -860,6 +860,12 @@ def _is_structured_content(value: Any) -> bool:
 _GATEWAY_INTERNAL_KEYS = frozenset({"request_id", "session_id", "policy", "metadata"})
 
 
+# Both the current tool-definition field and the legacy Chat Completions one.
+# `functions` survives sanitize_for_chat (it is a Chat-only key) and carries the
+# same free-text descriptions, so leaving it out forwarded them in cleartext.
+_TOOL_DEFINITION_KEYS: tuple[str, ...] = ("tools", "functions")
+
+
 def _apply_tool_definition_redaction(
     upstream_payload: dict[str, Any],
     *,
@@ -871,17 +877,23 @@ def _apply_tool_definition_redaction(
     Tool descriptions, parameter defaults and enum values are request-side
     content just like messages are, so they go through the same redaction.
     Returns the recorded hits so the caller can fold them into its audit log.
+
+    Safe to run more than once on the same payload: existing ``[REDACTED:...]``
+    markers are protected spans, so a second pass is a no-op.
     """
-    tools = upstream_payload.get("tools")
-    if not isinstance(tools, (list, dict)):
-        return []
-    sanitized_tools, hits = _sanitize_tool_definitions_for_upstream_with_hits(
-        tools,
-        whitelist_keys=whitelist_keys,
-    )
-    if not _preserves_json_shape(tools, sanitized_tools):
-        raise ValueError(violation_reason)
-    upstream_payload["tools"] = sanitized_tools
+    hits: list[dict[str, Any]] = []
+    for key in _TOOL_DEFINITION_KEYS:
+        definitions = upstream_payload.get(key)
+        if not isinstance(definitions, (list, dict)):
+            continue
+        sanitized, key_hits = _sanitize_tool_definitions_for_upstream_with_hits(
+            definitions,
+            whitelist_keys=whitelist_keys,
+        )
+        if not _preserves_json_shape(definitions, sanitized):
+            raise ValueError(violation_reason)
+        upstream_payload[key] = sanitized
+        hits.extend(key_hits)
     return hits
 
 
@@ -997,29 +1009,6 @@ def _build_responses_upstream_payload(
         upstream_payload["instructions"] = sanitized_instructions
         redaction_hits.extend(instruction_hits)
 
-    # Redact tool definitions before the cache below stores them, so a cached
-    # copy re-injected on a later turn is redacted too.
-    redaction_hits.extend(
-        _apply_tool_definition_redaction(
-            upstream_payload,
-            whitelist_keys=whitelist_keys,
-            violation_reason="responses_tools_shape_violation",
-        )
-    )
-
-    if redaction_hits:
-        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
-        # WARNING level: a request carrying sensitive fields is a security audit event
-        logger.warning(
-            "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
-            request_id,
-            session_id,
-            route,
-            len(redaction_hits),
-            sample,
-            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
-        )
-
     # Tool definition caching for stateless proxy chains.
     # Clients like Cursor send full tool definitions on the first turn and
     # tools=[] on subsequent turns, relying on server-side persistence
@@ -1065,6 +1054,32 @@ def _build_responses_upstream_payload(
                     "responses strip empty tools request_id=%s reason=function_call_in_history_no_cache",
                     request_id,
                 )
+
+    # Redact tool definitions AFTER the cache block, so whatever actually leaves
+    # the gateway is redacted — including a list re-injected from the cache.
+    # The cache is shared with the passthrough builder, which stores the client's
+    # raw tools by design, so redacting only before the cache write left the
+    # re-injected copy in cleartext on an otherwise filtered turn.
+    redaction_hits.extend(
+        _apply_tool_definition_redaction(
+            upstream_payload,
+            whitelist_keys=whitelist_keys,
+            violation_reason="responses_tools_shape_violation",
+        )
+    )
+
+    if redaction_hits:
+        sample = redaction_hits[:_MAX_REDACTION_HIT_LOG_ITEMS]
+        # WARNING level: a request carrying sensitive fields is a security audit event
+        logger.warning(
+            "responses input redaction request_id=%s session_id=%s route=%s hits=%d positions=%s truncated=%s",
+            request_id,
+            session_id,
+            route,
+            len(redaction_hits),
+            sample,
+            len(redaction_hits) > _MAX_REDACTION_HIT_LOG_ITEMS,
+        )
 
     return upstream_payload
 
@@ -1170,10 +1185,14 @@ def _build_generic_upstream_payload(
     The generic proxy has no message schema to work from, so the whole JSON body
     is walked. Without this the request pipeline only scored the payload for
     risk while the untouched original was forwarded.
+
+    The pattern set is picked from the route with the same predicate
+    RedactionFilter uses, so both layers redact this request with the same ids.
     """
     sanitized, redaction_hits = _sanitize_generic_payload_for_upstream_with_hits(
         payload,
         whitelist_keys=whitelist_keys,
+        relaxed_patterns=is_low_false_positive_route(route),
     )
     if not isinstance(sanitized, dict) or not _preserves_json_shape(payload, sanitized):
         raise ValueError("generic_input_shape_violation")

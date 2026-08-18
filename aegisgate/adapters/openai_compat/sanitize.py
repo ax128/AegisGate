@@ -54,6 +54,15 @@ _RESPONSES_SKIP_REDACTION_FIELDS = frozenset(
     }
 )
 _MAX_REDACTION_HIT_LOG_ITEMS = 24
+# Upper bound on hit rows kept in memory while walking one payload. Only
+# _MAX_REDACTION_HIT_LOG_ITEMS of them ever reach the audit log; the rest exist
+# to make the total count meaningful, and a generic provider payload can hold
+# far more string leaves than that number is worth.
+_MAX_COLLECTED_REDACTION_HITS = 2048
+# Nesting depth ceiling for the shared structured walker. Real payloads sit well
+# under 30 levels; the ceiling exists so a hostile body fails as a 400 instead
+# of exhausting the interpreter stack.
+_MAX_STRUCTURED_DEPTH = 128
 
 _SYSTEM_EXEC_RUNTIME_LINE_RE = re.compile(
     r"^\s*System:\s*\[[^\]]+\]\s*Exec\s+(?:completed|failed)\b",
@@ -256,7 +265,15 @@ def _sanitize_text_for_upstream_with_hits(
     path: str,
     field: str,
     whitelist_keys: set[str] | None = None,
+    relaxed_patterns: bool | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one string leaf.
+
+    ``relaxed_patterns`` overrides the role-derived choice between the relaxed
+    (credential-only by default) id set and the full one.  Callers that know the
+    route must pass it explicitly so the forward path uses the same set the
+    pipeline's RedactionFilter used for that route.
+    """
     if not text:
         return "", []
     if looks_like_base64_blob(text):
@@ -266,9 +283,14 @@ def _sanitize_text_for_upstream_with_hits(
     if not cleaned:
         return "", []
 
+    use_relaxed = (
+        role in _RESPONSES_RELAXED_REDACTION_ROLES
+        if relaxed_patterns is None
+        else relaxed_patterns
+    )
     patterns = (
         _responses_relaxed_redaction_patterns()
-        if role in _RESPONSES_RELAXED_REDACTION_ROLES
+        if use_relaxed
         else _responses_function_output_redaction_patterns()
     )
     hits: list[dict[str, Any]] = []
@@ -331,6 +353,21 @@ def _never_skip_field(field: str | None) -> bool:  # noqa: ARG001
     return False
 
 
+def _record_hits(hits: list[dict[str, Any]], node_hits: list[dict[str, Any]]) -> None:
+    """Append node hits, keeping the accumulator bounded.
+
+    Hits exist for the audit log, which samples _MAX_REDACTION_HIT_LOG_ITEMS
+    rows anyway.  On a generic provider payload with tens of thousands of string
+    leaves an unbounded accumulator is pure memory growth on the hot path, so it
+    stops collecting once the cap is reached — the log line still reports that
+    the sample was truncated.
+    """
+    room = _MAX_COLLECTED_REDACTION_HITS - len(hits)
+    if room <= 0:
+        return
+    hits.extend(node_hits[:room])
+
+
 def _merge_redaction_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse per-match hits into one row per (path, field, role, pattern)."""
     dedup: dict[tuple[str, str, str, str], int] = {}
@@ -358,12 +395,21 @@ def _sanitize_structured_node(
     whitelist_keys: set[str] | None = None,
     media_block_type: str | None = None,
     skip_field: Callable[[str | None], bool] = _skip_non_content_field,
+    relaxed_patterns: bool | None = None,
+    depth: int = 0,
 ) -> Any:
     """Walk a JSON-like node and redact every string leaf, preserving the shape.
 
     Shared by the chat / messages-system / tool-definition / generic-payload
     entry points so they cannot drift apart on skip rules or hit accounting.
+
+    Raises ``ValueError("payload_depth_shape_violation")`` past
+    _MAX_STRUCTURED_DEPTH so a hostile nesting depth surfaces as the regular 400
+    shape-violation response instead of an uncaught RecursionError 500.
     """
+    if depth > _MAX_STRUCTURED_DEPTH:
+        raise ValueError("payload_depth_shape_violation")
+
     if isinstance(node, str):
         if skip_field(field):
             return node
@@ -380,8 +426,9 @@ def _sanitize_structured_node(
                 path=path,
                 field=field,
                 whitelist_keys=whitelist_keys,
+                relaxed_patterns=relaxed_patterns,
             )
-            hits.extend(node_hits)
+            _record_hits(hits, node_hits)
             return node
 
         cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
@@ -390,8 +437,9 @@ def _sanitize_structured_node(
             path=path,
             field=field,
             whitelist_keys=whitelist_keys,
+            relaxed_patterns=relaxed_patterns,
         )
-        hits.extend(node_hits)
+        _record_hits(hits, node_hits)
         return cleaned
 
     if isinstance(node, list):
@@ -405,6 +453,8 @@ def _sanitize_structured_node(
                 whitelist_keys=whitelist_keys,
                 media_block_type=media_block_type,
                 skip_field=skip_field,
+                relaxed_patterns=relaxed_patterns,
+                depth=depth + 1,
             )
             for idx, item in enumerate(node)
         ]
@@ -430,6 +480,8 @@ def _sanitize_structured_node(
                 whitelist_keys=whitelist_keys,
                 media_block_type=next_media_block_type,
                 skip_field=skip_field,
+                relaxed_patterns=relaxed_patterns,
+                depth=depth + 1,
             )
     return copied
 
@@ -552,6 +604,7 @@ def _sanitize_generic_payload_for_upstream_with_hits(
     payload: Any,
     *,
     whitelist_keys: set[str] | None = None,
+    relaxed_patterns: bool = False,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Redact an arbitrary provider payload forwarded by the generic proxy.
 
@@ -559,6 +612,12 @@ def _sanitize_generic_payload_for_upstream_with_hits(
     endpoints) have no known message schema, so every string leaf is walked with
     the same skip rules the Responses path uses for cipher blobs and structural
     keys.
+
+    ``relaxed_patterns`` must mirror what RedactionFilter uses for the same
+    route.  It defaults to False — the full id set — because generic routes are
+    not in LOW_FALSE_POSITIVE_V1_ROUTES: deriving the set from the node role
+    instead would silently drop EMAIL/PHONE/ID/CARD here while the pipeline
+    scored the very same request with all of them.
     """
     hits: list[dict[str, Any]] = []
     sanitized = _sanitize_structured_node(
@@ -569,6 +628,7 @@ def _sanitize_generic_payload_for_upstream_with_hits(
         hits=hits,
         whitelist_keys=whitelist_keys,
         skip_field=_should_skip_responses_field_redaction,
+        relaxed_patterns=relaxed_patterns,
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -749,28 +809,35 @@ def _sanitize_responses_input_for_upstream(
     return sanitized
 
 
-def _shape_signature(value: Any) -> tuple[tuple[str, str], ...]:
-    """Return a deterministic structural signature for nested JSON-like payloads."""
-
-    signature: list[tuple[str, str]] = []
-
-    def _walk(node: Any, path: str) -> None:
-        if isinstance(node, dict):
-            signature.append((path, "dict"))
-            for key, item in node.items():
-                child = f"{path}.{key}" if path else str(key)
-                _walk(item, child)
-            return
-        if isinstance(node, list):
-            signature.append((path, f"list:{len(node)}"))
-            for idx, item in enumerate(node):
-                _walk(item, f"{path}[{idx}]")
-            return
-        signature.append((path, type(node).__name__))
-
-    _walk(value, "$")
-    return tuple(signature)
-
-
 def _preserves_json_shape(original: Any, sanitized: Any) -> bool:
-    return _shape_signature(original) == _shape_signature(sanitized)
+    """Return True when *sanitized* has exactly the structure of *original*.
+
+    Compares the two trees directly and returns on the first difference.  The
+    earlier implementation materialised a ``(path, type)`` tuple for every node
+    of both trees before comparing them, which on the generic proxy — where the
+    whole body is walked and bodies run to tens of megabytes — cost two extra
+    full traversals plus the allocations, on the request hot path.
+    """
+    if isinstance(original, dict):
+        if not isinstance(sanitized, dict) or len(original) != len(sanitized):
+            return False
+        for key, item in original.items():
+            if key not in sanitized:
+                return False
+            if not _preserves_json_shape(item, sanitized[key]):
+                return False
+        return True
+    if isinstance(sanitized, dict):
+        return False
+
+    if isinstance(original, list):
+        if not isinstance(sanitized, list) or len(original) != len(sanitized):
+            return False
+        return all(
+            _preserves_json_shape(item, other)
+            for item, other in zip(original, sanitized)
+        )
+    if isinstance(sanitized, list):
+        return False
+
+    return type(original) is type(sanitized)
