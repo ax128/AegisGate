@@ -11,7 +11,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 | 文件 | 用途 | 是否入库 | 热更新 | 含密 |
 |------|------|:---:|:---:|:---:|
 | `default.yaml` / `strict.yaml` / `permissive.yaml` | 策略（启用哪些 filter、`risk_threshold`） | 否（首启生成） | 是 | 否 |
-| `security_filters.yaml` | 各 filter 规则与 `action_map` | 是 | 是 | 否 |
+| `security_filters.yaml` | 各 filter 规则与 `action_map` | 否（Docker 首启生成） | 是 | 否 |
 | `.env` | 运行参数（见下方「运行参数」小节） | 否（从 `.env.example` 生成） | 部分 | 是 |
 | `.env.example` | 完整可调项清单与注释 | 是 | — | 否 |
 | `gw_tokens.json` | token → 上游映射 | 否 | 是 | 是 |

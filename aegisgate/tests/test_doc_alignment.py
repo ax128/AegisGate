@@ -165,6 +165,23 @@ def test_documented_env_vars_exist_in_settings() -> None:
     )
 
 
+def test_ui_editable_field_count_matches_docs() -> None:
+    """WEBUI-QUICKSTART cites how many settings the config page exposes.
+
+    Dropping a field from _UI_CONFIG_FIELDS is easy to do without noticing the
+    quickstart, which is how the count last went stale.
+    """
+    from aegisgate.core.gateway_ui_config import _UI_CONFIG_FIELDS
+
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    cited = re.search(r"共 (\d+) 项", quickstart)
+    assert cited, "WEBUI-QUICKSTART.md no longer states the editable-field count"
+    assert int(cited.group(1)) == len(_UI_CONFIG_FIELDS), (
+        f"the UI config page exposes {len(_UI_CONFIG_FIELDS)} fields but "
+        f"WEBUI-QUICKSTART.md says {cited.group(1)}."
+    )
+
+
 def test_documented_error_codes_exist_in_code() -> None:
     """Error codes listed in the README tables must appear in the source."""
     readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
