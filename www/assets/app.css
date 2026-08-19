@@ -1663,7 +1663,7 @@ body.login-page {
   box-shadow: 0 0 0 1px var(--accent-light);
 }
 .field-env {
-  font-family: "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 0.71rem;
   color: var(--muted);
   opacity: 0.85;
@@ -1774,7 +1774,7 @@ body.login-page {
 .audit-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .audit-row.open td { background: var(--accent-light); }
 .audit-ts {
-  font-family: "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1812,7 +1812,7 @@ body.login-page {
   border-radius: var(--radius-sm);
   background: var(--panel);
   border: 1px solid var(--line);
-  font-family: "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.55;
   max-height: 320px;
