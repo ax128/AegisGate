@@ -168,13 +168,6 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
         "section": "general",
     },
     {
-        "env": "AEGIS_ENABLE_THREAD_OFFLOAD",
-        "field": "enable_thread_offload",
-        "label": "线程池卸载",
-        "type": "bool",
-        "section": "general",
-    },
-    {
         "env": "AEGIS_FILTER_PIPELINE_TIMEOUT_S",
         "field": "filter_pipeline_timeout_s",
         "label": "过滤管道超时（秒）",

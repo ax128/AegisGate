@@ -747,7 +747,6 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（降级为纯转发，不落审计与脱敏映射）。脱敏过滤器本身始终 fail-closed，不受此开关影响 | `block` |
 | `AEGIS_MAX_MULTIPART_BODY_BYTES` | multipart 请求体上限（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`） | `60000000` |
 | `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | v2 token 路由请求体上限（多模态负载会超过 v1 的 JSON 上限） | `64000000` |
-| `AEGIS_ENABLE_THREAD_OFFLOAD` | （保留字段）历史兼容开关；当前 Store I/O、payload transform 与过滤管道已通过专用执行器 offload，不依赖此项 | `false` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
 | `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |

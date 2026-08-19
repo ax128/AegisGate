@@ -33,6 +33,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - **代码回滚**：`AEGIS_XFF_STRICT_INTERNAL=false` 并重启，回到旧的 admin / 默认 `/v1` / UI 判定。数字 token 与 `__passthrough` 在 A3 之前就已经有 XFF 降级，开关不会放宽它们
   - **配置回滚**：若已设置 `AEGIS_TRUSTED_PROXY_IPS`，该开关**回滚不了**它对 `_real_client_ip`（7 处）和 `_is_trusted_proxy`（1 处，含 UI 限流键）的影响。回退办法是清空该变量并重启
 
+### Breaking Changes
+
+- **删除无效配置 `AEGIS_ENABLE_THREAD_OFFLOAD`（P11 / B6）**
+  - 该字段从未接线，Web UI 可切换但不生效。`Settings` 为 `extra="ignore"`，旧 `.env` 里残留此键不会导致启动失败
+  - 历史 CHANGELOG 条目保留，不改
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**
