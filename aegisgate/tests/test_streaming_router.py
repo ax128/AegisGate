@@ -3001,16 +3001,6 @@ def test_messages_stream_probes_tool_use_partial_json(
         or "AegisGate" in body
     )
 
-_TAIL_BLINDSPOT_REASON = (
-    "B1: independent terminal frame flushes holdback so "
-    "_needs_final_stream_probe sees empty pending_frames"
-)
-_GENERIC_TAIL_REASON = (
-    "B1: generic stream has no holdback and no final probe; "
-    "content is yielded before the filter decision"
-)
-
-
 def _six_safe_then_dangerous_chat_frames() -> list[bytes]:
     return [
         b'data: {"id":"c1","choices":[{"delta":{"content":"one "}}]}\n\n',
@@ -3067,11 +3057,10 @@ def _sanitize_on_passwd_pipeline():
     return fake_run_response_pipeline
 
 
-@pytest.mark.xfail(reason=_TAIL_BLINDSPOT_REASON, strict=True)
 def test_execute_chat_stream_independent_terminal_frame_probes_unsampled_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """6 content chunks + independent finish + [DONE]; last two are currently unprobed."""
+    """6 content chunks + independent finish + [DONE]; tail must be probed before flush."""
     frames = _six_safe_then_dangerous_chat_frames()
     frames.append(
         b'data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
@@ -3106,7 +3095,6 @@ def test_execute_chat_stream_independent_terminal_frame_probes_unsampled_tail(
     assert "data: [DONE]" in text
 
 
-@pytest.mark.xfail(reason=_TAIL_BLINDSPOT_REASON, strict=True)
 def test_execute_responses_stream_independent_terminal_frame_probes_unsampled_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3383,7 +3371,6 @@ def test_execute_generic_stream_sanitizes_dangerous_middle_chunk(
     assert "【AegisGate已处理危险疑似片段】" in text
 
 
-@pytest.mark.xfail(reason=_GENERIC_TAIL_REASON, strict=True)
 def test_execute_generic_stream_probes_unsampled_last_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

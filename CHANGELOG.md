@@ -76,6 +76,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 抽共享 helper `_eof_recovery_replay_text`：已发出或即将刷出内容时只补断开提示；responses 有正文时本就走 finalize-only，空流仍只补提示
   - 不给 messages / generic 新增 EOF 恢复（B9'，本轮不做）
 
+### Fixed
+
+- **流式尾部探测改为按探测边界推进（P4 / B1）**
+  - `_needs_final_stream_probe` 不再要求 holdback 仍非空，改为比较 `chunk_count` 与上次探测过的内容块
+  - chat / responses 在独立终止帧刷出 holdback **之前**补跑一次响应管道探测，避免末 1–3 块未扫描即外发
+  - generic 流式路径补齐与另外三条对齐的 holdback（`_STREAM_BLOCK_HOLDBACK_EVENTS`）和尾部探测
+  - messages 路径的 `content_block_*` / `message_*` 本就不会整缓冲刷出，行为保持；共享判据避免再分叉一份实现
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**
