@@ -18,6 +18,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `filters/`：privilege / rag_poison / tool_call / anomaly 四个过滤器的直接单测
   - 测试内固定了 DNS 解析器与 Redis 客户端，安全用例不依赖真实网络或真实 Redis
 
+
+- **本地 UI 访问范围收紧**：新增 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK` 配置项（默认 `false`）
+  - 默认仅允许 loopback（127.0.0.1 / ::1）访问 UI，内网 IP 被拒绝
+  - 显式设置为 `true` 时恢复此前行为（允许 RFC1918 内网访问）
+  - 属于不可变字段（immutable），变更需重启生效
+
+- **v2 SSRF 防护增强：DNS 解析检查**
+  - 新增 `_resolve_target_ips()` 异步 DNS 解析，阻止域名解析到内网/私有 IP 的请求
+  - DNS 解析失败时采用 fail-closed 策略（阻断请求），防止 DNS rebinding 攻击
+  - `_is_ssrf_target()` 和 `_extract_target_url()` 改为 async，避免同步 DNS 阻塞事件循环
+
+
+- **流式回归缺口补齐（A7 / P14 前置）**
+  - 扩展既有 `test_streaming_router.py`，补「独立终止帧 + 末块危险载荷」（chat/responses 标 xfail 留给 B1）以及 generic 五形态基线；messages 终止帧按代码现状写为绿（并不刷空 holdback）
+  - 记录 messages / generic 在 EOF 无 `[DONE]` 时没有恢复分支的当前行为，供后续 B9' 立项
+
+
+- **过滤模式（Filter Mode）**：token 路径支持 `__redact` 和 `__passthrough` 后缀，按需切换过滤行为
+  - `token__redact`：仅执行脱敏过滤器（`exact_value_redaction` / `redaction` / `restoration`），跳过安全检测
+  - `token__passthrough`：跳过所有过滤器，请求/响应直接转发
+  - 无效模式名返回 `400 invalid_filter_mode`
+  - 审计日志记录 `filter_mode:redact` / `filter_mode:passthrough` 安全标签
+  - 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`
+
+- **请求统计仪表盘**：新增 `GET /__ui__/api/stats` 端点和 UI 统计页面
+  - 线程安全的内存统计收集器，按小时分桶，保留 7 天
+  - 追踪 5 个维度：总请求、脱敏替换次数、危险内容替换、拦截、穿透
+  - UI 页面包含汇总卡片 + 按小时/按天表格，支持刷新
+
+
+- **电脑/基础设施信息 PII 脱敏（请求侧，宽松模式）**
+  - 新增 9 个 field-labeled 模式：SYS_HOSTNAME、SYS_USERNAME、SYS_OS_VERSION、SYS_KERNEL、SYS_HOME_PATH、SYS_ENV_VAR、SYS_DOCKER_ID、SYS_K8S_RESOURCE、SYS_INTERNAL_URL
+  - 仅匹配 `field: value` / `field=value` 格式（如 `hostname: prod-web-01`），避免普通提及误报
+  - SYS_HOME_PATH 和 SYS_INTERNAL_URL 无需字段标签，直接匹配路径/URL 格式
+
+---
+
 ### Breaking Changes
 
 - **公网上游白名单旁路默认关闭**
@@ -25,7 +62,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 新增 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（默认 `false`，热重载不可变）。公网客户端命中白名单时不再旁路，回落正常过滤管道。内网客户端与未设 `client_is_internal` 的既有调用保持旁路
   - 公网部署若仍需对白名单上游明文转发，须显式设 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true` 并重启
 
-### Breaking Changes
 
 - **反代 XFF 内网判定收紧（默认开启）**
   - 新增 `AEGIS_XFF_STRICT_INTERNAL`（默认 `true`，热重载不可变，需重启）。存在 `X-Forwarded-For` 且直连 IP 不在 `AEGIS_TRUSTED_PROXY_IPS` 时，admin、默认上游 `/v1`、以及 `/__ui__` 一律按公网处理
@@ -33,107 +69,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - **代码回滚**：`AEGIS_XFF_STRICT_INTERNAL=false` 并重启，回到旧的 admin / 默认 `/v1` / UI 判定。数字 token 与 `__passthrough` 在 A3 之前就已经有 XFF 降级，开关不会放宽它们
   - **配置回滚**：若已设置 `AEGIS_TRUSTED_PROXY_IPS`，该开关**回滚不了**它对 `_real_client_ip`（7 处）和 `_is_trusted_proxy`（1 处，含 UI 限流键）的影响。回退办法是清空该变量并重启
 
-### Breaking Changes
 
 - **删除无效配置 `AEGIS_ENABLE_THREAD_OFFLOAD`（P11 / B6）**
   - 该字段从未接线，Web UI 可切换但不生效。`Settings` 为 `extra="ignore"`，旧 `.env` 里残留此键不会导致启动失败
   - 历史 CHANGELOG 条目保留，不改
 
-### Changed
-
-- **`AEGIS_STORAGE_FAILURE_ACTION=forward` 默认对未登记的请求侧过滤器 fail-closed（P12 / B6）**
-  - 这是预防性加固，不是修复一条现存的 fail-open：今天 6 个请求侧过滤器都已在 critical 名单里，`:111` 的 `continue` 不可达
-  - 未登记的新请求侧过滤器在 forward 模式下不再被静默跳过；forward 只豁免映射/审计持久化失败
-
-### Changed
-
-- **清理未接线的死代码与恒 0 指标（P11）**
-  - 删除无调用方的 `SemanticAnalyzer`（保留 `SemanticServiceClient` 与 TF-IDF 离线实验资产，下架需产品决策）
-  - 删除 `core/registry.py`、`FilterRejectedError`、无调用方的 `coerce_chat_stream_to_messages_stream`，以及 `storage/_helpers.py` 中未使用的 `json_dumps` / `json_loads` / `to_int`（`LRUMappingCache` 保留）
-  - 删除从未在热路径上报的 Prometheus 指标与包装函数：`aegisgate_filter_hits_total`、`aegisgate_pipeline_duration_seconds`、`aegisgate_confirmations_total`、`aegisgate_upstream_errors_total`，以及 `emit_counter` / `traced`
-  - `system_prompt_guard` / `untrusted_content_guard` **默认仍关闭**：未写入 `default.yaml` / `strict.yaml`。内置缺省策略与 `default.yaml` 对齐，避免策略文件缺失时悄悄启用 `untrusted_content_guard`。两者仍须同时出现在策略 YAML **并且**对应 feature flag 为 true 才会运行
-
-### Changed
-
-- **Messages→Responses 隐私默认与参数保真（P10 + P7 H5）**
-  - compat 映射显式设 `store: false`，避免 OpenAI 侧默认持久化对话
-  - `stop_sequences` 映射为 `stop`；`top_k` 无 Responses 对应参数，显式丢弃而非透传（上游 payload 走黑名单过滤，透传会让原本可用的请求变 400）；`thinking` / `redacted_thinking` 块跳过，不再落成 `[NON_TEXT_PART]`
-  - Anthropic `tool_choice` 按表映射到 Responses（`any` → `auto` 并打 tag，**不等于** `required`；`tool`+name → `{type:function,name}`；未知取值 → `auto` + tag）。Responses→Chat 把 flat `{type:function,name}` 转成 Chat 嵌套 `function`
-  - Chat→Responses rename 补 `max_completion_tokens→max_output_tokens`；`parallel_tool_calls` 不再当作 Responses-only 从 Chat 方向剥掉
-  - **意图确认**：Chat 方向把 `reasoning` 透传给能接受它的上游（如 Azure 变体）；仅当 dict 内全部为 `None` 时仍丢弃空对象
-
-### Fixed
-
-- **messages 路由扫描并清洗 `tool_use` 危险载荷（P7 H4 / B4'）**
-  - `InternalResponse.tool_call_content` 本来就能从 Anthropic `content[].input` 取值，但 sanitizer 只改 `output_text`：命中若只在 tool_use 里，处置仍是 allow，原始 `input` 原样返回
-  - sanitizer 在 tool_call_content-only 命中时改为 `sanitize`；`patch_messages_content_block` 清洗 `tool_use.input`
-  - 流式 `content_block_delta.partial_json` 进入扫描窗口，并随 probe 的 `tool_calls` metadata 交给 `tool_call_content`
-
-### Fixed
-
-- **EOF 无 `[DONE]` 时不再把已刷出的流式正文再播一遍（P7 H2 / B9）**
-  - chat 恢复分支此前会先刷出 holdback，再把整个 `stream_window` 放进合成 chunk，客户端看到重复正文
-  - 抽共享 helper `_eof_recovery_replay_text`：已发出或即将刷出内容时只补断开提示；responses 有正文时本就走 finalize-only，空流仍只补提示
-  - 不给 messages / generic 新增 EOF 恢复（B9'，本轮不做）
-
-### Fixed
-
-- **流式尾部探测改为按探测边界推进（P4 / B1）**
-  - `_needs_final_stream_probe` 不再要求 holdback 仍非空，改为比较 `chunk_count` 与上次探测过的内容块
-  - chat / responses 在独立终止帧刷出 holdback **之前**补跑一次响应管道探测，避免末 1–3 块未扫描即外发
-  - generic 流式路径补齐与另外三条对齐的 holdback（`_STREAM_BLOCK_HOLDBACK_EVENTS`）和尾部探测
-  - messages 路径的 `content_block_*` / `message_*` 本就不会整缓冲刷出，行为保持；共享判据避免再分叉一份实现
-
-### Changed
-
-- **统一文本归一化（P8 M-2/M-3）**
-  - 新增 `aegisgate/util/text_normalize.py`：NFKC + confusable 折叠 + 不可见/BIDI 剥离 + 小写 + 空白折叠
-  - 打分型过滤器（`injection_detector` / `privilege_guard` / `rag_poison_guard` / `anomaly_detector` / `tool_call_guard`）在归一化文本上匹配，同形字与换行拆分不再绕过
-  - `rag_poison_guard` 规则编译补 `re.DOTALL`
-  - 改写型（`request_sanitizer` / `output_sanitizer`）在归一化后检测；原文能匹配时仍对原文 `sub`，仅归一化命中时整段替换为占位符，**不会**把 NFKC/小写后的文本写回转发载荷
-
-### Changed
-
-- **热重载原子化与 store swap 条件化（P9）**
-  - `reload_settings` 先构造完整 `Settings`，再一次 `__dict__.update` 写入可变字段；后续步骤失败则回滚快照，避免半新旧配置
-  - `reload_runtime_dependencies` 仅在存储相关字段变化时 `swap()`；只改日志级别不再 churn 后端
-  - `_retired_backends` 上限 8，超限 `close()` 最老后端，并打 INFO 记录当前退役数量（不引入 TTL 回收）
-  - SQLite 迁移补 `created_at = 0` 回填；prune 后重置 LRU；三后端共用 `MIN_MAPPING_TTL_SECONDS = 300`
-  - 热重载后调度关闭共享 upstream HTTP client，超时/连接数变更无需整进程重启
-
-
-### Security
-
-- **HTTP 走私检测正则线性化（P1 ReDoS）**
-  - `te_te` 改为逗号唯一切分，`cl_te` / `te_cl` 两侧空白收窄为水平空白，消除量词与换行类重叠。检测面保留数字后尾随空格、头名前缩进、以及 5 行以上空行
-  - 三处规则源同步：YAML 的 anomaly / sanitizer / force_block 三段、`security_rules.py` 代码默认（含此前缺失的 anomaly 走私 5 条）、以及 v2 代理硬编码 `_DEFAULT_DANGEROUS_COMMAND_PATTERNS`
-  - 本轮不加扫描窗口或 16KB 截断（那会在签名前填充即可绕过）；有界扫描与 v2 现有截断策略收敛到后续规则引擎工作
-
-- **合并两份分叉的 `security_filters.yaml`（P0）**
-  - 此前 `config/security_filters.yaml` 与 `aegisgate/policies/rules/security_filters.yaml` 都在版本控制内，且内容已经分叉。Docker 部署把 `./config` 挂载覆盖到包内规则目录（`AEGIS_SECURITY_RULES_PATH` 指向那里），裸机部署读包内那份，于是同一条安全修复只落到其中一份，两种部署加载了**不同的安全规则**
-  - 以严格的那份为准合并，包内副本随之变化：`action_map.injection_detector.tool_call_injection` `review` → `block`，`tool_call_injection` severity `6` → `9`，`non_reducible_categories` 增加 `obfuscated` 与 `tool_call_injection`
-  - 同一次合并中，`action_map.tool_call_guard.dangerous_param` 由 `block` 改为 `review`。这不是新的放宽，而是补上一个早就定下、却只落到 config 副本的调整（见下方本节 `### Fixed` →「tool_call_guard 对编码工具参数的误拦截」中「`dangerous_param` action 从 `block` 降为 `review`」）。`aegisgate/config/security_rules.py` 的内置默认值同步改为 `review`，避免 YAML 缺失时行为翻转
-  - `config/security_filters.yaml` 移出版本控制并加入 `.gitignore`，改由 `init_config` 在首次启动时从镜像内的只读模板生成。唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`
-  - 新增 `test_config_rules_copy_matches_package_copy` 守卫：一旦 `config/` 下重新出现一份副本且与包内不一致，测试失败
-
-  **升级动作（必读）**
-
-  1. **Docker 必须重建镜像，不能只重启。** 补写规则的模板来自镜像内的 `/app/bootstrap/rules`（由 `Dockerfile` 烘焙）。`git pull` 会删掉宿主机上的 `config/security_filters.yaml`，若只执行 `docker compose up -d`，`init_config` 会用**旧镜像里的旧规则**补写，`tool_call_injection` 会被静默降回 `review`。正确步骤：`git pull && docker compose build aegisgate && docker compose up -d`
-     - **这一步做错不会自愈**：`init_config` 只在文件缺失或为空时写入，从不覆盖已存在的文件，所以事后再补 `build` 也不会把旧规则纠正回来。一旦踩中，需 `rm config/security_filters.yaml` 后重启，让新镜像重新生成。
-     - 起服务后建议验证一次：`docker compose exec aegisgate grep -n 'tool_call_injection' /app/aegisgate/policies/rules/security_filters.yaml`，确认 `action_map` 下是 `block` 而非 `review`
-  2. **用 Web UI 改过规则的实例，`git pull` 会被 git 中止**（本地已修改的文件被上游删除）。先 `cp config/security_filters.yaml /tmp/rules.bak`，再 `git checkout -- config/security_filters.yaml && git pull`，然后把自定义项手工并回 `aegisgate/policies/rules/security_filters.yaml`
-  3. **裸机部署的拦截行为会收紧**：`tool_call_injection` 变为强制拦截且不再被「研究/教学/引用」上下文降分，`obfuscated` 同样不再可降分。若上游会正常回传工具调用的文本表示，按 [config/README.md](config/README.md) 的说明放宽
-
-- **请求侧脱敏覆盖修复（P0）**
-  - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）。凭据探测覆盖**整个字符串**而非固定前缀：此前只看前 4096 字符，用 4KB base64 前缀垫一下就能让其后的密钥被整段跳过；改为 `str.find` 定位 + 定点匹配后，12MB 媒体的探测开销约 35ms
-  - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）。块内间隔使用 `(?:[^-]|-(?!----))` 而非 `[\s\S]`，无法越过下一段 `-----`，因此没有 END 标记的头部会立即失配而不是探测 16384 个偏移——1MB 的 BEGIN 头部洪水从 ~6.2s 降到 ~8ms（正则本身），规则整体保持线性
-  - 通用代理子路径（`/v1/embeddings`、`/v1/rerank` 等）接入保形脱敏：此前流水线只对展平文本打分，转发的仍是原始 payload。转发路径与 `RedactionFilter` 共用同一条路由判据（`is_low_false_positive_route`），因此通用路由跑**完整**规则集——否则 EMAIL/手机/身份证/银行卡会被打分却仍以明文转发
-  - Responses `instructions`（系统提示词）与三条路由的工具定义（`tools` 与旧版 `functions` 的 `description`、`parameters` 默认值/枚举值）纳入脱敏；工具名、tool call 关联 id、媒体定位符仍原样转发
-  - 工具定义脱敏移到 tools 缓存回填**之后**：缓存与 passthrough 构造器共用，passthrough 回合按设计缓存原始 tools，此前只在写缓存前脱敏，导致同一 conversation 的后续「已过滤」请求回填时把原文转发出去
-  - 脱敏过滤器纳入 `_SECURITY_CRITICAL_FILTER_NAMES`：过滤器异常时一律 fail-closed，不再受 `AEGIS_STORAGE_FAILURE_ACTION=forward` 影响而转发半脱敏内容；映射持久化失败仍遵循该开关，降级为「已脱敏但不可还原」并打审计标记 `redaction_mapping_persist_failed`
-  - 通用代理的结构遍历加了嵌套深度上限（超限按 `payload_depth_shape_violation` 返回 400，而不是 `RecursionError` 500）与脱敏命中行数上限；`_preserves_json_shape` 改为短路比较，不再为两棵树各物化一份逐节点签名
-
-### Breaking Changes
 
 - **HTTP 走私正则会定点改写现网 `config/security_filters.yaml`**
   - Docker 挂载下该文件是 Web UI 规则 CRUD 的目标，`init_config` 从不整文件覆盖。升级后启动时只替换三段 `command_patterns` 里 id 为 `http_smuggling_*` / `web_http_smuggling_*` 的 regex，其余自定义规则原样保留
@@ -187,19 +127,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 本地 UI 登录不再接受一次性默认密码，始终使用 `config/aegis_gateway.key` 文件内容
   - 删除 `_is_admin_initialized()` / `_mark_admin_initialized()` 和 `.admin_initialized` 标记文件机制
 
-### Added
-
-- **本地 UI 访问范围收紧**：新增 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK` 配置项（默认 `false`）
-  - 默认仅允许 loopback（127.0.0.1 / ::1）访问 UI，内网 IP 被拒绝
-  - 显式设置为 `true` 时恢复此前行为（允许 RFC1918 内网访问）
-  - 属于不可变字段（immutable），变更需重启生效
-
-- **v2 SSRF 防护增强：DNS 解析检查**
-  - 新增 `_resolve_target_ips()` 异步 DNS 解析，阻止域名解析到内网/私有 IP 的请求
-  - DNS 解析失败时采用 fail-closed 策略（阻断请求），防止 DNS rebinding 攻击
-  - `_is_ssrf_target()` 和 `_extract_target_url()` 改为 async，避免同步 DNS 阻塞事件循环
-
 ### Changed
+
+- **`AEGIS_STORAGE_FAILURE_ACTION=forward` 默认对未登记的请求侧过滤器 fail-closed（P12 / B6）**
+  - 这是预防性加固，不是修复一条现存的 fail-open：今天 6 个请求侧过滤器都已在 critical 名单里，`:111` 的 `continue` 不可达
+  - 未登记的新请求侧过滤器在 forward 模式下不再被静默跳过；forward 只豁免映射/审计持久化失败
+
+
+- **清理未接线的死代码与恒 0 指标（P11）**
+  - 删除无调用方的 `SemanticAnalyzer`（保留 `SemanticServiceClient` 与 TF-IDF 离线实验资产，下架需产品决策）
+  - 删除 `core/registry.py`、`FilterRejectedError`、无调用方的 `coerce_chat_stream_to_messages_stream`，以及 `storage/_helpers.py` 中未使用的 `json_dumps` / `json_loads` / `to_int`（`LRUMappingCache` 保留）
+  - 删除从未在热路径上报的 Prometheus 指标与包装函数：`aegisgate_filter_hits_total`、`aegisgate_pipeline_duration_seconds`、`aegisgate_confirmations_total`、`aegisgate_upstream_errors_total`，以及 `emit_counter` / `traced`
+  - `system_prompt_guard` / `untrusted_content_guard` **默认仍关闭**：未写入 `default.yaml` / `strict.yaml`。内置缺省策略与 `default.yaml` 对齐，避免策略文件缺失时悄悄启用 `untrusted_content_guard`。两者仍须同时出现在策略 YAML **并且**对应 feature flag 为 true 才会运行
+
+
+- **Messages→Responses 隐私默认与参数保真（P10 + P7 H5）**
+  - compat 映射显式设 `store: false`，避免 OpenAI 侧默认持久化对话
+  - `stop_sequences` 映射为 `stop`；`top_k` 无 Responses 对应参数，显式丢弃而非透传（上游 payload 走黑名单过滤，透传会让原本可用的请求变 400）；`thinking` / `redacted_thinking` 块跳过，不再落成 `[NON_TEXT_PART]`
+  - Anthropic `tool_choice` 按表映射到 Responses（`any` → `auto` 并打 tag，**不等于** `required`；`tool`+name → `{type:function,name}`；未知取值 → `auto` + tag）。Responses→Chat 把 flat `{type:function,name}` 转成 Chat 嵌套 `function`
+  - Chat→Responses rename 补 `max_completion_tokens→max_output_tokens`；`parallel_tool_calls` 不再当作 Responses-only 从 Chat 方向剥掉
+  - **意图确认**：Chat 方向把 `reasoning` 透传给能接受它的上游（如 Azure 变体）；仅当 dict 内全部为 `None` 时仍丢弃空对象
+
+
+- **统一文本归一化（P8 M-2/M-3）**
+  - 新增 `aegisgate/util/text_normalize.py`：NFKC + confusable 折叠 + 不可见/BIDI 剥离 + 小写 + 空白折叠
+  - 打分型过滤器（`injection_detector` / `privilege_guard` / `rag_poison_guard` / `anomaly_detector` / `tool_call_guard`）在归一化文本上匹配，同形字与换行拆分不再绕过
+  - `rag_poison_guard` 规则编译补 `re.DOTALL`
+  - 改写型（`request_sanitizer` / `output_sanitizer`）在归一化后检测；原文能匹配时仍对原文 `sub`，仅归一化命中时整段替换为占位符，**不会**把 NFKC/小写后的文本写回转发载荷
+
+
+- **热重载原子化与 store swap 条件化（P9）**
+  - `reload_settings` 先构造完整 `Settings`，再一次 `__dict__.update` 写入可变字段；后续步骤失败则回滚快照，避免半新旧配置
+  - `reload_runtime_dependencies` 仅在存储相关字段变化时 `swap()`；只改日志级别不再 churn 后端
+  - `_retired_backends` 上限 8，超限 `close()` 最老后端，并打 INFO 记录当前退役数量（不引入 TTL 回收）
+  - SQLite 迁移补 `created_at = 0` 回填；prune 后重置 LRU；三后端共用 `MIN_MAPPING_TTL_SECONDS = 300`
+  - 热重载后调度关闭共享 upstream HTTP client，超时/连接数变更无需整进程重启
+
+
 
 - **CI 覆盖率 / 版本矩阵 / 测试入库（A6 / P14）**
   - 覆盖率门槛拆成独立的 `coverage report` 步骤：跑测试那步保留 `--cov-fail-under=0`，只对测试失败 gating；门槛检查单独 `continue-on-error`，先拿到真实数字再决定是否把 50 写成硬门槛，不主动下调已声明值。`continue-on-error` 不再盖在测试步骤上，否则 3.12 的测试失败会被吞掉
@@ -207,13 +171,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 删除 `.gitignore` 对 `aegisgate/tests/*` 的白名单机制（此前新增测试默认被忽略，零测试仍绿灯）。Detect tests 在找不到 `test_*.py` 时直接失败
   - 把 `OPTIMIZATION_PLAN.md` 列入内部报告忽略段，避免审计方案随 `git add -A` 进入公开仓库
 
-### Added
 
-- **流式回归缺口补齐（A7 / P14 前置）**
-  - 扩展既有 `test_streaming_router.py`，补「独立终止帧 + 末块危险载荷」（chat/responses 标 xfail 留给 B1）以及 generic 五形态基线；messages 终止帧按代码现状写为绿（并不刷空 holdback）
-  - 记录 messages / generic 在 EOF 无 `[DONE]` 时没有恢复分支的当前行为，供后续 B9' 立项
+- **Token 生成改为纯字母数字**（`a-zA-Z0-9`），不再包含 `-` `_` 符号，避免与 `__` 过滤模式分隔符冲突
+
+
+- **过滤规则降敏（降低误报率）**
+  - `dangerous_param_patterns`：`&&`/`;`/`||`/`` ` `` 裸匹配 → 必须后跟危险命令（curl/wget/bash/sh/nc 等）
+  - `python`/`perl`/`ruby`/`php` → 仅在 `-c`/`-e` 内联执行标志时触发
+  - `semantic_approval_patterns`：`delete`/`drop` 裸词 → 仅匹配完整短语如 `drop table`
+  - `privilege_escalation`：`读取配置`/`read config` 过宽 → 收窄为 `系统配置`/`system file` 等
+  - `tool_call_injection`：severity 9→6，action block→review，从 non-reducible 移除
+  - `obfuscated`：从 non-reducible 移除（讨论编码原理时可降分）
+  - non-reducible 类别：5→3（仅保留 system_exfil, unicode_bidi, spam_noise）
+  - > **已过期**：上面三条对 `tool_call_injection` / `obfuscated` 的降敏，已被后续的 P1 安全审计修复撤销——severity 恢复 `9`、action 恢复 `block`，两者都加回 non-reducible。该修复当时只落到 `config/` 副本，包内副本一直停在降敏后的值，直到本次合并两份 YAML 时才同步过去（见上方 `### Security` 首条）。当前 `non_reducible_categories` 是 5 项：`system_exfil`、`obfuscated`、`unicode_bidi`、`tool_call_injection`、`spam_noise`。本条其余降敏（`dangerous_param_patterns`、`python`/`perl` 等、`semantic_approval_patterns`、`privilege_escalation`）仍然有效。
 
 ### Fixed
+
+- **messages 路由扫描并清洗 `tool_use` 危险载荷（P7 H4 / B4'）**
+  - `InternalResponse.tool_call_content` 本来就能从 Anthropic `content[].input` 取值，但 sanitizer 只改 `output_text`：命中若只在 tool_use 里，处置仍是 allow，原始 `input` 原样返回
+  - sanitizer 在 tool_call_content-only 命中时改为 `sanitize`；`patch_messages_content_block` 清洗 `tool_use.input`
+  - 流式 `content_block_delta.partial_json` 进入扫描窗口，并随 probe 的 `tool_calls` metadata 交给 `tool_call_content`
+
+
+- **EOF 无 `[DONE]` 时不再把已刷出的流式正文再播一遍（P7 H2 / B9）**
+  - chat 恢复分支此前会先刷出 holdback，再把整个 `stream_window` 放进合成 chunk，客户端看到重复正文
+  - 抽共享 helper `_eof_recovery_replay_text`：已发出或即将刷出内容时只补断开提示；responses 有正文时本就走 finalize-only，空流仍只补提示
+  - 不给 messages / generic 新增 EOF 恢复（B9'，本轮不做）
+
+
+- **流式尾部探测改为按探测边界推进（P4 / B1）**
+  - `_needs_final_stream_probe` 不再要求 holdback 仍非空，改为比较 `chunk_count` 与上次探测过的内容块
+  - chat / responses 在独立终止帧刷出 holdback **之前**补跑一次响应管道探测，避免末 1–3 块未扫描即外发
+  - generic 流式路径补齐与另外三条对齐的 holdback（`_STREAM_BLOCK_HOLDBACK_EVENTS`）和尾部探测
+  - messages 路径的 `content_block_*` / `message_*` 本就不会整缓冲刷出，行为保持；共享判据避免再分叉一份实现
+
 
 - **stats 优雅关闭死锁（A4 / P6）**
   - `_persist_async` 在队列满时 `get_nowait()` 丢弃旧快照却不调用 `task_done()`，`Queue` 的 unfinished 计数永久 +1，`flush()` 里的 `join()` 永不返回，lifespan 关闭挂死
@@ -232,25 +223,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）
   - 非函数类型的 `name` 字段（如用户名）保持不变
 
-### Added
-
-- **过滤模式（Filter Mode）**：token 路径支持 `__redact` 和 `__passthrough` 后缀，按需切换过滤行为
-  - `token__redact`：仅执行脱敏过滤器（`exact_value_redaction` / `redaction` / `restoration`），跳过安全检测
-  - `token__passthrough`：跳过所有过滤器，请求/响应直接转发
-  - 无效模式名返回 `400 invalid_filter_mode`
-  - 审计日志记录 `filter_mode:redact` / `filter_mode:passthrough` 安全标签
-  - 端口路由同样支持：`/v1/__gw__/t/8317__redact/...`
-
-- **请求统计仪表盘**：新增 `GET /__ui__/api/stats` 端点和 UI 统计页面
-  - 线程安全的内存统计收集器，按小时分桶，保留 7 天
-  - 追踪 5 个维度：总请求、脱敏替换次数、危险内容替换、拦截、穿透
-  - UI 页面包含汇总卡片 + 按小时/按天表格，支持刷新
-
-### Changed
-
-- **Token 生成改为纯字母数字**（`a-zA-Z0-9`），不再包含 `-` `_` 符号，避免与 `__` 过滤模式分隔符冲突
-
-### Fixed
 
 - **[Critical] tool_call_guard `review` 动作在流式模式下被当作 `block` 处理**
   - `_stream_block_reason()` 只要检测到 `tool_call_violation` 标签就触发流阻断，不区分 `block`/`review`
@@ -279,26 +251,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `_extract_chat_output_text` 生成 tool call 摘要时未检测危险性
   - 修复：先检查 `_looks_executable_payload_dangerous`，危险内容用占位符替代
 
-### Changed
+### Security
 
-- **过滤规则降敏（降低误报率）**
-  - `dangerous_param_patterns`：`&&`/`;`/`||`/`` ` `` 裸匹配 → 必须后跟危险命令（curl/wget/bash/sh/nc 等）
-  - `python`/`perl`/`ruby`/`php` → 仅在 `-c`/`-e` 内联执行标志时触发
-  - `semantic_approval_patterns`：`delete`/`drop` 裸词 → 仅匹配完整短语如 `drop table`
-  - `privilege_escalation`：`读取配置`/`read config` 过宽 → 收窄为 `系统配置`/`system file` 等
-  - `tool_call_injection`：severity 9→6，action block→review，从 non-reducible 移除
-  - `obfuscated`：从 non-reducible 移除（讨论编码原理时可降分）
-  - non-reducible 类别：5→3（仅保留 system_exfil, unicode_bidi, spam_noise）
-  - > **已过期**：上面三条对 `tool_call_injection` / `obfuscated` 的降敏，已被后续的 P1 安全审计修复撤销——severity 恢复 `9`、action 恢复 `block`，两者都加回 non-reducible。该修复当时只落到 `config/` 副本，包内副本一直停在降敏后的值，直到本次合并两份 YAML 时才同步过去（见上方 `### Security` 首条）。当前 `non_reducible_categories` 是 5 项：`system_exfil`、`obfuscated`、`unicode_bidi`、`tool_call_injection`、`spam_noise`。本条其余降敏（`dangerous_param_patterns`、`python`/`perl` 等、`semantic_approval_patterns`、`privilege_escalation`）仍然有效。
+- **HTTP 走私检测正则线性化（P1 ReDoS）**
+  - `te_te` 改为逗号唯一切分，`cl_te` / `te_cl` 两侧空白收窄为水平空白，消除量词与换行类重叠。检测面保留数字后尾随空格、头名前缩进、以及 5 行以上空行
+  - 三处规则源同步：YAML 的 anomaly / sanitizer / force_block 三段、`security_rules.py` 代码默认（含此前缺失的 anomaly 走私 5 条）、以及 v2 代理硬编码 `_DEFAULT_DANGEROUS_COMMAND_PATTERNS`
+  - 本轮不加扫描窗口或 16KB 截断（那会在签名前填充即可绕过）；有界扫描与 v2 现有截断策略收敛到后续规则引擎工作
 
-### Added
+- **合并两份分叉的 `security_filters.yaml`（P0）**
+  - 此前 `config/security_filters.yaml` 与 `aegisgate/policies/rules/security_filters.yaml` 都在版本控制内，且内容已经分叉。Docker 部署把 `./config` 挂载覆盖到包内规则目录（`AEGIS_SECURITY_RULES_PATH` 指向那里），裸机部署读包内那份，于是同一条安全修复只落到其中一份，两种部署加载了**不同的安全规则**
+  - 以严格的那份为准合并，包内副本随之变化：`action_map.injection_detector.tool_call_injection` `review` → `block`，`tool_call_injection` severity `6` → `9`，`non_reducible_categories` 增加 `obfuscated` 与 `tool_call_injection`
+  - 同一次合并中，`action_map.tool_call_guard.dangerous_param` 由 `block` 改为 `review`。这不是新的放宽，而是补上一个早就定下、却只落到 config 副本的调整（见下方本节 `### Fixed` →「tool_call_guard 对编码工具参数的误拦截」中「`dangerous_param` action 从 `block` 降为 `review`」）。`aegisgate/config/security_rules.py` 的内置默认值同步改为 `review`，避免 YAML 缺失时行为翻转
+  - `config/security_filters.yaml` 移出版本控制并加入 `.gitignore`，改由 `init_config` 在首次启动时从镜像内的只读模板生成。唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`
+  - 新增 `test_config_rules_copy_matches_package_copy` 守卫：一旦 `config/` 下重新出现一份副本且与包内不一致，测试失败
 
-- **电脑/基础设施信息 PII 脱敏（请求侧，宽松模式）**
-  - 新增 9 个 field-labeled 模式：SYS_HOSTNAME、SYS_USERNAME、SYS_OS_VERSION、SYS_KERNEL、SYS_HOME_PATH、SYS_ENV_VAR、SYS_DOCKER_ID、SYS_K8S_RESOURCE、SYS_INTERNAL_URL
-  - 仅匹配 `field: value` / `field=value` 格式（如 `hostname: prod-web-01`），避免普通提及误报
-  - SYS_HOME_PATH 和 SYS_INTERNAL_URL 无需字段标签，直接匹配路径/URL 格式
+  **升级动作（必读）**
 
----
+  1. **Docker 必须重建镜像，不能只重启。** 补写规则的模板来自镜像内的 `/app/bootstrap/rules`（由 `Dockerfile` 烘焙）。`git pull` 会删掉宿主机上的 `config/security_filters.yaml`，若只执行 `docker compose up -d`，`init_config` 会用**旧镜像里的旧规则**补写，`tool_call_injection` 会被静默降回 `review`。正确步骤：`git pull && docker compose build aegisgate && docker compose up -d`
+     - **这一步做错不会自愈**：`init_config` 只在文件缺失或为空时写入，从不覆盖已存在的文件，所以事后再补 `build` 也不会把旧规则纠正回来。一旦踩中，需 `rm config/security_filters.yaml` 后重启，让新镜像重新生成。
+     - 起服务后建议验证一次：`docker compose exec aegisgate grep -n 'tool_call_injection' /app/aegisgate/policies/rules/security_filters.yaml`，确认 `action_map` 下是 `block` 而非 `review`
+  2. **用 Web UI 改过规则的实例，`git pull` 会被 git 中止**（本地已修改的文件被上游删除）。先 `cp config/security_filters.yaml /tmp/rules.bak`，再 `git checkout -- config/security_filters.yaml && git pull`，然后把自定义项手工并回 `aegisgate/policies/rules/security_filters.yaml`
+  3. **裸机部署的拦截行为会收紧**：`tool_call_injection` 变为强制拦截且不再被「研究/教学/引用」上下文降分，`obfuscated` 同样不再可降分。若上游会正常回传工具调用的文本表示，按 [config/README.md](config/README.md) 的说明放宽
+
+- **请求侧脱敏覆盖修复（P0）**
+  - base64 二进制启发式不再豁免高置信凭据：PEM 私钥、长 JWT、`sk-`/`AKIA`/`ghp_`/`xox`/`xprv` 等即使整段像 base64 也会被脱敏（此前 ≥256 字符且 base64 字符占比 >92% 的字符串被整段跳过，实测 PEM 私钥与 481 字符 JWT 均未脱敏）。凭据探测覆盖**整个字符串**而非固定前缀：此前只看前 4096 字符，用 4KB base64 前缀垫一下就能让其后的密钥被整段跳过；改为 `str.find` 定位 + 定点匹配后，12MB 媒体的探测开销约 35ms
+  - `PRIVATE_KEY_PEM` 规则修正：此前 `-----BEGIN RSA PRIVATE KEY-----` 等带标签的常见形态不匹配；现覆盖全部标签形态，并在 `END` 标记存在时脱敏整个 PEM 块（而不仅是首行）。块内间隔使用 `(?:[^-]|-(?!----))` 而非 `[\s\S]`，无法越过下一段 `-----`，因此没有 END 标记的头部会立即失配而不是探测 16384 个偏移——1MB 的 BEGIN 头部洪水从 ~6.2s 降到 ~8ms（正则本身），规则整体保持线性
+  - 通用代理子路径（`/v1/embeddings`、`/v1/rerank` 等）接入保形脱敏：此前流水线只对展平文本打分，转发的仍是原始 payload。转发路径与 `RedactionFilter` 共用同一条路由判据（`is_low_false_positive_route`），因此通用路由跑**完整**规则集——否则 EMAIL/手机/身份证/银行卡会被打分却仍以明文转发
+  - Responses `instructions`（系统提示词）与三条路由的工具定义（`tools` 与旧版 `functions` 的 `description`、`parameters` 默认值/枚举值）纳入脱敏；工具名、tool call 关联 id、媒体定位符仍原样转发
+  - 工具定义脱敏移到 tools 缓存回填**之后**：缓存与 passthrough 构造器共用，passthrough 回合按设计缓存原始 tools，此前只在写缓存前脱敏，导致同一 conversation 的后续「已过滤」请求回填时把原文转发出去
+  - 脱敏过滤器纳入 `_SECURITY_CRITICAL_FILTER_NAMES`：过滤器异常时一律 fail-closed，不再受 `AEGIS_STORAGE_FAILURE_ACTION=forward` 影响而转发半脱敏内容；映射持久化失败仍遵循该开关，降级为「已脱敏但不可还原」并打审计标记 `redaction_mapping_persist_failed`
+  - 通用代理的结构遍历加了嵌套深度上限（超限按 `payload_depth_shape_violation` 返回 400，而不是 `RecursionError` 500）与脱敏命中行数上限；`_preserves_json_shape` 改为短路比较，不再为两棵树各物化一份逐节点签名
 
 ## [Previous]
 
