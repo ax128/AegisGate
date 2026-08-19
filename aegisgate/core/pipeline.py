@@ -18,14 +18,13 @@ _SLOW_FILTER_WARN_S = 1.0
 _init_log_lock = threading.Lock()
 _init_logged: bool = False
 
-# H-07: Security-critical filters must never be silently forward-degraded when
-# storage_failure_action=forward.  A filter that raises here has not finished its
-# work, so continuing would forward whatever it left half-applied.
-# The redaction filters belong in this set: an exception mid-way through the
-# message loop leaves part of the request unredacted, and forwarding that is a
-# cleartext leak.  Their *storage* dependency is handled inside RedactionFilter,
-# which honours storage_failure_action itself and degrades to a redacted but
-# non-restorable request instead of raising.
+# H-07: Unregistered request-side filters default to fail-closed.
+# storage_failure_action=forward must not skip a request filter just because
+# its name is missing from a hand-maintained set — that would become a
+# silent fail-open the next time someone adds a filter.
+# The names below are documented security-critical filters (used by tests and
+# comments). Runtime gating no longer consults this set; an explicit exempt
+# list would be required to degrade on request-filter errors.
 _SECURITY_CRITICAL_FILTER_NAMES: frozenset[str] = frozenset({
     "exact_value_redaction",
     "injection_detector",
@@ -37,6 +36,7 @@ _SECURITY_CRITICAL_FILTER_NAMES: frozenset[str] = frozenset({
     "tool_call_guard",
     "untrusted_content_guard",
 })
+_REQUEST_FILTER_FORWARD_EXEMPT_NAMES: frozenset[str] = frozenset()
 
 
 def _should_log_filter_done(
@@ -97,8 +97,13 @@ class Pipeline:
                 if phase == "request":
                     from aegisgate.config.settings import settings as _settings
 
-                    is_security_critical = plugin.name in _SECURITY_CRITICAL_FILTER_NAMES
-                    if _settings.storage_failure_action == "forward" and not is_security_critical:
+                    is_forward_exempt = (
+                        plugin.name in _REQUEST_FILTER_FORWARD_EXEMPT_NAMES
+                    )
+                    if (
+                        _settings.storage_failure_action == "forward"
+                        and is_forward_exempt
+                    ):
                         logger.warning(
                             "filter_error_degraded phase=%s filter=%s request_id=%s — forwarding due to storage_failure_action=forward",
                             phase,

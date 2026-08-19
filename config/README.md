@@ -70,7 +70,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游；仅 localhost/内网客户端可直连 `/v1/...`（或由反向代理携带 `x-aegis-proxy-token`） | `http://localhost:8317/v1` |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 命中的上游整体旁路请求与响应双侧过滤管道，包含 PII 脱敏（等同 `__passthrough`）；仅用于完全可信上游。公网客户端默认不旁路，见 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | 空 |
 | `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | 是否允许公网/非内网客户端使用上游白名单旁路（危险；默认仅内网） | `false` / `true` |
-| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时：`block`（安全默认）或 `forward`（降级纯转发） | `block` |
+| `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时：`block`（安全默认）或 `forward`（仅豁免映射/审计持久化失败，不改变过滤判定） | `block` |
 | `AEGIS_UPSTREAM_TIMEOUT_SECONDS` | 上游超时秒数 | `600`（10 分钟） |
 | `AEGIS_ENABLE_LOCAL_PORT_ROUTING` | 允许纯数字 token 回退到本地主机端口（如 `/v1/__gw__/t/8317/...`） | `false` / `true` |
 | `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS` | 是否允许公网/非内网客户端使用纯数字端口 token（默认仅内网） | `false` / `true` |

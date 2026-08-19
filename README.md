@@ -430,7 +430,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL for `/v1/...` from localhost/internal clients only (or from a reverse proxy presenting `x-aegis-proxy-token`) |
 | `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | _(empty)_ | Comma-separated upstream bases that **bypass both request and response pipelines, including PII redaction**. Equivalent to `__passthrough` for those upstreams and intended only for fully trusted upstreams. Public clients do not get this bypass unless `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true` |
 | `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | `false` | Allow whitelist bypass from public/non-internal clients (dangerous; default: internal-only, same shape as `__passthrough`) |
-| `AEGIS_STORAGE_FAILURE_ACTION` | `block` | Behaviour when the storage backend fails: `block` rejects the request, `forward` degrades to plain forwarding (no audit or redaction-mapping persistence). Redaction filters are fail-closed regardless of this setting |
+| `AEGIS_STORAGE_FAILURE_ACTION` | `block` | Behaviour when the storage backend fails: `block` rejects the request. `forward` only skips persisting mapping/audit records; it does not change filter verdicts or response-side block behaviour. Unregistered request filters still fail closed. |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | `true` | Enable semantic review (gray-zone gated; see `AEGIS_SEMANTIC_GRAY_LOW/HIGH`) |

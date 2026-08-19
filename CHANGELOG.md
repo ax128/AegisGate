@@ -39,6 +39,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 该字段从未接线，Web UI 可切换但不生效。`Settings` 为 `extra="ignore"`，旧 `.env` 里残留此键不会导致启动失败
   - 历史 CHANGELOG 条目保留，不改
 
+### Changed
+
+- **`AEGIS_STORAGE_FAILURE_ACTION=forward` 默认对未登记的请求侧过滤器 fail-closed（P12 / B6）**
+  - 这是预防性加固，不是修复一条现存的 fail-open：今天 6 个请求侧过滤器都已在 critical 名单里，`:111` 的 `continue` 不可达
+  - 未登记的新请求侧过滤器在 forward 模式下不再被静默跳过；forward 只豁免映射/审计持久化失败
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**
