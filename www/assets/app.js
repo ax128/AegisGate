@@ -308,7 +308,8 @@ function createInputField(item, card) {
     }
   }
   input.id = fieldId(item);
-  const read = () => (item.type === "int" || item.type === "float" ? input.value : input.value);
+  // Numbers stay strings here; the server coerces and range-checks them.
+  const read = () => input.value;
   input.addEventListener("input", () => updateFieldValue(item.field, read(), card));
   input.addEventListener("change", () => updateFieldValue(item.field, read(), card));
   return input;
@@ -1067,8 +1068,6 @@ function bindRedactUI() {
 bindRedactUI();
 
 // ─── Security Rules ───────────────────────────
-
-// ─── Security Rules ────────────────────────────
 // Sections come from /__ui__/api/rules, which discovers them by walking
 // security_filters.yaml — adding a rule group to the YAML surfaces it here with
 // no change to this file.
@@ -1115,6 +1114,16 @@ function renderRuleSectionList(sections, query) {
     host.appendChild(wrap);
   });
 
+  // The action map below is appended unconditionally, so this has to be decided
+  // before it lands — otherwise the sidebar is never empty and a search that
+  // matches nothing looks like a group list that failed to load.
+  if (!byFilter.size) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = "没有匹配的规则组";
+    host.appendChild(note);
+  }
+
   const actionMap = document.createElement("div");
   actionMap.className = "rules-filter-group";
   actionMap.innerHTML = '<div class="rules-filter-title">处置<span></span></div>';
@@ -1128,10 +1137,6 @@ function renderRuleSectionList(sections, query) {
   button.addEventListener("click", () => selectRulesSection(ACTION_MAP_SECTION));
   actionMap.appendChild(button);
   host.appendChild(actionMap);
-
-  if (!host.children.length) {
-    host.innerHTML = '<p class="empty-note">没有匹配的规则组</p>';
-  }
 }
 
 function selectRulesSection(sectionId) {
