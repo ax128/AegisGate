@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -49,12 +49,18 @@ def normalize_for_match(
     confusable_map: Mapping[str, str] | None = None,
     strip_chars: Iterable[str] | None = None,
     fold_whitespace: bool = True,
+    casefold: bool = True,
 ) -> str:
     """NFKC + confusable fold + invisible/bidi strip + lower, optionally whitespace fold.
 
     Whitespace folding is on by default so ``ignore\\nprevious`` matches
     ``ignore previous``. Callers that must keep newlines (HTTP smuggling
     signatures) should also search the unfolded form.
+
+    ``casefold=False`` keeps the original case. Only pass it when the consumer
+    is case-insensitive anyway (an ``re.IGNORECASE`` pattern): it lets plain
+    ASCII text normalize back to itself, which :func:`build_haystacks` uses to
+    collapse three search forms down to one.
     """
     if not text:
         return ""
@@ -67,25 +73,69 @@ def normalize_for_match(
         else set(DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS)
     )
     table = str.maketrans({**mapping, **{ch: None for ch in strip}})
-    normalized = unicodedata.normalize("NFKC", text).translate(table).lower()
+    normalized = unicodedata.normalize("NFKC", text).translate(table)
+    if casefold:
+        normalized = normalized.lower()
     if fold_whitespace:
         return _WHITESPACE_RE.sub(" ", normalized).strip()
     return normalized
 
 
-def match_haystacks(text: str) -> tuple[str, str]:
+def match_haystacks(text: str, *, casefold: bool = True) -> tuple[str, str]:
     """Unfolded (newlines kept) and whitespace-folded forms for pattern search."""
-    unfolded = normalize_for_match(text, fold_whitespace=False)
+    unfolded = normalize_for_match(text, fold_whitespace=False, casefold=casefold)
     folded = _WHITESPACE_RE.sub(" ", unfolded).strip()
     return unfolded, folded
 
 
+def build_haystacks(text: str) -> tuple[str, ...]:
+    """The distinct forms a pattern should be searched against.
+
+    Normalizing is the expensive part (NFKC + translate over the whole text),
+    so callers that test many patterns against one text must build this once
+    and reuse it rather than calling :func:`pattern_hits` in a loop.
+
+    Case is deliberately preserved: every caller matches with
+    ``re.IGNORECASE``, so lowercasing here would only make the normalized form
+    differ from the original and force a third search per pattern. Duplicate
+    forms are dropped, so ordinary ASCII text collapses to a single entry.
+    """
+    if not text:
+        return ("",)
+    unfolded = normalize_for_match(text, fold_whitespace=False, casefold=False)
+    # No ``.strip()``: trailing whitespace cannot hide a match from ``search``,
+    # and stripping would make the folded form differ from the unfolded one for
+    # every text that merely ends in a newline, costing a second search per
+    # pattern for nothing.
+    folded = _WHITESPACE_RE.sub(" ", unfolded)
+    forms = [text]
+    if unfolded != text:
+        forms.append(unfolded)
+    if folded != unfolded and folded != text:
+        forms.append(folded)
+    return tuple(forms)
+
+
+def any_pattern_hits(
+    patterns: Iterable[re.Pattern[str]], haystacks: Sequence[str]
+) -> bool:
+    """True if any pattern matches any prebuilt haystack."""
+    return any(pattern.search(hay) for pattern in patterns for hay in haystacks)
+
+
+def pattern_hits_in(pattern: re.Pattern[str], haystacks: Sequence[str]) -> bool:
+    """True if *pattern* matches any prebuilt haystack."""
+    return any(pattern.search(hay) for hay in haystacks)
+
+
 def pattern_hits(pattern: re.Pattern[str], text: str) -> bool:
-    """True if *pattern* matches the original or either normalized form."""
-    if pattern.search(text):
-        return True
-    unfolded, folded = match_haystacks(text)
-    return bool(pattern.search(unfolded) or (folded != unfolded and pattern.search(folded)))
+    """True if *pattern* matches the original or either normalized form.
+
+    Single-shot convenience wrapper. In a loop over patterns, build the
+    haystacks once with :func:`build_haystacks` and use
+    :func:`pattern_hits_in` instead.
+    """
+    return pattern_hits_in(pattern, build_haystacks(text))
 
 
 def apply_rewrite_conservatively(
@@ -109,7 +159,7 @@ def apply_rewrite_conservatively(
             updated = rewritten
     if original_hit:
         return updated
-    if any(pattern_hits(pattern, text) for pattern in pattern_list):
+    if any_pattern_hits(pattern_list, build_haystacks(text)):
         return replacement
     return text
 

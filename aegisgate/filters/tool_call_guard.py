@@ -10,7 +10,11 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
-from aegisgate.util.text_normalize import normalize_for_match, pattern_hits
+from aegisgate.util.text_normalize import (
+    build_haystacks,
+    normalize_for_match,
+    pattern_hits_in,
+)
 
 
 # H-10: Unconditionally blocked tool names regardless of whitelist configuration.
@@ -308,8 +312,9 @@ class ToolCallGuard(BaseFilter):
                     or tool_norm in _FILE_WRITE_CONTENT_TOOLS
                     else self._dangerous_param_patterns
                 )
+                args_haystacks = build_haystacks(args_text)
                 for _rule_id, pattern in patterns:
-                    if not pattern_hits(pattern, args_text):
+                    if not pattern_hits_in(pattern, args_haystacks):
                         continue
                     match = pattern.search(args_text) or pattern.search(args_norm)
                     matched_text = (match.group(0) if match else args_norm)[:120]

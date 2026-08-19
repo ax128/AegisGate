@@ -13,7 +13,12 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
-from aegisgate.util.text_normalize import apply_rewrite_conservatively, pattern_hits
+from aegisgate.util.text_normalize import (
+    any_pattern_hits,
+    apply_rewrite_conservatively,
+    build_haystacks,
+    pattern_hits_in,
+)
 
 
 class OutputSanitizer(BaseFilter):
@@ -92,13 +97,14 @@ class OutputSanitizer(BaseFilter):
 
     @staticmethod
     def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
-        return any(pattern_hits(pattern, text) for pattern in patterns)
+        return any_pattern_hits(patterns, build_haystacks(text))
 
     @staticmethod
     def _matched_pattern_ids(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
         hits: list[str] = []
+        haystacks = build_haystacks(text)
         for pattern_id, pattern in patterns:
-            if pattern_hits(pattern, text):
+            if pattern_hits_in(pattern, haystacks):
                 hits.append(pattern_id)
         return sorted(set(hits))
 

@@ -10,7 +10,11 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
-from aegisgate.util.text_normalize import pattern_hits
+from aegisgate.util.text_normalize import (
+    any_pattern_hits,
+    build_haystacks,
+    pattern_hits_in,
+)
 
 
 class PrivilegeGuard(BaseFilter):
@@ -42,13 +46,14 @@ class PrivilegeGuard(BaseFilter):
 
     def _matches(self, text: str) -> list[str]:
         hits: list[str] = []
+        haystacks = build_haystacks(text)
         for pattern_id, pattern in self._blocked_patterns:
-            if pattern_hits(pattern, text):
+            if pattern_hits_in(pattern, haystacks):
                 hits.append(pattern_id)
         return hits
 
     def _is_discussion_context(self, text: str) -> bool:
-        return any(pattern_hits(pattern, text) for pattern in self._discussion_patterns)
+        return any_pattern_hits(self._discussion_patterns, build_haystacks(text))
 
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
         blocked: list[str] = []

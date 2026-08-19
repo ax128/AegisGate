@@ -11,7 +11,12 @@ from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
-from aegisgate.util.text_normalize import apply_rewrite_conservatively, pattern_hits
+from aegisgate.util.text_normalize import (
+    any_pattern_hits,
+    apply_rewrite_conservatively,
+    build_haystacks,
+    pattern_hits_in,
+)
 
 
 class RequestSanitizer(BaseFilter):
@@ -130,12 +135,13 @@ class RequestSanitizer(BaseFilter):
         return compiled
 
     def _matches_any(self, text: str, patterns: list[re.Pattern[str]]) -> bool:
-        return any(pattern_hits(pattern, text) for pattern in patterns)
+        return any_pattern_hits(patterns, build_haystacks(text))
 
     def _matched_categories(self, text: str) -> set[str]:
         categories: set[str] = set()
+        haystacks = build_haystacks(text)
         for category, pattern in self._strong_intent_patterns:
-            if pattern_hits(pattern, text):
+            if pattern_hits_in(pattern, haystacks):
                 categories.add(category)
         return categories
 

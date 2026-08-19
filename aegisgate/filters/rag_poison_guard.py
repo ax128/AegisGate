@@ -10,7 +10,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
-from aegisgate.util.text_normalize import pattern_hits
+from aegisgate.util.text_normalize import build_haystacks, pattern_hits_in
 
 
 class RagPoisonGuard(BaseFilter):
@@ -65,12 +65,10 @@ class RagPoisonGuard(BaseFilter):
     def _match_signals(self, text: str, patterns: dict[str, re.Pattern[str]]) -> list[str]:
         if not text:
             return []
-        haystack_ok = bool(text)
         hits: list[str] = []
-        if not haystack_ok:
-            return hits
+        haystacks = build_haystacks(text)
         for signal, pattern in patterns.items():
-            if pattern_hits(pattern, text):
+            if pattern_hits_in(pattern, haystacks):
                 hits.append(signal)
         return hits
 
