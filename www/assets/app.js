@@ -125,13 +125,16 @@ async function fetchJson(url, options = {}) {
   return response.json();
 }
 
-function setStatus(id, message, isError = false) {
+// `level` accepts the legacy boolean (true = error) or "ok" | "warn" | "err".
+function setStatus(id, message, level = false) {
   const node = document.getElementById(id);
   if (!node) return;
+  const kind = level === true ? "err" : level === false ? (message ? "ok" : "") : String(level);
+  const isError = kind === "err";
   node.textContent = message;
-  node.className = "status-note " + (isError ? "err" : message ? "ok" : "");
+  node.className = "status-note " + kind;
   // Auto-clear success messages after 4 seconds
-  if (!isError && message) {
+  if (kind === "ok" && message) {
     clearTimeout(node._clearTimer);
     node._clearTimer = setTimeout(() => {
       node.textContent = "";
@@ -151,35 +154,91 @@ function updateHeaderStatus(status) {
   }
 }
 
+// ─── Config panels ─────────────────────────────
+// Panels, nav entries and groups are all generated from /__ui__/api/config, so
+// adding a field or a section server-side needs no change here.
+
+let configSections = [];
+const dirtyFields = new Set();
+
+const SECTION_ICONS = {
+  sliders: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
+  gauge: '<path d="M12 21a9 9 0 1 1 9-9"/><line x1="12" y1="12" x2="17" y2="8"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9,12 11,14 15,10"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  shuffle: '<polyline points="16,3 21,3 21,8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21,16 21,21 16,21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>',
+  layers: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+};
+
+function sectionIcon(key) {
+  const body = SECTION_ICONS[key] || SECTION_ICONS.sliders;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+}
+
 function fieldId(field) {
   return `cfg-${field.field}`;
 }
 
 function cloneState(items) {
   configState = items.map((item) => ({ ...item }));
+  dirtyFields.clear();
 }
 
-function updateFieldValue(fieldName, value) {
-  const item = configState.find((entry) => entry.field === fieldName);
-  if (item) item.value = value;
+function findField(fieldName) {
+  return configState.find((entry) => entry.field === fieldName);
 }
 
-function createBoolButton(item) {
+function markDirty(fieldName, card) {
+  dirtyFields.add(fieldName);
+  if (card) card.classList.add("dirty");
+  const item = findField(fieldName);
+  if (item) applyDependencies(item.section);
+}
+
+function updateFieldValue(fieldName, value, card) {
+  const item = findField(fieldName);
+  if (!item) return;
+  item.value = value;
+  markDirty(fieldName, card);
+}
+
+// A field carrying `depends_on: {other_field: expected}` is only shown while the
+// other field currently holds that value.
+function applyDependencies(section) {
+  configState
+    .filter((item) => item.section === section && item.depends_on)
+    .forEach((item) => {
+      const card = document.getElementById(`card-${item.field}`);
+      if (!card) return;
+      const satisfied = Object.entries(item.depends_on).every(([dep, expected]) => {
+        const depItem = findField(dep);
+        return depItem && String(depItem.value) === String(expected);
+      });
+      card.classList.toggle("dep-hidden", !satisfied);
+    });
+}
+
+function createBoolButton(item, card) {
   const button = document.createElement("button");
   button.type = "button";
   button.id = fieldId(item);
   button.className = `bool-button ${item.value ? "on" : "off"}`;
   button.textContent = item.value ? "已开启" : "已关闭";
+  button.setAttribute("role", "switch");
+  button.setAttribute("aria-checked", item.value ? "true" : "false");
   button.addEventListener("click", () => {
-    const next = !item.value;
-    updateFieldValue(item.field, next);  // update configState clone, not original item
+    const next = !findField(item.field).value;
+    updateFieldValue(item.field, next, card);
     button.className = `bool-button ${next ? "on" : "off"}`;
     button.textContent = next ? "已开启" : "已关闭";
+    button.setAttribute("aria-checked", next ? "true" : "false");
   });
   return button;
 }
 
-function createInputField(item) {
+function createInputField(item, card) {
   let input;
   if (item.type === "enum") {
     input = document.createElement("select");
@@ -192,47 +251,189 @@ function createInputField(item) {
     });
   } else {
     input = document.createElement("input");
-    input.type = item.type === "int" ? "number" : "text";
-    input.value = item.value ?? "";
+    if (item.sensitive) {
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.placeholder = item.has_value ? `已配置 ${item.masked}，留空表示不修改` : "未配置";
+      input.value = "";
+    } else if (item.type === "int" || item.type === "float") {
+      input.type = "number";
+      if (item.type === "float") input.step = "any";
+      if (item.min !== undefined && item.min !== null) input.min = String(item.min);
+      if (item.max !== undefined && item.max !== null) input.max = String(item.max);
+      input.value = item.value ?? "";
+    } else {
+      input.type = "text";
+      input.value = item.value ?? "";
+    }
   }
   input.id = fieldId(item);
-  input.addEventListener("input", () => {
-    updateFieldValue(item.field, item.type === "int" ? Number(input.value) : input.value);
-  });
-  input.addEventListener("change", () => {
-    updateFieldValue(item.field, item.type === "int" ? Number(input.value) : input.value);
-  });
+  const read = () => (item.type === "int" || item.type === "float" ? input.value : input.value);
+  input.addEventListener("input", () => updateFieldValue(item.field, read(), card));
+  input.addEventListener("change", () => updateFieldValue(item.field, read(), card));
   return input;
 }
 
-function renderConfig(items) {
+function buildFieldCard(item) {
+  const card = document.createElement("div");
+  card.id = `card-${item.field}`;
+  card.className = `field-card ${item.type === "string" ? "wide" : ""}`;
+  card.dataset.search = `${item.label} ${item.env} ${item.field} ${item.help || ""}`.toLowerCase();
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const badges = [];
+  if (item.requires_restart) {
+    badges.push('<span class="field-badge restart" title="该字段被 hot_reload 固定，保存后需重启网关才生效">需重启</span>');
+  }
+  if (item.pending_value !== undefined) {
+    badges.push('<span class="field-badge pending" title="已写入 config/.env，但当前进程仍在使用旧值">待生效</span>');
+  }
+  const defaultText = item.sensitive ? "" : `<span class="default">默认: ${escapeHtml(String(item.default))}</span>`;
+  meta.innerHTML =
+    `<strong>${escapeHtml(item.label)}${badges.join("")}</strong>` +
+    `<span class="field-env">${escapeHtml(item.env)}</span>` +
+    (item.help ? `<span class="field-help">${escapeHtml(item.help)}</span>` : "") +
+    defaultText;
+  card.appendChild(meta);
+  card.appendChild(item.type === "bool" ? createBoolButton(item, card) : createInputField(item, card));
+  return card;
+}
+
+function buildConfigPanel(section) {
+  const panel = document.createElement("section");
+  panel.id = section.id;
+  panel.className = "panel";
+  panel.innerHTML =
+    `<div class="panel-head">` +
+      `<div class="panel-head-icon">${sectionIcon(section.icon)}</div>` +
+      `<div class="panel-head-info">` +
+        `<h2>${escapeHtml(section.label)}</h2>` +
+        `<p class="panel-desc">${escapeHtml(section.desc || "")}　修改后点击保存，写入 <code>config/.env</code></p>` +
+      `</div>` +
+    `</div>` +
+    `<div class="config-toolbar">` +
+      `<input type="search" class="config-search" id="search-${section.id}" placeholder="搜索本页配置项…" aria-label="搜索 ${escapeHtml(section.label)} 配置项">` +
+      `<span class="config-count" id="count-${section.id}"></span>` +
+    `</div>` +
+    `<div class="restart-banner hidden" id="restart-banner-${section.id}" role="status"></div>` +
+    `<div class="config-groups" id="groups-${section.id}"></div>` +
+    `<div class="panel-actions">` +
+      `<button id="save-${section.id}" class="btn-save" type="button">` +
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+        `<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>` +
+        `<polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>` +
+        `保存${escapeHtml(section.label)}` +
+      `</button>` +
+      `<span id="${section.id}-save-status" class="status-note" aria-live="polite"></span>` +
+    `</div>`;
+  return panel;
+}
+
+function filterSection(sectionId, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  const groups = document.getElementById(`groups-${sectionId}`);
+  if (!groups) return;
+  let visible = 0;
+  groups.querySelectorAll(".config-group").forEach((group) => {
+    let groupVisible = 0;
+    group.querySelectorAll(".field-card").forEach((card) => {
+      const hit = !needle || (card.dataset.search || "").includes(needle);
+      card.classList.toggle("search-hidden", !hit);
+      if (hit) groupVisible += 1;
+    });
+    group.classList.toggle("search-hidden", groupVisible === 0);
+    visible += groupVisible;
+  });
+  const counter = document.getElementById(`count-${sectionId}`);
+  if (counter) counter.textContent = needle ? `匹配 ${visible} 项` : `共 ${visible} 项`;
+}
+
+function renderConfig(payload) {
+  const items = Array.isArray(payload) ? payload : payload.items || [];
+  const sections = (Array.isArray(payload) ? configSections : payload.sections) || configSections;
+  configSections = sections;
   cloneState(items);
-  const sections = {
-    general: document.getElementById("general-config"),
-    security: document.getElementById("security-config"),
-    v2: document.getElementById("v2-config"),
-  };
-  Object.values(sections).forEach((node) => {
-    if (node) node.innerHTML = "";
+
+  const navHost = document.getElementById("config-nav");
+  const panelHost = document.getElementById("config-panels");
+  if (!panelHost) return;
+  if (navHost) navHost.innerHTML = "";
+  panelHost.innerHTML = "";
+
+  sections.forEach((section) => {
+    const sectionItems = configState.filter((item) => item.section === section.id);
+    if (!sectionItems.length) return;
+
+    if (navHost) {
+      const link = document.createElement("a");
+      link.href = `#${section.id}`;
+      link.className = "nav-item";
+      link.innerHTML = `${sectionIcon(section.icon)}${escapeHtml(section.label)}`;
+      navHost.appendChild(link);
+    }
+
+    const panel = buildConfigPanel(section);
+    panelHost.appendChild(panel);
+
+    const groupHost = panel.querySelector(`#groups-${section.id}`);
+    const seen = new Map();
+    sectionItems.forEach((item) => {
+      const groupName = item.group || "其他";
+      if (!seen.has(groupName)) {
+        const group = document.createElement("div");
+        group.className = "config-group";
+        group.innerHTML = `<h3 class="config-group-title">${escapeHtml(groupName)}</h3><div class="form-grid dynamic-config"></div>`;
+        groupHost.appendChild(group);
+        seen.set(groupName, group.querySelector(".form-grid"));
+      }
+      seen.get(groupName).appendChild(buildFieldCard(item));
+    });
+
+    panel.querySelector(`#search-${section.id}`)
+      .addEventListener("input", (event) => filterSection(section.id, event.target.value));
+    panel.querySelector(`#save-${section.id}`)
+      .addEventListener("click", () => saveSection(section.id, `${section.id}-save-status`));
+
+    filterSection(section.id, "");
+    applyDependencies(section.id);
+
+    const pending = sectionItems.filter((item) => item.pending_value !== undefined);
+    if (pending.length) showRestartBanner(section.id, pending.map((item) => item.label), true);
   });
 
-  items.forEach((item) => {
-    const card = document.createElement("div");
-    card.className = `field-card ${item.type === "string" ? "wide" : ""}`;
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.innerHTML = `<strong>${escapeHtml(item.label)}</strong><span class="default">默认: ${escapeHtml(String(item.default))}</span>`;
-    card.appendChild(meta);
-    card.appendChild(item.type === "bool" ? createBoolButton(item) : createInputField(item));
-    const section = sections[item.section];
-    if (section) section.appendChild(card);
+  initScrollSpy();
+}
+
+function showRestartBanner(sectionId, labels, alreadyWritten) {
+  const banner = document.getElementById(`restart-banner-${sectionId}`);
+  if (!banner) return;
+  const names = labels.map((l) => escapeHtml(l)).join("、");
+  banner.innerHTML =
+    `<span class="restart-banner-text">` +
+      `<strong>${alreadyWritten ? "以下配置已写入但尚未生效" : "以下配置需要重启后才会生效"}：</strong>${names}` +
+      `　—　这些字段被网关在启动时固定，热重载不会应用。` +
+    `</span>` +
+    `<button class="btn-sm restart-banner-btn" type="button">重启网关</button>`;
+  banner.classList.remove("hidden");
+  banner.querySelector(".restart-banner-btn").addEventListener("click", () => {
+    const restartBtn = document.getElementById("restart-button");
+    if (restartBtn) restartBtn.click();
   });
 }
 
 function collectSectionValues(section) {
   const values = {};
   configState.filter((item) => item.section === section).forEach((item) => {
-    values[item.field] = item.type === "int" ? String(item.value).trim() : item.value;
+    if (item.sensitive) {
+      const input = document.getElementById(fieldId(item));
+      const typed = input ? input.value.trim() : "";
+      if (typed) values[item.field] = typed;
+      return;
+    }
+    values[item.field] = item.type === "int" || item.type === "float"
+      ? String(item.value).trim()
+      : item.value;
   });
   return values;
 }
@@ -248,8 +449,19 @@ async function saveSection(section, statusId) {
       },
       body: JSON.stringify({ values: collectSectionValues(section) }),
     });
-    renderConfig(data.config.items);
-    setStatus(statusId, "已保存，配置已热重载。");
+    const restartRequired = Array.isArray(data.restart_required) ? data.restart_required : [];
+    const fieldMap = new Map(configState.map((item) => [item.field, item]));
+    renderConfig(data.config);
+    if (restartRequired.length) {
+      showRestartBanner(
+        section,
+        restartRequired.map((name) => (fieldMap.get(name) || {}).label || name),
+        false
+      );
+      setStatus(statusId, `已写入 config/.env；其中 ${restartRequired.length} 项需重启网关后生效。`, "warn");
+    } else {
+      setStatus(statusId, "已保存，配置已热重载。");
+    }
     await loadBootstrap();
   } catch (error) {
     setStatus(statusId, `保存失败: ${error.message}`, true);
@@ -263,10 +475,9 @@ function setActiveNav(hash) {
 }
 
 function initScrollSpy() {
-  const sections = document.querySelectorAll("main section[id]");
-  if (!sections.length) return;
-
   function onScroll() {
+    const sections = document.querySelectorAll("main section[id]");
+    if (!sections.length) return;
     const offset = 80;
     let current = sections[0].id;
     sections.forEach((section) => {
@@ -277,7 +488,11 @@ function initScrollSpy() {
     setActiveNav(`#${current}`);
   }
 
-  window.addEventListener("scroll", onScroll, { passive: true });
+  if (!initScrollSpy._bound) {
+    window.addEventListener("scroll", onScroll, { passive: true });
+    initScrollSpy._bound = true;
+  }
+  initScrollSpy._onScroll = onScroll;
   onScroll();
 }
 
@@ -344,7 +559,7 @@ async function loadBootstrap() {
   if (output) output.textContent = JSON.stringify(data, null, 2);
 
   const configData = await fetchJson("/__ui__/api/config");
-  renderConfig(configData.items);
+  renderConfig(configData);
 
   const preferredDocId = Array.isArray(data.docs) && data.docs.length ? data.docs[0].id : null;
   await loadDocs(preferredDocId);
@@ -631,9 +846,6 @@ function bindActions() {
     });
     window.location.href = "/__ui__/login";
   });
-  document.getElementById("save-general").addEventListener("click", () => saveSection("general", "general-save-status"));
-  document.getElementById("save-security").addEventListener("click", () => saveSection("security", "security-save-status"));
-  document.getElementById("save-v2").addEventListener("click", () => saveSection("v2", "v2-save-status"));
 }
 
 bindActions();

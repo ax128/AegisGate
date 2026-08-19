@@ -1484,3 +1484,95 @@ body.login-page {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── Config panels: groups, search, restart notices ─────────────── */
+.config-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.config-search {
+  flex: 1;
+  min-width: 0;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.86rem;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.config-search::placeholder { color: var(--muted); }
+.config-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.config-count {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.config-group + .config-group { margin-top: 22px; }
+.config-group-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.config-group.search-hidden,
+.field-card.search-hidden,
+.field-card.dep-hidden { display: none; }
+
+.field-card.dirty {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-light);
+}
+.field-env {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.71rem;
+  color: var(--muted);
+  opacity: 0.85;
+  word-break: break-all;
+}
+.field-help {
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.field-badge {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+.field-badge.restart { background: rgba(184, 124, 10, 0.14); color: var(--warning); }
+.field-badge.pending { background: rgba(177, 52, 40, 0.13); color: var(--error); }
+
+.restart-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(184, 124, 10, 0.35);
+  background: rgba(184, 124, 10, 0.09);
+  font-size: 0.83rem;
+  line-height: 1.5;
+}
+.restart-banner-text { flex: 1; min-width: 240px; }
+.restart-banner-btn { flex-shrink: 0; }
+.status-note.warn { color: var(--warning); }

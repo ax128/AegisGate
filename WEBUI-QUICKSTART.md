@@ -105,7 +105,9 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 ## 4. UI 能力
 
 - 查看服务状态、监听地址、安全级别、默认上游
-- 编辑**主要**运行参数（基础设置、安全设置、v2 代理、功能开关、限流阈值等，共 58 项）
+- 编辑运行参数，共 100 项，按 8 个分区呈现：基础设置、存储与保留、限额与超时、安全策略、访问控制、协议转换与路由、v2 代理、控制台
+  - 每个分区带搜索框；字段按用途分组，并标注对应的环境变量名与默认值
+  - 未开放编辑的 4 项：`app_name`、`gateway_key`（走密钥管理页）、`require_confirmation_on_block`（已废弃）、`internal_forwarding_kernel_rollout`（内部灰度开关）
 - 安全过滤规则增删改查（PII 规则、工具注入规则、命令规则、动作映射）
 - 精确值脱敏列表（exact-value redaction）增删改查
 - 请求统计仪表盘：总请求、脱敏替换、危险内容替换、拦截、穿透五个维度，按小时/按天查看
@@ -117,13 +119,20 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 
 ### 4.1 哪些配置改完需要重启
 
-保存配置会写入 `config/.env` 并触发热更新，但少数安全关键项在启动时固定，热更新不会生效。UI 上可编辑、却**需要重启才生效**的有三项：
+保存配置会写入 `config/.env` 并触发热更新，但安全关键项在启动时固定（`hot_reload._IMMUTABLE_FIELDS`），热更新不会生效。这类字段在配置页上带 **需重启** 徽章，保存后页面会给出提示条和「重启网关」按钮，不再报告一次并未发生的热重载。
+
+配置页上可编辑、需要重启才生效的字段：
 
 - `AEGIS_SECURITY_LEVEL`（安全级别）
 - `AEGIS_ENFORCE_LOOPBACK_ONLY`（仅本机访问）
 - `AEGIS_TRUSTED_PROXY_IPS`（可信反向代理 IP）
+- `AEGIS_XFF_STRICT_INTERNAL`（默认 `true`：带 `X-Forwarded-For` 且直连不在可信代理列表时，admin / 默认 `/v1` / UI 按公网处理）
+- `AEGIS_V2_BLOCK_INTERNAL_TARGETS`（v2 SSRF 防护）
+- `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS`、`AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE`、`AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（公网闸门）
+- `AEGIS_ENABLE_REQUEST_HMAC_AUTH`、`AEGIS_REQUEST_HMAC_SECRET`（请求签名）
+- `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK`（控制台内网访问）
 
-另有一项不在配置页、同样需重启：`AEGIS_XFF_STRICT_INTERNAL`（默认 `true`：带 `X-Forwarded-For` 且直连不在可信代理列表时，admin / 默认 `/v1` / UI 按公网处理）。
+已写入 `.env` 但当前进程尚未采用的字段，会额外带 **待生效** 徽章，并显示 `.env` 中的新值而不是进程里的旧值。
 
 改完这些项，请用本页的「重启网关」按钮，或执行 `docker compose restart aegisgate` / `python aegisgate-local.py restart`。**注意**：设了 `AEGIS_TRUSTED_PROXY_IPS` 之后，仅把 `AEGIS_XFF_STRICT_INTERNAL=false` **回滚不了** client IP 与限流键的变化；配置侧回退是清空该变量并重启。完整的不可热更新清单见 [config/README.md](config/README.md) 的「热更新说明」。
 
