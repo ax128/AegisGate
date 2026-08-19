@@ -2,28 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from collections import OrderedDict
-from typing import Any
-
-
-def json_dumps(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def json_loads(data: str) -> dict[str, Any]:
-    loaded = json.loads(data)
-    if isinstance(loaded, dict):
-        return loaded
-    return {}
-
-
-def to_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
 
 
 class LRUMappingCache:

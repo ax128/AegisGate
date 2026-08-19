@@ -2,13 +2,8 @@
 
 from aegisgate.observability.logging import configure_logging, log_event
 from aegisgate.observability.metrics import (
-    emit_counter,
     get_metrics_app,
-    inc_confirmation,
-    inc_filter_hit,
     inc_request,
-    inc_upstream_error,
-    observe_pipeline_duration,
     observe_request_duration,
 )
 from aegisgate.observability.tracing import (
@@ -16,23 +11,16 @@ from aegisgate.observability.tracing import (
     init_tracing,
     trace,
     trace_span,
-    traced,
 )
 
 __all__ = [
     "configure_logging",
-    "emit_counter",
     "get_metrics_app",
     "get_tracer",
-    "inc_confirmation",
-    "inc_filter_hit",
     "inc_request",
-    "inc_upstream_error",
     "init_tracing",
     "log_event",
-    "observe_pipeline_duration",
     "observe_request_duration",
     "trace",
     "trace_span",
-    "traced",
 ]

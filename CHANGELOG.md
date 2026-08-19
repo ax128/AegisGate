@@ -45,6 +45,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 这是预防性加固，不是修复一条现存的 fail-open：今天 6 个请求侧过滤器都已在 critical 名单里，`:111` 的 `continue` 不可达
   - 未登记的新请求侧过滤器在 forward 模式下不再被静默跳过；forward 只豁免映射/审计持久化失败
 
+### Changed
+
+- **清理未接线的死代码与恒 0 指标（P11）**
+  - 删除无调用方的 `SemanticAnalyzer`（保留 `SemanticServiceClient` 与 TF-IDF 离线实验资产，下架需产品决策）
+  - 删除 `core/registry.py`、`FilterRejectedError`、无调用方的 `coerce_chat_stream_to_messages_stream`，以及 `storage/_helpers.py` 中未使用的 `json_dumps` / `json_loads` / `to_int`（`LRUMappingCache` 保留）
+  - 删除从未在热路径上报的 Prometheus 指标与包装函数：`aegisgate_filter_hits_total`、`aegisgate_pipeline_duration_seconds`、`aegisgate_confirmations_total`、`aegisgate_upstream_errors_total`，以及 `emit_counter` / `traced`
+  - `system_prompt_guard` / `untrusted_content_guard` **默认仍关闭**：未写入 `default.yaml` / `strict.yaml`。内置缺省策略与 `default.yaml` 对齐，避免策略文件缺失时悄悄启用 `untrusted_content_guard`。两者仍须同时出现在策略 YAML **并且**对应 feature flag 为 true 才会运行
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**

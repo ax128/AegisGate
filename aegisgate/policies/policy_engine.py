@@ -24,8 +24,6 @@ _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "exact_value_redaction",
         "redaction",
-        "system_prompt_guard",
-        "untrusted_content_guard",
         "request_sanitizer",
         "rag_poison_guard",
         "anomaly_detector",
