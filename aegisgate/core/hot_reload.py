@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 from aegisgate.util.logger import logger
@@ -184,45 +185,71 @@ def _settings_from_runtime_env_file():
     return Settings.model_validate(merged)
 
 
+def _mutable_settings_payload(source: object) -> dict[str, object]:
+    from aegisgate.config.settings import Settings
+
+    return {
+        field_name: getattr(source, field_name)
+        for field_name in Settings.model_fields
+        if field_name not in _IMMUTABLE_FIELDS
+    }
+
+
+def _apply_settings_payload(target: object, payload: dict[str, object]) -> None:
+    target.__dict__.update(payload)
+
+
 def reload_settings() -> None:
     """Reload config/.env into the global settings singleton.
 
     Security-critical fields in ``_IMMUTABLE_FIELDS`` are pinned at startup
     and cannot be changed via hot-reload.
+
+    Mutable fields are applied in one ``__dict__.update`` after a complete
+    ``Settings`` is built. Failure after that point rolls the snapshot back
+    so callers never keep a half-applied config.
     """
     from aegisgate.config.feature_flags import refresh_feature_flags
-    from aegisgate.config.settings import Settings, settings
+    from aegisgate.config.settings import settings
     from aegisgate.observability.logging import configure_logging
 
+    previous_payload: dict[str, object] | None = None
     try:
         fresh = _settings_from_runtime_env_file()
-        for field_name in Settings.model_fields:
-            if field_name in _IMMUTABLE_FIELDS:
-                continue
-            setattr(settings, field_name, getattr(fresh, field_name))
-        refresh_feature_flags()
-        # Re-check writable paths: reload may have reset audit_log_path /
-        # sqlite_db_path back to the configured default, losing the runtime
-        # fallback that was applied at startup when /app/logs is not writable.
-        from aegisgate.init_config import ensure_runtime_storage_paths
+        previous_payload = _mutable_settings_payload(settings)
+        incoming = _mutable_settings_payload(fresh)
+        _apply_settings_payload(settings, incoming)
+        try:
+            refresh_feature_flags()
+            # Re-check writable paths: reload may have reset audit_log_path /
+            # sqlite_db_path back to the configured default, losing the runtime
+            # fallback that was applied at startup when /app/logs is not writable.
+            from aegisgate.init_config import ensure_runtime_storage_paths
 
-        ensure_runtime_storage_paths()
-        # Apply new log level immediately so callers see the change at once.
-        from aegisgate.util.logger import apply_log_level
+            ensure_runtime_storage_paths()
+            from aegisgate.util.logger import apply_log_level
 
-        apply_log_level(settings.log_level)
-        configure_logging(settings.log_level)
-        from aegisgate.adapters.openai_compat.pipeline_runtime import (
-            reload_runtime_dependencies,
-        )
+            apply_log_level(settings.log_level)
+            configure_logging(settings.log_level)
+            from aegisgate.adapters.openai_compat.pipeline_runtime import (
+                reload_runtime_dependencies,
+            )
 
-        reload_runtime_dependencies()
-        from aegisgate.adapters.openai_compat.router import (
-            reload_semantic_client_settings,
-        )
+            reload_runtime_dependencies(SimpleNamespace(**previous_payload))
+            from aegisgate.adapters.openai_compat.upstream import (
+                schedule_close_upstream_async_client,
+            )
 
-        reload_semantic_client_settings()
-        logger.info("hot_reload settings reloaded from config/.env")
+            schedule_close_upstream_async_client()
+            from aegisgate.adapters.openai_compat.router import (
+                reload_semantic_client_settings,
+            )
+
+            reload_semantic_client_settings()
+            logger.info("hot_reload settings reloaded from config/.env")
+        except Exception:
+            _apply_settings_payload(settings, previous_payload)
+            raise
     except Exception:
         logger.exception("hot_reload settings reload failed")
 

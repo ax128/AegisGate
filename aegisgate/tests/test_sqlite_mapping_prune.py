@@ -55,6 +55,30 @@ def test_prune_expired_mappings_preserves_recent_rows(tmp_path: Path) -> None:
     assert fresh.get_mapping("S2", "R2") == {"{{Y}}": "fresh-secret"}
 
 
+def test_sqlite_init_backfills_zero_created_at(tmp_path: Path) -> None:
+    db_path = tmp_path / "aegisgate.db"
+    store = SqliteKVStore(db_path=str(db_path))
+    store.set_mapping("S3", "R3", {"{{Z}}": "legacy"})
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("UPDATE mapping_store SET created_at = 0")
+        conn.commit()
+    finally:
+        conn.close()
+
+    SqliteKVStore(db_path=str(db_path))
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT created_at FROM mapping_store WHERE session_id = ? AND request_id = ?",
+            ("S3", "R3"),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert int(row[0]) > 0
+
+
 class _FakePostgresCache:
     def __init__(self) -> None:
         self.values: dict[tuple[str, str], dict[str, str]] = {}

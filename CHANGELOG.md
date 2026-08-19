@@ -92,6 +92,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `rag_poison_guard` 规则编译补 `re.DOTALL`
   - 改写型（`request_sanitizer` / `output_sanitizer`）在归一化后检测；原文能匹配时仍对原文 `sub`，仅归一化命中时整段替换为占位符，**不会**把 NFKC/小写后的文本写回转发载荷
 
+### Changed
+
+- **热重载原子化与 store swap 条件化（P9）**
+  - `reload_settings` 先构造完整 `Settings`，再一次 `__dict__.update` 写入可变字段；后续步骤失败则回滚快照，避免半新旧配置
+  - `reload_runtime_dependencies` 仅在存储相关字段变化时 `swap()`；只改日志级别不再 churn 后端
+  - `_retired_backends` 上限 8，超限 `close()` 最老后端，并打 INFO 记录当前退役数量（不引入 TTL 回收）
+  - SQLite 迁移补 `created_at = 0` 回填；prune 后重置 LRU；三后端共用 `MIN_MAPPING_TTL_SECONDS = 300`
+  - 热重载后调度关闭共享 upstream HTTP client，超时/连接数变更无需整进程重启
+
 
 ### Security
 

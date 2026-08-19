@@ -5,6 +5,9 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 
+# Shared floor for mapping retention math (prune cutoff / Redis expiry padding).
+MIN_MAPPING_TTL_SECONDS = 300
+
 
 class LRUMappingCache:
     """Thread-safe LRU cache for redaction mappings."""

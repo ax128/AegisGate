@@ -125,7 +125,7 @@ class TestReloadSettings:
         monkeypatch.setattr(feature_flags, "refresh_feature_flags", lambda: None)
         monkeypatch.setattr(init_config, "ensure_runtime_storage_paths", lambda: None)
         monkeypatch.setattr(
-            pipeline_runtime, "reload_runtime_dependencies", lambda: None
+            pipeline_runtime, "reload_runtime_dependencies", lambda *args, **kwargs: None
         )
         monkeypatch.setattr(router, "reload_semantic_client_settings", lambda: None)
 
@@ -162,7 +162,7 @@ class TestReloadSettings:
         monkeypatch.setattr(feature_flags, "refresh_feature_flags", lambda: None)
         monkeypatch.setattr(init_config, "ensure_runtime_storage_paths", lambda: None)
         monkeypatch.setattr(
-            pipeline_runtime, "reload_runtime_dependencies", lambda: None
+            pipeline_runtime, "reload_runtime_dependencies", lambda *args, **kwargs: None
         )
         monkeypatch.setattr(router, "reload_semantic_client_settings", lambda: None)
 
@@ -184,3 +184,140 @@ class TestReloadSettings:
             root_logger.setLevel(original_root_level)
             logger.setLevel(original_aegis_level)
             runtime_settings.log_level = original_runtime_level
+
+
+def test_reload_settings_failure_rolls_back_mutable_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("AEGIS_LOG_LEVEL=debug\n", encoding="utf-8")
+
+    import aegisgate.config.feature_flags as feature_flags
+    import aegisgate.adapters.openai_compat.pipeline_runtime as pipeline_runtime
+    import aegisgate.adapters.openai_compat.router as router
+    import aegisgate.init_config as init_config
+    from aegisgate.config.settings import settings as runtime_settings
+
+    monkeypatch.setattr(feature_flags, "refresh_feature_flags", lambda: None)
+    monkeypatch.setattr(init_config, "ensure_runtime_storage_paths", lambda: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "reload_runtime_dependencies",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(router, "reload_semantic_client_settings", lambda: None)
+
+    original_level = runtime_settings.log_level
+    hot_reload.reload_settings()
+    assert runtime_settings.log_level == original_level
+
+
+def test_reload_settings_readers_never_see_mixed_generations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "AEGIS_LOG_LEVEL=debug\nAEGIS_FILTER_PIPELINE_TIMEOUT_S=12.5\n",
+        encoding="utf-8",
+    )
+
+    import threading
+
+    import aegisgate.config.feature_flags as feature_flags
+    import aegisgate.adapters.openai_compat.pipeline_runtime as pipeline_runtime
+    import aegisgate.adapters.openai_compat.router as router
+    import aegisgate.init_config as init_config
+    from aegisgate.config.settings import settings as runtime_settings
+
+    monkeypatch.setattr(feature_flags, "refresh_feature_flags", lambda: None)
+    monkeypatch.setattr(init_config, "ensure_runtime_storage_paths", lambda: None)
+    monkeypatch.setattr(
+        pipeline_runtime, "reload_runtime_dependencies", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(router, "reload_semantic_client_settings", lambda: None)
+
+    old_pair = (runtime_settings.log_level, runtime_settings.filter_pipeline_timeout_s)
+    new_pair = ("debug", 12.5)
+    seen: list[tuple[object, object]] = []
+    stop = threading.Event()
+
+    def _reader() -> None:
+        while not stop.is_set():
+            seen.append(
+                (
+                    runtime_settings.log_level,
+                    runtime_settings.filter_pipeline_timeout_s,
+                )
+            )
+
+    reader = threading.Thread(target=_reader)
+    original_level = runtime_settings.log_level
+    original_timeout = runtime_settings.filter_pipeline_timeout_s
+    try:
+        reader.start()
+        hot_reload.reload_settings()
+        stop.set()
+        reader.join(timeout=2)
+        allowed = {old_pair, new_pair}
+        mixed = [pair for pair in seen if pair not in allowed]
+        assert not mixed
+        assert runtime_settings.log_level == "debug"
+        assert runtime_settings.filter_pipeline_timeout_s == 12.5
+    finally:
+        stop.set()
+        runtime_settings.log_level = original_level
+        runtime_settings.filter_pipeline_timeout_s = original_timeout
+
+
+def test_log_level_reload_does_not_swap_store() -> None:
+    from types import SimpleNamespace
+
+    import aegisgate.adapters.openai_compat.pipeline_runtime as pipeline_runtime
+    from aegisgate.config.settings import settings as runtime_settings
+
+    swaps: list[object] = []
+    original_swap = pipeline_runtime.store.swap
+    pipeline_runtime.store.swap = lambda backend: swaps.append(backend)
+    try:
+        previous = SimpleNamespace(
+            **{
+                name: getattr(runtime_settings, name)
+                for name in pipeline_runtime._STORAGE_SETTINGS_FIELDS
+            }
+        )
+        pipeline_runtime.reload_runtime_dependencies(previous)
+        assert swaps == []
+    finally:
+        pipeline_runtime.store.swap = original_swap
+
+
+def test_storage_backend_change_swaps_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import aegisgate.adapters.openai_compat.pipeline_runtime as pipeline_runtime
+    from aegisgate.config.settings import settings as runtime_settings
+
+    swaps: list[object] = []
+    sentinel = object()
+    monkeypatch.setattr(pipeline_runtime, "create_store", lambda: sentinel)
+    monkeypatch.setattr(pipeline_runtime, "reset_pipeline_cache", lambda: None)
+    monkeypatch.setattr(pipeline_runtime, "ensure_runtime_storage_paths", lambda: None)
+    original_swap = pipeline_runtime.store.swap
+    pipeline_runtime.store.swap = lambda backend: swaps.append(backend)
+    try:
+        previous = SimpleNamespace(
+            **{
+                name: getattr(runtime_settings, name)
+                for name in pipeline_runtime._STORAGE_SETTINGS_FIELDS
+            }
+        )
+        previous.storage_backend = "redis"
+        pipeline_runtime.reload_runtime_dependencies(previous)
+        assert swaps == [sentinel]
+    finally:
+        pipeline_runtime.store.swap = original_swap
+

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, TypeVar
 
-from aegisgate.storage._helpers import LRUMappingCache
+from aegisgate.storage._helpers import LRUMappingCache, MIN_MAPPING_TTL_SECONDS
 from aegisgate.storage.crypto import (
     decrypt_mapping,
     encrypt_mapping,
@@ -73,6 +73,10 @@ class SqliteKVStore(KVStore):
                 conn.execute(
                     "ALTER TABLE mapping_store ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
                 )
+            conn.execute(
+                "UPDATE mapping_store SET created_at = ? WHERE created_at = 0",
+                (int(time.time()),),
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_mapping_store_created_at ON mapping_store(created_at)"
             )
@@ -173,7 +177,7 @@ class SqliteKVStore(KVStore):
         accumulation of stale PII mappings.
         """
         import time as _time
-        cutoff = int(_time.time()) - max(300, max_age_seconds)
+        cutoff = int(_time.time()) - max(MIN_MAPPING_TTL_SECONDS, max_age_seconds)
 
         def _prune() -> int:
             with self._managed_connection() as conn:
@@ -184,5 +188,8 @@ class SqliteKVStore(KVStore):
                 conn.commit()
                 return int(cursor.rowcount or 0)
 
-        return self._with_retry(_prune)
+        removed = self._with_retry(_prune)
+        if removed > 0:
+            self._cache = LRUMappingCache(self.max_cache_entries)
+        return removed
 
