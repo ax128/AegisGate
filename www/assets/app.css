@@ -1999,3 +1999,175 @@ tr.search-hidden { display: none; }
   .rules-sidebar { position: static; }
   .rules-sections { max-height: 240px; }
 }
+
+/* ─── Toasts ─────────────────────────────────────────────────────── */
+.toast-host {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(400px, calc(100vw - 40px));
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(10px) scale(0.98);
+  transition: opacity 0.22s var(--ease),
+              transform 0.22s var(--ease);
+}
+.toast.visible { opacity: 1; transform: translateY(0) scale(1); }
+.toast-icon { width: 17px; height: 17px; flex-shrink: 0; margin-top: 1px; }
+.toast-text { flex: 1; min-width: 0; word-break: break-word; }
+.toast-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.toast-close:hover { color: var(--text); }
+.toast-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.toast-ok   { border-left: 3px solid var(--success); }
+.toast-ok   .toast-icon { color: var(--success); }
+.toast-warn { border-left: 3px solid var(--warning); }
+.toast-warn .toast-icon { color: var(--warning); }
+.toast-err  { border-left: 3px solid var(--error); }
+.toast-err  .toast-icon { color: var(--error); }
+
+/* ─── Dialogs (replace window.alert / window.confirm) ────────────── */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.dialog-overlay.visible { opacity: 1; }
+.dialog-card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 22px 24px 18px;
+  transform: scale(0.97);
+  transition: transform 0.18s var(--ease);
+}
+.dialog-overlay.visible .dialog-card { transform: scale(1); }
+.dialog-title {
+  margin: 0 0 10px;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.dialog-danger .dialog-title { color: var(--error); }
+.dialog-body { font-size: 0.87rem; line-height: 1.6; color: var(--muted); }
+.dialog-message { margin: 0; }
+.dialog-detail {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 140px;
+  overflow: auto;
+}
+.dialog-copy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px solid var(--line);
+}
+.dialog-copy-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  flex-shrink: 0;
+  min-width: 58px;
+}
+.dialog-copy-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.77rem;
+  color: var(--text);
+  word-break: break-all;
+}
+.dialog-copy-btn { flex-shrink: 0; }
+.dialog-require {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.dialog-require-input {
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.83rem;
+}
+.dialog-require-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 20px;
+}
+.dialog-confirm-danger {
+  background: var(--error);
+  border-color: var(--error);
+}
+/* Press feedback follows the shared button treatment — fade and settle, not a
+   brightness sweep with a lifted shadow. */
+.dialog-confirm-danger:hover { opacity: 0.88; }
+.dialog-confirm-danger:active { opacity: 0.7; transform: scale(0.97); }
+.dialog-confirm:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+@media (max-width: 580px) {
+  .toast-host { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+}

@@ -79,6 +79,27 @@ cat config/aegis_gateway.key
 
 如果缺少或使用了错误的 CSRF token，服务端会返回 `403 ui_csrf_invalid`。
 
+### 3.2 乐观并发（If-Match / ETag）
+
+配置、安全规则、动作映射、compose 文件、精确值脱敏这五类资源都是整文件读改写。它们的 `GET` 会返回 `ETag`：
+
+```bash
+curl -sD - -o /dev/null http://127.0.0.1:18080/__ui__/api/rules/pii_patterns -b cookie.txt | grep -i etag
+# etag: "997c45e1092faae6d9432a6e4e9f70d7"
+```
+
+写请求带上 `If-Match: <etag>` 后，若期间该资源已被其他会话改动，服务端返回 `409 etag_mismatch` 并附带 `current_etag`，从而避免覆盖对方的改动：
+
+```bash
+curl -X POST http://127.0.0.1:18080/__ui__/api/rules/pii_patterns \
+  -H "Content-Type: application/json" \
+  -H "x-aegis-ui-csrf: <TOKEN>" \
+  -H 'If-Match: "997c45e1092faae6d9432a6e4e9f70d7"' \
+  -b cookie.txt -d '{"id":"MY_RULE","regex":"..."}'
+```
+
+`If-Match` **有则校验、无则放行**：不带该头的既有脚本行为完全不变。Web UI 始终携带。
+
 示例流程：
 
 > 注意：`AEGIS_LOCAL_UI_SECURE_COOKIE=true`（默认）会下发 `Secure` cookie。`curl -c/-b` 在 `http://127.0.0.1` 下通常不会回传该 cookie，导致后续 UI API 调用返回 401。用 `curl` 调试 UI API 时建议临时设置 `AEGIS_LOCAL_UI_SECURE_COOKIE=false` 后重启网关，或在 HTTPS 下访问。
