@@ -1853,3 +1853,149 @@ body.login-page {
 @media (max-width: 580px) {
   .audit-filter.audit-filter-wide { grid-column: span 1; }
 }
+
+/* ─── Rules workbench: section tree, search, regex lab ───────────── */
+.rules-layout {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.rules-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  top: calc(var(--header-h) + 16px);
+}
+.rules-sidebar .config-search { max-width: none; }
+.rules-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.rules-sections::-webkit-scrollbar { width: 3px; }
+.rules-sections::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+.rules-filter-group { display: flex; flex-direction: column; gap: 2px; }
+.rules-filter-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 8px 4px;
+}
+.rules-filter-title span { font-variant-numeric: tabular-nums; opacity: 0.7; }
+.rules-section-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.rules-section-item:hover { background: var(--surface2); color: var(--text); }
+.rules-section-item.active { background: var(--accent-light); color: var(--accent); font-weight: 600; }
+.rules-section-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rules-section-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rules-section-count {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+.rules-readonly-tag {
+  font-size: 0.62rem;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.rules-main { min-width: 0; }
+.rules-section-label { font-size: 0.92rem; }
+.rules-toolbar .config-search { max-width: 260px; }
+.rule-regex-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rule-regex-cell code { font-size: 0.79rem; }
+.rule-extra { font-size: 0.8rem; color: var(--muted); }
+tr.search-hidden { display: none; }
+
+.regex-lab textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  resize: vertical;
+}
+.regex-lab textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.regex-lab-hint { font-size: 0.76rem; color: var(--muted); margin: 0 0 7px; line-height: 1.45; }
+.regex-lab-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.regex-lab-result {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.probe-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--surface2);
+}
+.probe-hit-count { font-size: 0.72rem; font-weight: 600; color: var(--success); }
+.probe-miss-tag { font-size: 0.72rem; color: var(--muted); }
+.probe-sample {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+.probe-sample mark {
+  background: rgba(184, 124, 10, 0.28);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.probe-miss { color: var(--muted); }
+.probe-danger { color: var(--error); font-size: 0.82rem; margin: 0; line-height: 1.5; }
+
+@media (max-width: 980px) {
+  .rules-layout { grid-template-columns: minmax(0, 1fr); }
+  .rules-sidebar { position: static; }
+  .rules-sections { max-height: 240px; }
+}

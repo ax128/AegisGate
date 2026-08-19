@@ -55,6 +55,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 控制台新增「审计日志」面板：筛选栏 + 概览卡片 + 行展开完整 JSON + 导出按钮；风险分按高/中/低着色，处置用语义色徽章
   - 前端代码放在独立的 `www/assets/audit.js`，不再往 1300 行的 `app.js` 里堆
 
+- **Web 控制台规则工作台：全部规则组可管理 + 正则试验场**
+  - 规则组由 `_RULES_SECTIONS` 硬编码 5 组改为**遍历 `security_filters.yaml` 自动发现**，控制台可管理的规则从 109 条（5 组）扩到 228 条（32 组）
+  - 此前完全没有入口的规则组：`request_sanitizer`（33 条）、`sanitizer`（17 条）、`tool_call_guard`（14 条）、`rag_poison_guard`（13 条）、`post_restore_guard`（12 条）、`privilege_guard`（7 条）以及 `injection_detector` 的另外 5 组（19 条）
+  - section id 改为点号路径（如 `request_sanitizer.leak_check_patterns`）；旧的 5 个 id 保留为别名，既有 API 调用与书签不受影响
+  - 路径不可任意穿越：请求中的 section 只能命中服务端发现出来的枚举，标量节点与非规则列表一律 404
+  - `tool_call_guard.parameter_rules` 以 tool+param 为标识而非 id，标记为只读：可查看，写操作返回 403
+  - 规则的 `category` / `kind` 等元数据在编辑时不再被丢弃；表格列按规则实际字段动态生成
+  - 新增 `POST /__ui__/api/rules_test` 正则试验场：给出每条样本的命中区间，UI 高亮显示
+    - 匹配在**可终止的子进程**中执行（`aegisgate/core/regex_probe.py`），灾难性回溯的正则会被超时终止并如实告知作者，而不是拖死网关线程
+    - 子进程刻意零加锁：正则在父进程编译好后传入，结果走裸 Pipe 而非带 feeder 线程的 Queue
+    - 输入上限：正则 500 字符、样本 5 条、单条 2000 字符
+  - 规则组树按过滤器分组并显示条数；规则组与规则各有搜索框
+
 - **关键安全模块的直接测试（P14）**
   - `util/ip_safety.py`：内网/保留地址判定（含 IPv4-mapped IPv6）、DNS rebinding（域名过检但解析指向内网）、多记录应答中混入内网地址、解析失败 fail-closed
   - `core/security_boundary.py`：HMAC 签名验证（`sha256=` 前缀、篡改、错密钥）、nonce 重放窗口、Redis nonce 后端不可用时 fail-closed
