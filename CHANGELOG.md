@@ -28,6 +28,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 分段控件补 `role="tablist"` / `role="tab"` / `aria-selected`
   - 所有可聚焦控件统一 `:focus-visible` 焦点环
 
+### Fixed
+
+- **控制台改规则不再清空 `security_filters.yaml` 的注释**
+  - `_save_rules_yaml()` 走 `yaml.safe_load` → `yaml.dump`，PyYAML 不保留注释，还会重排缩进与引号风格：从 UI 改一条正则会重写整个文件，**80 行注释全部消失**，并产生约 1250 行的 diff
+  - 这些注释是安全策略的说明文档（哪些 pattern 在低误报面上保持启用、个别 pattern 的 ReDoS 注意事项等），静默丢失属于实打实的信息损失
+  - 新增 `aegisgate/core/rules_editor.py`：规则的增 / 改 / 删以及 action_map 的动作修改，都以**行级文本补丁**的方式应用，只有目标规则所在的行会变，其余部分逐字节保持不变
+  - 文本改 YAML 天然脆弱，因此补丁结果**从不被直接信任**：先重新解析，再与调用方期望的完整文档逐字段比对，只有完全一致才写入；否则退回原来的 dump 路径并打出告警（结果依然正确，只是注释会丢）
+  - 删除规则时保留其后的空行与注释，避免顺带吃掉块之间的分隔
+  - `regex` 值统一单引号，其余字段沿用文件既有风格
+
 ### Added
 
 - **Web 控制台配置中心：全字段覆盖与「需重启」标注**
