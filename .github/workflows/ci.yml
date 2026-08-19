@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
 
@@ -33,25 +33,33 @@ jobs:
           if [ -d aegisgate/tests ] && find aegisgate/tests -maxdepth 1 -name 'test_*.py' -print -quit | grep -q .; then
             echo "has_tests=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "No tracked tests found under aegisgate/tests" >&2
+            exit 1
           fi
 
-      - name: Skip test run
-        if: steps.tests.outputs.has_tests != 'true'
-        run: echo "No tracked tests found under aegisgate/tests; skipping pytest and coverage."
-
       - name: Run tests
-        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version != '3.12'
+        if: matrix.python-version != '3.12'
         timeout-minutes: 8
         run: pytest -v
 
       - name: Run tests with coverage
-        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12'
         timeout-minutes: 12
+        # --cov-fail-under=0 keeps the coverage floor out of *this* step so a
+        # test failure is the only thing that can fail it. The floor is checked
+        # separately below.
         run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing --cov-fail-under=0 -v
 
+      - name: Check coverage floor
+        if: matrix.python-version == '3.12'
+        # Temporary: reports pyproject.toml's fail_under=50 against the measured
+        # number without failing the job, so the real figure is visible before a
+        # floor is committed to. Drop continue-on-error once it is enforced.
+        continue-on-error: true
+        run: coverage report
+
       - name: Upload coverage
-        if: steps.tests.outputs.has_tests == 'true' && matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           file: coverage.xml

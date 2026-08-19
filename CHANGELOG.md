@@ -105,6 +105,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - DNS 解析失败时采用 fail-closed 策略（阻断请求），防止 DNS rebinding 攻击
   - `_is_ssrf_target()` 和 `_extract_target_url()` 改为 async，避免同步 DNS 阻塞事件循环
 
+### Changed
+
+- **CI 覆盖率 / 版本矩阵 / 测试入库（A6 / P14）**
+  - 覆盖率门槛拆成独立的 `coverage report` 步骤：跑测试那步保留 `--cov-fail-under=0`，只对测试失败 gating；门槛检查单独 `continue-on-error`，先拿到真实数字再决定是否把 50 写成硬门槛，不主动下调已声明值。`continue-on-error` 不再盖在测试步骤上，否则 3.12 的测试失败会被吞掉
+  - CI Python 矩阵补入 `3.11`，与 `Dockerfile` 的 `python:3.11-slim` 对齐
+  - 删除 `.gitignore` 对 `aegisgate/tests/*` 的白名单机制（此前新增测试默认被忽略，零测试仍绿灯）。Detect tests 在找不到 `test_*.py` 时直接失败
+  - 把 `OPTIMIZATION_PLAN.md` 列入内部报告忽略段，避免审计方案随 `git add -A` 进入公开仓库
+
 ### Fixed
 
 - **上游 400 错误：tool name 包含非法字符**
