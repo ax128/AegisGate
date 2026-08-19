@@ -44,12 +44,19 @@ jobs:
 
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
-        # Temporary: honour pyproject.toml fail_under=50, but do not fail the
-        # job until the measured coverage number is known and a real floor is
-        # confirmed. Drop continue-on-error once the floor is enforced.
-        continue-on-error: true
         timeout-minutes: 12
-        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing -v
+        # --cov-fail-under=0 keeps the coverage floor out of *this* step so a
+        # test failure is the only thing that can fail it. The floor is checked
+        # separately below.
+        run: pytest --cov=aegisgate --cov-report=xml --cov-report=term-missing --cov-fail-under=0 -v
+
+      - name: Check coverage floor
+        if: matrix.python-version == '3.12'
+        # Temporary: reports pyproject.toml's fail_under=50 against the measured
+        # number without failing the job, so the real figure is visible before a
+        # floor is committed to. Drop continue-on-error once it is enforced.
+        continue-on-error: true
+        run: coverage report
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
