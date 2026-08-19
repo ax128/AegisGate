@@ -84,6 +84,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - generic 流式路径补齐与另外三条对齐的 holdback（`_STREAM_BLOCK_HOLDBACK_EVENTS`）和尾部探测
   - messages 路径的 `content_block_*` / `message_*` 本就不会整缓冲刷出，行为保持；共享判据避免再分叉一份实现
 
+### Changed
+
+- **统一文本归一化（P8 M-2/M-3）**
+  - 新增 `aegisgate/util/text_normalize.py`：NFKC + confusable 折叠 + 不可见/BIDI 剥离 + 小写 + 空白折叠
+  - 打分型过滤器（`injection_detector` / `privilege_guard` / `rag_poison_guard` / `anomaly_detector` / `tool_call_guard`）在归一化文本上匹配，同形字与换行拆分不再绕过
+  - `rag_poison_guard` 规则编译补 `re.DOTALL`
+  - 改写型（`request_sanitizer` / `output_sanitizer`）在归一化后检测；原文能匹配时仍对原文 `sub`，仅归一化命中时整段替换为占位符，**不会**把 NFKC/小写后的文本写回转发载荷
+
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**

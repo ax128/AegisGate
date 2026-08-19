@@ -22,11 +22,11 @@ from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 from aegisgate.util.risk_scoring import clamp01, weighted_nonlinear_score
+from aegisgate.util.text_normalize import normalize_for_match
 
 
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
-_WHITESPACE_RE = re.compile(r"\s+")
 _WORD_SPLIT_RE = re.compile(r"\S+")
 # Latin/Common/Inherited scripts are expected in normal multilingual text;
 # mixing two *different* non-Latin scripts in the same word is suspicious.
@@ -202,10 +202,6 @@ class PromptInjectionDetector(BaseFilter):
         self._invisible_chars = set(detector_rules.get("unicode_invisible_chars", [])) or set(_DEFAULT_INVISIBLE_CHARS)
         self._bidi_chars = set(detector_rules.get("unicode_bidi_chars", [])) or set(_DEFAULT_BIDI_CHARS)
 
-        # Build combined translation table for normalize: confusable mapping + invisible/bidi removal
-        _strip_chars: dict[str, None] = {ch: None for ch in (self._invisible_chars | self._bidi_chars)}
-        self._norm_table = str.maketrans({**self._confusable_map, **_strip_chars})
-
         scoring_model = detector_rules.get("scoring_model", {})
         level = normalize_security_level()
         self._nonlinear_k = float(scoring_model.get("nonlinear_k", 2.2))
@@ -260,10 +256,11 @@ class PromptInjectionDetector(BaseFilter):
         return compiled
 
     def _normalize_text(self, text: str) -> str:
-        normalized = unicodedata.normalize("NFKC", text)
-        normalized = normalized.translate(self._norm_table)
-        normalized = normalized.lower()
-        return _WHITESPACE_RE.sub(" ", normalized).strip()
+        return normalize_for_match(
+            text,
+            confusable_map=self._confusable_map,
+            strip_chars=self._invisible_chars | self._bidi_chars,
+        )
 
     def _decode_multistage(self, token: str) -> list[str]:
         if not self._multi_decode_enabled:

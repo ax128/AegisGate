@@ -13,6 +13,12 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.text_normalize import (
+    any_pattern_hits,
+    apply_rewrite_conservatively,
+    build_haystacks,
+    pattern_hits_in,
+)
 
 
 class OutputSanitizer(BaseFilter):
@@ -91,13 +97,14 @@ class OutputSanitizer(BaseFilter):
 
     @staticmethod
     def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
-        return any(pattern.search(text) for pattern in patterns)
+        return any_pattern_hits(patterns, build_haystacks(text))
 
     @staticmethod
     def _matched_pattern_ids(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
         hits: list[str] = []
+        haystacks = build_haystacks(text)
         for pattern_id, pattern in patterns:
-            if pattern.search(text):
+            if pattern_hits_in(pattern, haystacks):
                 hits.append(pattern_id)
         return sorted(set(hits))
 
@@ -266,26 +273,55 @@ class OutputSanitizer(BaseFilter):
         if should_sanitize or should_replace_encoded:
             replacement_spans: list[tuple[int, int]] = []
             cleaned = resp.output_text
-            if has_command_payload or risk_triggered:
-                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._command_patterns))
-                for pattern in self._command_patterns:
-                    cleaned = pattern.sub(self._command_replacement, cleaned)
-            if should_replace_encoded:
-                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._encoded_payload_patterns))
-                for pattern in self._encoded_payload_patterns:
-                    cleaned = pattern.sub(self._payload_replacement, cleaned)
-            if has_unsafe_uri or risk_triggered:
-                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_uri_patterns))
-                for pattern in self._unsafe_uri_patterns:
-                    cleaned = pattern.sub(self._uri_replacement, cleaned)
-            if has_unsafe_markup or risk_triggered:
-                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._unsafe_markup_patterns))
-                for pattern in self._unsafe_markup_patterns:
-                    cleaned = pattern.sub(self._markup_replacement, cleaned)
-            if has_spam or risk_triggered:
-                replacement_spans.extend(self._collect_replacement_spans(resp.output_text, self._spam_noise_patterns))
-                for pattern in self._spam_noise_patterns:
-                    cleaned = pattern.sub(self._spam_replacement, cleaned)
+
+            def _apply(
+                current: str,
+                patterns: list[re.Pattern[str]],
+                replacement: str,
+                enabled: bool,
+            ) -> str:
+                if not enabled:
+                    return current
+                replacement_spans.extend(
+                    self._collect_replacement_spans(resp.output_text, patterns)
+                )
+                rewritten = apply_rewrite_conservatively(current, patterns, replacement)
+                if rewritten != current and not any(
+                    pattern.search(current) for pattern in patterns
+                ):
+                    replacement_spans.append((0, len(resp.output_text)))
+                return rewritten
+
+            cleaned = _apply(
+                cleaned,
+                self._command_patterns,
+                self._command_replacement,
+                has_command_payload or risk_triggered,
+            )
+            cleaned = _apply(
+                cleaned,
+                self._encoded_payload_patterns,
+                self._payload_replacement,
+                should_replace_encoded,
+            )
+            cleaned = _apply(
+                cleaned,
+                self._unsafe_uri_patterns,
+                self._uri_replacement,
+                has_unsafe_uri or risk_triggered,
+            )
+            cleaned = _apply(
+                cleaned,
+                self._unsafe_markup_patterns,
+                self._markup_replacement,
+                has_unsafe_markup or risk_triggered,
+            )
+            cleaned = _apply(
+                cleaned,
+                self._spam_noise_patterns,
+                self._spam_replacement,
+                has_spam or risk_triggered,
+            )
 
             if cleaned != resp.output_text:
                 self._log_dangerous_sample(
