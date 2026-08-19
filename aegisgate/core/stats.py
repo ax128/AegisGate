@@ -341,3 +341,15 @@ def clear() -> None:
 def flush() -> None:
     """Force the statistics to be written to disk."""
     _collector.flush()
+
+
+def shutdown_stats_worker(timeout_seconds: float = 1.0) -> None:
+    """Stop the persist worker thread.
+
+    The thread is non-daemon and its only other shutdown path is the atexit
+    handler, which CPython runs *after* ``threading._shutdown`` has already
+    joined non-daemon threads — so anything that starts the worker and then
+    exits without calling this hangs forever. Callers that own the process
+    lifecycle (app shutdown, test teardown) must call it explicitly.
+    """
+    _collector.shutdown_worker(timeout_seconds)

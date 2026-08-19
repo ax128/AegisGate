@@ -17,6 +17,7 @@ from aegisgate.adapters.openai_compat.upstream import close_upstream_async_clien
 from aegisgate.adapters.v2_proxy.router import close_v2_async_client
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.dangerous_response_log import shutdown_dangerous_response_log_worker
+from aegisgate.core.stats import shutdown_stats_worker
 from aegisgate.storage.offload import shutdown_store_io_executor
 
 
@@ -40,6 +41,7 @@ def _shutdown_background_runtime_after_tests():
     shutdown_payload_transform_executor()
     shutdown_audit_worker()
     shutdown_dangerous_response_log_worker()
+    shutdown_stats_worker()
     _run_async_cleanup(close_upstream_async_client)
     _run_async_cleanup(close_v2_async_client)
     _run_async_cleanup(close_semantic_async_client)
