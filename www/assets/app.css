@@ -1703,3 +1703,153 @@ body.login-page {
 .restart-banner-text { flex: 1; min-width: 240px; }
 .restart-banner-btn { flex-shrink: 0; }
 .status-note.warn { color: var(--warning); }
+
+/* ─── Audit explorer ─────────────────────────────────────────────── */
+.audit-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.audit-tile-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.audit-filter { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.audit-filter.audit-filter-wide { grid-column: span 2; }
+.audit-filter > span {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.audit-filter input,
+.audit-filter select {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.84rem;
+  min-width: 0;
+}
+.audit-filter input:focus,
+.audit-filter select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.audit-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.audit-toolbar-spacer { flex: 1; }
+.audit-count { font-size: 0.82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.audit-more {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.audit-scan-note { font-size: 0.76rem; color: var(--muted); }
+
+.audit-row { cursor: pointer; }
+.audit-row:hover td { background: var(--accent-light); }
+.audit-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.audit-row.open td { background: var(--accent-light); }
+.audit-ts {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.audit-route { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-route code { font-size: 0.78rem; }
+.audit-risk {
+  display: inline-block;
+  min-width: 42px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.audit-risk.risk-low  { background: rgba(45, 122, 82, 0.12);  color: var(--success); }
+.audit-risk.risk-mid  { background: rgba(184, 124, 10, 0.14); color: var(--warning); }
+.audit-risk.risk-high { background: rgba(177, 52, 40, 0.14);  color: var(--error); }
+.audit-risk.risk-none { background: var(--panel-2); color: var(--muted); }
+.audit-tag {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.audit-dim { color: var(--muted); font-size: 0.82rem; }
+.audit-detail td { padding: 0 14px 12px; background: var(--surface2); }
+.audit-json {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.75rem;
+  line-height: 1.55;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.audit-samples { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
+.audit-sample-select {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.84rem;
+}
+.audit-sample-list { display: flex; flex-direction: column; gap: 6px; }
+.audit-sample {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+}
+.audit-sample summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 11px;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+.audit-sample summary::-webkit-details-marker { display: none; }
+.audit-sample summary code { font-size: 0.78rem; }
+.audit-sample[open] summary { border-bottom: 1px solid var(--line); }
+.audit-sample .audit-json { border: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+
+@media (max-width: 580px) {
+  .audit-filter.audit-filter-wide { grid-column: span 1; }
+}

@@ -40,6 +40,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 新增 `float` 字段类型与 `min` / `max` 范围校验；`int` 字段接受 `600.0` 这类往返值但仍拒绝真正的小数
   - 敏感字段（`postgres_dsn` / `request_hmac_secret`）不再回显明文，仅返回掩码；提交空值表示保持不变，审计与响应中一律记为 `***`
 
+- **Web 控制台审计日志检索**
+  - 网关逐请求写入 `logs/audit.jsonl`（`risk_score` / `request_disposition` / `response_disposition` / `disposition_reasons` / `security_tags` / `enforcement_actions`），此前控制台自己也在往里写，却没有任何读取入口——「哪条请求被拦了、为什么」只能 SSH 上去 grep
+  - 新增 `aegisgate/core/audit_query.py`：从文件尾部**反向分块读取**，最新记录在前，按字节游标翻页
+    - 单次请求设有扫描字节上限（默认 8 MB），命中不足即返回 `budget_exhausted` 与游标，绝不整文件读入
+    - 跨 chunk 边界的记录会被拼接还原，不会丢行或截断
+    - 无匹配的筛选条件下游标仍严格前进，调用方不会空转
+  - 新增端点：
+    - `GET /__ui__/api/audit`：按时间区间 / 路由 / 处置 / 最低风险分 / 安全标签 / 全文关键词筛选，游标翻页
+    - `GET /__ui__/api/audit/summary`：处置分布、风险分桶、Top 路由与安全标签；统计不完整时如实返回 `complete: false`
+    - `GET /__ui__/api/audit/record/{request_id}`：按 request_id 精确查单条
+    - `GET /__ui__/api/audit/export`：按当前筛选导出 JSONL / CSV，最多 5000 行；CSV 对以 `=` `+` `-` `@` 开头的单元格加前缀，避免表格软件把审计内容当公式执行
+    - `GET /__ui__/api/dangerous_samples` 与 `/dates`：浏览按日期切分的危险响应样本；日期参数只能命中枚举出来的文件，不参与路径拼接
+  - 控制台新增「审计日志」面板：筛选栏 + 概览卡片 + 行展开完整 JSON + 导出按钮；风险分按高/中/低着色，处置用语义色徽章
+  - 前端代码放在独立的 `www/assets/audit.js`，不再往 1300 行的 `app.js` 里堆
+
 - **关键安全模块的直接测试（P14）**
   - `util/ip_safety.py`：内网/保留地址判定（含 IPv4-mapped IPv6）、DNS rebinding（域名过检但解析指向内网）、多记录应答中混入内网地址、解析失败 fail-closed
   - `core/security_boundary.py`：HMAC 签名验证（`sha256=` 前缀、篡改、错密钥）、nonce 重放窗口、Redis nonce 后端不可用时 fail-closed

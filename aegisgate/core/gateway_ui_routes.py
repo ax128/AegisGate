@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -805,6 +806,221 @@ def register_ui_routes(app: FastAPI) -> None:
         except OSError:
             return JSONResponse(status_code=500, content={"error": "write_failed", "detail": "无法写入文件"})
         return JSONResponse(content={"ok": True, "filename": filename, "save_path": str(path)})
+
+    # ------------------------------------------------------------------
+    # Audit log explorer
+    # ------------------------------------------------------------------
+
+    _AUDIT_CSV_COLUMNS: tuple[str, ...] = (
+        "ts", "request_id", "session_id", "tenant_id", "route", "event",
+        "risk_score", "risk_threshold", "requires_human_review",
+        "request_disposition", "response_disposition",
+        "disposition_reasons", "security_tags", "enforcement_actions",
+    )
+    # Excel and friends execute a cell whose text starts with one of these.
+    _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+    def _audit_filter_from_query(request: Request):
+        from aegisgate.core.audit_query import AuditFilter, parse_timestamp
+
+        params = request.query_params
+        raw_min_risk = params.get("min_risk", "").strip()
+        try:
+            min_risk = float(raw_min_risk) if raw_min_risk else None
+        except ValueError:
+            min_risk = None
+        return AuditFilter(
+            since=parse_timestamp(params.get("since")),
+            until=parse_timestamp(params.get("until")),
+            route=params.get("route", "").strip(),
+            disposition=params.get("disposition", "").strip(),
+            min_risk=min_risk,
+            tag=params.get("tag", "").strip(),
+            event=params.get("event", "").strip(),
+            text=params.get("q", "").strip(),
+        )
+
+    def _audit_paging(request: Request, default_limit: int, max_limit: int) -> tuple[int | None, int]:
+        params = request.query_params
+        raw_cursor = params.get("cursor", "").strip()
+        try:
+            cursor = int(raw_cursor) if raw_cursor else None
+        except ValueError:
+            cursor = None
+        try:
+            limit = int(params.get("limit", default_limit))
+        except ValueError:
+            limit = default_limit
+        return cursor, max(1, min(limit, max_limit))
+
+    def _audit_unavailable() -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "audit_log_disabled",
+                "detail": "AEGIS_AUDIT_LOG_PATH 为空，审计文件未启用",
+            },
+        )
+
+    def _csv_cell(value: object) -> str:
+        if isinstance(value, (list, tuple)):
+            text = " | ".join(str(item) for item in value)
+        elif value is None:
+            text = ""
+        else:
+            text = str(value)
+        if text.startswith(_CSV_FORMULA_PREFIXES):
+            text = "'" + text
+        return text
+
+    @app.get("/__ui__/api/audit")
+    async def local_ui_audit_query(request: Request) -> JSONResponse:
+        """Page backwards through the audit log, newest record first."""
+        from aegisgate.core.audit_query import (
+            DEFAULT_LIMIT,
+            MAX_LIMIT,
+            query_log,
+            resolve_audit_path,
+        )
+
+        path = resolve_audit_path()
+        if path is None:
+            return _audit_unavailable()
+        cursor, limit = _audit_paging(request, DEFAULT_LIMIT, MAX_LIMIT)
+        criteria = _audit_filter_from_query(request)
+        result = await asyncio.to_thread(
+            query_log, path, criteria, cursor=cursor, limit=limit
+        )
+        return JSONResponse(content={
+            "items": result.items,
+            "next_cursor": result.next_cursor,
+            "reached_start": result.reached_start,
+            "budget_exhausted": result.budget_exhausted,
+            "scanned_bytes": result.scanned_bytes,
+            "file_size": result.file_size,
+            "malformed_lines": result.malformed_lines,
+            "path": str(path),
+            "exists": path.is_file(),
+        })
+
+    @app.get("/__ui__/api/audit/summary")
+    async def local_ui_audit_summary(request: Request) -> JSONResponse:
+        from aegisgate.core.audit_query import resolve_audit_path, summarize_log
+
+        path = resolve_audit_path()
+        if path is None:
+            return _audit_unavailable()
+        criteria = _audit_filter_from_query(request)
+        summary = await asyncio.to_thread(summarize_log, path, criteria)
+        return JSONResponse(content=summary)
+
+    @app.get("/__ui__/api/audit/record/{request_id}")
+    async def local_ui_audit_record(request_id: str) -> JSONResponse:
+        from aegisgate.core.audit_query import AuditFilter, query_log, resolve_audit_path
+
+        path = resolve_audit_path()
+        if path is None:
+            return _audit_unavailable()
+        result = await asyncio.to_thread(
+            query_log, path, AuditFilter(request_id=request_id.strip()), limit=20
+        )
+        if not result.items:
+            return JSONResponse(status_code=404, content={"error": "record_not_found"})
+        return JSONResponse(content={"request_id": request_id, "items": result.items})
+
+    @app.get("/__ui__/api/audit/export")
+    async def local_ui_audit_export(request: Request) -> Response:
+        """Export the current filter as JSONL or CSV, capped at MAX_EXPORT_LIMIT rows."""
+        import csv
+        import io
+
+        from aegisgate.core.audit_query import (
+            MAX_EXPORT_LIMIT,
+            query_log,
+            resolve_audit_path,
+        )
+
+        path = resolve_audit_path()
+        if path is None:
+            return _audit_unavailable()
+        fmt = request.query_params.get("format", "jsonl").strip().lower()
+        if fmt not in {"jsonl", "csv"}:
+            return JSONResponse(status_code=400, content={"error": "invalid_format"})
+        cursor, limit = _audit_paging(request, MAX_EXPORT_LIMIT, MAX_EXPORT_LIMIT)
+        criteria = _audit_filter_from_query(request)
+        result = await asyncio.to_thread(
+            query_log, path, criteria, cursor=cursor, limit=limit
+        )
+
+        if fmt == "jsonl":
+            body = "".join(
+                json.dumps({k: v for k, v in item.items() if k != "_offset"}, ensure_ascii=False) + "\n"
+                for item in result.items
+            )
+            media_type = "application/x-ndjson"
+            filename = "aegisgate-audit.jsonl"
+        else:
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(_AUDIT_CSV_COLUMNS)
+            for item in result.items:
+                writer.writerow([_csv_cell(item.get(column)) for column in _AUDIT_CSV_COLUMNS])
+            body = buffer.getvalue()
+            media_type = "text/csv; charset=utf-8"
+            filename = "aegisgate-audit.csv"
+
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Aegis-Export-Rows": str(len(result.items)),
+                "X-Aegis-Export-Truncated": "1" if result.next_cursor is not None else "0",
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Dangerous response samples
+    # ------------------------------------------------------------------
+
+    @app.get("/__ui__/api/dangerous_samples/dates")
+    async def local_ui_dangerous_sample_dates() -> JSONResponse:
+        from aegisgate.core.audit_query import list_dangerous_sample_dates
+
+        return JSONResponse(content={
+            "items": list_dangerous_sample_dates(),
+            "enabled": bool(settings.enable_dangerous_response_log),
+        })
+
+    @app.get("/__ui__/api/dangerous_samples")
+    async def local_ui_dangerous_samples(request: Request) -> JSONResponse:
+        from aegisgate.core.audit_query import (
+            DEFAULT_LIMIT,
+            MAX_LIMIT,
+            query_log,
+            resolve_dangerous_sample_path,
+        )
+
+        date_str = request.query_params.get("date", "").strip()
+        path = resolve_dangerous_sample_path(date_str)
+        if path is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "sample_file_not_found", "detail": date_str},
+            )
+        cursor, limit = _audit_paging(request, DEFAULT_LIMIT, MAX_LIMIT)
+        criteria = _audit_filter_from_query(request)
+        result = await asyncio.to_thread(
+            query_log, path, criteria, cursor=cursor, limit=limit
+        )
+        return JSONResponse(content={
+            "date": date_str,
+            "items": result.items,
+            "next_cursor": result.next_cursor,
+            "reached_start": result.reached_start,
+            "budget_exhausted": result.budget_exhausted,
+            "file_size": result.file_size,
+        })
 
     # ------------------------------------------------------------------
     # Gateway restart
