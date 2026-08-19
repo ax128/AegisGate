@@ -9,7 +9,9 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from aegisgate.adapters.openai_compat import router as openai_router
+from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
+from aegisgate.filters.sanitizer import OutputSanitizer
 
 
 def _seed_policy(ctx, policy_name: str = "default") -> dict[str, object]:
@@ -748,3 +750,130 @@ async def test_chat_response_sanitize_keeps_tool_call_arguments_valid_json(
     ]
     # Must remain parseable JSON for the client.
     json.loads(sanitized_arguments)
+
+
+@pytest.mark.asyncio
+async def test_messages_response_sanitizes_tool_use_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P7 H4 / B4': tool_use.input must be scrubbed, not only assistant text."""
+    dangerous_fragment = "cat /etc/passwd"
+    result, audit_calls = await _run_route_once(
+        monkeypatch,
+        route_name="messages",
+        upstream_body={
+            "id": "msg-tool-use-1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4.5",
+            "content": [
+                {"type": "text", "text": "I'll look that up."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_danger",
+                    "name": "bash",
+                    "input": {"command": dangerous_fragment},
+                },
+            ],
+            "stop_reason": "tool_use",
+        },
+        response_pipeline=_sanitize_pipeline(dangerous_fragment),
+    )
+
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert dangerous_fragment not in dumped
+    content = result["content"]
+    tool_blocks = [block for block in content if block.get("type") == "tool_use"]
+    assert tool_blocks
+    assert dangerous_fragment not in json.dumps(tool_blocks, ensure_ascii=False)
+    assert result["aegisgate"]["action"] == "sanitize"
+    assert audit_calls[0]["response_disposition"] == "sanitize"
+
+
+@pytest.mark.asyncio
+async def test_chat_and_responses_tool_payloads_remain_control_for_messages_tool_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chat/responses already sanitize tool envelopes; keep them as controls."""
+    fragment = "cat /etc/passwd"
+    chat_result, _ = await _run_route_once(
+        monkeypatch,
+        route_name="chat",
+        upstream_body={
+            "id": "chat-tool-ctrl",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_ctrl",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": json.dumps({"command": fragment}),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+        response_pipeline=_sanitize_pipeline(fragment),
+    )
+    assert fragment not in json.dumps(chat_result, ensure_ascii=False)
+
+    responses_result, _ = await _run_route_once(
+        monkeypatch,
+        route_name="responses",
+        upstream_body={
+            "id": "resp-tool-ctrl",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": "",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": fragment}),
+                }
+            ],
+        },
+        response_pipeline=_sanitize_pipeline(fragment),
+    )
+    assert fragment not in json.dumps(responses_result, ensure_ascii=False)
+
+
+def test_output_sanitizer_sets_sanitize_when_hit_is_only_in_tool_call_content() -> None:
+    resp = InternalResponse(
+        request_id="r-tool-use-scan",
+        session_id="s-tool-use-scan",
+        model="claude-sonnet-4.5",
+        output_text="I'll look that up.",
+        raw={
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "bash",
+                    "input": {
+                        "body": "Content-Length: 10\r\nTransfer-Encoding: chunked"
+                    },
+                }
+            ]
+        },
+    )
+    ctx = RequestContext(
+        request_id="r-tool-use-scan",
+        session_id="s-tool-use-scan",
+        route="/v1/messages",
+        enabled_filters={"output_sanitizer"},
+    )
+    OutputSanitizer().process_response(resp, ctx)
+    assert "Transfer-Encoding: chunked" in resp.tool_call_content
+    assert ctx.response_disposition == "sanitize"

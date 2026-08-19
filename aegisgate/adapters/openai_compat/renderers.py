@@ -275,6 +275,18 @@ def patch_messages_content_block(
     ops: NonStreamRenderOps,
 ) -> dict[str, Any]:
     patched = copy.deepcopy(block)
+    if patched.get("type") == "tool_use":
+        name = str(patched.get("name") or "")
+        inp = patched.get("input")
+        combined = f"{name} {inp}".strip()
+        if ops.looks_executable_payload_dangerous(combined):
+            patched["name"] = ops.critical_danger_placeholder
+            patched["input"] = {"_blocked": ops.critical_danger_placeholder}
+            return patched
+        if isinstance(patched.get("name"), str):
+            patched["name"] = ops.sanitize_text(str(patched["name"]), ctx)
+        patched["input"] = sanitize_nested_text_value(inp, ctx, ops=ops)
+        return patched
     if isinstance(patched.get("text"), str):
         patched["text"] = ops.sanitize_text(str(patched["text"]), ctx)
     return patched

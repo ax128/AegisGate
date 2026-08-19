@@ -308,6 +308,26 @@ class OutputSanitizer(BaseFilter):
                     "action": "sanitize",
                 }
                 logger.info("response sanitized request_id=%s", ctx.request_id)
+            elif should_sanitize:
+                # Hit lived in tool_call_content (or another non-output_text
+                # channel). Keep output_text, but still mark sanitize so
+                # route renderers can scrub tool_use / tool_call envelopes.
+                ctx.response_disposition = "sanitize"
+                ctx.disposition_reasons.append("response_sanitized")
+                ctx.security_tags.add("tool_calls_disabled_by_policy")
+                ctx.enforcement_actions.append(f"{self.name}:tool_calls:disable")
+                self._report = {
+                    "filter": self.name,
+                    "hit": True,
+                    "risk_score": ctx.risk_score,
+                    "risk_threshold": ctx.risk_threshold,
+                    "action": "sanitize",
+                    "tool_call_content_only": True,
+                }
+                logger.info(
+                    "response sanitized request_id=%s reason=tool_call_content_only",
+                    ctx.request_id,
+                )
 
         return resp
 

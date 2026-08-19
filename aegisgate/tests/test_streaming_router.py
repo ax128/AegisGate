@@ -2888,4 +2888,66 @@ def test_responses_stream_block_drains_upstream_and_sanitizes_full_text(
     assert "cat /etc/passwd" not in text
     assert "data: [DONE]" in text
 
+def test_messages_stream_probes_tool_use_partial_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P7 H4: streaming tool_use.input / partial_json must reach the response probe."""
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        blob = f"{resp.output_text} {resp.tool_call_content}"
+        if "cat /etc/passwd" in blob:
+            ctx.response_disposition = "sanitize"
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+            ctx.disposition_reasons.append("response_high_risk_command")
+        return resp
+
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_tu_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{}}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\":\\"cat /etc/passwd\\"}"}}\n\n'
+            ),
+            (
+                b"event: content_block_stop\n"
+                b'data: {"type":"content_block_stop","index":0}\n\n'
+            ),
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ],
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": "messages-stream-tool-use",
+        "session_id": "messages-stream-tool-use",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "cat /etc/passwd" not in body
+    assert (
+        "【AegisGate已处理危险疑似片段】" in body
+        or "_blocked" in body
+        or "AegisGate" in body
+    )
 

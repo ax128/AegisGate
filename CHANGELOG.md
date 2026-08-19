@@ -62,6 +62,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Chat→Responses rename 补 `max_completion_tokens→max_output_tokens`；`parallel_tool_calls` 不再当作 Responses-only 从 Chat 方向剥掉
   - **意图确认**：Chat 方向把 `reasoning` 透传给能接受它的上游（如 Azure 变体）；仅当 dict 内全部为 `None` 时仍丢弃空对象
 
+### Fixed
+
+- **messages 路由扫描并清洗 `tool_use` 危险载荷（P7 H4 / B4'）**
+  - `InternalResponse.tool_call_content` 本来就能从 Anthropic `content[].input` 取值，但 sanitizer 只改 `output_text`：命中若只在 tool_use 里，处置仍是 allow，原始 `input` 原样返回
+  - sanitizer 在 tool_call_content-only 命中时改为 `sanitize`；`patch_messages_content_block` 清洗 `tool_use.input`
+  - 流式 `content_block_delta.partial_json` 进入扫描窗口，并随 probe 的 `tool_calls` metadata 交给 `tool_call_content`
 
 ### Security
 
