@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web 控制台并发保护与交互反馈**
+  - 规则 YAML、`config/.env`、compose 文件、精确值列表都是「读全量 → 改内存 → 整体写回」，写入本身原子但**没有版本校验**：两个标签页各自打开规则页，A 加规则、B 删规则，后保存的一方会静默覆盖前者，而规则会立即热重载——等于安全策略被无声回滚
+  - 新增 `aegisgate/core/ui_etag.py`：上述四类资源的 GET 返回基于文件内容的 `ETag`，写请求携带 `If-Match` 时校验，不匹配返回 `409 etag_mismatch` 并回传当前 `current_etag` 供客户端刷新重放
+  - `If-Match` **有则校验、无则放行**：既有 API 调用与脚本行为不变；控制台始终携带，因此始终受保护
+  - `rules` 与 `rules_action_map` 共用同一份 YAML 的校验值，一方写入会使另一方的 `If-Match` 失效
+  - 精确值脱敏的按序号删除也纳入校验——过期视图里删「第 3 条」原本会删掉此刻恰好排在第 3 位的值
+  - 兼容 `*`、无引号、`W/` 弱校验前缀以及逗号分隔的多值 `If-Match`
+  - 新增 `www/assets/ui-kit.js`：toast 提示与自绘确认/信息对话框，替换全部 17 处 `window.alert` / `window.confirm`
+    - 破坏性操作（删除 Token / 删除规则 / 清除统计 / 重启网关）使用红色危险样式，且默认焦点落在「取消」，回车不会误触发
+    - 更换密钥要求手动键入密钥类型名才能提交
+    - Token 注册与更新结果改为带「复制」按钮的对话框，不再让人从 `alert` 里手抄 base_url
+    - 对话框自带焦点陷阱、Esc 关闭、`aria-modal`
+  - 写冲突不再表现为一句失败文案：提示「已被其他会话修改」并自动重新加载受影响的视图
+
 - **关键安全模块的直接测试（P14）**
   - `util/ip_safety.py`：内网/保留地址判定（含 IPv4-mapped IPv6）、DNS rebinding（域名过检但解析指向内网）、多记录应答中混入内网地址、解析失败 fail-closed
   - `core/security_boundary.py`：HMAC 签名验证（`sha256=` 前缀、篡改、错密钥）、nonce 重放窗口、Redis nonce 后端不可用时 fail-closed

@@ -101,11 +101,22 @@ function renderMarkdown(markdown) {
 let uiCsrfToken = "";
 let configState = [];
 
+// `resource` names the logical thing being read or written ("rules", "config"…).
+// Reads remember its ETag; writes send it back as If-Match so a save from a
+// stale tab is rejected instead of silently overwriting someone else's edit.
 async function fetchJson(url, options = {}) {
+  const { resource, ...init } = options;
+  const method = (init.method || "GET").toUpperCase();
+  const isWrite = method !== "GET" && method !== "HEAD";
+  if (resource && isWrite) {
+    const known = AegisUI.etags.get(resource);
+    if (known) init.headers = { ...(init.headers || {}), "If-Match": known };
+  }
+
   const response = await fetch(url, {
     cache: "no-store",
     credentials: "same-origin",
-    ...options,
+    ...init,
   });
   if (response.status === 401) {
     window.location.href = "/__ui__/login";
@@ -113,16 +124,38 @@ async function fetchJson(url, options = {}) {
   }
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
+    let conflict = false;
     try {
       const data = await response.json();
+      conflict = response.status === 409 && data.error === "etag_mismatch";
       if (data.detail) message = data.detail;
       else if (data.error) message = data.error;
     } catch (_error) {
       // noop
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.conflict = conflict;
+    throw error;
+  }
+  if (resource) {
+    const tag = response.headers.get("ETag");
+    // Only reads refresh the validator. Refreshing it from a write response
+    // would let a rejected save succeed on retry and clobber the other edit.
+    if (tag && !isWrite) AegisUI.etags.set(resource, tag);
   }
   return response.json();
+}
+
+// A conflict is not a failure the user caused; tell them what happened and
+// reload the affected view so their next attempt starts from current state.
+function handleWriteError(error, reload, prefix) {
+  if (error.conflict) {
+    AegisUI.toast(error.message, "warn", { timeout: 8000 });
+    if (typeof reload === "function") reload();
+    return;
+  }
+  AegisUI.toast(`${prefix}: ${error.message}`, "err");
 }
 
 function setStatus(id, message, isError = false) {
@@ -242,6 +275,7 @@ async function saveSection(section, statusId) {
   try {
     const data = await fetchJson("/__ui__/api/config", {
       method: "POST",
+      resource: "config",
       headers: {
         "Content-Type": "application/json",
         "x-aegis-ui-csrf": uiCsrfToken,
@@ -250,8 +284,15 @@ async function saveSection(section, statusId) {
     });
     renderConfig(data.config.items);
     setStatus(statusId, "已保存，配置已热重载。");
+    AegisUI.toast("配置已保存并热重载", "ok");
     await loadBootstrap();
   } catch (error) {
+    if (error.conflict) {
+      setStatus(statusId, "配置已被其他会话修改", true);
+      AegisUI.toast(error.message, "warn", { timeout: 8000 });
+      await loadBootstrap();
+      return;
+    }
     setStatus(statusId, `保存失败: ${error.message}`, true);
   }
 }
@@ -343,7 +384,7 @@ async function loadBootstrap() {
   uiCsrfToken = data.ui && data.ui.csrf_token ? data.ui.csrf_token : "";
   if (output) output.textContent = JSON.stringify(data, null, 2);
 
-  const configData = await fetchJson("/__ui__/api/config");
+  const configData = await fetchJson("/__ui__/api/config", { resource: "config" });
   renderConfig(configData.items);
 
   const preferredDocId = Array.isArray(data.docs) && data.docs.length ? data.docs[0].id : null;
@@ -461,7 +502,14 @@ async function loadTokens() {
       // Delete token
       tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
         const t = e.currentTarget.dataset.delToken;
-        if (!confirm(`确认删除 Token\n${t}\n\n此操作不可撤销。`)) return;
+        const ok = await AegisUI.confirm({
+          title: "删除 Token",
+          message: "删除后使用该 Token 的客户端会立即失去访问，且无法恢复。",
+          detail: t,
+          confirmLabel: "删除",
+          danger: true,
+        });
+        if (!ok) return;
         try {
           await fetchJson(`/__ui__/api/tokens/${encodeURIComponent(t)}`, {
             method: "DELETE",
@@ -469,7 +517,7 @@ async function loadTokens() {
           });
           loadTokens();
         } catch (err) {
-          alert(`删除失败: ${err.message}`);
+          handleWriteError(err, loadTokens, "删除失败");
         }
       });
       tbody.appendChild(tr);
@@ -540,7 +588,12 @@ async function submitTokenModal() {
       closeTokenModal();
       loadTokens();
       if (body.new_token) {
-        alert(`Token 已更新\n\n新 Base URL:\n${data.base_url}\n\n请同步更新客户端配置。`);
+        AegisUI.toast("Token 已更新", "ok");
+        await AegisUI.alert({
+          title: "Token 已更新",
+          message: "客户端的 base_url 需要同步更新为下面的地址。",
+          html: AegisUI.copyRow("Base URL", data.base_url),
+        });
       }
     } catch (err) {
       errorEl.textContent = err.message;
@@ -562,9 +615,16 @@ async function submitTokenModal() {
       closeTokenModal();
       loadTokens();
       if (data.already_registered) {
-        alert(`Token 已存在（复用）：${data.token}\n\nBase URL:\n${data.base_url}`);
+        await AegisUI.alert({
+          title: "Token 已存在，复用现有映射",
+          html: AegisUI.copyRow("Token", data.token) + AegisUI.copyRow("Base URL", data.base_url),
+        });
       } else {
-        alert(`注册成功！\n\nToken: ${data.token}\nBase URL:\n${data.base_url}\n\n请妥善保存，Base URL 可直接作为 OpenAI 兼容 API 的 base_url 使用。`);
+        await AegisUI.alert({
+          title: "注册成功",
+          message: "Base URL 可直接作为 OpenAI 兼容 API 的 base_url 使用，请妥善保存。",
+          html: AegisUI.copyRow("Token", data.token) + AegisUI.copyRow("Base URL", data.base_url),
+        });
       }
     } catch (err) {
       errorEl.textContent = err.message;
@@ -624,7 +684,8 @@ function bindActions() {
     window.open("/__ui__/health", "_blank", "noopener,noreferrer");
   });
   document.getElementById("logout-button").addEventListener("click", async () => {
-    if (!confirm("确认退出登录？")) return;
+    const ok = await AegisUI.confirm({ title: "退出登录", message: "需要重新输入网关密钥才能再次进入控制台。", confirmLabel: "退出" });
+    if (!ok) return;
     await fetchJson("/__ui__/api/logout", {
       method: "POST",
       headers: { "x-aegis-ui-csrf": uiCsrfToken },
@@ -655,7 +716,7 @@ async function loadRedactValues() {
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
   try {
-    const data = await fetchJson("/__ui__/api/redact_values");
+    const data = await fetchJson("/__ui__/api/redact_values", { resource: "redact_values" });
     const items = Array.isArray(data.items) ? data.items : [];
     if (countEl) countEl.textContent = `共 ${items.length} 条`;
     if (!items.length) {
@@ -679,15 +740,22 @@ async function loadRedactValues() {
           </button>
         </td>`;
       tr.querySelector(".btn-danger-sm").addEventListener("click", async () => {
-        if (!confirm(`确认删除第 ${idx} 条脱敏值？`)) return;
+        const ok = await AegisUI.confirm({
+          title: "删除精确值脱敏",
+          message: `确认删除第 ${idx} 条？该值将不再从请求与响应中被替换。`,
+          confirmLabel: "删除",
+          danger: true,
+        });
+        if (!ok) return;
         try {
           await fetchJson(`/__ui__/api/redact_values/${idx}`, {
             method: "DELETE",
+            resource: "redact_values",
             headers: { "x-aegis-ui-csrf": uiCsrfToken },
           });
           loadRedactValues();
         } catch (err) {
-          alert(`删除失败: ${err.message}`);
+          handleWriteError(err, loadRedactValues, "删除失败");
         }
       });
       tbody.appendChild(tr);
@@ -722,12 +790,19 @@ async function submitRedactModal() {
   try {
     await fetchJson("/__ui__/api/redact_values", {
       method: "POST",
+      resource: "redact_values",
       headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
       body: JSON.stringify({ value }),
     });
     closeRedactModal();
+    AegisUI.toast("已添加，该值将从请求与响应中被替换", "ok");
     loadRedactValues();
   } catch (err) {
+    if (err.conflict) {
+      closeRedactModal();
+      handleWriteError(err, loadRedactValues, "添加失败");
+      return;
+    }
     errEl.textContent = err.message;
   } finally {
     submitBtn.disabled = false;
@@ -795,7 +870,7 @@ async function loadRules(section) {
       : `<tr><th>ID</th><th>Regex</th><th>操作</th></tr>`;
   }
   try {
-    const data = await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`);
+    const data = await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`, { resource: "rules" });
     const items = Array.isArray(data.items) ? data.items : [];
     if (countEl) countEl.textContent = `共 ${items.length} 条规则`;
     if (!items.length) {
@@ -819,15 +894,23 @@ async function loadRules(section) {
       });
       tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
         const ruleId = e.currentTarget.dataset.delRuleId;
-        if (!confirm(`确认删除规则 "${ruleId}"？`)) return;
+        const ok = await AegisUI.confirm({
+          title: "删除安全规则",
+          message: "规则删除后立即热重载生效，对应的检测能力会随之关闭。",
+          detail: ruleId,
+          confirmLabel: "删除",
+          danger: true,
+        });
+        if (!ok) return;
         try {
           await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(ruleId)}`, {
             method: "DELETE",
+            resource: "rules",
             headers: {"x-aegis-ui-csrf": uiCsrfToken},
           });
           loadRules(section);
         } catch (err) {
-          alert(`删除失败: ${err.message}`);
+          handleWriteError(err, () => loadRules(section), "删除失败");
         }
       });
       tbody.appendChild(tr);
@@ -851,7 +934,7 @@ async function loadActionMap() {
   if (countEl) countEl.textContent = "";
 
   try {
-    const data = await fetchJson("/__ui__/api/rules_action_map");
+    const data = await fetchJson("/__ui__/api/rules_action_map", { resource: "rules" });
     const actionMap = data.action_map || {};
     actionMapState = JSON.parse(JSON.stringify(actionMap));
     if (!grid) return;
@@ -931,19 +1014,27 @@ async function submitRuleModal() {
     if (isEdit) {
       await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(editId)}`, {
         method: "PATCH",
+        resource: "rules",
         headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
         body: JSON.stringify({regex, kind: kind || undefined}),
       });
     } else {
       await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`, {
         method: "POST",
+        resource: "rules",
         headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
         body: JSON.stringify(body),
       });
     }
     closeRuleModal();
+    AegisUI.toast(isEdit ? "规则已更新，已热重载生效" : "规则已添加，已热重载生效", "ok");
     loadRules(section);
   } catch (err) {
+    if (err.conflict) {
+      closeRuleModal();
+      handleWriteError(err, () => loadRules(section), "保存失败");
+      return;
+    }
     errEl.textContent = err.message;
   } finally {
     submitBtn.disabled = false;
@@ -976,12 +1067,15 @@ function bindRulesUI() {
     try {
       await fetchJson("/__ui__/api/rules_action_map", {
         method: "PATCH",
+        resource: "rules",
         headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
         body: JSON.stringify(actionMapState),
       });
       setStatus("action-map-status", "已保存");
+      AegisUI.toast("动作映射已保存", "ok");
     } catch (err) {
       setStatus("action-map-status", `失败: ${err.message}`, true);
+      handleWriteError(err, loadActionMap, "保存失败");
     }
   });
 
@@ -1065,7 +1159,7 @@ async function viewKey(keyType) {
     const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
     showKeyModal(keyType, data);
   } catch (err) {
-    alert(`查看失败: ${err.message}`);
+    AegisUI.toast(`查看失败: ${err.message}`, "err");
   }
 }
 
@@ -1075,7 +1169,14 @@ async function rotateKey(keyType) {
     gateway: "更换网关密钥后，已注册的 Token 路由仍有效，但旧的 AEGIS_GATEWAY_KEY 将失效，需更新客户端配置。\n\n确认更换？",
     proxy_token: "更换代理令牌后 Caddy ↔ AegisGate 自动配对将失效，需重启服务重新配对。\n\n确认更换？",
   };
-  if (!confirm(warnings[keyType] || "确认更换密钥？")) return;
+  const ok = await AegisUI.confirm({
+    title: "更换密钥",
+    message: warnings[keyType] || "确认更换密钥？",
+    confirmLabel: "更换密钥",
+    danger: true,
+    requireText: keyType,
+  });
+  if (!ok) return;
   try {
     const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}/rotate`, {
       method: "POST",
@@ -1088,7 +1189,7 @@ async function rotateKey(keyType) {
     const detail = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
     showKeyModal(keyType, detail, {rotated: true});
   } catch (err) {
-    alert(`更换失败: ${err.message}`);
+    AegisUI.toast(`更换失败: ${err.message}`, "err");
   }
 }
 
@@ -1186,7 +1287,13 @@ function bindStatsUI() {
   if (refreshBtn) refreshBtn.addEventListener("click", loadStats);
   var clearBtn = document.getElementById("stats-clear");
   if (clearBtn) clearBtn.addEventListener("click", async function() {
-    if (!confirm("确认清除所有统计数据？此操作不可撤销。")) return;
+    const ok = await AegisUI.confirm({
+      title: "清除请求统计",
+      message: "所有历史统计将被清空，此操作不可撤销。",
+      confirmLabel: "清除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await fetchJson("/__ui__/api/stats", {
         method: "DELETE",
@@ -1194,7 +1301,7 @@ function bindStatsUI() {
       });
       loadStats();
     } catch (err) {
-      alert("清除失败: " + err.message);
+      AegisUI.toast("清除失败: " + err.message, "err");
     }
   });
   loadStats();
@@ -1245,7 +1352,7 @@ async function loadComposeContent(filename) {
   if (!editor) return;
   editor.value = "加载中…";
   try {
-    var data = await fetchJson("/__ui__/api/compose/" + encodeURIComponent(filename));
+    var data = await fetchJson("/__ui__/api/compose/" + encodeURIComponent(filename), { resource: "compose" });
     editor.value = data.content || "";
   } catch (err) {
     editor.value = "加载失败: " + err.message;
@@ -1261,12 +1368,15 @@ function bindComposeUI() {
     try {
       await fetchJson("/__ui__/api/compose/" + encodeURIComponent(currentComposeFile), {
         method: "PUT",
+        resource: "compose",
         headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
         body: JSON.stringify({ content: editor.value }),
       });
       setStatus("compose-save-status", "已保存");
+      AegisUI.toast("Compose 文件已保存", "ok");
     } catch (err) {
       setStatus("compose-save-status", "保存失败: " + err.message, true);
+      handleWriteError(err, function () { loadComposeContent(currentComposeFile); }, "保存失败");
     }
   });
   loadComposeList();
@@ -1278,7 +1388,13 @@ function bindRestartButton() {
   var btn = document.getElementById("restart-button");
   if (!btn) return;
   btn.addEventListener("click", async function() {
-    if (!confirm("确认重启网关？服务将短暂中断约 1.5 秒。")) return;
+    const ok = await AegisUI.confirm({
+      title: "重启网关",
+      message: "网关将在约 1.5 秒后收到 SIGTERM，期间正在处理的请求会中断。",
+      confirmLabel: "重启",
+      danger: true,
+    });
+    if (!ok) return;
     btn.disabled = true;
     btn.querySelector("svg + span, svg ~ *") || (btn.textContent = "重启中…");
     try {
@@ -1289,7 +1405,7 @@ function bindRestartButton() {
       updateHeaderStatus("restarting");
       setTimeout(function() { window.location.reload(); }, 3000);
     } catch (err) {
-      alert("重启失败: " + err.message);
+      AegisUI.toast("重启失败: " + err.message, "err");
       btn.disabled = false;
     }
   });

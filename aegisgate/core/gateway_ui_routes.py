@@ -43,6 +43,11 @@ from aegisgate.core.gateway_ui_config import (
     _ui_config_payload,
     _write_env_updates,
 )
+from aegisgate.core.ui_etag import (
+    etag_for_file,
+    if_match_conflict,
+    with_etag,
+)
 from aegisgate.core.gw_tokens import (
     list_tokens as gw_tokens_list,
     register as gw_tokens_register,
@@ -107,12 +112,20 @@ def register_ui_routes(app: FastAPI) -> None:
         clear()
         return JSONResponse(content={"ok": True})
 
+    def _env_etag() -> str:
+        from aegisgate.core.gateway_ui_config import _ENV_PATH
+
+        return etag_for_file(_ENV_PATH)
+
     @app.get("/__ui__/api/config")
-    async def local_ui_config() -> dict[str, object]:
-        return _ui_config_payload()
+    async def local_ui_config() -> JSONResponse:
+        return with_etag(JSONResponse(content=_ui_config_payload()), _env_etag())
 
     @app.post("/__ui__/api/config")
     async def local_ui_update_config(request: Request) -> JSONResponse:
+        conflict = if_match_conflict(request, _env_etag())
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -148,7 +161,10 @@ def register_ui_routes(app: FastAPI) -> None:
                 str(k): str(v) for k, v in updated_fields.items()
             },
         })
-        return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
+        return with_etag(
+            JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()}),
+            _env_etag(),
+        )
 
     @app.get("/__ui__/api/docs/{doc_id}")
     async def local_ui_doc_content(doc_id: str) -> JSONResponse:
@@ -551,18 +567,26 @@ def register_ui_routes(app: FastAPI) -> None:
         sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
         return JSONResponse(content={"sections": sections})
 
+    def _rules_etag() -> str:
+        return etag_for_file(_resolve_rules_file())
+
     @app.get("/__ui__/api/rules/{section}")
     async def local_ui_rules_get(section: str) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
         data = _load_rules_yaml()
         items = _get_section_list(data, section)
-        return JSONResponse(content={"section": section, "items": items})
+        return with_etag(
+            JSONResponse(content={"section": section, "items": items}), _rules_etag()
+        )
 
     @app.post("/__ui__/api/rules/{section}")
     async def local_ui_rules_add(section: str, request: Request) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
+        conflict = if_match_conflict(request, _rules_etag())
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -588,12 +612,17 @@ def register_ui_routes(app: FastAPI) -> None:
         items.append(new_item)
         _set_section_list(data, section, items)
         _save_rules_yaml(data)
-        return JSONResponse(status_code=201, content={"ok": True, "item": new_item})
+        return with_etag(
+            JSONResponse(status_code=201, content={"ok": True, "item": new_item}), _rules_etag()
+        )
 
     @app.patch("/__ui__/api/rules/{section}/{rule_id}")
     async def local_ui_rules_update(section: str, rule_id: str, request: Request) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
+        conflict = if_match_conflict(request, _rules_etag())
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -616,13 +645,16 @@ def register_ui_routes(app: FastAPI) -> None:
                     item["patterns"] = body["patterns"]
                 _set_section_list(data, section, items)
                 _save_rules_yaml(data)
-                return JSONResponse(content={"ok": True, "item": item})
+                return with_etag(JSONResponse(content={"ok": True, "item": item}), _rules_etag())
         return JSONResponse(status_code=404, content={"error": "rule_not_found"})
 
     @app.delete("/__ui__/api/rules/{section}/{rule_id}")
-    async def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
+    async def local_ui_rules_delete(section: str, rule_id: str, request: Request) -> JSONResponse:
         if section not in _RULES_SECTIONS:
             return JSONResponse(status_code=404, content={"error": "unknown_section"})
+        conflict = if_match_conflict(request, _rules_etag())
+        if conflict is not None:
+            return conflict
         data = _load_rules_yaml()
         items = _get_section_list(data, section)
         new_items = [item for item in items if str(item.get("id", "")) != rule_id]
@@ -630,15 +662,20 @@ def register_ui_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=404, content={"error": "rule_not_found"})
         _set_section_list(data, section, new_items)
         _save_rules_yaml(data)
-        return JSONResponse(content={"ok": True})
+        return with_etag(JSONResponse(content={"ok": True}), _rules_etag())
 
     @app.get("/__ui__/api/rules_action_map")
     async def local_ui_action_map_get() -> JSONResponse:
         data = _load_rules_yaml()
-        return JSONResponse(content={"action_map": data.get("action_map") or {}})
+        return with_etag(
+            JSONResponse(content={"action_map": data.get("action_map") or {}}), _rules_etag()
+        )
 
     @app.patch("/__ui__/api/rules_action_map")
     async def local_ui_action_map_update(request: Request) -> JSONResponse:
+        conflict = if_match_conflict(request, _rules_etag())
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -660,7 +697,9 @@ def register_ui_routes(app: FastAPI) -> None:
                 action_map[category][threat] = str(action)
         data["action_map"] = action_map
         _save_rules_yaml(data)
-        return JSONResponse(content={"ok": True, "action_map": action_map})
+        return with_etag(
+            JSONResponse(content={"ok": True, "action_map": action_map}), _rules_etag()
+        )
 
     # ------------------------------------------------------------------
     # Exact-value redaction management
@@ -676,22 +715,33 @@ def register_ui_routes(app: FastAPI) -> None:
             return val[:2] + "*" * (len(val) - 2)
         return val[:4] + "****" + val[-3:]
 
+    def _redact_values_etag() -> str:
+        from aegisgate.config.redact_values import _config_path
+
+        return etag_for_file(_config_path())
+
     @app.get("/__ui__/api/redact_values")
     async def local_ui_redact_values_list() -> JSONResponse:
         from aegisgate.config.redact_values import load_redact_values
 
         values = load_redact_values()
         items = [{"masked": _mask_value(v), "length": len(v)} for v in values]
-        return JSONResponse(content={
-            "items": items,
-            "count": len(items),
-            "description": _REDACT_VALUES_DESCRIPTION,
-        })
+        return with_etag(
+            JSONResponse(content={
+                "items": items,
+                "count": len(items),
+                "description": _REDACT_VALUES_DESCRIPTION,
+            }),
+            _redact_values_etag(),
+        )
 
     @app.post("/__ui__/api/redact_values")
     async def local_ui_redact_values_add(request: Request) -> JSONResponse:
         from aegisgate.config.redact_values import load_redact_values, save_redact_values
 
+        conflict = if_match_conflict(request, _redact_values_etag())
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -710,18 +760,27 @@ def register_ui_routes(app: FastAPI) -> None:
             save_redact_values(values)
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": "validation_error", "detail": str(exc)})
-        return JSONResponse(content={"ok": True, "count": len(values)})
+        return with_etag(
+            JSONResponse(content={"ok": True, "count": len(values)}), _redact_values_etag()
+        )
 
     @app.delete("/__ui__/api/redact_values/{index}")
-    async def local_ui_redact_values_delete(index: int) -> JSONResponse:
+    async def local_ui_redact_values_delete(index: int, request: Request) -> JSONResponse:
         from aegisgate.config.redact_values import load_redact_values, save_redact_values
 
+        # Positional index over a shared list: without the ETag check a stale tab
+        # deleting "row 3" would remove whatever now sits at row 3.
+        conflict = if_match_conflict(request, _redact_values_etag())
+        if conflict is not None:
+            return conflict
         values = load_redact_values()
         if index < 0 or index >= len(values):
             return JSONResponse(status_code=404, content={"error": "index_out_of_range"})
         values.pop(index)
         save_redact_values(values)
-        return JSONResponse(content={"ok": True, "count": len(values)})
+        return with_etag(
+            JSONResponse(content={"ok": True, "count": len(values)}), _redact_values_etag()
+        )
 
     # ------------------------------------------------------------------
     # Docker compose file editor
@@ -755,12 +814,18 @@ def register_ui_routes(app: FastAPI) -> None:
         path = _compose_file_path(filename)
         if not path.is_file():
             return JSONResponse(status_code=404, content={"error": "file_not_found"})
-        return JSONResponse(content={"filename": filename, "content": path.read_text(encoding="utf-8")})
+        return with_etag(
+            JSONResponse(content={"filename": filename, "content": path.read_text(encoding="utf-8")}),
+            etag_for_file(path),
+        )
 
     @app.put("/__ui__/api/compose/{filename:path}")
     async def local_ui_compose_put(filename: str, request: Request) -> JSONResponse:
         if filename not in _COMPOSE_FILES_ALLOWED:
             return JSONResponse(status_code=404, content={"error": "not_allowed"})
+        conflict = if_match_conflict(request, etag_for_file(_compose_file_path(filename)))
+        if conflict is not None:
+            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -781,7 +846,10 @@ def register_ui_routes(app: FastAPI) -> None:
             tmp_path.replace(path)
         except OSError:
             return JSONResponse(status_code=500, content={"error": "write_failed", "detail": "无法写入文件"})
-        return JSONResponse(content={"ok": True, "filename": filename, "save_path": str(path)})
+        return with_etag(
+            JSONResponse(content={"ok": True, "filename": filename, "save_path": str(path)}),
+            etag_for_file(path),
+        )
 
     # ------------------------------------------------------------------
     # Gateway restart
