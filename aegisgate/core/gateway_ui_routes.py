@@ -43,6 +43,7 @@ from aegisgate.core.gateway_ui_config import (
     _ui_config_payload,
     _write_env_updates,
 )
+from aegisgate.core.rules_editor import RuleEdit
 from aegisgate.core.gw_tokens import (
     list_tokens as gw_tokens_list,
     register as gw_tokens_register,
@@ -501,11 +502,12 @@ def register_ui_routes(app: FastAPI) -> None:
         with path.open(encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    def _save_rules_yaml(data: dict) -> None:
-        path = _resolve_rules_file()
+    def _write_rules_text(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
-            yaml.dump(data, tmp, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp"
+        ) as tmp:
+            tmp.write(text)
             tmp_path = Path(tmp.name)
         tmp_path.replace(path)
         try:
@@ -513,6 +515,38 @@ def register_ui_routes(app: FastAPI) -> None:
             reload_security_rules()
         except Exception:
             pass
+
+    def _save_rules_yaml(data: dict, edit: "RuleEdit | None" = None) -> None:
+        """Persist *data*, keeping the file's comments when *edit* describes the change.
+
+        A plain dump would drop all 80 comment lines in security_filters.yaml —
+        the file documents the security policy, so the edit is applied as a text
+        patch instead, verified against *data* before it is written.
+        """
+        path = _resolve_rules_file()
+        if edit is not None and path.is_file():
+            from aegisgate.core.rules_editor import render_rules_yaml
+
+            original = path.read_text(encoding="utf-8")
+            _write_rules_text(path, render_rules_yaml(original, data, edit))
+            return
+        _write_rules_text(
+            path,
+            yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+        )
+
+    def _save_action_map_yaml(data: dict, updates: list[tuple[list[str], object]]) -> None:
+        path = _resolve_rules_file()
+        if path.is_file():
+            from aegisgate.core.rules_editor import render_scalar_updates
+
+            original = path.read_text(encoding="utf-8")
+            _write_rules_text(path, render_scalar_updates(original, data, updates))
+            return
+        _write_rules_text(
+            path,
+            yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+        )
 
     def _get_section_list(data: dict, section_key: str) -> list:
         keys = _RULES_SECTIONS[section_key]
@@ -587,7 +621,15 @@ def register_ui_routes(app: FastAPI) -> None:
             new_item["patterns"] = body["patterns"]
         items.append(new_item)
         _set_section_list(data, section, items)
-        _save_rules_yaml(data)
+        _save_rules_yaml(
+            data,
+            RuleEdit(
+                path=list(_RULES_SECTIONS[section]),
+                op="add",
+                rule_id=rule_id,
+                fields={k: v for k, v in new_item.items() if k != "id"},
+            ),
+        )
         return JSONResponse(status_code=201, content={"ok": True, "item": new_item})
 
     @app.patch("/__ui__/api/rules/{section}/{rule_id}")
@@ -600,6 +642,7 @@ def register_ui_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
         data = _load_rules_yaml()
         items = _get_section_list(data, section)
+        changed: dict[str, object] = {}
         for item in items:
             if str(item.get("id", "")) == rule_id:
                 if "regex" in body:
@@ -610,12 +653,23 @@ def register_ui_routes(app: FastAPI) -> None:
                     if invalid_regex is not None:
                         return invalid_regex
                     item["regex"] = regex
+                    changed["regex"] = regex
                 if "kind" in body:
                     item["kind"] = str(body["kind"])
+                    changed["kind"] = item["kind"]
                 if "patterns" in body and isinstance(body["patterns"], list):
                     item["patterns"] = body["patterns"]
+                    changed["patterns"] = item["patterns"]
                 _set_section_list(data, section, items)
-                _save_rules_yaml(data)
+                _save_rules_yaml(
+                    data,
+                    RuleEdit(
+                        path=list(_RULES_SECTIONS[section]),
+                        op="update",
+                        rule_id=rule_id,
+                        fields=changed,
+                    ),
+                )
                 return JSONResponse(content={"ok": True, "item": item})
         return JSONResponse(status_code=404, content={"error": "rule_not_found"})
 
@@ -629,7 +683,10 @@ def register_ui_routes(app: FastAPI) -> None:
         if len(new_items) == len(items):
             return JSONResponse(status_code=404, content={"error": "rule_not_found"})
         _set_section_list(data, section, new_items)
-        _save_rules_yaml(data)
+        _save_rules_yaml(
+            data,
+            RuleEdit(path=list(_RULES_SECTIONS[section]), op="delete", rule_id=rule_id),
+        )
         return JSONResponse(content={"ok": True})
 
     @app.get("/__ui__/api/rules_action_map")
@@ -646,6 +703,7 @@ def register_ui_routes(app: FastAPI) -> None:
         allowed_actions = {"block", "review", "sanitize", "pass"}
         data = _load_rules_yaml()
         action_map = data.get("action_map") or {}
+        updates: list[tuple[list[str], object]] = []
         for category, threats in body.items():
             if not isinstance(threats, dict):
                 continue
@@ -657,9 +715,11 @@ def register_ui_routes(app: FastAPI) -> None:
                         status_code=400,
                         content={"error": "invalid_action", "detail": f"'{action}' 不是有效动作"},
                     )
+                if action_map[category].get(threat) != str(action):
+                    updates.append((["action_map", str(category), str(threat)], str(action)))
                 action_map[category][threat] = str(action)
         data["action_map"] = action_map
-        _save_rules_yaml(data)
+        _save_action_map_yaml(data, updates)
         return JSONResponse(content={"ok": True, "action_map": action_map})
 
     # ------------------------------------------------------------------
