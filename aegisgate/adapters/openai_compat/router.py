@@ -649,6 +649,23 @@ def _build_upstream_eof_replay_text(cached_text: str) -> str:
     return f"{text}\n\n{_UPSTREAM_EOF_RECOVERY_NOTICE}"
 
 
+def _eof_recovery_replay_text(
+    *,
+    cached_text: str,
+    content_already_sent: bool,
+) -> str:
+    """Synthetic EOF text that does not repeat frames already yielded.
+
+    Chat/responses flush remaining ``pending_frames`` before this helper runs.
+    Pass ``content_already_sent=True`` when those frames (or earlier holdback
+    flushes) already carried the cached body, so recovery only injects the
+    notice rather than replaying ``stream_window``.
+    """
+    if content_already_sent:
+        return _UPSTREAM_EOF_RECOVERY_NOTICE
+    return _build_upstream_eof_replay_text(cached_text)
+
+
 # Max characters of full request content emitted while debugging, so logs stay manageable
 _DEBUG_REQUEST_BODY_MAX_CHARS = 32000
 _DEBUG_HEADERS_REDACT = frozenset(
@@ -3018,6 +3035,7 @@ async def _execute_chat_stream_once(
         stream_window = ""
         pending_frames: list[bytes] = []
         chunk_count = 0
+        emitted_content_chunks = 0
         saw_tool_call_chunk = False
         saw_terminal_chunk = False
         saw_done = False
@@ -3083,6 +3101,7 @@ async def _execute_chat_stream_once(
                     if blocked_reason:
                         break
                     while pending_frames:
+                        emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     yield line
                     break
@@ -3160,10 +3179,12 @@ async def _execute_chat_stream_once(
 
                 if is_content_event:
                     while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                        emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     continue
 
                 while pending_frames:
+                    emitted_content_chunks += 1
                     yield pending_frames.pop(0)
                 yield line
 
@@ -3250,7 +3271,9 @@ async def _execute_chat_stream_once(
                         yield _stream_done_sse_chunk()
                         stream_end_reason = "policy_auto_sanitize"
                         return
+                pending_had_content = bool(pending_frames)
                 while pending_frames:
+                    emitted_content_chunks += 1
                     yield pending_frames.pop(0)
                 if saw_terminal_chunk:
                     yield _stream_done_sse_chunk()
@@ -3277,7 +3300,11 @@ async def _execute_chat_stream_once(
                     stream_end_reason = "upstream_eof_no_done_recovered"
                 else:
                     ctx.enforcement_actions.append("upstream:upstream_eof_no_done")
-                    replay_text = _build_upstream_eof_replay_text(stream_window)
+                    replay_text = _eof_recovery_replay_text(
+                        cached_text=stream_window,
+                        content_already_sent=pending_had_content
+                        or emitted_content_chunks > 0,
+                    )
                     logger.warning(
                         "chat stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true recovery_chars=%s",
                         ctx.request_id,
@@ -3568,6 +3595,7 @@ async def _execute_responses_stream_once(
         stream_window = ""
         pending_frames: list[bytes] = []
         chunk_count = 0
+        emitted_content_chunks = 0
         saw_any_data_event = False
         saw_terminal_event = False
         saw_done = False
@@ -3625,6 +3653,7 @@ async def _execute_responses_stream_once(
                     if blocked_reason:
                         break
                     while pending_frames:
+                        emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     yield line
                     break
@@ -3739,10 +3768,12 @@ async def _execute_responses_stream_once(
 
                 if is_content_event:
                     while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                        emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     continue
 
                 while pending_frames:
+                    emitted_content_chunks += 1
                     yield pending_frames.pop(0)
                 yield line
             if blocked_reason:
@@ -3836,7 +3867,9 @@ async def _execute_responses_stream_once(
                     yield _stream_done_sse_chunk()
                     stream_end_reason = "policy_auto_sanitize"
                     return
+                pending_had_content = bool(pending_frames)
                 while pending_frames:
+                    emitted_content_chunks += 1
                     yield pending_frames.pop(0)
                 if saw_terminal_event:
                     terminal_event_reason = last_terminal_event_type or "terminal_event"
@@ -3852,7 +3885,11 @@ async def _execute_responses_stream_once(
                         "warning": "upstream_eof_no_done",
                         "recovered": True,
                     }
-                    replay_text = _build_upstream_eof_replay_text("")
+                    replay_text = _eof_recovery_replay_text(
+                        cached_text="",
+                        content_already_sent=pending_had_content
+                        or emitted_content_chunks > 0,
+                    )
                     logger.warning(
                         "responses stream upstream closed without DONE request_id=%s chunk_count=%s cached_chars=%s inject_done=true replay_notice=true",
                         ctx.request_id,
