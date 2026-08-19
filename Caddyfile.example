@@ -67,6 +67,9 @@ api.example.com {
     respond @not_api 404
 
     # Use 127.0.0.1:18080 when Caddy runs on the host (see the notes at the top of this file)
+    # Also set AEGIS_TRUSTED_PROXY_IPS=127.0.0.1 on the gateway so X-Forwarded-For from this
+    # proxy is trusted. With the default AEGIS_XFF_STRICT_INTERNAL=true, an empty trusted-proxy
+    # list makes any XFF look like a public client (admin / default /v1 / UI).
     reverse_proxy 127.0.0.1:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}

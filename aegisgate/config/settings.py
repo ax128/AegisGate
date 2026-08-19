@@ -142,6 +142,11 @@ class Settings(BaseSettings):
     # Trusted reverse-proxy IPs (comma-separated); only these may set X-Forwarded-For.
     # Empty = trust direct client IP only (safest default).
     trusted_proxy_ips: str = ""
+    # When True (default), X-Forwarded-For from a direct peer that is not in
+    # trusted_proxy_ips is treated as a public client even if the resolved IP
+    # looks internal. Set false to restore the pre-A3 admin / default-/v1 / UI
+    # checks while rolling out AEGIS_TRUSTED_PROXY_IPS. Restart required.
+    xff_strict_internal: bool = True
     local_ui_session_ttl_seconds: int = 43_200
     local_ui_login_rate_limit_per_minute: int = 10
     local_ui_secure_cookie: bool = True

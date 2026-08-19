@@ -365,11 +365,12 @@ async def test_boundary_blocks_admin_endpoints_from_public_ip_loopback_disabled(
 
 
 @pytest.mark.asyncio
-async def test_boundary_ignores_xff_from_untrusted_proxy(
+async def test_boundary_treats_xff_from_untrusted_proxy_as_public_for_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", "")
     monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", True)
     monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
     monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
     request = _build_request(
@@ -384,7 +385,9 @@ async def test_boundary_ignores_xff_from_untrusted_proxy(
 
     response = await gateway.security_boundary_middleware(request, _allow_next)
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    body = _response_json(response)
+    assert body["error"]["code"] == "admin_endpoint_network_restricted"
 
 
 @pytest.mark.asyncio
@@ -1279,3 +1282,147 @@ async def test_ui_login_rate_limit_boundary_is_per_ip(
 
     assert [await _login_from("127.0.0.43") for _ in range(3)] == [200, 200, 429]
     assert await _login_from("127.0.0.44") == 200
+
+
+def _reset_trusted_proxy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", value)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
+
+
+@pytest.mark.asyncio
+async def test_boundary_rejects_default_v1_when_xff_from_untrusted_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1"
+    )
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", True)
+    _reset_trusted_proxy(monkeypatch, "")
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=False,
+        client_host="172.18.0.4",
+        headers={"x-forwarded-for": "8.8.8.8"},
+        body={"input": "hello"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 403
+    assert _response_json(response)["error"]["code"] == "token_route_required"
+
+
+@pytest.mark.asyncio
+async def test_boundary_allows_default_v1_xff_when_proxy_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1"
+    )
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", True)
+    _reset_trusted_proxy(monkeypatch, "172.18.0.4")
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=False,
+        client_host="172.18.0.4",
+        headers={"x-forwarded-for": "10.0.0.8"},
+        body={"input": "hello"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_boundary_allows_proxy_token_v1_despite_untrusted_xff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1"
+    )
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", True)
+    _reset_trusted_proxy(monkeypatch, "")
+    monkeypatch.setattr(gateway, "get_proxy_token_value", lambda: "proxy-secret")
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=False,
+        client_host="172.18.0.4",
+        headers={
+            "x-forwarded-for": "8.8.8.8",
+            "x-aegis-proxy-token": "proxy-secret",
+        },
+        body={"input": "hello"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_boundary_rejects_ui_login_when_xff_from_untrusted_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "local_ui_allow_internal_network", True)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", True)
+    _reset_trusted_proxy(monkeypatch, "")
+    request = _build_request(
+        "/__ui__/login",
+        method="GET",
+        client_host="172.18.0.4",
+        headers={"x-forwarded-for": "8.8.8.8"},
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 403
+    assert _response_json(response)["error"]["code"] == "local_ui_network_restricted"
+
+
+@pytest.mark.asyncio
+async def test_xff_strict_internal_false_restores_old_admin_and_v1_and_ui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gateway.settings, "upstream_base_url", "http://cli-proxy-api:8317/v1"
+    )
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "local_ui_allow_internal_network", True)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", False)
+    _reset_trusted_proxy(monkeypatch, "")
+    headers = {"x-forwarded-for": "8.8.8.8"}
+
+    admin = _build_request(
+        "/__gw__/register",
+        client_host="172.18.0.4",
+        headers=headers,
+        body={
+            "upstream_base": "https://upstream.example.com/v1",
+            "gateway_key": "agent",
+        },
+    )
+    v1 = _build_request(
+        "/v1/responses",
+        token_authenticated=False,
+        client_host="172.18.0.4",
+        headers=headers,
+        body={"input": "hello"},
+    )
+    ui = _build_request(
+        "/__ui__/login",
+        method="GET",
+        client_host="172.18.0.4",
+        headers=headers,
+    )
+
+    assert (
+        await gateway.security_boundary_middleware(admin, _allow_next)
+    ).status_code == 200
+    assert (await gateway.security_boundary_middleware(v1, _allow_next)).status_code == 200
+    assert (await gateway.security_boundary_middleware(ui, _allow_next)).status_code == 200

@@ -25,6 +25,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 新增 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（默认 `false`，热重载不可变）。公网客户端命中白名单时不再旁路，回落正常过滤管道。内网客户端与未设 `client_is_internal` 的既有调用保持旁路
   - 公网部署若仍需对白名单上游明文转发，须显式设 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true` 并重启
 
+### Breaking Changes
+
+- **反代 XFF 内网判定收紧（默认开启）**
+  - 新增 `AEGIS_XFF_STRICT_INTERNAL`（默认 `true`，热重载不可变，需重启）。存在 `X-Forwarded-For` 且直连 IP 不在 `AEGIS_TRUSTED_PROXY_IPS` 时，admin、默认上游 `/v1`、以及 `/__ui__` 一律按公网处理
+  - **只影响同时满足这 4 个前提的部署**：① 设了 `AEGIS_UPSTREAM_BASE_URL` ② 客户端走非 token `/v1/...` ③ 未带 `X-Aegis-Proxy-Token` ④ 未设 `AEGIS_TRUSTED_PROXY_IPS`。参考 Caddy 配置里 admin 本就不经公网；带 proxy token 的 `/v1` 不受影响
+  - **代码回滚**：`AEGIS_XFF_STRICT_INTERNAL=false` 并重启，回到旧的 admin / 默认 `/v1` / UI 判定。数字 token 与 `__passthrough` 在 A3 之前就已经有 XFF 降级，开关不会放宽它们
+  - **配置回滚**：若已设置 `AEGIS_TRUSTED_PROXY_IPS`，该开关**回滚不了**它对 `_real_client_ip`（7 处）和 `_is_trusted_proxy`（1 处，含 UI 限流键）的影响。回退办法是清空该变量并重启
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**
