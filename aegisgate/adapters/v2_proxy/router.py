@@ -121,15 +121,15 @@ _V2_SKIP_REDACTION_FIELDS = frozenset(
 _DEFAULT_DANGEROUS_COMMAND_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         "web_http_smuggling_cl_te",
-        r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
+        r"(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b",
     ),
     (
         "web_http_smuggling_te_cl",
-        r"(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+",
+        r"(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+",
     ),
     (
         "web_http_smuggling_te_te",
-        r"(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b",
+        r"(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b",
     ),
     (
         "web_http_response_splitting",

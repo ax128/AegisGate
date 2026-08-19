@@ -34,6 +34,7 @@ config/security_filters.yaml
 config/default.yaml
 config/strict.yaml
 config/permissive.yaml
+config/*.yaml.bak-*
 
 # Encryption keys and token mappings (NEVER commit)
 config/aegis_fernet.key

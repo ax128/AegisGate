@@ -337,6 +337,26 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "ssti_or_log4shell", "regex": r"(?:\{\{\s*7\s*\*\s*7\s*\}\}|\$\{jndi:(?:ldap|rmi|dns|iiop)://)"},
             {"id": "ssrf_metadata", "regex": r"(?:https?://)?(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)(?::\d+)?(?:/|\b)"},
             {"id": "crlf_header_injection", "regex": r"(?:%0d%0a|\r\n)\s*(?:set-cookie:|location:|x-forwarded-)"},
+            {
+                "id": "http_smuggling_cl_te",
+                "regex": r"(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b",
+            },
+            {
+                "id": "http_smuggling_te_cl",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+",
+            },
+            {
+                "id": "http_smuggling_te_te",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b",
+            },
+            {
+                "id": "http_response_splitting",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b",
+            },
+            {
+                "id": "http_obs_fold_header",
+                "regex": r"(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:",
+            },
         ],
         "points": {
             "repetition_ratio": 0.25,
@@ -412,15 +432,15 @@ _DEFAULT_RULES: dict[str, Any] = {
         "command_patterns": [
             {
                 "id": "web_http_smuggling_cl_te",
-                "regex": r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
+                "regex": r"(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b",
             },
             {
                 "id": "web_http_smuggling_te_cl",
-                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+",
             },
             {
                 "id": "web_http_smuggling_te_te",
-                "regex": r"(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b",
             },
             {
                 "id": "web_http_response_splitting",
@@ -444,15 +464,15 @@ _DEFAULT_RULES: dict[str, Any] = {
             },
             {
                 "id": "web_http_smuggling_cl_te",
-                "regex": r"(?is)\bcontent-length\s*:\s*\d+\s*(?:\\r\\n|\r\n|\n)+\s*transfer-encoding\s*:\s*chunked\b",
+                "regex": r"(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b",
             },
             {
                 "id": "web_http_smuggling_te_cl",
-                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b\s*(?:\\r\\n|\r\n|\n)+\s*content-length\s*:\s*\d+",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*chunked\b[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*content-length\s*:\s*\d+",
             },
             {
                 "id": "web_http_smuggling_te_te",
-                "regex": r"(?is)\btransfer-encoding\s*:\s*(?:[^\r\n,]+,\s*)+chunked\b",
+                "regex": r"(?is)\btransfer-encoding\s*:\s*[^\r\n,]+(?:,[^\r\n,]+)*,\s*chunked\b",
             },
             {
                 "id": "web_http_response_splitting",
