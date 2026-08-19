@@ -704,8 +704,10 @@ def messages_payload_to_responses_payload(
             result["tools"] = converted_tools
     if isinstance(payload.get("stop_sequences"), list) and payload["stop_sequences"]:
         result["stop"] = list(payload["stop_sequences"])
-    if "top_k" in payload:
-        result["top_k"] = payload["top_k"]
+    # Anthropic top_k is deliberately dropped, not forwarded: the Responses API
+    # has no equivalent, and the upstream payload is built from a blacklist
+    # (_GATEWAY_INTERNAL_KEYS), so anything set here reaches the upstream
+    # verbatim and would turn a previously working request into a 400.
     for key in ("request_id", "session_id", "policy", "metadata"):
         if key in payload:
             result[key] = payload[key]

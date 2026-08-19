@@ -376,7 +376,7 @@ def test_load_global_model_map_loads_allowed_models(
     assert "gpt-5.6" in mapper._configured_allowed_models
 
 
-def test_messages_payload_sets_store_false_and_maps_stop_and_top_k() -> None:
+def test_messages_payload_sets_store_false_maps_stop_and_drops_top_k() -> None:
     result = messages_payload_to_responses_payload(
         {
             "model": "claude-sonnet-4.5",
@@ -388,7 +388,8 @@ def test_messages_payload_sets_store_false_and_maps_stop_and_top_k() -> None:
     )
     assert result["store"] is False
     assert result["stop"] == ["END", "STOP"]
-    assert result["top_k"] == 8
+    # The Responses API has no top_k; forwarding it would 400 upstream.
+    assert "top_k" not in result
 
 
 def test_messages_payload_skips_thinking_blocks() -> None:

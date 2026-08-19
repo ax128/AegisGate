@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Messages→Responses 隐私默认与参数保真（P10 + P7 H5）**
   - compat 映射显式设 `store: false`，避免 OpenAI 侧默认持久化对话
-  - `stop_sequences` / `top_k` 分别映射为 `stop` / `top_k`；`thinking` / `redacted_thinking` 块跳过，不再落成 `[NON_TEXT_PART]`
+  - `stop_sequences` 映射为 `stop`；`top_k` 无 Responses 对应参数，显式丢弃而非透传（上游 payload 走黑名单过滤，透传会让原本可用的请求变 400）；`thinking` / `redacted_thinking` 块跳过，不再落成 `[NON_TEXT_PART]`
   - Anthropic `tool_choice` 按表映射到 Responses（`any` → `auto` 并打 tag，**不等于** `required`；`tool`+name → `{type:function,name}`；未知取值 → `auto` + tag）。Responses→Chat 把 flat `{type:function,name}` 转成 Chat 嵌套 `function`
   - Chat→Responses rename 补 `max_completion_tokens→max_output_tokens`；`parallel_tool_calls` 不再当作 Responses-only 从 Chat 方向剥掉
   - **意图确认**：Chat 方向把 `reasoning` 透传给能接受它的上游（如 Azure 变体）；仅当 dict 内全部为 `None` 时仍丢弃空对象
