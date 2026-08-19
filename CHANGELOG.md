@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Web 控制台改用 Apple HIG 设计系统**
+  - 中性色由 `--text` / `--muted` 两级扩展为 **四级 label + 三级 fill + 独立 separator**：标题、正文、次要说明、占位符不再靠字号硬拉开层次
+  - 深色模式补上 **elevation 层级**（页面 `#1C1C1E` / 卡片 `#2C2C2E` / 弹层 `#3A3A3C`）。此前 `--panel: #18181b` 是单层的，模态框与卡片同色，层次全靠边框撑
+  - 语义色改用 Apple 系统色，且深浅两套各自取值：`#0071E3` / `#0A84FF`（accent）、`#248A3D` / `#30D158`、`#B25000` / `#FF9F0A`、`#D70015` / `#FF453A`
+  - 字体改为 `-apple-system` → `SF Pro` → `PingFang SC` 栈；字号走 HIG 阶梯（largeTitle / title2 / title3 / headline / body / callout / footnote / caption），数字统一 `tabular-nums`
+  - 四个控件替换：布尔开关 → **iOS Switch**（51×31 轨道 + 27 滑块 + 弹簧过渡）、视图切换 → **Segmented Control**、表格 → **Inset Grouped List**（整表一张圆角卡片、分隔线左侧内缩）、配置项 → 设置行式布局（标签与控件左右分列）
+  - 按钮分三档：filled（主操作）/ tinted（次要）/ plain（第三级），破坏性操作用 tinted red。移除渐变填充、hover 位移与 `brightness()` 滤镜——Apple 的按压反馈是「变淡并回落」而非「浮起」
+  - 动效统一到一条缓动曲线 `cubic-bezier(.32,.72,0,1)`；模态在窄屏改为从底部滑入的 sheet；`prefers-reduced-motion` 保护保留
+  - 材质分三档（thin / regular / thick），顶栏模糊由 16px 提升到 30px 并加 `saturate(180%)`，模态遮罩改用材质而非纯黑蒙层
+  - 圆角与间距成体系：控件 10 / 卡片 12 / 面板 16 / 模态 20；间距走 8pt 阶梯
+  - 移除页面背景的靛蓝径向渐变，改为纯粹的 grouped 底色 —— 深度由 elevation 提供
+  - 既有 CSS 变量名（`--bg` `--panel` `--line` `--text` `--muted` …）全部保留为新 token 的别名，本文件其余规则无需改动
+
+- **可访问性修复**
+  - 布尔开关补 `role="switch"` + `aria-checked`，状态不再只靠颜色（滑块位移同时表达）
+  - 侧栏当前项补 `aria-current="page"`
+  - 全部表头补 `scope="col"`（含 JS 动态生成的表头）
+  - 分段控件补 `role="tablist"` / `role="tab"` / `aria-selected`
+  - 所有可聚焦控件统一 `:focus-visible` 焦点环
+
 ### Added
 
 - **Web 控制台配置中心：全字段覆盖与「需重启」标注**

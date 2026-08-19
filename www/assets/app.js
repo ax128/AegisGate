@@ -225,15 +225,19 @@ function createBoolButton(item, card) {
   button.type = "button";
   button.id = fieldId(item);
   button.className = `bool-button ${item.value ? "on" : "off"}`;
-  button.textContent = item.value ? "已开启" : "已关闭";
+  // A switch announces its own state through role + aria-checked, so the old
+  // "已开启 / 已关闭" text would be read out twice. The label comes from the
+  // field name instead.
   button.setAttribute("role", "switch");
   button.setAttribute("aria-checked", item.value ? "true" : "false");
+  button.setAttribute("aria-label", item.label);
+  button.title = item.value ? "已开启" : "已关闭";
   button.addEventListener("click", () => {
     const next = !findField(item.field).value;
     updateFieldValue(item.field, next, card);
     button.className = `bool-button ${next ? "on" : "off"}`;
-    button.textContent = next ? "已开启" : "已关闭";
     button.setAttribute("aria-checked", next ? "true" : "false");
+    button.title = next ? "已开启" : "已关闭";
   });
   return button;
 }
@@ -470,7 +474,11 @@ async function saveSection(section, statusId) {
 
 function setActiveNav(hash) {
   document.querySelectorAll(".nav-item").forEach((link) => {
-    link.classList.toggle("active", link.getAttribute("href") === hash);
+    const active = link.getAttribute("href") === hash;
+    link.classList.toggle("active", active);
+    // Colour alone does not tell a screen reader which section is showing.
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   });
 }
 
@@ -1003,8 +1011,8 @@ async function loadRules(section) {
   const showKind = section === "command_patterns";
   if (thead) {
     thead.innerHTML = showKind
-      ? `<tr><th>ID</th><th>Regex</th><th>类型</th><th>操作</th></tr>`
-      : `<tr><th>ID</th><th>Regex</th><th>操作</th></tr>`;
+      ? `<tr><th scope="col">ID</th><th scope="col">Regex</th><th scope="col">类型</th><th scope="col">操作</th></tr>`
+      : `<tr><th scope="col">ID</th><th scope="col">Regex</th><th scope="col">操作</th></tr>`;
   }
   try {
     const data = await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`);
@@ -1166,8 +1174,12 @@ async function submitRuleModal() {
 function bindRulesUI() {
   document.querySelectorAll("[data-rules-section]").forEach((tab) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll("[data-rules-section]").forEach((t) => t.classList.remove("active"));
+      document.querySelectorAll("[data-rules-section]").forEach((t) => {
+        t.classList.remove("active");
+        t.setAttribute("aria-selected", "false");
+      });
       tab.classList.add("active");
+      tab.setAttribute("aria-selected", "true");
       currentRulesSection = tab.dataset.rulesSection;
       loadRules(currentRulesSection);
     });
@@ -1360,7 +1372,7 @@ async function loadStats() {
     var rows = currentStatsView === "hourly" ? data.hourly : data.daily;
     var timeKey = currentStatsView === "hourly" ? "hour" : "date";
     var thead = document.getElementById("stats-thead");
-    if (thead) thead.innerHTML = "<tr><th>" + (currentStatsView === "hourly" ? "小时" : "日期") + "</th><th>请求</th><th>脱敏</th><th>危险替换</th><th>拦截</th><th>直通</th></tr>";
+    if (thead) thead.innerHTML = '<tr><th scope="col">' + (currentStatsView === "hourly" ? "小时" : "日期") + '</th><th scope="col">请求</th><th scope="col">脱敏</th><th scope="col">危险替换</th><th scope="col">拦截</th><th scope="col">直通</th></tr>';
 
     if (!rows || !rows.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty">暂无数据</td></tr>';
@@ -1388,7 +1400,11 @@ async function loadStats() {
 function bindStatsUI() {
   document.querySelectorAll("[data-stats-view]").forEach(function(tab) {
     tab.addEventListener("click", function() {
-      document.querySelectorAll("[data-stats-view]").forEach(function(t) { t.classList.remove("active"); });
+      document.querySelectorAll("[data-stats-view]").forEach(function(t) {
+        t.classList.remove("active");
+        t.setAttribute("aria-selected", "false");
+      });
+      tab.setAttribute("aria-selected", "true");
       tab.classList.add("active");
       currentStatsView = tab.dataset.statsView;
       loadStats();
