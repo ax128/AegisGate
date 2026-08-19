@@ -115,6 +115,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **stats 优雅关闭死锁（A4 / P6）**
+  - `_persist_async` 在队列满时 `get_nowait()` 丢弃旧快照却不调用 `task_done()`，`Queue` 的 unfinished 计数永久 +1，`flush()` 里的 `join()` 永不返回，lifespan 关闭挂死
+  - 丢弃项出队后立即 `task_done()`；与 worker `finally` 里的 `task_done()` 不重叠（worker 从未拿到被丢弃的项）
+
 - **上游 400 错误：tool name 包含非法字符**
   - OpenAI Responses API 要求 `input[].name` 匹配 `^[a-zA-Z0-9_-]+`，包含中文等字符时被拒绝
   - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）
