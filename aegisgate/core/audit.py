@@ -50,11 +50,20 @@ def _register_shutdown_handler() -> None:
     _AUDIT_ATEXIT_REGISTERED = True
 
 
-def _ensure_worker() -> None:
+def _get_audit_worker() -> threading.Thread | None:
+    return _AUDIT_WORKER
+
+
+def _set_audit_worker(worker: threading.Thread) -> None:
     global _AUDIT_WORKER
+    _AUDIT_WORKER = worker
+
+
+def _ensure_worker() -> None:
     _register_shutdown_handler()
-    _AUDIT_WORKER = ensure_worker_thread(
-        _AUDIT_WORKER,
+    ensure_worker_thread(
+        _get_audit_worker,
+        _set_audit_worker,
         lock=_AUDIT_LOCK,
         build_thread=lambda: threading.Thread(
             target=_worker_loop,

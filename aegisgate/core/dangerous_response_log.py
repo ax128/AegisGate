@@ -277,11 +277,20 @@ def _register_shutdown_handler() -> None:
     _LOG_ATEXIT_REGISTERED = True
 
 
-def _ensure_worker() -> None:
+def _get_log_worker() -> threading.Thread | None:
+    return _LOG_WORKER
+
+
+def _set_log_worker(worker: threading.Thread) -> None:
     global _LOG_WORKER
+    _LOG_WORKER = worker
+
+
+def _ensure_worker() -> None:
     _register_shutdown_handler()
-    _LOG_WORKER = ensure_worker_thread(
-        _LOG_WORKER,
+    ensure_worker_thread(
+        _get_log_worker,
+        _set_log_worker,
         lock=_LOG_WORKER_LOCK,
         build_thread=lambda: threading.Thread(
             target=_worker_loop,

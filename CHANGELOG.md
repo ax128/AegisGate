@@ -119,6 +119,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `_persist_async` 在队列满时 `get_nowait()` 丢弃旧快照却不调用 `task_done()`，`Queue` 的 unfinished 计数永久 +1，`flush()` 里的 `join()` 永不返回，lifespan 关闭挂死
   - 丢弃项出队后立即 `task_done()`；与 worker `finally` 里的 `task_done()` 不重叠（worker 从未拿到被丢弃的项）
 
+- **后台 worker 双启动竞态（A5 / P9）**
+  - `ensure_worker_thread` 原先按值接收 `worker`，锁内复查的是过期局部值；并发首启可拉起两个非 daemon 线程，关闭只发一个哨兵，另一个永阻塞在 `queue.get()`
+  - 改为在锁内通过 getter/setter 读写当前全局（或实例）持有的线程，赋值发生在 `start()` 之后、放锁之前
+
 - **上游 400 错误：tool name 包含非法字符**
   - OpenAI Responses API 要求 `input[].name` 匹配 `^[a-zA-Z0-9_-]+`，包含中文等字符时被拒绝
   - 在 `_sanitize_responses_input_for_upstream` 中对 `function_call` / `function` / `function_call_output` 类型的 `name` 字段做合规清洗（非法字符替换为 `_`）
