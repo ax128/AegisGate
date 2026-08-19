@@ -181,6 +181,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 删除 `.gitignore` 对 `aegisgate/tests/*` 的白名单机制（此前新增测试默认被忽略，零测试仍绿灯）。Detect tests 在找不到 `test_*.py` 时直接失败
   - 把 `OPTIMIZATION_PLAN.md` 列入内部报告忽略段，避免审计方案随 `git add -A` 进入公开仓库
 
+### Added
+
+- **流式回归缺口补齐（A7 / P14 前置）**
+  - 扩展既有 `test_streaming_router.py`，补「独立终止帧 + 末块危险载荷」（chat/responses 标 xfail 留给 B1）以及 generic 五形态基线；messages 终止帧按代码现状写为绿（并不刷空 holdback）
+  - 记录 messages / generic 在 EOF 无 `[DONE]` 时没有恢复分支的当前行为，供后续 B9' 立项
+
 ### Fixed
 
 - **stats 优雅关闭死锁（A4 / P6）**

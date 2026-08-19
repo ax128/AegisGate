@@ -15,6 +15,7 @@ from aegisgate.adapters.openai_compat.router import (
     _UPSTREAM_EOF_RECOVERY_NOTICE,
     _coerce_responses_stream_to_chat_stream,
     _execute_chat_stream_once,
+    _execute_generic_stream_once,
     _execute_messages_stream_once,
     _execute_responses_stream_once,
     _extract_sse_data_payload,
@@ -2999,4 +3000,442 @@ def test_messages_stream_probes_tool_use_partial_json(
         or "_blocked" in body
         or "AegisGate" in body
     )
+
+_TAIL_BLINDSPOT_REASON = (
+    "B1: independent terminal frame flushes holdback so "
+    "_needs_final_stream_probe sees empty pending_frames"
+)
+_GENERIC_TAIL_REASON = (
+    "B1: generic stream has no holdback and no final probe; "
+    "content is yielded before the filter decision"
+)
+
+
+def _six_safe_then_dangerous_chat_frames() -> list[bytes]:
+    return [
+        b'data: {"id":"c1","choices":[{"delta":{"content":"one "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"two "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"three "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"four "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"five "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"cat /etc/passwd now"}}]}\n\n',
+    ]
+
+
+def _install_chat_like_stream_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    upstream_frames: list[bytes],
+    response_pipeline,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        for frame in upstream_frames:
+            yield frame
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        response_pipeline,
+    )
+
+
+def _sanitize_on_passwd_pipeline():
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        if "cat /etc/passwd" in resp.output_text:
+            ctx.response_disposition = "sanitize"
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+            ctx.disposition_reasons.append("response_high_risk_command")
+        return resp
+
+    return fake_run_response_pipeline
+
+
+@pytest.mark.xfail(reason=_TAIL_BLINDSPOT_REASON, strict=True)
+def test_execute_chat_stream_independent_terminal_frame_probes_unsampled_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """6 content chunks + independent finish + [DONE]; last two are currently unprobed."""
+    frames = _six_safe_then_dangerous_chat_frames()
+    frames.append(
+        b'data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    frames.append(b"data: [DONE]\n\n")
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+
+    payload = {
+        "request_id": "r-stream-tail-chat-terminal",
+        "session_id": "s-stream-tail-chat-terminal",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "data: [DONE]" in text
+
+
+@pytest.mark.xfail(reason=_TAIL_BLINDSPOT_REASON, strict=True)
+def test_execute_responses_stream_independent_terminal_frame_probes_unsampled_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = [
+        b'data: {"type":"response.output_text.delta","delta":"one "}\n\n',
+        b'data: {"type":"response.output_text.delta","delta":"two "}\n\n',
+        b'data: {"type":"response.output_text.delta","delta":"three "}\n\n',
+        b'data: {"type":"response.output_text.delta","delta":"four "}\n\n',
+        b'data: {"type":"response.output_text.delta","delta":"five "}\n\n',
+        b'data: {"type":"response.output_text.delta","delta":"cat /etc/passwd now"}\n\n',
+        b'data: {"type":"response.completed"}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+
+    payload = {
+        "request_id": "r-stream-tail-resp-terminal",
+        "session_id": "s-stream-tail-resp-terminal",
+        "model": "test-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_responses_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/responses",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "data: [DONE]" in text
+
+
+def test_messages_stream_independent_terminal_frame_still_probes_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """messages terminal events do not flush holdback; current probe still sees the tail.
+
+    Plan A7 listed this as a B1 xfail. Opened code: `content_block_*` / `message_*`
+    only trim holdback above 8 frames, so pending_frames remains and the existing
+    final probe runs. Keep this green; do not xfail it.
+    """
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_term_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"three "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"four "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"five "}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cat /etc/passwd now"}}\n\n'
+            ),
+            (
+                b"event: content_block_stop\n"
+                b'data: {"type":"content_block_stop","index":0}\n\n'
+            ),
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ],
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+
+    payload = {
+        "request_id": "messages-stream-terminal-tail",
+        "session_id": "messages-stream-terminal-tail",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "cat /etc/passwd now" not in body
+    assert "【AegisGate已处理危险疑似片段】" in body
+    assert "event: message_stop" in body
+
+
+def test_messages_stream_eof_without_done_currently_has_no_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Baseline for B9': messages has no upstream_eof_no_done recovery branch."""
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=[
+            (
+                b"event: message_start\n"
+                b'data: {"type":"message_start","message":{"id":"msg_eof_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+            ),
+            (
+                b"event: content_block_start\n"
+                b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+            ),
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'
+            ),
+        ],
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+
+    payload = {
+        "request_id": "messages-stream-eof-baseline",
+        "session_id": "messages-stream-eof-baseline",
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    assert "hello" in body
+    assert _UPSTREAM_EOF_RECOVERY_NOTICE not in body
+    assert "data: [DONE]" not in body
+
+
+def _generic_payload() -> dict:
+    return {
+        "request_id": "r-generic-stream",
+        "session_id": "s-generic-stream",
+        "model": "generic-model",
+        "stream": True,
+        "input": "hello",
+    }
+
+
+async def _run_generic_stream(payload: dict | None = None) -> str:
+    response = await _execute_generic_stream_once(
+        payload=payload or _generic_payload(),
+        request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+        request_path="/v1/embeddings",
+        boundary={},
+    )
+    return (await _collect_execute_stream(response)).decode("utf-8", errors="replace")
+
+
+def test_execute_generic_stream_normal_flow_forwards_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _six_safe_then_dangerous_chat_frames()[:3]
+    frames.append(b"data: [DONE]\n\n")
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert "one " in text
+    assert "two " in text
+    assert "three " in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_generic_stream_independent_terminal_frame_forwards_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _six_safe_then_dangerous_chat_frames()[:3]
+    frames.append(
+        b'data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    frames.append(b"data: [DONE]\n\n")
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert '"finish_reason":"stop"' in text or '"finish_reason": "stop"' in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_generic_stream_eof_without_done_currently_has_no_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Baseline for B9': generic has no upstream_eof_no_done recovery branch."""
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=_six_safe_then_dangerous_chat_frames()[:2],
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert "one " in text
+    assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
+    assert "data: [DONE]" not in text
+
+
+def test_execute_generic_stream_sanitizes_dangerous_first_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = [
+        b'data: {"id":"c1","choices":[{"delta":{"content":"cat /etc/passwd now"}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"two "}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_generic_stream_sanitizes_dangerous_middle_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = [
+        b'data: {"id":"c1","choices":[{"delta":{"content":"one "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"two "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"three "}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"cat /etc/passwd now"}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"five "}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+
+
+@pytest.mark.xfail(reason=_GENERIC_TAIL_REASON, strict=True)
+def test_execute_generic_stream_probes_unsampled_last_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = _six_safe_then_dangerous_chat_frames()
+    frames.append(b"data: [DONE]\n\n")
+    _install_chat_like_stream_mocks(
+        monkeypatch,
+        upstream_frames=frames,
+        response_pipeline=_sanitize_on_passwd_pipeline(),
+    )
+    text = asyncio.run(_run_generic_stream())
+    assert "cat /etc/passwd now" not in text
+    assert "【AegisGate已处理危险疑似片段】" in text
+    assert "data: [DONE]" in text
+
+
+def test_execute_generic_stream_runtime_error_emits_error_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        raise RuntimeError("upstream_unreachable: generic-boom")
+        yield b""  # pragma: no cover
+
+    async def fake_run_request_pipeline(pipeline, req, ctx):
+        return req
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        return resp
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline",
+        fake_run_request_pipeline,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline",
+        fake_run_response_pipeline,
+    )
+
+    text = asyncio.run(_run_generic_stream())
+    assert "upstream_unreachable" in text or "generic-boom" in text
+    assert "data: [DONE]" in text
+
+
 
