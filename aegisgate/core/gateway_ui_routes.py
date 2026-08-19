@@ -472,21 +472,121 @@ def register_ui_routes(app: FastAPI) -> None:
     # Security rules YAML CRUD
     # ------------------------------------------------------------------
 
-    _RULES_SECTIONS: dict[str, list[str]] = {
-        "pii_patterns": ["redaction", "pii_patterns"],
-        "tool_injection": ["injection_detector", "tool_call_injection_patterns"],
-        "command_patterns": ["anomaly_detector", "command_patterns"],
-        "direct_patterns": ["injection_detector", "direct_patterns"],
-        "system_exfil_patterns": ["injection_detector", "system_exfil_patterns"],
+    # Every editable rule group in security_filters.yaml, addressed by its dotted
+    # path. Discovery below picks up anything not listed here, so a new group in
+    # the YAML shows up in the console without a code change; the seed exists so
+    # a group whose last rule was deleted keeps its label and stays editable.
+    _RULE_SECTION_LABELS: dict[str, str] = {
+        "redaction.pii_patterns": "PII 脱敏规则",
+        "restoration.suspicious_context_patterns": "还原可疑上下文",
+        "untrusted_content_guard.instructional_patterns": "不可信内容指令",
+        "injection_detector.direct_patterns": "直接注入规则",
+        "injection_detector.system_exfil_patterns": "提示词窃取规则",
+        "injection_detector.html_markdown_patterns": "HTML/Markdown 注入",
+        "injection_detector.remote_content_patterns": "远程内容注入",
+        "injection_detector.indirect_injection_patterns": "间接注入规则",
+        "injection_detector.remote_content_instruction_patterns": "远程内容指令",
+        "injection_detector.tool_call_injection_patterns": "工具调用注入规则",
+        "injection_detector.spam_noise_patterns": "垃圾噪声规则",
+        "rag_poison_guard.ingestion_poison_patterns": "RAG 入库投毒",
+        "rag_poison_guard.retrieval_poison_patterns": "RAG 检索投毒",
+        "rag_poison_guard.propagation_patterns": "RAG 扩散传播",
+        "privilege_guard.blocked_patterns": "越权阻断规则",
+        "anomaly_detector.command_patterns": "异常命令规则",
+        "request_sanitizer.strong_intent_patterns": "请求强意图规则",
+        "request_sanitizer.leak_check_patterns": "请求泄露检查",
+        "request_sanitizer.shape_anomaly_patterns": "请求形态异常",
+        "request_sanitizer.command_patterns": "请求命令规则",
+        "request_sanitizer.encoded_payload_patterns": "请求编码载荷",
+        "sanitizer.command_patterns": "响应命令规则",
+        "sanitizer.force_block_command_patterns": "强制阻断命令",
+        "sanitizer.encoded_payload_patterns": "响应编码载荷",
+        "sanitizer.system_leak_patterns": "系统信息泄露",
+        "sanitizer.unsafe_markup_patterns": "不安全标记",
+        "sanitizer.unsafe_uri_patterns": "不安全 URI",
+        "tool_call_guard.parameter_rules": "工具参数规则",
+        "tool_call_guard.dangerous_param_patterns": "危险参数规则",
+        "tool_call_guard.semantic_approval_patterns": "语义放行规则",
+        "post_restore_guard.lure_patterns": "还原后诱导规则",
+        "post_restore_guard.secret_patterns": "还原后密钥规则",
     }
 
-    _RULES_SECTION_LABELS: dict[str, str] = {
-        "pii_patterns": "PII 脱敏规则",
-        "tool_injection": "工具调用注入规则",
-        "command_patterns": "异常命令规则",
-        "direct_patterns": "直接注入规则",
-        "system_exfil_patterns": "提示词窃取规则",
+    _RULE_FILTER_LABELS: dict[str, str] = {
+        "redaction": "脱敏",
+        "restoration": "还原",
+        "untrusted_content_guard": "不可信内容防护",
+        "injection_detector": "注入检测",
+        "rag_poison_guard": "RAG 投毒防护",
+        "privilege_guard": "越权防护",
+        "anomaly_detector": "异常检测",
+        "request_sanitizer": "请求净化",
+        "sanitizer": "响应净化",
+        "tool_call_guard": "工具调用防护",
+        "post_restore_guard": "还原后检查",
     }
+
+    # Section ids the console used before dotted paths existed. Kept so bookmarked
+    # URLs and existing API clients keep working.
+    _LEGACY_SECTION_ALIASES: dict[str, str] = {
+        "pii_patterns": "redaction.pii_patterns",
+        "tool_injection": "injection_detector.tool_call_injection_patterns",
+        "command_patterns": "anomaly_detector.command_patterns",
+        "direct_patterns": "injection_detector.direct_patterns",
+        "system_exfil_patterns": "injection_detector.system_exfil_patterns",
+    }
+
+    # Groups whose items are keyed by something other than `id` (parameter_rules
+    # uses tool+param), so the id-based CRUD below cannot address them. Listed and
+    # viewable, not editable.
+    _READONLY_SECTIONS: frozenset[str] = frozenset({"tool_call_guard.parameter_rules"})
+
+    # Per-rule metadata the editor may write besides id/regex. Anything else in an
+    # existing rule is preserved untouched on update.
+    _RULE_EXTRA_STRING_FIELDS: frozenset[str] = frozenset({"kind", "category", "tool", "param"})
+
+    def _looks_like_rule_list(value: object) -> bool:
+        if not isinstance(value, list) or not value:
+            return False
+        return all(isinstance(entry, dict) for entry in value) and any(
+            "regex" in entry or "id" in entry for entry in value
+        )
+
+    def _discover_rule_sections(data: dict) -> dict[str, dict[str, Any]]:
+        """Map every editable rule group in *data* to its dotted section id.
+
+        Walks the YAML instead of hard-coding a list, so adding a rule group to
+        security_filters.yaml surfaces it in the console with no code change. The
+        returned ids are the only values the CRUD routes accept, so a dotted path
+        from a request can never reach an arbitrary node.
+        """
+        found: dict[str, dict[str, Any]] = {}
+
+        def walk(node: object, path: list[str]) -> None:
+            if not isinstance(node, dict):
+                return
+            for key, value in node.items():
+                key = str(key)
+                current = path + [key]
+                if _looks_like_rule_list(value):
+                    found[".".join(current)] = {"path": current, "count": len(value)}
+                elif isinstance(value, dict):
+                    walk(value, current)
+
+        walk(data, [])
+        # Seed known groups so one whose rules were all deleted does not vanish.
+        for section_id in _RULE_SECTION_LABELS:
+            found.setdefault(section_id, {"path": section_id.split("."), "count": 0})
+
+        for section_id, info in found.items():
+            filter_key = info["path"][0]
+            info["id"] = section_id
+            info["label"] = _RULE_SECTION_LABELS.get(
+                section_id, section_id.rsplit(".", 1)[-1].replace("_", " ")
+            )
+            info["filter"] = filter_key
+            info["filter_label"] = _RULE_FILTER_LABELS.get(filter_key, filter_key)
+            info["readonly"] = section_id in _READONLY_SECTIONS
+        return found
 
     def _resolve_rules_file() -> Path:
         p = Path(settings.security_rules_path)
@@ -514,23 +614,27 @@ def register_ui_routes(app: FastAPI) -> None:
         except Exception:
             pass
 
-    def _get_section_list(data: dict, section_key: str) -> list:
-        keys = _RULES_SECTIONS[section_key]
+    def _section_info(data: dict, section: str) -> dict[str, Any] | None:
+        """Resolve a section id (dotted or legacy alias) against *data*."""
+        sections = _discover_rule_sections(data)
+        resolved = _LEGACY_SECTION_ALIASES.get(section, section)
+        return sections.get(resolved)
+
+    def _get_section_list(data: dict, path: list[str]) -> list:
         node: Any = data
-        for k in keys:
+        for key in path:
             if not isinstance(node, dict):
                 return []
-            node = node.get(k) or []
+            node = node.get(key) or []
         return node if isinstance(node, list) else []
 
-    def _set_section_list(data: dict, section_key: str, items: list) -> None:
-        keys = _RULES_SECTIONS[section_key]
+    def _set_section_list(data: dict, path: list[str], items: list) -> None:
         node = data
-        for k in keys[:-1]:
-            if k not in node:
-                node[k] = {}
-            node = node[k]
-        node[keys[-1]] = items
+        for key in path[:-1]:
+            if key not in node or not isinstance(node[key], dict):
+                node[key] = {}
+            node = node[key]
+        node[path[-1]] = items
 
     def _required_rule_regex(body: dict[str, Any]) -> str | None:
         regex = _string_field(body.get("regex"))
@@ -546,23 +650,72 @@ def register_ui_routes(app: FastAPI) -> None:
             )
         return None
 
+    def _unknown_section_response(section: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=404, content={"error": "unknown_section", "detail": section}
+        )
+
+    def _readonly_section_response(section: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "section_readonly",
+                "detail": f"规则组 '{section}' 以 tool+param 为标识，暂不支持通过控制台编辑",
+            },
+        )
+
+    def _apply_rule_extras(target: dict, body: dict[str, Any]) -> None:
+        """Copy the editable metadata fields present in *body* onto *target*."""
+        for key in _RULE_EXTRA_STRING_FIELDS:
+            if key in body:
+                target[key] = str(body[key])
+        if isinstance(body.get("patterns"), list):
+            target["patterns"] = body["patterns"]
+
     @app.get("/__ui__/api/rules")
     async def local_ui_rules_sections() -> JSONResponse:
-        sections = [{"id": k, "label": v} for k, v in _RULES_SECTION_LABELS.items()]
-        return JSONResponse(content={"sections": sections})
+        data = _load_rules_yaml()
+        discovered = _discover_rule_sections(data)
+        sections = [
+            {
+                "id": info["id"],
+                "label": info["label"],
+                "filter": info["filter"],
+                "filter_label": info["filter_label"],
+                "count": len(_get_section_list(data, info["path"])),
+                "readonly": info["readonly"],
+            }
+            for info in discovered.values()
+        ]
+        sections.sort(key=lambda s: (s["filter"], s["id"]))
+        return JSONResponse(content={
+            "sections": sections,
+            "total_rules": sum(s["count"] for s in sections),
+            "aliases": dict(_LEGACY_SECTION_ALIASES),
+        })
 
     @app.get("/__ui__/api/rules/{section}")
     async def local_ui_rules_get(section: str) -> JSONResponse:
-        if section not in _RULES_SECTIONS:
-            return JSONResponse(status_code=404, content={"error": "unknown_section"})
         data = _load_rules_yaml()
-        items = _get_section_list(data, section)
-        return JSONResponse(content={"section": section, "items": items})
+        info = _section_info(data, section)
+        if info is None:
+            return _unknown_section_response(section)
+        items = _get_section_list(data, info["path"])
+        return JSONResponse(content={
+            "section": info["id"],
+            "label": info["label"],
+            "readonly": info["readonly"],
+            "items": items,
+        })
 
     @app.post("/__ui__/api/rules/{section}")
     async def local_ui_rules_add(section: str, request: Request) -> JSONResponse:
-        if section not in _RULES_SECTIONS:
-            return JSONResponse(status_code=404, content={"error": "unknown_section"})
+        data = _load_rules_yaml()
+        info = _section_info(data, section)
+        if info is None:
+            return _unknown_section_response(section)
+        if info["readonly"]:
+            return _readonly_section_response(info["id"])
         try:
             body = await request.json()
         except Exception:
@@ -576,30 +729,29 @@ def register_ui_routes(app: FastAPI) -> None:
         invalid_regex = _invalid_regex_response(regex)
         if invalid_regex is not None:
             return invalid_regex
-        data = _load_rules_yaml()
-        items = _get_section_list(data, section)
+        items = _get_section_list(data, info["path"])
         if any(str(item.get("id", "")) == rule_id for item in items):
             return JSONResponse(status_code=409, content={"error": "id_exists", "detail": f"规则 id '{rule_id}' 已存在"})
         new_item: dict = {"id": rule_id, "regex": regex}
-        if "kind" in body:
-            new_item["kind"] = str(body["kind"])
-        if "patterns" in body and isinstance(body["patterns"], list):
-            new_item["patterns"] = body["patterns"]
+        _apply_rule_extras(new_item, body)
         items.append(new_item)
-        _set_section_list(data, section, items)
+        _set_section_list(data, info["path"], items)
         _save_rules_yaml(data)
-        return JSONResponse(status_code=201, content={"ok": True, "item": new_item})
+        return JSONResponse(status_code=201, content={"ok": True, "section": info["id"], "item": new_item})
 
     @app.patch("/__ui__/api/rules/{section}/{rule_id}")
     async def local_ui_rules_update(section: str, rule_id: str, request: Request) -> JSONResponse:
-        if section not in _RULES_SECTIONS:
-            return JSONResponse(status_code=404, content={"error": "unknown_section"})
+        data = _load_rules_yaml()
+        info = _section_info(data, section)
+        if info is None:
+            return _unknown_section_response(section)
+        if info["readonly"]:
+            return _readonly_section_response(info["id"])
         try:
             body = await request.json()
         except Exception:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
-        data = _load_rules_yaml()
-        items = _get_section_list(data, section)
+        items = _get_section_list(data, info["path"])
         for item in items:
             if str(item.get("id", "")) == rule_id:
                 if "regex" in body:
@@ -610,27 +762,66 @@ def register_ui_routes(app: FastAPI) -> None:
                     if invalid_regex is not None:
                         return invalid_regex
                     item["regex"] = regex
-                if "kind" in body:
-                    item["kind"] = str(body["kind"])
-                if "patterns" in body and isinstance(body["patterns"], list):
-                    item["patterns"] = body["patterns"]
-                _set_section_list(data, section, items)
+                _apply_rule_extras(item, body)
+                _set_section_list(data, info["path"], items)
                 _save_rules_yaml(data)
-                return JSONResponse(content={"ok": True, "item": item})
+                return JSONResponse(content={"ok": True, "section": info["id"], "item": item})
         return JSONResponse(status_code=404, content={"error": "rule_not_found"})
 
     @app.delete("/__ui__/api/rules/{section}/{rule_id}")
     async def local_ui_rules_delete(section: str, rule_id: str) -> JSONResponse:
-        if section not in _RULES_SECTIONS:
-            return JSONResponse(status_code=404, content={"error": "unknown_section"})
         data = _load_rules_yaml()
-        items = _get_section_list(data, section)
+        info = _section_info(data, section)
+        if info is None:
+            return _unknown_section_response(section)
+        if info["readonly"]:
+            return _readonly_section_response(info["id"])
+        items = _get_section_list(data, info["path"])
         new_items = [item for item in items if str(item.get("id", "")) != rule_id]
         if len(new_items) == len(items):
             return JSONResponse(status_code=404, content={"error": "rule_not_found"})
-        _set_section_list(data, section, new_items)
+        _set_section_list(data, info["path"], new_items)
         _save_rules_yaml(data)
-        return JSONResponse(content={"ok": True})
+        return JSONResponse(content={"ok": True, "section": info["id"]})
+
+    @app.post("/__ui__/api/rules_test")
+    async def local_ui_rules_test(request: Request) -> JSONResponse:
+        """Run a candidate regex against sample text and report the hit spans.
+
+        Matching happens in a killable child process: a pattern typed here is a
+        very plausible source of catastrophic backtracking, and reporting the
+        timeout is more useful to the author than hanging a worker.
+        """
+        from aegisgate.core.regex_probe import (
+            ProbeInputError,
+            normalize_probe_input,
+            probe,
+        )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+        try:
+            regex, samples = normalize_probe_input(body.get("regex"), body.get("samples"))
+        except ProbeInputError as exc:
+            return JSONResponse(status_code=400, content={"error": "invalid_probe_input", "detail": str(exc)})
+
+        outcome = await asyncio.to_thread(probe, regex, samples)
+        if outcome.get("error"):
+            return JSONResponse(status_code=400, content={"error": "probe_failed", "detail": outcome["error"]})
+        if outcome.get("timed_out"):
+            return JSONResponse(content={
+                "ok": True,
+                "timed_out": True,
+                "timeout_seconds": outcome["timeout_seconds"],
+                "detail": (
+                    f"正则在 {outcome['timeout_seconds']} 秒内未跑完，极可能存在灾难性回溯，"
+                    "不建议保存"
+                ),
+                "results": [],
+            })
+        return JSONResponse(content={"ok": True, "timed_out": False, "results": outcome["results"]})
 
     @app.get("/__ui__/api/rules_action_map")
     async def local_ui_action_map_get() -> JSONResponse:

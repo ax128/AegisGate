@@ -769,11 +769,119 @@ bindRedactUI();
 
 // ─── Security Rules ───────────────────────────
 
-let currentRulesSection = "pii_patterns";
+// ─── Security Rules ────────────────────────────
+// Sections come from /__ui__/api/rules, which discovers them by walking
+// security_filters.yaml — adding a rule group to the YAML surfaces it here with
+// no change to this file.
+
+let currentRulesSection = "";
+let currentRulesReadonly = false;
 let actionMapState = {};
+let rulesSectionIndex = [];
+
+const ACTION_MAP_SECTION = "action_map";
+
+function renderRuleSectionList(sections, query) {
+  const host = document.getElementById("rules-sections");
+  if (!host) return;
+  const needle = String(query || "").trim().toLowerCase();
+  host.innerHTML = "";
+
+  const byFilter = new Map();
+  sections.forEach((section) => {
+    if (needle && !`${section.label} ${section.id}`.toLowerCase().includes(needle)) return;
+    if (!byFilter.has(section.filter)) byFilter.set(section.filter, []);
+    byFilter.get(section.filter).push(section);
+  });
+
+  byFilter.forEach((group, filterKey) => {
+    const wrap = document.createElement("div");
+    wrap.className = "rules-filter-group";
+    const total = group.reduce((sum, s) => sum + s.count, 0);
+    wrap.innerHTML = `<div class="rules-filter-title">${escapeHtml(group[0].filter_label || filterKey)}<span>${total}</span></div>`;
+    group.forEach((section) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `rules-section-item${section.id === currentRulesSection ? " active" : ""}`;
+      button.dataset.rulesSection = section.id;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", section.id === currentRulesSection ? "true" : "false");
+      button.innerHTML =
+        `<span class="rules-section-name">${escapeHtml(section.label)}` +
+        (section.readonly ? '<span class="rules-readonly-tag">只读</span>' : "") +
+        `</span><span class="rules-section-count">${section.count}</span>`;
+      button.addEventListener("click", () => selectRulesSection(section.id));
+      wrap.appendChild(button);
+    });
+    host.appendChild(wrap);
+  });
+
+  const actionMap = document.createElement("div");
+  actionMap.className = "rules-filter-group";
+  actionMap.innerHTML = '<div class="rules-filter-title">处置<span></span></div>';
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `rules-section-item${currentRulesSection === ACTION_MAP_SECTION ? " active" : ""}`;
+  button.dataset.rulesSection = ACTION_MAP_SECTION;
+  button.setAttribute("role", "tab");
+  button.innerHTML = '<span class="rules-section-name">动作映射</span>';
+  button.addEventListener("click", () => selectRulesSection(ACTION_MAP_SECTION));
+  actionMap.appendChild(button);
+  host.appendChild(actionMap);
+
+  if (!host.children.length) {
+    host.innerHTML = '<p class="empty-note">没有匹配的规则组</p>';
+  }
+}
+
+function selectRulesSection(sectionId) {
+  currentRulesSection = sectionId;
+  document.querySelectorAll("[data-rules-section]").forEach((node) => {
+    const active = node.dataset.rulesSection === sectionId;
+    node.classList.toggle("active", active);
+    node.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  const search = document.getElementById("rules-search");
+  if (search) search.value = "";
+  loadRules(sectionId);
+}
+
+async function loadRuleSections(preferredSection) {
+  try {
+    const data = await fetchJson("/__ui__/api/rules");
+    rulesSectionIndex = Array.isArray(data.sections) ? data.sections : [];
+    const fallback = rulesSectionIndex.length ? rulesSectionIndex[0].id : ACTION_MAP_SECTION;
+    const target = preferredSection
+      || (rulesSectionIndex.some((s) => s.id === currentRulesSection) ? currentRulesSection : null)
+      || "redaction.pii_patterns";
+    currentRulesSection = rulesSectionIndex.some((s) => s.id === target) ? target : fallback;
+    renderRuleSectionList(rulesSectionIndex, "");
+    await loadRules(currentRulesSection);
+  } catch (err) {
+    const host = document.getElementById("rules-sections");
+    if (host) host.innerHTML = `<p class="error-note">规则组加载失败: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function filterRulesTable(query) {
+  const needle = String(query || "").trim().toLowerCase();
+  const tbody = document.getElementById("rules-tbody");
+  const countEl = document.getElementById("rules-count");
+  if (!tbody) return;
+  let visible = 0;
+  tbody.querySelectorAll("tr[data-search]").forEach((row) => {
+    const hit = !needle || row.dataset.search.includes(needle);
+    row.classList.toggle("search-hidden", !hit);
+    if (hit) visible += 1;
+  });
+  if (countEl) {
+    const total = tbody.querySelectorAll("tr[data-search]").length;
+    countEl.textContent = needle ? `匹配 ${visible} / ${total} 条` : `共 ${total} 条规则`;
+  }
+}
 
 async function loadRules(section) {
-  if (section === "action_map") {
+  if (section === ACTION_MAP_SECTION) {
     await loadActionMap();
     return;
   }
@@ -783,59 +891,92 @@ async function loadRules(section) {
   const tableEl = document.getElementById("rules-table");
   const actionMapPanel = document.getElementById("action-map-panel");
   const addBtn = document.getElementById("rules-add");
+  const searchBox = document.getElementById("rules-search");
+  const labelEl = document.getElementById("rules-section-label");
   if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
   if (tableEl) tableEl.classList.remove("hidden");
   if (actionMapPanel) actionMapPanel.classList.add("hidden");
-  if (addBtn) addBtn.classList.remove("hidden");
+  if (searchBox) searchBox.classList.remove("hidden");
 
-  const showKind = section === "command_patterns";
-  if (thead) {
-    thead.innerHTML = showKind
-      ? `<tr><th>ID</th><th>Regex</th><th>类型</th><th>操作</th></tr>`
-      : `<tr><th>ID</th><th>Regex</th><th>操作</th></tr>`;
-  }
   try {
     const data = await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`);
     const items = Array.isArray(data.items) ? data.items : [];
-    if (countEl) countEl.textContent = `共 ${items.length} 条规则`;
+    currentRulesReadonly = Boolean(data.readonly);
+    if (labelEl) {
+      labelEl.textContent = data.label || section;
+      labelEl.title = section;
+    }
+    if (addBtn) addBtn.classList.toggle("hidden", currentRulesReadonly);
+
+    // Columns beyond id/regex vary per group (kind, category, tool, param…);
+    // derive them from the rules actually present instead of hard-coding.
+    const extraKeys = [];
+    items.forEach((item) => {
+      Object.keys(item).forEach((key) => {
+        if (key !== "id" && key !== "regex" && !extraKeys.includes(key)) extraKeys.push(key);
+      });
+    });
+
+    if (thead) {
+      thead.innerHTML =
+        `<tr><th scope="col">ID</th><th scope="col">Regex</th>` +
+        extraKeys.map((k) => `<th scope="col">${escapeHtml(k)}</th>`).join("") +
+        (currentRulesReadonly ? "" : `<th scope="col">操作</th>`) +
+        `</tr>`;
+    }
+    const colCount = 2 + extraKeys.length + (currentRulesReadonly ? 0 : 1);
+
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="${showKind ? 4 : 3}" class="token-table-empty">暂无规则，点击「添加规则」新增。</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="${colCount}" class="token-table-empty">暂无规则，点击「添加规则」新增。</td></tr>`;
+      if (countEl) countEl.textContent = "共 0 条规则";
       return;
     }
+
     tbody.innerHTML = "";
     items.forEach((item) => {
       const tr = document.createElement("tr");
+      tr.dataset.search = `${item.id || ""} ${item.regex || ""}`.toLowerCase();
       const idCell = `<td><code style="font-size:0.82rem;">${escapeHtml(item.id || "")}</code></td>`;
-      const regexCell = `<td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(item.regex || "")}"><code style="font-size:0.79rem;">${escapeHtml(item.regex || "")}</code></td>`;
-      const kindCell = showKind ? `<td><span style="font-size:0.8rem;color:var(--muted);">${escapeHtml(item.kind || "")}</span></td>` : "";
-      const actionCell = `<td style="white-space:nowrap;">
-        <button class="btn-edit-sm" data-rule-id="${escapeHtml(item.id)}" data-rule-regex="${escapeHtml(item.regex || "")}" data-rule-kind="${escapeHtml(item.kind || "")}">编辑</button>
-        <button class="btn-danger-sm" data-del-rule-id="${escapeHtml(item.id)}">删除</button>
+      const regexCell = `<td class="rule-regex-cell" title="${escapeHtml(item.regex || "")}"><code>${escapeHtml(item.regex || "")}</code></td>`;
+      const extraCells = extraKeys
+        .map((key) => `<td><span class="rule-extra">${escapeHtml(String(item[key] ?? ""))}</span></td>`)
+        .join("");
+      const actionCell = currentRulesReadonly ? "" : `<td style="white-space:nowrap;">
+        <button class="btn-edit-sm" data-rule-id="${escapeHtml(item.id || "")}">编辑</button>
+        <button class="btn-danger-sm" data-del-rule-id="${escapeHtml(item.id || "")}">删除</button>
       </td>`;
-      tr.innerHTML = idCell + regexCell + kindCell + actionCell;
-      tr.querySelector(".btn-edit-sm").addEventListener("click", (e) => {
-        const btn = e.currentTarget;
-        openRuleModal(section, {id: btn.dataset.ruleId, regex: btn.dataset.ruleRegex, kind: btn.dataset.ruleKind});
-      });
-      tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
-        const ruleId = e.currentTarget.dataset.delRuleId;
-        if (!confirm(`确认删除规则 "${ruleId}"？`)) return;
-        try {
-          await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(ruleId)}`, {
-            method: "DELETE",
-            headers: {"x-aegis-ui-csrf": uiCsrfToken},
-          });
-          loadRules(section);
-        } catch (err) {
-          alert(`删除失败: ${err.message}`);
-        }
-      });
+      tr.innerHTML = idCell + regexCell + extraCells + actionCell;
+
+      if (!currentRulesReadonly) {
+        tr.querySelector(".btn-edit-sm").addEventListener("click", () => {
+          openRuleModal(section, item);
+        });
+        tr.querySelector(".btn-danger-sm").addEventListener("click", async (e) => {
+          const ruleId = e.currentTarget.dataset.delRuleId;
+          if (!confirm(`确认删除规则 "${ruleId}"？`)) return;
+          try {
+            await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(ruleId)}`, {
+              method: "DELETE",
+              headers: {"x-aegis-ui-csrf": uiCsrfToken},
+            });
+            await refreshRulesAfterWrite(section);
+          } catch (err) {
+            alert(`删除失败: ${err.message}`);
+          }
+        });
+      }
       tbody.appendChild(tr);
     });
+    filterRulesTable(searchBox ? searchBox.value : "");
   } catch (err) {
     if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
     if (countEl) countEl.textContent = "加载失败";
   }
+}
+
+// Rule counts live in the sidebar, so a write has to refresh both views.
+async function refreshRulesAfterWrite(section) {
+  await loadRuleSections(section);
 }
 
 async function loadActionMap() {
@@ -845,10 +986,15 @@ async function loadActionMap() {
   const countEl = document.getElementById("rules-count");
   const grid = document.getElementById("action-map-grid");
 
+  const searchBox = document.getElementById("rules-search");
+  const labelEl = document.getElementById("rules-section-label");
+
   if (tableEl) tableEl.classList.add("hidden");
   if (actionMapPanel) actionMapPanel.classList.remove("hidden");
   if (addBtn) addBtn.classList.add("hidden");
   if (countEl) countEl.textContent = "";
+  if (searchBox) searchBox.classList.add("hidden");
+  if (labelEl) { labelEl.textContent = "动作映射"; labelEl.title = "action_map"; }
 
   try {
     const data = await fetchJson("/__ui__/api/rules_action_map");
@@ -898,17 +1044,90 @@ function openRuleModal(section, item) {
   document.getElementById("rule-modal-id").value = item ? (item.id || "") : "";
   document.getElementById("rule-modal-id").disabled = !!item;
   document.getElementById("rule-modal-regex").value = item ? (item.regex || "") : "";
-  document.getElementById("rule-modal-kind").value = item ? (item.kind || "") : "";
+  document.getElementById("rule-modal-kind").value = item ? (item.kind || item.category || "") : "";
   document.getElementById("rule-modal-error").textContent = "";
   document.getElementById("rule-modal-submit").textContent = item ? "保存" : "添加";
-  const showKind = section === "command_patterns";
+
+  // `kind` only exists on the anomaly/command groups; `category` on the request
+  // sanitizer intent group. Show the field when the group actually uses one.
+  const usesKind = section.endsWith("command_patterns");
+  const usesCategory = section === "request_sanitizer.strong_intent_patterns";
   const kindField = document.getElementById("rule-modal-kind-field");
-  if (kindField) kindField.style.display = showKind ? "" : "none";
+  if (kindField) {
+    kindField.style.display = usesKind || usesCategory ? "" : "none";
+    const label = kindField.querySelector("label");
+    if (label) label.textContent = usesCategory ? "类别（category，可选）" : "类型（kind，可选）";
+    kindField.dataset.fieldName = usesCategory ? "category" : "kind";
+  }
+
+  resetRegexLab();
   openModal(modal, document.getElementById("rule-modal-id"));
 }
 
 function closeRuleModal() {
   closeModal(document.getElementById("rule-modal"));
+}
+
+// ── Regex lab ────────────────────────────────
+// Wraps every hit span in <mark> so the author can see exactly what the pattern
+// eats, which is the part a plain "compiles ok" check never told them.
+function renderProbeSample(sample, spans) {
+  if (!spans.length) return `<span class="probe-miss">${escapeHtml(sample)}</span>`;
+  let cursor = 0;
+  let out = "";
+  spans.forEach(([start, end]) => {
+    if (start > cursor) out += escapeHtml(sample.slice(cursor, start));
+    out += `<mark>${escapeHtml(sample.slice(start, end))}</mark>`;
+    cursor = end;
+  });
+  out += escapeHtml(sample.slice(cursor));
+  return out;
+}
+
+function resetRegexLab() {
+  const result = document.getElementById("rule-modal-test-result");
+  if (result) {
+    result.innerHTML = "";
+    result.classList.add("hidden");
+  }
+  setStatus("rule-modal-test-status", "");
+}
+
+async function runRegexLab() {
+  const regex = document.getElementById("rule-modal-regex").value;
+  const raw = document.getElementById("rule-modal-sample").value;
+  const result = document.getElementById("rule-modal-test-result");
+  const samples = raw.split("\n").filter((line) => line.length > 0).slice(0, 5);
+  if (!regex.trim()) { setStatus("rule-modal-test-status", "请先填写正则表达式", true); return; }
+  if (!samples.length) { setStatus("rule-modal-test-status", "请先填写测试文本", true); return; }
+
+  setStatus("rule-modal-test-status", "测试中…");
+  try {
+    const data = await fetchJson("/__ui__/api/rules_test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
+      body: JSON.stringify({regex, samples}),
+    });
+    result.classList.remove("hidden");
+    if (data.timed_out) {
+      result.innerHTML = `<p class="probe-danger">${escapeHtml(data.detail)}</p>`;
+      setStatus("rule-modal-test-status", "超时", true);
+      return;
+    }
+    const hits = data.results.filter((r) => r.matched).length;
+    result.innerHTML = data.results
+      .map((r) => {
+        const sample = samples[r.index] ?? "";
+        const head = r.matched
+          ? `<span class="probe-hit-count">命中 ${r.match_count}${r.truncated ? "+" : ""} 处</span>`
+          : '<span class="probe-miss-tag">未命中</span>';
+        return `<div class="probe-row">${head}<pre class="probe-sample">${renderProbeSample(sample, r.spans)}</pre></div>`;
+      })
+      .join("");
+    setStatus("rule-modal-test-status", `${hits} / ${samples.length} 条样本命中`);
+  } catch (err) {
+    setStatus("rule-modal-test-status", err.message, true);
+  }
 }
 
 async function submitRuleModal() {
@@ -917,22 +1136,28 @@ async function submitRuleModal() {
   const isEdit = !!editId;
   const ruleId = document.getElementById("rule-modal-id").value.trim();
   const regex = document.getElementById("rule-modal-regex").value.trim();
-  const kind = document.getElementById("rule-modal-kind").value.trim();
+  const kindField = document.getElementById("rule-modal-kind-field");
+  const extraName = (kindField && kindField.dataset.fieldName) || "kind";
+  const extraValue = kindField && kindField.style.display !== "none"
+    ? document.getElementById("rule-modal-kind").value.trim()
+    : "";
   const errEl = document.getElementById("rule-modal-error");
   errEl.textContent = "";
   if (!ruleId) { errEl.textContent = "请填写规则 ID"; return; }
   if (!regex) { errEl.textContent = "请填写正则表达式"; return; }
   const body = {id: ruleId, regex};
-  if (kind) body.kind = kind;
+  if (extraValue) body[extraName] = extraValue;
   const submitBtn = document.getElementById("rule-modal-submit");
   submitBtn.disabled = true;
   submitBtn.textContent = "保存中…";
   try {
     if (isEdit) {
+      const patch = {regex};
+      if (extraValue) patch[extraName] = extraValue;
       await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}/${encodeURIComponent(editId)}`, {
         method: "PATCH",
         headers: {"Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken},
-        body: JSON.stringify({regex, kind: kind || undefined}),
+        body: JSON.stringify(patch),
       });
     } else {
       await fetchJson(`/__ui__/api/rules/${encodeURIComponent(section)}`, {
@@ -942,7 +1167,7 @@ async function submitRuleModal() {
       });
     }
     closeRuleModal();
-    loadRules(section);
+    await refreshRulesAfterWrite(section);
   } catch (err) {
     errEl.textContent = err.message;
   } finally {
@@ -952,14 +1177,18 @@ async function submitRuleModal() {
 }
 
 function bindRulesUI() {
-  document.querySelectorAll("[data-rules-section]").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll("[data-rules-section]").forEach((t) => t.classList.remove("active"));
-      tab.classList.add("active");
-      currentRulesSection = tab.dataset.rulesSection;
-      loadRules(currentRulesSection);
-    });
-  });
+  const sectionSearch = document.getElementById("rules-section-search");
+  if (sectionSearch) {
+    sectionSearch.addEventListener("input", (event) =>
+      renderRuleSectionList(rulesSectionIndex, event.target.value));
+  }
+  const ruleSearch = document.getElementById("rules-search");
+  if (ruleSearch) {
+    ruleSearch.addEventListener("input", (event) => filterRulesTable(event.target.value));
+  }
+  const testBtn = document.getElementById("rule-modal-test");
+  if (testBtn) testBtn.addEventListener("click", runRegexLab);
+
   const addBtn = document.getElementById("rules-add");
   if (addBtn) addBtn.addEventListener("click", () => openRuleModal(currentRulesSection, null));
 
@@ -994,7 +1223,7 @@ function bindRulesUI() {
         e.preventDefault();
         closeRuleModal();
       }
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey && e.target.tagName !== "TEXTAREA") {
         const btn = document.getElementById("rule-modal-submit");
         if (btn && !btn.disabled) {
           e.preventDefault();
@@ -1003,8 +1232,7 @@ function bindRulesUI() {
       }
     });
   }
-  // Load default section
-  loadRules("pii_patterns");
+  loadRuleSections();
 }
 
 // ─── Key Management ───────────────────────────

