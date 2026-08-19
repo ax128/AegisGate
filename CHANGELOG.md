@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Web 控制台配置中心：全字段覆盖与「需重启」标注**
+  - 修复：`security_level` / `enforce_loopback_only` / `trusted_proxy_ips` / `v2_block_internal_targets` 在配置页可编辑，但它们属于 `hot_reload._IMMUTABLE_FIELDS`，保存后运行时并未生效，页面却提示「已保存，配置已热重载」且把输入框回填成进程里的旧值
+  - 配置项元数据新增 `requires_restart`（由 `_IMMUTABLE_FIELDS` 推导，不手工维护），`POST /__ui__/api/config` 返回 `restart_required` 列表；页面对这些字段展示「需重启」徽章与提示条，并提供「重启网关」按钮
+  - 已写入 `.env` 但进程未采用的字段额外标注「待生效」，且回填 `.env` 中的新值而非内存旧值
+  - 可编辑配置项从 58 项扩到 100 项（`Settings` 共 104 项，另 4 项按用途明确排除），新增 PostgreSQL、请求 HMAC 签名、公网闸门、Docker 上游、控制台会话、清理任务等分组
+  - 分区从 3 个扩到 8 个（基础设置 / 存储与保留 / 限额与超时 / 安全策略 / 访问控制 / 协议转换与路由 / v2 代理 / 控制台）；分区、分组与面板均由后端元数据生成，新增字段无需改前端
+  - 每个分区带搜索框，字段展示对应环境变量名与说明，`depends_on` 支持按依赖字段联动显隐
+  - 新增 `float` 字段类型与 `min` / `max` 范围校验；`int` 字段接受 `600.0` 这类往返值但仍拒绝真正的小数
+  - 敏感字段（`postgres_dsn` / `request_hmac_secret`）不再回显明文，仅返回掩码；提交空值表示保持不变，审计与响应中一律记为 `***`
+
 - **关键安全模块的直接测试（P14）**
   - `util/ip_safety.py`：内网/保留地址判定（含 IPv4-mapped IPv6）、DNS rebinding（域名过检但解析指向内网）、多记录应答中混入内网地址、解析失败 fail-closed
   - `core/security_boundary.py`：HMAC 签名验证（`sha256=` 前缀、篡改、错密钥）、nonce 重放窗口、Redis nonce 后端不可用时 fail-closed

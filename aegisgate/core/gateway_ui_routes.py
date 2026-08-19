@@ -38,7 +38,9 @@ from aegisgate.core.gateway_ui_config import (
     _coerce_config_value,
     _docs_catalog,
     _resolve_doc_path,
+    _restart_required_fields,
     _serialize_env_value,
+    _UI_CONFIG_SECTIONS,
     _ui_config_field_map,
     _ui_config_payload,
     _write_env_updates,
@@ -127,28 +129,49 @@ def register_ui_routes(app: FastAPI) -> None:
             meta = field_map.get(str(field_name))
             if meta is None:
                 return JSONResponse(status_code=400, content={"error": "invalid_field", "detail": str(field_name)})
+            # Secrets are never echoed to the browser, so an empty submission
+            # means "keep the stored value" rather than "clear it".
+            if meta.get("sensitive") and not str(raw_value or "").strip():
+                continue
             try:
                 coerced = _coerce_config_value(meta, raw_value)
             except ValueError as exc:
                 return JSONResponse(status_code=400, content={"error": "invalid_field_value", "detail": str(exc)})
             env_updates[str(meta["env"])] = _serialize_env_value(str(meta["type"]), coerced)
             updated_fields[str(field_name)] = coerced
+        if not env_updates:
+            return JSONResponse(content={"ok": True, "updated": {}, "restart_required": [], "config": _ui_config_payload()})
         try:
             _write_env_updates(env_updates)
         except RuntimeError as exc:
             return JSONResponse(status_code=500, content={"error": "env_write_failed", "detail": str(exc)})
         from aegisgate.core.hot_reload import reload_settings
         reload_settings()
+        # Fields pinned by hot_reload._IMMUTABLE_FIELDS were written to .env but
+        # are NOT live in this process. Tell the client so it can say so instead
+        # of reporting a hot reload that did not happen.
+        restart_fields = _restart_required_fields()
+        restart_required = sorted(f for f in updated_fields if f in restart_fields)
         # H-20: Audit every successful configuration change for traceability.
         write_audit({
             "event": "config_updated",
             "route": "/__ui__/api/config",
             "actor_ip": request.client.host if request.client else "unknown",
             "updated_fields": {
-                str(k): str(v) for k, v in updated_fields.items()
+                str(k): ("***" if field_map.get(str(k), {}).get("sensitive") else str(v))
+                for k, v in updated_fields.items()
             },
+            "restart_required": restart_required,
         })
-        return JSONResponse(content={"ok": True, "updated": updated_fields, "config": _ui_config_payload()})
+        return JSONResponse(content={
+            "ok": True,
+            "updated": {
+                k: ("***" if field_map.get(str(k), {}).get("sensitive") else v)
+                for k, v in updated_fields.items()
+            },
+            "restart_required": restart_required,
+            "config": _ui_config_payload(),
+        })
 
     @app.get("/__ui__/api/docs/{doc_id}")
     async def local_ui_doc_content(doc_id: str) -> JSONResponse:
@@ -833,9 +856,5 @@ def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
             "csrf_token": _ui_csrf_token(session_token) if session_token else "",
         },
         "docs": _docs_catalog(),
-        "config_sections": {
-            "general": "基础设置",
-            "security": "安全设置",
-            "v2": "v2 代理",
-        },
+        "config_sections": [dict(section) for section in _UI_CONFIG_SECTIONS],
     }

@@ -85,30 +85,7 @@
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">配置</span>
-            <a href="#settings" class="nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
-                <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
-                <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
-                <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
-              </svg>
-              基础设置
-            </a>
-            <a href="#security" class="nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                <polyline points="9,12 11,14 15,10"/>
-              </svg>
-              安全设置
-            </a>
-            <a href="#v2" class="nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
-                <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
-                <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
-              </svg>
-              v2 代理
-            </a>
+            <div id="config-nav"></div>
             <a href="#rules" class="nav-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/>
@@ -274,92 +251,8 @@
             </div>
           </section>
 
-          <!-- General settings -->
-          <section id="settings" class="panel">
-            <div class="panel-head">
-              <div class="panel-head-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
-                  <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
-                  <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
-                  <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
-                </svg>
-              </div>
-              <div class="panel-head-info">
-                <h2>基础设置</h2>
-                <p class="panel-desc">修改后点击保存，配置将实时写入 <code>config/.env</code></p>
-              </div>
-            </div>
-            <div id="general-config" class="form-grid dynamic-config"></div>
-            <div class="panel-actions">
-              <button id="save-general" class="btn-save" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                  <polyline points="17,21 17,13 7,13 7,21"/>
-                  <polyline points="7,3 7,8 15,8"/>
-                </svg>
-                保存基础设置
-              </button>
-              <span id="general-save-status" class="status-note" aria-live="polite"></span>
-            </div>
-          </section>
-
-          <!-- Security settings -->
-          <section id="security" class="panel">
-            <div class="panel-head">
-              <div class="panel-head-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                  <polyline points="9,12 11,14 15,10"/>
-                </svg>
-              </div>
-              <div class="panel-head-info">
-                <h2>安全设置</h2>
-                <p class="panel-desc">布尔值用按钮切换：<span style="color:var(--success)">绿色</span>为开启，<span style="color:var(--error)">红色</span>为关闭</p>
-              </div>
-            </div>
-            <div id="security-config" class="form-grid dynamic-config"></div>
-            <div class="panel-actions">
-              <button id="save-security" class="btn-save" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                  <polyline points="17,21 17,13 7,13 7,21"/>
-                  <polyline points="7,3 7,8 15,8"/>
-                </svg>
-                保存安全设置
-              </button>
-              <span id="security-save-status" class="status-note" aria-live="polite"></span>
-            </div>
-          </section>
-
-          <!-- v2 proxy settings -->
-          <section id="v2" class="panel">
-            <div class="panel-head">
-              <div class="panel-head-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
-                  <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
-                  <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
-                </svg>
-              </div>
-              <div class="panel-head-info">
-                <h2>v2 代理</h2>
-                <p class="panel-desc">请求过滤、响应过滤及 SSRF 防护等代理参数</p>
-              </div>
-            </div>
-            <div id="v2-config" class="form-grid dynamic-config"></div>
-            <div class="panel-actions">
-              <button id="save-v2" class="btn-save" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                  <polyline points="17,21 17,13 7,13 7,21"/>
-                  <polyline points="7,3 7,8 15,8"/>
-                </svg>
-                保存 v2 设置
-              </button>
-              <span id="v2-save-status" class="status-note" aria-live="polite"></span>
-            </div>
-          </section>
+          <!-- Config panels (generated from /__ui__/api/config) -->
+          <div id="config-panels"></div>
 
           <!-- Security Rules -->
           <section id="rules" class="panel">
