@@ -184,12 +184,33 @@ def test_smuggling_regexes_still_match_obfuscated_payloads(label: str, pattern: 
         assert compiled.search(sample), f"{label} missed {sample!r}"
 
 
+def _walk_source_files(root: Path):
+    """Yield files under *root*, pruning skipped directories as we descend.
+
+    ``rglob("*")`` would stat every entry inside .git and .worktrees before the
+    per-path skip check discards them. On a checkout with git worktrees that is
+    ~4900 stats for the same 121 files, which runs into pytest's 30s per-test
+    timeout; pruning keeps it under a second.
+    """
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir():
+                if entry.name not in _SKIP_DIR_NAMES:
+                    stack.append(entry)
+            else:
+                yield entry
+
+
 def test_repo_has_no_quantifier_ambiguous_te_te_shape() -> None:
     offenders: list[str] = []
-    for path in _REPO_ROOT.rglob("*"):
-        if not path.is_file() or path.suffix not in _SEARCH_SUFFIXES:
-            continue
-        if any(part in _SKIP_DIR_NAMES for part in path.parts):
+    for path in _walk_source_files(_REPO_ROOT):
+        if path.suffix not in _SEARCH_SUFFIXES:
             continue
         if path.name == "test_redos_guard.py":
             continue
