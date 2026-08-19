@@ -258,6 +258,27 @@ def _is_upstream_whitelisted(upstream_base: str) -> bool:
     return _normalize_upstream_base(upstream_base) in whitelist
 
 
+def _should_bypass_filters_for_whitelist(
+    upstream_base: str,
+    boundary: dict | None = None,
+) -> bool:
+    """True when this upstream is fully trusted *and* the client may use that trust.
+
+    Membership on ``AEGIS_UPSTREAM_WHITELIST_URL_LIST`` skips both request and
+    response pipelines, including PII redaction. Public clients are denied that
+    bypass unless ``allow_public_upstream_whitelist`` is on. A missing
+    ``client_is_internal`` key is treated as internal so unit tests that pass
+    ``boundary={}`` keep the historical bypass.
+    """
+    if not _is_upstream_whitelisted(upstream_base):
+        return False
+    if settings.allow_public_upstream_whitelist:
+        return True
+    if isinstance(boundary, dict) and boundary.get("client_is_internal") is False:
+        return False
+    return True
+
+
 def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
     forwarded: dict[str, str] = {}
     connection_scoped = _connection_scoped_headers(headers)

@@ -18,6 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `filters/`：privilege / rag_poison / tool_call / anomaly 四个过滤器的直接单测
   - 测试内固定了 DNS 解析器与 Redis 客户端，安全用例不依赖真实网络或真实 Redis
 
+### Breaking Changes
+
+- **公网上游白名单旁路默认关闭**
+  - `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 命中后仍会**整体旁路请求与响应双侧管道（含 PII 脱敏）**；文档此前写「仅跳过响应侧」是错的，现已对齐
+  - 新增 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（默认 `false`，热重载不可变）。公网客户端命中白名单时不再旁路，回落正常过滤管道。内网客户端与未设 `client_is_internal` 的既有调用保持旁路
+  - 公网部署若仍需对白名单上游明文转发，须显式设 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=true` 并重启
+
 ### Security
 
 - **HTTP 走私检测正则线性化（P1 ReDoS）**

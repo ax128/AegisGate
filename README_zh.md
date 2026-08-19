@@ -149,7 +149,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
   - `POST /v1/responses`
   - `POST /v1/messages` — Anthropic Messages 专用端点（完整安全管道）；支持原样透传到 Anthropic 兼容上游，或通过 token `compat` 模式自动转换为 OpenAI Responses 格式
   - `POST /v1/files`、`POST /v1/images/edits`、`POST /v1/images/variations` — multipart 上传专用路由（注册在通用透传之前）：表单字段参与脱敏，体积上限走 `AEGIS_MAX_MULTIPART_BODY_BYTES`（60MB）而非 `AEGIS_MAX_REQUEST_BODY_BYTES`
-  - `POST /v1/{subpath}` 通用透传路径；默认仍沿用 v1 请求/响应安全管道，只有 `__passthrough` 或命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时才跳过过滤
+  - `POST /v1/{subpath}` 通用透传路径；默认仍沿用 v1 请求/响应安全管道，只有 `__passthrough` 或命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时才**整体旁路请求与响应双侧过滤管道（含 PII 脱敏）**
   - `POST /relay/generate` — 可选 Relay 兼容端点，默认关闭；需 `AEGIS_ENABLE_RELAY_ENDPOINT=true`
   - 若客户端把 `Responses API` 风格请求（仅 `input`）误发到 `/v1/chat/completions`，网关会转发到上游 `/v1/responses`，并把返回结果重新包装成 Chat Completions 的 JSON/SSE 形状
   - 若客户端把 `Chat Completions` 风格请求（`messages`）误发到 `/v1/responses`，网关会做反向兼容转换，并返回 Responses 风格结果
@@ -741,7 +741,8 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔，支持 CIDR 如 `172.16.0.0/12`）；仅这些 IP 的 XFF 会被信任 | 空 |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（仅 localhost / 内网客户端可直连 `/v1/...`） | 空 |
-| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔）。命中的上游**整体跳过响应侧过滤管道**，效果等同 `__passthrough`，但没有公网客户端限制、也不产生 `filter_mode` 审计标签；仅用于完全受信的上游 | 空 |
+| `AEGIS_UPSTREAM_WHITELIST_URL_LIST` | 白名单上游（逗号分隔）。命中的上游**整体旁路请求与响应双侧过滤管道，包含 PII 脱敏**，效果等同 `__passthrough`；仅用于完全可信上游。公网客户端默认不能走这条旁路，除非显式打开 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | 空 |
+| `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | 是否允许公网/非内网客户端使用上游白名单旁路（危险；默认仅内网，与 `__passthrough` 对齐） | `false` |
 | `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（降级为纯转发，不落审计与脱敏映射）。脱敏过滤器本身始终 fail-closed，不受此开关影响 | `block` |
 | `AEGIS_MAX_MULTIPART_BODY_BYTES` | multipart 请求体上限（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`） | `60000000` |
 | `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | v2 token 路由请求体上限（多模态负载会超过 v1 的 JSON 上限） | `64000000` |

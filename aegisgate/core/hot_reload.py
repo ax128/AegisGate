@@ -136,6 +136,7 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         "security_level",
         "allow_public_numeric_tokens",
         "allow_public_passthrough_mode",
+        "allow_public_upstream_whitelist",
         "enable_request_hmac_auth",
         "request_hmac_secret",
         "v2_block_internal_targets",
