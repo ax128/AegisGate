@@ -82,6 +82,14 @@
               </svg>
               请求统计
             </a>
+            <a href="#audit" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14,2 14,8 20,8"/>
+                <line x1="8" y1="13" x2="14" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/>
+              </svg>
+              审计日志
+            </a>
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">配置</span>
@@ -271,6 +279,104 @@
                   清除数据
                 </button>
               </div>
+            </div>
+          </section>
+
+          <!-- Audit explorer -->
+          <section id="audit" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14,2 14,8 20,8"/>
+                  <line x1="8" y1="13" x2="14" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>审计日志</h2>
+                <p class="panel-desc">检索网关逐请求写下的结构化审计记录：风险分、处置、命中原因、安全标签</p>
+              </div>
+            </div>
+
+            <div id="audit-summary" class="audit-summary"></div>
+
+            <div class="audit-filters">
+              <label class="audit-filter">
+                <span>起始时间</span>
+                <input type="datetime-local" id="audit-since">
+              </label>
+              <label class="audit-filter">
+                <span>结束时间</span>
+                <input type="datetime-local" id="audit-until">
+              </label>
+              <label class="audit-filter">
+                <span>路由包含</span>
+                <input type="text" id="audit-route" placeholder="/v1/chat/completions">
+              </label>
+              <label class="audit-filter">
+                <span>处置</span>
+                <select id="audit-disposition">
+                  <option value="">全部</option>
+                  <option value="allow">allow</option>
+                  <option value="block">block</option>
+                  <option value="sanitize">sanitize</option>
+                  <option value="review">review</option>
+                  <option value="pass">pass</option>
+                </select>
+              </label>
+              <label class="audit-filter">
+                <span>最低风险分</span>
+                <input type="number" id="audit-min-risk" min="0" max="1" step="0.05" placeholder="0.7">
+              </label>
+              <label class="audit-filter">
+                <span>安全标签</span>
+                <input type="text" id="audit-tag" placeholder="injection">
+              </label>
+              <label class="audit-filter audit-filter-wide">
+                <span>全文关键词</span>
+                <input type="search" id="audit-q" placeholder="在原始记录中搜索…">
+              </label>
+            </div>
+
+            <div class="audit-toolbar">
+              <button id="audit-apply" class="btn-sm" type="button">查询</button>
+              <button id="audit-reset" class="btn-sm-ghost" type="button">重置</button>
+              <span id="audit-count" class="audit-count"></span>
+              <span class="audit-toolbar-spacer"></span>
+              <button id="audit-export-jsonl" class="btn-sm-ghost" type="button">导出 JSONL</button>
+              <button id="audit-export-csv" class="btn-sm-ghost" type="button">导出 CSV</button>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table" id="audit-table">
+                <thead>
+                  <tr>
+                    <th scope="col">时间</th>
+                    <th scope="col">路由 / 事件</th>
+                    <th scope="col">风险</th>
+                    <th scope="col">请求</th>
+                    <th scope="col">响应</th>
+                    <th scope="col">标签</th>
+                  </tr>
+                </thead>
+                <tbody id="audit-tbody">
+                  <tr><td colspan="6" class="token-table-empty">点击「查询」加载审计记录</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="audit-more">
+              <button id="audit-more" class="btn-sm-ghost hidden" type="button">加载更早的记录</button>
+              <span id="audit-scan-note" class="audit-scan-note"></span>
+            </div>
+
+            <div class="audit-samples">
+              <h3 class="config-group-title">危险响应样本</h3>
+              <div class="audit-toolbar">
+                <select id="sample-date" class="audit-sample-select"><option value="">加载中…</option></select>
+                <button id="sample-load" class="btn-sm-ghost" type="button">加载</button>
+                <span id="sample-note" class="audit-scan-note"></span>
+              </div>
+              <div id="sample-list" class="audit-sample-list"></div>
             </div>
           </section>
 
@@ -758,5 +864,6 @@
     </div>
 
     <script src="/__ui__/assets/app.js"></script>
+    <script src="/__ui__/assets/audit.js"></script>
   </body>
 </html>
