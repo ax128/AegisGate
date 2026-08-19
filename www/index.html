@@ -243,15 +243,15 @@
               </div>
             </div>
 
-            <div class="rules-tabs" style="margin-top:16px;">
-              <button class="rules-tab active" data-stats-view="hourly">按小时</button>
-              <button class="rules-tab" data-stats-view="daily">按天</button>
+            <div class="rules-tabs" role="tablist" aria-label="统计视图" style="margin-top:16px;">
+              <button class="rules-tab active" role="tab" aria-selected="true" data-stats-view="hourly">按小时</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-stats-view="daily">按天</button>
             </div>
 
             <div class="token-table-wrap">
               <table class="token-table">
                 <thead id="stats-thead">
-                  <tr><th>时间</th><th>请求</th><th>脱敏</th><th>危险替换</th><th>拦截</th><th>直通</th></tr>
+                  <tr><th scope="col">时间</th><th scope="col">请求</th><th scope="col">脱敏</th><th scope="col">危险替换</th><th scope="col">拦截</th><th scope="col">直通</th></tr>
                 </thead>
                 <tbody id="stats-tbody">
                   <tr><td colspan="6" class="token-table-empty">加载中...</td></tr>
@@ -377,13 +377,13 @@
               </div>
             </div>
 
-            <div class="rules-tabs">
-              <button class="rules-tab active" data-rules-section="pii_patterns">PII 脱敏规则</button>
-              <button class="rules-tab" data-rules-section="tool_injection">工具注入规则</button>
-              <button class="rules-tab" data-rules-section="command_patterns">命令异常规则</button>
-              <button class="rules-tab" data-rules-section="direct_patterns">直接注入规则</button>
-              <button class="rules-tab" data-rules-section="system_exfil_patterns">提示词窃取规则</button>
-              <button class="rules-tab" data-rules-section="action_map">动作映射</button>
+            <div class="rules-tabs" role="tablist" aria-label="规则组">
+              <button class="rules-tab active" role="tab" aria-selected="true" data-rules-section="pii_patterns">PII 脱敏规则</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-rules-section="tool_injection">工具注入规则</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-rules-section="command_patterns">命令异常规则</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-rules-section="direct_patterns">直接注入规则</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-rules-section="system_exfil_patterns">提示词窃取规则</button>
+              <button class="rules-tab" role="tab" aria-selected="false" data-rules-section="action_map">动作映射</button>
             </div>
 
             <div id="rules-panel" class="rules-panel">
@@ -399,7 +399,7 @@
               <div class="token-table-wrap">
                 <table class="token-table" id="rules-table">
                   <thead id="rules-thead">
-                    <tr><th>ID</th><th>Regex</th><th>类型</th><th>操作</th></tr>
+                    <tr><th scope="col">ID</th><th scope="col">Regex</th><th scope="col">类型</th><th scope="col">操作</th></tr>
                   </thead>
                   <tbody id="rules-tbody">
                     <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
@@ -450,7 +450,7 @@
             <div class="token-table-wrap">
               <table class="token-table">
                 <thead>
-                  <tr><th>#</th><th>脱敏值（已遮蔽）</th><th>长度</th><th>操作</th></tr>
+                  <tr><th scope="col">#</th><th scope="col">脱敏值（已遮蔽）</th><th scope="col">长度</th><th scope="col">操作</th></tr>
                 </thead>
                 <tbody id="redact-tbody">
                   <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
@@ -498,10 +498,10 @@
               <table class="token-table">
                 <thead>
                   <tr>
-                    <th>Token（路由令牌）</th>
-                    <th>上游地址</th>
-                    <th>脱敏豁免字段</th>
-                    <th>操作</th>
+                    <th scope="col">Token（路由令牌）</th>
+                    <th scope="col">上游地址</th>
+                    <th scope="col">脱敏豁免字段</th>
+                    <th scope="col">操作</th>
                   </tr>
                 </thead>
                 <tbody id="token-tbody">
