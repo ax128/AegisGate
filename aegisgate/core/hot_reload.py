@@ -289,8 +289,14 @@ def reload_security_rules() -> dict[str, Any]:
         return True
 
     def _load_yaml() -> None:
-        from aegisgate.config.security_rules import load_security_rules
+        from aegisgate.config.security_rules import (
+            invalidate_security_rules_cache,
+            load_security_rules,
+        )
 
+        # Explicit invalidation first: the cache is mtime-keyed, and a reload
+        # asked for by name must not be answered from a stale entry.
+        invalidate_security_rules_cache()
         load_security_rules()
 
     # 1. security_rules.py has mtime-based cache — next call auto-reloads.
