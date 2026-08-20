@@ -391,6 +391,7 @@ def _compile_patterns(
     fallback: tuple[tuple[str, str], ...],
     *,
     legacy_string_ids: bool = False,
+    honour_enabled: bool = False,
 ) -> list[tuple[str, re.Pattern[str]]]:
     """Compile *fallback* plus the configured *items*.
 
@@ -405,6 +406,11 @@ def _compile_patterns(
     positional ``field_secret_{idx}`` id where the caller says the legacy form is
     meaningful (matching ``sanitize.py``'s ``FIELD_SECRET_{idx}``), skipped
     otherwise.
+
+    ``honour_enabled`` is opt-in for the same reason: the redaction lists have a
+    runtime ``enabled`` flag and the caller that compiles them says so, while
+    ``sanitizer.command_patterns`` shares this loop and has no such flag on the
+    V1 side.
     """
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for pattern_id, regex in fallback:
@@ -414,7 +420,11 @@ def _compile_patterns(
             continue
     for index, item in enumerate(items or [], start=1):
         if isinstance(item, dict):
-            if not rule_enabled(item):
+            # Only the redaction lists honour ``enabled``. This same loop also
+            # compiles ``sanitizer.command_patterns``, where the three V1 filters
+            # ignore the flag entirely — honouring it here would switch a
+            # dangerous-command rule off on V2 while it stayed on for V1.
+            if honour_enabled and not rule_enabled(item):
                 continue
             regex_value = item.get("regex")
             pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
@@ -439,6 +449,7 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
     compiled = _compile_patterns(
         pii_patterns if isinstance(pii_patterns, list) else None,
         fallback=(),
+        honour_enabled=True,
     )
     field_min_len = max(
         _DEFAULT_FIELD_VALUE_MIN_LEN,
@@ -460,6 +471,7 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
             field_patterns if isinstance(field_patterns, list) else None,
             fallback=fallback_field_patterns,
             legacy_string_ids=True,
+            honour_enabled=True,
         )
     )
     return compiled

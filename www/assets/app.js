@@ -3305,7 +3305,23 @@ async function rrDeleteRule(ruleId, data) {
   if (!ok) return;
 
   const params = new URLSearchParams();
-  if (rule.relaxed_removal_empties_list) params.set("confirm_empty", "true");
+  if (rule.relaxed_removal_empties_list) {
+    // The server refuses this without confirm_empty, and answering that on the
+    // caller's behalf would turn its question into a formality. Emptying the
+    // list is its own decision, so it gets its own dialog.
+    const confirmedEmpty = await AegisUI.confirm({
+      title: "这会清空 relaxed 集",
+      message:
+        "它是自定义列表里的最后一个成员。移除后 relaxed 集为空，V1 对话路由（管道 + 转发）与 " +
+        "multipart 转发上将没有任何 PII 规则生效——其余执行面不受影响。" +
+        "若要保留一个悬空引用而不清空列表，请改从 relaxed 开关移除它，或先添加别的成员。",
+      detail: ruleId,
+      confirmLabel: "确认清空并删除",
+      danger: true,
+    });
+    if (!confirmedEmpty) return;
+    params.set("confirm_empty", "true");
+  }
   const query = params.toString();
   try {
     const result = await fetchJson(

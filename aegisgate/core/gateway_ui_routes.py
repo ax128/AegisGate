@@ -55,6 +55,7 @@ from aegisgate.core.rules_editor import (
     render_rules_yaml,
     render_scalar_updates,
 )
+from aegisgate.core.request_redaction_settings import guard_pii_rule_write
 from aegisgate.core.rules_write import (
     RulesChange,
     RulesSnapshot,
@@ -736,6 +737,19 @@ def register_ui_routes(app: FastAPI) -> None:
     # real bool: running it through the string path above would write the YAML
     # scalar "False", which is a non-empty string and therefore true.
     _RULE_EXTRA_BOOL_FIELDS: frozenset[str] = frozenset({"enabled"})
+    # ...and only these groups have a compile loop that reads it. Accepting it
+    # elsewhere would write a field that either does nothing at all or — for
+    # sanitizer.command_patterns, which shares V2's compile loop — switches a
+    # rule off on V2 while the three V1 filters keep running it.
+    _ENABLED_AWARE_SECTIONS: frozenset[str] = frozenset(
+        {"redaction.pii_patterns", "redaction.field_value_patterns"}
+    )
+    # Groups whose ids the relaxed set resolves case-insensitively, so two
+    # spellings of one id are ambiguous rather than merely untidy.
+    _NORMALIZED_ID_SECTIONS: frozenset[str] = frozenset({"redaction.pii_patterns"})
+    # Rule fields whose value is the sensitive part of the rule and never enters
+    # an audit record.
+    _AUDIT_OPAQUE_RULE_FIELDS: frozenset[str] = frozenset({"regex", "patterns"})
 
     def _looks_like_rule_list(value: object) -> bool:
         if not isinstance(value, list) or not value:
@@ -897,7 +911,9 @@ def register_ui_routes(app: FastAPI) -> None:
             status_code=404, content={"error": "unknown_section", "detail": section}
         )
 
-    def _apply_rule_extras(target: dict, body: dict[str, Any]) -> dict[str, Any]:
+    def _apply_rule_extras(
+        target: dict, body: dict[str, Any], section_id: str
+    ) -> dict[str, Any]:
         """Copy the editable metadata fields present in *body* onto *target*.
 
         Returns just the fields it wrote, so an update can hand the comment-
@@ -910,6 +926,13 @@ def register_ui_routes(app: FastAPI) -> None:
                 applied[key] = target[key]
         for key in _RULE_EXTRA_BOOL_FIELDS:
             if key in body:
+                if section_id not in _ENABLED_AWARE_SECTIONS:
+                    raise RulesWriteError(
+                        "field_not_supported",
+                        f"规则组 '{section_id}' 的编译不读取 {key}；写入它只会留下一个"
+                        "在部分执行层无效果的字段",
+                        status=400,
+                    )
                 if not isinstance(body[key], bool):
                     raise RulesWriteError(
                         "invalid_type", f"{key} 必须是 JSON 布尔值", status=400
@@ -987,8 +1010,10 @@ def register_ui_routes(app: FastAPI) -> None:
                 raise RulesWriteError(
                     "id_exists", f"规则 id '{rule_id}' 已存在", status=409
                 )
+            if info["id"] in _NORMALIZED_ID_SECTIONS:
+                guard_pii_rule_write(data.get("redaction"), rule_id, is_new=True)
             new_item: dict = {"id": rule_id, "regex": regex}
-            _apply_rule_extras(new_item, body)
+            _apply_rule_extras(new_item, body, info["id"])
             items.append(new_item)
             _set_section_list(data, info["path"], items)
             return _rules_change(
@@ -1045,11 +1070,13 @@ def register_ui_routes(app: FastAPI) -> None:
             )
             if target is None:
                 raise RulesWriteError("rule_not_found", f"规则 '{rule_id}' 不存在", status=404)
+            if info["id"] in _NORMALIZED_ID_SECTIONS:
+                guard_pii_rule_write(data.get("redaction"), rule_id, is_new=False)
             changed: dict[str, object] = {}
             if regex is not None:
                 target["regex"] = regex
                 changed["regex"] = regex
-            changed.update(_apply_rule_extras(target, body))
+            changed.update(_apply_rule_extras(target, body, info["id"]))
             _set_section_list(data, info["path"], items)
             return _rules_change(
                 snapshot,
@@ -1063,6 +1090,13 @@ def register_ui_routes(app: FastAPI) -> None:
                     "rule_id": rule_id,
                     "operation": "update",
                     "fields": sorted(changed),
+                    # Which fields changed does not say whether a rule was
+                    # switched off. Pattern text stays out; a bool does not.
+                    "values": {
+                        key: value
+                        for key, value in changed.items()
+                        if key not in _AUDIT_OPAQUE_RULE_FIELDS
+                    },
                 },
                 payload={"section": info["id"], "item": target},
             )

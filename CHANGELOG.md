@@ -66,7 +66,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `enabled` 通过独立的布尔白名单处理，不再经过 `_RULE_EXTRA_STRING_FIELDS`——
   后者会把值 `str()` 成 `"False"`，而非空字符串在 YAML 里是真值。非布尔值返回 400。
 - `adapters/v2_proxy/router.py` 的 `_compile_patterns` 由 `pii_patterns`、`field_value_patterns`
-  与 `sanitizer.command_patterns` 共用，因此这三组的 dict 条目现在都遵守 `enabled`。
+  与 `sanitizer.command_patterns` 共用，因此遵守 `enabled` 的行为改为**由调用方显式开启**
+  （`honour_enabled=True`），只有两个 redaction 调用点传它。三个 V1 过滤器
+  （`filters/sanitizer.py`、`filters/request_sanitizer.py`、`filters/anomaly_detector.py`）
+  完全不读该字段，若 V2 单方面遵守，一条 `enabled: false` 的危险命令规则会在 V2 上被关掉、
+  在 V1 上继续运行——对一个阻断类检测控件来说是单侧变松。
+- `enabled` 只在**确实有编译循环读取它**的规则组上被接受（`redaction.pii_patterns`、
+  `redaction.field_value_patterns`），其余规则组返回 400 `field_not_supported`：
+  否则写进去的是一个要么毫无效果、要么只在部分执行层生效的字段。
+- **PII 规则 ID 采用去空白、大小写不敏感的唯一性校验**（v4 §2.3）。`relaxed_pii_ids` 按归一化后的
+  ID 解析，因此同时存在 `EMAIL` 与 `Email` 时它无法判断成员指向哪一条，面板也会因此进入阻断状态。
+  此前 CRUD 只做精确字符串比较，等于允许控制台给自己制造这个状态。现在：新增会与既有 ID 归一化比较，
+  冲突返回 409 `id_normalization_conflict`；已存在冲突时，针对该 ID 的**修改**被拒绝，
+  **删除仍然放行**——删掉其中一条正是唯一的解法。其他规则组的精确匹配契约不变。
+- 存在归一化冲突时，`materialize_custom` 与 `remove_unresolved` 一并拒绝：前者会把两种写法
+  静默折叠成一个成员。
+- 规则更新的审计除字段名外还记录**新值**（正则与 `patterns` 除外）。此前停用一条规则与重新启用它
+  留下的审计记录完全相同，看不出发生了什么。relaxed 写入同时记录 `relaxed_members_after` 与
+  `relaxed_emptied`。
+- 删除一条会让自定义 relaxed 列表清空的规则时，面板会**再问一次**并说明后果，
+  而不是替调用方补上 `confirm_empty=true`——服务端为此设的门不能由发起方自己答掉。
 
 ### Added
 

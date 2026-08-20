@@ -29,6 +29,7 @@ from aegisgate.core import gateway_ui_routes, gw_tokens, rules_write
 from aegisgate.storage.kv import KVStore
 
 _SETTINGS = "/__ui__/api/request_redaction/settings"
+_APP_JS = Path(__file__).resolve().parents[2] / "www" / "assets" / "app.js"
 
 _RULES = """\
 version: 3
@@ -312,6 +313,118 @@ class TestMembershipIsIncremental:
         assert any(event.get("relaxed_operation") == "set_membership" for event in _AUDIT)
 
 
+class TestPiiIdUniqueness:
+    """``relaxed_pii_ids`` resolves ids case-insensitively, so two spellings of
+    one id are ambiguous — and the panel blocks itself the moment one exists."""
+
+    def test_a_case_only_duplicate_cannot_be_created(self, client, rules_file: Path) -> None:
+        before = rules_file.read_bytes()
+        response = client.post(
+            "/__ui__/api/rules/redaction.pii_patterns", json={"id": "email", "regex": "e"}
+        )
+        assert response.status_code == 409
+        assert response.json()["error"] == "id_normalization_conflict"
+        assert rules_file.read_bytes() == before
+
+    def test_whitespace_only_differences_count_as_the_same_id(self, client) -> None:
+        response = client.post(
+            "/__ui__/api/rules/redaction.pii_patterns", json={"id": " EMAIL ", "regex": "e"}
+        )
+        assert response.status_code == 409
+
+    def test_an_unrelated_id_is_still_accepted(self, client) -> None:
+        assert client.post(
+            "/__ui__/api/rules/redaction.pii_patterns",
+            json={"id": "FRESH_ID", "regex": "fresh"},
+        ).status_code == 201
+
+    def test_other_sections_keep_their_exact_match_contract(self, client) -> None:
+        """Only the redaction ids are resolved case-insensitively at runtime."""
+        assert client.post(
+            "/__ui__/api/rules/sanitizer.command_patterns",
+            json={"id": "seed_cmd_upper", "regex": "x"},
+        ).status_code == 201
+        assert client.post(
+            "/__ui__/api/rules/sanitizer.command_patterns",
+            json={"id": "SEED_CMD_UPPER", "regex": "y"},
+        ).status_code == 201
+
+    def test_an_existing_collision_blocks_editing_but_not_deleting(
+        self, client, rules_file: Path
+    ) -> None:
+        """Deleting one spelling is the way out, so it must stay available."""
+        rules_file.write_text(
+            _RULES.replace(
+                "    - id: EMAIL\n", "    - id: Email\n      regex: 'e2'\n    - id: EMAIL\n"
+            ),
+            encoding="utf-8",
+        )
+        refused = client.patch(
+            "/__ui__/api/rules/redaction.pii_patterns/EMAIL", json={"regex": "changed"}
+        )
+        assert refused.status_code == 409
+        assert refused.json()["error"] == "id_normalization_conflict"
+
+        assert client.delete("/__ui__/api/rules/redaction.pii_patterns/Email").status_code == 200
+        assert (
+            client.patch(
+                "/__ui__/api/rules/redaction.pii_patterns/EMAIL", json={"regex": "changed"}
+            ).status_code
+            == 200
+        )
+
+    def test_materialising_under_a_collision_is_refused_rather_than_merged(
+        self, client, rules_file: Path
+    ) -> None:
+        """Expanding to a normalised set would fold the two into one member."""
+        rules_file.write_text(
+            _RULES.replace(
+                "    - id: EMAIL\n", "    - id: Email\n      regex: 'e2'\n    - id: EMAIL\n"
+            ),
+            encoding="utf-8",
+        )
+        _patch(client, {"relaxed": {"operation": "set_mode", "mode": "all"}})
+        response = client.patch(
+            _SETTINGS,
+            json={"relaxed": {"operation": "materialize_custom", "source": "current", "confirm": True}},
+            headers={"If-Match": client.get(_SETTINGS).headers["etag"]},
+        )
+        assert response.status_code == 409
+        assert response.json()["error"] == "id_normalization_conflict"
+
+
+class TestEnabledIsScopedToTheLoopsThatReadIt:
+    """``enabled`` is honoured by the redaction lists and nothing else."""
+
+    def test_a_group_whose_compile_loop_ignores_it_refuses_the_field(self, client) -> None:
+        assert client.post(
+            "/__ui__/api/rules/sanitizer.command_patterns",
+            json={"id": "SEED_CMD", "regex": "rm -rf"},
+        ).status_code == 201
+        response = client.patch(
+            "/__ui__/api/rules/sanitizer.command_patterns/SEED_CMD", json={"enabled": False}
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "field_not_supported"
+
+    def test_v2_keeps_running_a_disabled_command_pattern(self, rules_file: Path) -> None:
+        """V2 shares one compile loop with the redaction lists; the three V1
+        filters ignore ``enabled`` entirely, so honouring it for command
+        patterns would switch a dangerous-command rule off on V2 alone."""
+        from aegisgate.adapters.v2_proxy import router as v2_router
+        from aegisgate.config.security_rules import invalidate_security_rules_cache
+
+        rules_file.write_text(
+            _RULES + "sanitizer:\n  command_patterns:\n"
+            "    - id: DANGEROUS\n      regex: 'rm -rf'\n      enabled: false\n",
+            encoding="utf-8",
+        )
+        invalidate_security_rules_cache()
+        v2_router._v2_dangerous_command_patterns.cache_clear()
+        ids = [name for name, _ in v2_router._v2_dangerous_command_patterns()]
+        assert "dangerous" in ids
+
+
 class TestNormalizationConflicts:
     def test_a_case_only_duplicate_blocks_membership_writes(
         self, client, rules_file: Path
@@ -579,6 +692,17 @@ class TestDeleteSettlesRelaxedMembership:
         assert "relaxed_pii_ids" not in _yaml(rules_file)["redaction"]
         assert any(event.get("relaxed_dangling") for event in _AUDIT)
 
+    def test_the_panel_asks_before_emptying_the_set_rather_than_answering_for_you(
+        self,
+    ) -> None:
+        """The server refuses this without confirm_empty; a caller that supplies
+        it unprompted turns that question into a formality."""
+        js = _APP_JS.read_text(encoding="utf-8")
+        block = js[js.index("async function rrDeleteRule") : js.index("function rrRender")]
+        empties = block.index("relaxed_removal_empties_list")
+        assert "AegisUI.confirm" in block[empties : block.index('params.set("confirm_empty"')]
+        assert "这会清空 relaxed 集" in block
+
     def test_emptying_the_list_by_deleting_needs_confirmation(
         self, client, rules_file: Path
     ) -> None:
@@ -636,6 +760,38 @@ class TestProbeAndAuditOnPanelWrites:
         assert event["event"] == "ui_rule_updated"
         assert event["rule_id"] == "EMAIL"
         assert "enabled" in event["fields"]
+        # Which field changed does not say whether the rule was switched off.
+        assert event["values"]["enabled"] is False
+
+    def test_the_audited_values_still_leave_out_the_pattern(self, client) -> None:
+        client.patch(
+            "/__ui__/api/rules/redaction.pii_patterns/EMAIL",
+            json={"regex": "sk-live-[0-9]{20}", "enabled": True},
+        )
+        event = _AUDIT[-1]
+        assert event["values"] == {"enabled": True}
+        assert "sk-live-" not in yaml.safe_dump(event, allow_unicode=True)
+
+    def test_emptying_the_relaxed_set_says_so_in_the_audit(
+        self, client, rules_file: Path
+    ) -> None:
+        rules_file.write_text(
+            _RULES.replace("    - FIELD_SECRET\n    - LEFTOVER_RULE\n", ""), encoding="utf-8"
+        )
+        _patch(
+            client,
+            {
+                "relaxed": {
+                    "operation": "set_membership",
+                    "id": "TOKEN",
+                    "enabled": False,
+                    "confirm_empty": True,
+                }
+            },
+        )
+        event = _AUDIT[-1]
+        assert event["relaxed_emptied"] is True
+        assert event["relaxed_members_after"] == []
 
     def test_the_audit_carries_no_pattern_text(self, client) -> None:
         client.post(

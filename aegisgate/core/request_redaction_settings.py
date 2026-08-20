@@ -603,7 +603,67 @@ def _guard_collisions(redaction: dict[str, Any]) -> None:
         )
 
 
-def _set_relaxed_list(redaction: dict[str, Any], members: list[str], confirm_empty: Any):
+def _guard_id_collision(redaction: dict[str, Any], rule_id: str) -> None:
+    """Refuse a CRUD write aimed at an id the file spells more than one way.
+
+    Deliberately narrower than :func:`_guard_collisions`: only writes whose
+    meaning is ambiguous are refused. Deleting one of the two spellings is how an
+    operator gets out of the state, so the delete path does not call this.
+    """
+    normalized = _normalize_id(rule_id)
+    entries, _ = _pii_entries(redaction)
+    spellings = [
+        str(item.get("id", "PII"))
+        for item in entries
+        if _normalize_id(item.get("id", "PII")) == normalized
+    ]
+    if len(spellings) > 1:
+        raise _error(
+            "id_normalization_conflict",
+            f"'{rule_id}' 在 pii_patterns 中有多个仅大小写或空白不同的写法："
+            + "、".join(spellings)
+            + "。请先删除其中一条，工具不会替你选择保留哪一个。",
+            status=409,
+            collisions=[{"normalized": normalized, "source": "pii_patterns", "raw": spellings}],
+        )
+
+
+def guard_pii_rule_write(redaction: Any, rule_id: str, *, is_new: bool) -> None:
+    """The uniqueness contract for a PII rule id (v4 §2.3).
+
+    Ids are compared with whitespace stripped and case folded, because that is
+    how ``relaxed_pii_ids`` resolves them: a file holding both ``EMAIL`` and
+    ``Email`` cannot say which one a relaxed member refers to, and the panel
+    blocks itself the moment one exists. Letting the console create that state is
+    the console handing itself a jam.
+    """
+    if not isinstance(redaction, dict):
+        return
+    if is_new:
+        normalized = _normalize_id(rule_id)
+        entries, _ = _pii_entries(redaction)
+        clash = [
+            str(item.get("id", "PII"))
+            for item in entries
+            if _normalize_id(item.get("id", "PII")) == normalized
+        ]
+        if clash:
+            raise _error(
+                "id_normalization_conflict",
+                f"'{rule_id}' 与已有规则 {'、'.join(clash)} 归一化后相同（去空白、忽略大小写）。"
+                "relaxed 集按归一化后的 ID 解析，两条同名规则会让它无法判断指向哪一条。",
+                status=409,
+            )
+        return
+    _guard_id_collision(redaction, rule_id)
+
+
+def _set_relaxed_list(
+    redaction: dict[str, Any],
+    members: list[str],
+    confirm_empty: Any,
+    audit: dict[str, Any] | None = None,
+):
     from aegisgate.core.rules_editor import LeafOp
 
     if not members and confirm_empty is not True:
@@ -614,6 +674,11 @@ def _set_relaxed_list(redaction: dict[str, Any], members: list[str], confirm_emp
             status=409,
         )
     redaction["relaxed_pii_ids"] = members
+    if audit is not None:
+        # Ids, not pattern text: the reviewer of an audit log needs to see that
+        # the set was emptied, and "which field changed" does not tell them.
+        audit["relaxed_members_after"] = list(members)
+        audit["relaxed_emptied"] = not members
     return [LeafOp(list(RELAXED_PATH), "set", members)]
 
 
@@ -682,7 +747,7 @@ def _op_set_membership(payload: dict[str, Any], redaction: dict[str, Any], audit
     if enabled:
         members.append(configured[normalized])
     audit["relaxed_mode_after"] = "custom"
-    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"))
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
 
 
 def _op_materialize_custom(
@@ -693,6 +758,9 @@ def _op_materialize_custom(
     if payload.get("confirm") is not True:
         raise _error("confirm_required", "展开为自定义列表需要 confirm=true", status=409)
 
+    # Expansion walks every configured id, and the normalised set would quietly
+    # fold two spellings into one member.
+    _guard_collisions(redaction)
     mode, _ = _relaxed_mode(redaction)
     if mode == "custom":
         raise _error("already_custom", "当前已经是自定义列表，无需展开", status=409)
@@ -701,7 +769,7 @@ def _op_materialize_custom(
     else:
         members = sorted(DEFAULT_RELAXED_PII_IDS)
     audit.update({"relaxed_materialized_from": mode, "relaxed_mode_after": "custom"})
-    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"))
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
 
 
 def _op_remove_unresolved(
@@ -713,6 +781,7 @@ def _op_remove_unresolved(
     if payload.get("confirm") is not True:
         raise _error("confirm_required", "清理悬空成员需要 confirm=true", status=409)
 
+    _guard_collisions(redaction)
     mode, explicit = _relaxed_mode(redaction)
     if mode != "custom":
         raise _error(
@@ -732,7 +801,7 @@ def _op_remove_unresolved(
 
     audit.update({"relaxed_id": raw_id, "relaxed_unresolved_removed": True})
     members = [item for item in explicit if _normalize_id(item) != normalized]
-    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"))
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
 
 
 _RELAXED_OPERATIONS = {
@@ -844,5 +913,6 @@ def relaxed_cleanup_for_deleted_rule(
 
     members = [item for item in explicit if _normalize_id(item) != normalized]
     # An empty result still needs the same confirmation any other emptying does.
-    ops = _set_relaxed_list(redaction, members, confirm_empty)
-    return ops, {"relaxed_member_removed": True}
+    note: dict[str, Any] = {"relaxed_member_removed": True}
+    ops = _set_relaxed_list(redaction, members, confirm_empty, note)
+    return ops, note
