@@ -9,7 +9,7 @@
   </head>
   <body class="login-page">
     <button id="theme-toggle" class="btn-hdr btn-theme-float" type="button" title="切换主题" aria-label="切换主题">
-      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+      <svg class="icon-sun u-hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
       </svg>
       <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -46,11 +46,30 @@
                 autofocus
               >
             </div>
-            <p class="field-hint">密钥在首次启动时自动生成，查看文件 <code>config/aegis_gateway.key</code> 或启动日志获取</p>
+            <p class="field-hint">密钥在首次启动时自动生成，就是 <code>config/aegis_gateway.key</code> 的文件内容</p>
           </div>
           <button type="submit" class="btn-login">登 录</button>
           <div id="login-error" class="login-error" role="alert" aria-live="polite"></div>
         </form>
+
+        <!-- The hint used to be a bare relative path, which is inside the
+             container for a Docker deployment and relative to an unknown cwd
+             for a bare-metal one. These are the two commands that actually
+             print it. -->
+        <details class="login-help">
+          <summary>怎么拿到网关密钥？</summary>
+          <div class="login-help-row">
+            <span class="login-help-label">本机 / 裸机部署</span>
+            <code>cat config/aegis_gateway.key</code>
+            <button type="button" class="btn-sm-ghost" data-copy="cat config/aegis_gateway.key">复制</button>
+          </div>
+          <div class="login-help-row">
+            <span class="login-help-label">Docker 部署</span>
+            <code>docker compose exec aegisgate cat config/aegis_gateway.key</code>
+            <button type="button" class="btn-sm-ghost" data-copy="docker compose exec aegisgate cat config/aegis_gateway.key">复制</button>
+          </div>
+          <p class="login-help-note">复制时注意不要带上结尾的换行或多余空格。</p>
+        </details>
 
         <div class="login-notice">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -58,7 +77,7 @@
             <line x1="12" y1="8" x2="12" y2="12"/>
             <line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
-          默认仅允许本机 loopback 访问 · 使用 <code>config/aegis_gateway.key</code> 文件内容作为密码 · 登录后可查看配置与文档
+          默认仅允许本机 loopback 访问 · 登录密码与管理接口共用同一份网关密钥
         </div>
 
         <div class="login-github">

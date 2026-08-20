@@ -579,6 +579,18 @@ body {
   flex: 1;
 }
 
+/* The control is a flex item, and the shared input rule gives it width: 100% —
+   which resolves against the whole card. It therefore claimed every pixel and
+   left .meta at min-content, i.e. one character per line for all 100 labels.
+   A .wide card stacks instead, so there the full width is what we want. */
+.field-card:not(.wide) > input,
+.field-card:not(.wide) > select,
+.field-card:not(.wide) > textarea {
+  flex: 0 1 46%;
+  width: auto;
+  min-width: 0;
+}
+
 .field-card.wide .meta {
   flex-direction: row;
   justify-content: space-between;
@@ -599,6 +611,7 @@ body {
 }
 
 input[type="text"],
+input[type="url"],
 input[type="number"],
 input[type="search"],
 input[type="password"],
@@ -913,6 +926,12 @@ textarea:focus {
   padding: var(--sp-5);
 }
 
+/* `.hidden` had only ever been defined for the modal overlay, while seventeen
+   places in the scripts and nine in the markup toggle it on ordinary elements —
+   so the register dialog showed the Token field it meant to hide, the rules
+   table and the action map rendered at once, and "添加规则" stayed visible on
+   read-only groups. One rule makes all of them behave as written. */
+.hidden { display: none !important; }
 .modal-overlay.hidden { display: none; }
 
 .modal-card {
@@ -1410,10 +1429,16 @@ body.login-page {
 /* ─── Responsive ─────────────────────────────── */
 
 @media (max-width: 980px) {
-  .app-body { flex-direction: column; }
+  /* flex-start sizes the cross axis to content, and a flex item's default
+     min-width: auto refuses to shrink below it — so the nav strip widened the
+     whole page instead of scrolling inside itself, and every panel inherited a
+     horizontal scrollbar. */
+  .app-body { flex-direction: column; align-items: stretch; }
 
   .sidebar {
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
     position: static;
     height: auto;
     border-right: none;
@@ -1429,10 +1454,19 @@ body.login-page {
   .sidebar-section {
     padding: 0;
     display: flex;
+    align-items: center;
     gap: 2px;
     border-top: none;
     flex-shrink: 0;
   }
+
+  /* The generated config links live in their own wrapper, which stayed a block
+     and stacked eight items vertically inside the horizontal strip. */
+  #config-nav {
+    display: flex;
+    gap: 2px;
+  }
+  #config-nav .nav-item { flex-shrink: 0; }
 
   .sidebar-section + .sidebar-section { border-top: none; }
   .sidebar-section-label { display: none; }
@@ -2170,4 +2204,458 @@ tr.search-hidden { display: none; }
 
 @media (max-width: 580px) {
   .toast-host { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+}
+
+/* ─── Onboarding, search, states ───────────────────────────────────
+   Added with the usability pass: first-run guidance on the overview, a
+   console-wide config search, badge legends, skeletons and empty states that
+   carry their own action. */
+
+/* Reaching the first panel meant tabbing through 15+ sidebar links. */
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: -60px;
+  z-index: 300;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top var(--dur-fast) var(--ease);
+}
+.skip-link:focus { top: 12px; }
+
+#overview:focus { outline: none; }
+
+/* An outline survives every theme; the glow depends on the accent tint being
+   visible against whatever sits behind the control. Keep both. */
+.nav-item:focus-visible,
+.btn-hdr:focus-visible,
+.field-reset:focus-visible,
+.copy-btn:focus-visible,
+.doc-inline-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Config search across every panel ── */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 8px;
+}
+.sidebar-search .config-search {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+}
+.sidebar-search-hits {
+  font: var(--type-caption);
+  color: var(--label-2);
+  white-space: nowrap;
+}
+.panel.search-hidden,
+.nav-item.search-hidden { display: none; }
+
+.config-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0 0 14px;
+  font: var(--type-caption);
+  color: var(--label-2);
+}
+.config-legend .field-badge { margin-left: 0; margin-right: 2px; }
+
+.field-badge.changed { background: var(--accent-light); color: var(--accent); }
+
+.field-reset {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.field-reset:hover { opacity: 0.75; }
+
+.save-count {
+  margin-left: 2px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+/* ── Overview: quick start ── */
+.stat-card-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--label-3);
+}
+.stat-card-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.stat-card-url {
+  font-size: 0.88rem;
+  word-break: break-all;
+}
+.stat-card-url.is-unset { color: var(--label-3); border-bottom-style: none; }
+
+.onboard {
+  background: var(--bg-elevated);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: var(--sp-4) var(--sp-5);
+}
+.onboard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.onboard-head h2 {
+  margin: 0;
+  font: var(--type-headline);
+  color: var(--label-1);
+}
+.onboard.collapsed .onboard-steps { display: none; }
+.onboard-steps {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.onboard-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.onboard-mark {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: var(--fill-2);
+  color: var(--label-2);
+}
+.onboard-done .onboard-mark { background: var(--success); color: #fff; }
+.onboard-now  .onboard-mark { background: var(--accent);  color: #fff; }
+.onboard-body { flex: 1; min-width: 0; }
+.onboard-body strong {
+  display: block;
+  font: var(--type-headline);
+  color: var(--label-1);
+  margin-bottom: 4px;
+}
+.onboard-body p {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--label-2);
+  line-height: 1.5;
+}
+.onboard-actions { margin-top: 8px; }
+.onboard-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+.onboard-copy code {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--fill-3);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--label-1);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* ── Token table: the base_url the client actually needs ── */
+.token-baseurl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.token-baseurl code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--label-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-btn { flex-shrink: 0; }
+.copy-btn.copied { color: var(--success); border-color: var(--success); }
+
+/* ── Upstream field feedback and probe ── */
+.field-note {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  min-height: 1.1em;
+  line-height: 1.4;
+}
+.field-note.ok   { color: var(--success); }
+.field-note.warn { color: var(--warning); }
+.field-note.err  { color: var(--error); }
+
+.modal-field-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.field-details {
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--label-2);
+}
+.field-details summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.field-details p { margin: 8px 0 0; line-height: 1.5; }
+
+/* ── Loading skeletons and empty states ── */
+.skeleton-bar {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--fill-2);
+  animation: skeleton-pulse 1.4s var(--ease) infinite;
+}
+.skeleton-row td { vertical-align: middle; }
+.skeleton-row:nth-child(2) .skeleton-bar { opacity: 0.75; }
+.skeleton-row:nth-child(3) .skeleton-bar { opacity: 0.5; }
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+
+.empty-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.error-state { color: var(--error); }
+
+/* ── Docs: tables and in-document links ── */
+.markdown-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 1em;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-sm);
+}
+.markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+.markdown-table th,
+.markdown-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--separator);
+  vertical-align: top;
+}
+.markdown-table th {
+  background: var(--fill-3);
+  font-weight: 600;
+  color: var(--label-1);
+  white-space: nowrap;
+}
+.markdown-table tbody tr:last-child td { border-bottom: none; }
+
+.markdown-body a { color: var(--accent); }
+.doc-inline-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ── Login: how to obtain the gateway key ── */
+.login-help {
+  margin-top: 18px;
+  font-size: 0.8rem;
+  color: var(--label-2);
+  text-align: left;
+}
+.login-help summary {
+  cursor: pointer;
+  color: var(--accent);
+  text-align: center;
+}
+.login-help-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.login-help-label {
+  flex-shrink: 0;
+  width: 84px;
+  color: var(--label-3);
+  font-size: 0.74rem;
+}
+.login-help-row code {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--fill-3);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.login-help-note { margin: 10px 0 0; color: var(--label-3); font-size: 0.74rem; }
+.login-error-wide { text-align: left; line-height: 1.55; }
+
+/* ── Narrow screens ──
+   The header never shrank: brand plus five labelled buttons overflowed a phone
+   viewport and gave the whole page a horizontal scrollbar. */
+@media (max-width: 720px) {
+  .btn-hdr-label { display: none; }
+  .btn-hdr { padding: 6px 9px; }
+}
+
+@media (max-width: 980px) {
+  /* The horizontal nav strip scrolls; fade its right edge so that reads as
+     "more over here" rather than "that is all of it". */
+  .sidebar {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent 100%);
+  }
+  .sidebar-search { width: 200px; flex-shrink: 0; padding: 0 6px; }
+}
+
+@media (max-width: 580px) {
+  .onboard-copy { flex-direction: column; align-items: stretch; }
+  .token-baseurl { flex-direction: column; align-items: flex-start; }
+  .login-help-row { flex-wrap: wrap; }
+  .login-help-label { width: auto; }
+
+  /* "默认: aegisgate/policies/rules/security_filters.yaml" on one unbreakable
+     line was wider than a phone, which pushed the grid — and with it the page —
+     past the viewport. */
+  .field-card { min-width: 0; }
+  .field-card .default {
+    white-space: normal;
+    word-break: break-all;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-bar { animation: none; }
+}
+
+/* ─── Utility classes replacing inline style attributes ───────────────
+   The console ships `style-src 'self'` with no `unsafe-inline`
+   (gateway_auth._apply_ui_security_headers), so every `style="…"` attribute in
+   the markup was being *blocked* by the browser, not applied — around 130 CSP
+   violations per page load, and the declarations they carried simply never took
+   effect. These carry the same intent through the stylesheet instead. */
+
+.u-hidden { display: none; }
+.u-nowrap { white-space: nowrap; }
+.u-mono { font-family: var(--font-mono); }
+.u-required { color: var(--error); }
+.u-accent { color: var(--accent); }
+.u-note {
+  font: var(--type-caption);
+  color: var(--label-2);
+}
+.u-note-block { margin-bottom: 12px; }
+.u-note-tight { margin-bottom: 8px; }
+.u-actions { display: flex; gap: 8px; }
+.u-gap-top { margin-top: 16px; }
+.u-gap-top-sm { margin-top: 8px; }
+.u-code-sm { font-size: 0.82rem; }
+.u-code-md { font-size: 0.85rem; }
+
+.btn-icon-inline {
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+
+.sidebar-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--label-2);
+  text-decoration: none;
+  font-size: 0.82rem;
+  transition: color var(--dur-fast) var(--ease);
+}
+.sidebar-footer-link:hover { color: var(--accent); }
+.sidebar-footer-dim {
+  color: var(--label-2);
+  font-size: 0.75rem;
+  opacity: 0.5;
+}
+
+.key-modal-value {
+  flex: 1;
+  word-break: break-all;
+  background: var(--fill-3);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+.key-modal-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.compose-empty {
+  font-size: 0.83rem;
+  color: var(--label-2);
+}
+.compose-error {
+  font-size: 0.83rem;
+  color: var(--error);
+}
+
+/* Brief confirmation that the overview card sent you to this exact field. */
+.field-card-flash {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+  transition: border-color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }

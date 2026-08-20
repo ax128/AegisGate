@@ -18,6 +18,7 @@ import time
 import yaml
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -34,6 +35,7 @@ from aegisgate.core.gateway_keys import (
     _ensure_gateway_key,
     _is_forbidden_upstream_base_example,
     _normalize_input_upstream_base,
+    upstream_base_error,
 )
 from aegisgate.core.gateway_ui_config import (
     _coerce_config_value,
@@ -262,6 +264,9 @@ def register_ui_routes(app: FastAPI) -> None:
             return JSONResponse(status_code=400, content={"error": "missing_params", "detail": "upstream_base 为必填"})
         if _is_forbidden_upstream_base_example(upstream_base):
             return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
+        format_error = upstream_base_error(upstream_base)
+        if format_error is not None:
+            return JSONResponse(status_code=400, content={"error": "invalid_upstream_base", "detail": format_error})
         raw_whitelist = body.get("whitelist_key")
         whitelist = normalize_whitelist_keys(raw_whitelist) if raw_whitelist is not None else []
         try:
@@ -294,6 +299,9 @@ def register_ui_routes(app: FastAPI) -> None:
                 return JSONResponse(status_code=400, content={"error": "invalid_params", "detail": "upstream_base 不能为空"})
             if _is_forbidden_upstream_base_example(upstream_base):
                 return JSONResponse(status_code=400, content={"error": "example_upstream_forbidden", "detail": "请替换为真实上游地址"})
+            format_error = upstream_base_error(upstream_base)
+            if format_error is not None:
+                return JSONResponse(status_code=400, content={"error": "invalid_upstream_base", "detail": format_error})
             kwargs["upstream_base"] = upstream_base
         if "whitelist_key" in body:
             kwargs["whitelist_key"] = body["whitelist_key"]
@@ -333,6 +341,126 @@ def register_ui_routes(app: FastAPI) -> None:
         if removed:
             return JSONResponse(content={"ok": True})
         return JSONResponse(status_code=404, content={"error": "token_not_found"})
+
+    # ------------------------------------------------------------------
+    # Upstream reachability probe
+    # ------------------------------------------------------------------
+
+    # Registering a token used to tell the operator nothing about whether the
+    # address works; the first real client request was the first feedback. This
+    # makes the gateway issue that one request instead, and is deliberately
+    # narrow about it: the same validation the forwarder applies, cloud metadata
+    # endpoints refused outright, one request carrying no credentials, no
+    # redirects, a hard 3s ceiling, and only the status line comes back — never
+    # a response body.
+    #
+    # Private targets stay allowed. A local Ollama / vLLM / LM Studio upstream is
+    # the most common thing this page exists to configure, and the operator can
+    # already register that address and drive a request through it. Every probe
+    # is audited like the other admin actions in this module.
+    _PROBE_TIMEOUT_SECONDS = 3.0
+    _probe_limiter_slot: list[Any] = []
+
+    def _probe_limiter() -> Any:
+        """Reuse the admin limiter, built lazily to avoid a startup import cycle."""
+        if not _probe_limiter_slot:
+            from aegisgate.core.gateway import _AdminRateLimiter
+
+            _probe_limiter_slot.append(
+                _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
+            )
+        return _probe_limiter_slot[0]
+
+    async def _probe_upstream(upstream_base: str) -> dict[str, object]:
+        import httpx
+
+        started = time.monotonic()
+
+        def elapsed_ms() -> int:
+            return int((time.monotonic() - started) * 1000)
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=_PROBE_TIMEOUT_SECONDS, follow_redirects=False
+            ) as client:
+                response = await client.request("HEAD", upstream_base)
+                # Plenty of API roots answer HEAD with 405/501 while GET works.
+                if response.status_code in {405, 501}:
+                    response = await client.request("GET", upstream_base)
+        except httpx.TimeoutException:
+            return {
+                "reachable": False,
+                "reason": "timeout",
+                "detail": f"{_PROBE_TIMEOUT_SECONDS:g} 秒内没有响应，请检查地址、端口与网络可达性",
+                "elapsed_ms": elapsed_ms(),
+            }
+        except httpx.HTTPError as exc:
+            # Covers DNS failure, refused connections and TLS errors alike; the
+            # message is the operator's own target, not third-party data.
+            return {
+                "reachable": False,
+                "reason": "connect_error",
+                "detail": str(exc)[:200] or exc.__class__.__name__,
+                "elapsed_ms": elapsed_ms(),
+            }
+        except Exception as exc:
+            # A host that urlparse accepts can still be rejected deeper down —
+            # "https://xn--/" raises idna.IDNAError, which is not an HTTPError.
+            # A probe is a diagnostic; reporting the failure beats a 500.
+            logger.warning("ui upstream probe failed unexpectedly error=%s", exc)
+            return {
+                "reachable": False,
+                "reason": "invalid_host",
+                "detail": f"无法解析该地址：{str(exc)[:160] or exc.__class__.__name__}",
+                "elapsed_ms": elapsed_ms(),
+            }
+        return {
+            "reachable": True,
+            "status_code": response.status_code,
+            "elapsed_ms": elapsed_ms(),
+        }
+
+    @app.post("/__ui__/api/tokens/probe")
+    async def local_ui_tokens_probe(request: Request) -> JSONResponse:
+        from aegisgate.util.ip_safety import SSRF_METADATA_HOSTS
+
+        actor_ip = request.client.host if request.client else "unknown"
+        if not _probe_limiter().is_allowed(actor_ip):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "probe_rate_limited", "detail": "连通性测试过于频繁，请稍后再试"},
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+        upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
+        format_error = upstream_base_error(upstream_base)
+        if format_error is not None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_upstream_base", "detail": format_error},
+            )
+        hostname = (urlparse(upstream_base).hostname or "").strip().lower().strip(".")
+        # Only the metadata endpoints are refused by name. ip_safety's broader
+        # ".internal" rule guards client-supplied targets on the forwarding path;
+        # applying it here would reject host.docker.internal, which is the
+        # upstream host the Docker deployment documents.
+        if hostname in SSRF_METADATA_HOSTS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "probe_target_forbidden",
+                    "detail": "该地址指向云元数据服务，不能作为上游",
+                },
+            )
+        write_audit({
+            "event": "ui_upstream_probe",
+            "route": "/__ui__/api/tokens/probe",
+            "actor_ip": actor_ip,
+            "upstream_host": hostname,
+        })
+        return JSONResponse(content={"ok": True, **await _probe_upstream(upstream_base)})
 
     # ------------------------------------------------------------------
     # Key management

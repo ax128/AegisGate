@@ -135,6 +135,42 @@ def _is_forbidden_upstream_base_example(value: object) -> bool:
     return bool(normalized) and normalized in _FORBIDDEN_UPSTREAM_BASE_EXAMPLES
 
 
+# The forwarder already refuses a malformed upstream — but only at request time,
+# via adapters.openai_compat.upstream._normalize_upstream_base. Registering one
+# through the console therefore "succeeded" and then failed on the first real
+# request with nothing in the UI to explain it. These messages are checked
+# against that same function rather than restating its rules, so the console can
+# never accept a base the forwarder will refuse.
+_UPSTREAM_BASE_ERRORS: dict[str, str] = {
+    "invalid_upstream_scheme": "上游地址必须以 http:// 或 https:// 开头",
+    "invalid_upstream_host": "上游地址缺少主机名",
+    "invalid_upstream_query_fragment": "上游地址不能带查询参数或 # 片段",
+}
+
+
+def upstream_base_error(value: object) -> str | None:
+    """Return why *value* is unusable as an upstream base, or ``None`` if it is fine."""
+    candidate = _normalize_input_upstream_base(value)
+    if not candidate:
+        return "上游地址为必填"
+    # Imported here: the adapter package pulls in the forwarding stack, which
+    # imports this module back.
+    from urllib.parse import urlparse
+
+    from aegisgate.adapters.openai_compat.upstream import _normalize_upstream_base
+
+    try:
+        _normalize_upstream_base(candidate)
+    except ValueError as exc:
+        return _UPSTREAM_BASE_ERRORS.get(str(exc), f"上游地址无效：{exc}")
+    # Stricter than the forwarder on purpose: credentials in the URL end up in
+    # every log line that records the upstream, and an upstream key belongs in a
+    # header. Refusing them here narrows what can be stored, never widens it.
+    if "@" in urlparse(candidate).netloc:
+        return "上游地址不能包含用户名或密码，请改用请求头传递凭据"
+    return None
+
+
 def _normalize_required_whitelist_list(value: object) -> list[str] | None:
     if not isinstance(value, list):
         return None

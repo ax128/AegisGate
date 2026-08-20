@@ -131,6 +131,49 @@ class TestDesignSystemDiscipline:
         assert "translateX" in _block(css, ".bool-button.on::after")
 
 
+class TestSilentFailures:
+    """Rules whose absence breaks the page without erroring anywhere."""
+
+    def test_the_hidden_class_actually_hides(self, css: str) -> None:
+        """Scripts and markup toggle `.hidden` on ordinary elements.
+
+        It used to be defined only as `.modal-overlay.hidden`, so every other
+        toggle was a no-op: the register dialog showed the Token field it meant
+        to hide, and the rules table rendered on top of the action map.
+        """
+        assert re.search(r"(?<![\w.-])\.hidden\s*\{[^}]*display:\s*none", css), (
+            "a bare `.hidden { display: none }` rule is missing"
+        )
+
+    def test_a_config_control_does_not_starve_its_label(self, css: str) -> None:
+        """`.field-card` is a flex row and the shared input rule sets width:100%.
+
+        Without a constraint the control claims the whole card and `.meta`
+        collapses to min-content — every config label rendered one character per
+        line.
+        """
+        assert ".field-card:not(.wide) > input" in css
+        assert ".field-card:not(.wide) > select" in css
+
+
+class TestContentSecurityPolicy:
+    """`style-src 'self'` with no `unsafe-inline` — see
+    gateway_auth._apply_ui_security_headers. A `style="…"` attribute is not
+    merely inelegant here: the browser blocks it, so the declarations never
+    apply and the console logs a CSP violation for each one."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["index.html", "login.html", "assets/app.js", "assets/audit.js", "assets/ui-kit.js"],
+    )
+    def test_no_inline_style_attributes(self, name: str) -> None:
+        text = (_CSS_PATH.parents[1] / name).read_text(encoding="utf-8")
+        offenders = re.findall(r'style="[^"]*"', text)
+        assert offenders == [], (
+            f"{name} carries inline styles the console's CSP blocks: {offenders}"
+        )
+
+
 class TestMarkupSemantics:
     @pytest.fixture(scope="class")
     def html(self) -> str:

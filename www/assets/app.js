@@ -7,10 +7,41 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
+// Link targets this viewer will turn into anchors. Anything else — most of all a
+// `javascript:` URL — is left as the literal text the author wrote.
+const DOC_LINK_ALLOWED = /^(?:https?:\/\/[^\s<>"']+|#[\w-]*|[\w./-]+\.md(?:#[\w-]*)?)$/i;
+
+function renderDocLink(whole, label, href) {
+  // escapeHtml already ran over the raw line, so & is &amp; here.
+  const target = href.replace(/&amp;/g, "&");
+  if (!DOC_LINK_ALLOWED.test(target)) return whole;
+  if (/^https?:\/\//i.test(target)) {
+    return `<a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  }
+  const docId = target.split("#")[0];
+  // A bare #anchor has no counterpart in this single-pane viewer.
+  if (!docId) return label;
+  return `<button type="button" class="doc-inline-link" data-doc-link="${escapeHtml(docId)}">${label}</button>`;
+}
+
 function renderInline(text) {
   return escapeHtml(text)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, renderDocLink);
+}
+
+function isTableSeparatorRow(line) {
+  return /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line)
+    || /^\s*\|\s*:?-{3,}:?\s*\|\s*$/.test(line);
+}
+
+function splitTableRow(line) {
+  return line
+    .replace(/^\s*\|/, "")
+    .replace(/\|\s*$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
 }
 
 function renderMarkdown(markdown) {
@@ -20,6 +51,7 @@ function renderMarkdown(markdown) {
   let codeLines = [];
   let listType = null;
   let paragraph = [];
+  let tableLines = [];
 
   function flushParagraph() {
     if (!paragraph.length) return;
@@ -40,11 +72,37 @@ function renderMarkdown(markdown) {
     codeLines = [];
   }
 
+  // README.md and README_zh.md are mostly tables. Without this they came out as
+  // one run-on paragraph of pipes, which is what the docs panel showed by
+  // default. A run of pipe lines is only a table when a separator row follows
+  // the header; anything else falls back to paragraphs.
+  function flushTable() {
+    if (!tableLines.length) return;
+    const rows = tableLines;
+    tableLines = [];
+    if (rows.length < 2 || !isTableSeparatorRow(rows[1])) {
+      rows.forEach((line) => chunks.push(`<p>${renderInline(line)}</p>`));
+      return;
+    }
+    const header = splitTableRow(rows[0]);
+    const body = rows.slice(2).filter((line) => !isTableSeparatorRow(line)).map(splitTableRow);
+    chunks.push(
+      '<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>' +
+        header.map((cell) => `<th scope="col">${renderInline(cell)}</th>`).join("") +
+        "</tr></thead><tbody>" +
+        body
+          .map((cells) => `<tr>${cells.map((cell) => `<td>${renderInline(cell)}</td>`).join("")}</tr>`)
+          .join("") +
+        "</tbody></table></div>"
+    );
+  }
+
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
     if (line.startsWith("```")) {
       flushParagraph();
       flushList();
+      flushTable();
       if (inCode) flushCode();
       else inCode = true;
       continue;
@@ -56,8 +114,16 @@ function renderMarkdown(markdown) {
     if (!line.trim()) {
       flushParagraph();
       flushList();
+      flushTable();
       continue;
     }
+    if (line.trimStart().startsWith("|")) {
+      flushParagraph();
+      flushList();
+      tableLines.push(line);
+      continue;
+    }
+    flushTable();
     const heading = line.match(/^(#{1,3})\s+(.*)$/);
     if (heading) {
       flushParagraph();
@@ -94,6 +160,7 @@ function renderMarkdown(markdown) {
 
   flushParagraph();
   flushList();
+  flushTable();
   flushCode();
   return chunks.join("\n") || '<p class="empty-note">暂无内容。</p>';
 }
@@ -150,15 +217,66 @@ async function fetchJson(url, options = {}) {
   return response.json();
 }
 
+// One place decides what a failed write says. The raw server message is fine for
+// a validation error the user can act on, but the transport-level ones used to
+// surface as "HTTP 403" or the English "missing or invalid csrf token", neither
+// of which tells anyone what to do next.
+function describeWriteError(error, prefix) {
+  if (error.conflict) {
+    return `${prefix}：该内容已被其他会话修改，已为你重新加载最新版本，请确认后重新提交`;
+  }
+  if (error.status === 403) {
+    return `${prefix}：登录会话已失效，请刷新页面后重试`;
+  }
+  if (error.status === 429) {
+    return `${prefix}：操作过于频繁，请稍后再试`;
+  }
+  if (error.status >= 500) {
+    return `${prefix}：服务端写入失败（${error.message}），请检查 config/ 目录权限与磁盘空间`;
+  }
+  return `${prefix}：${error.message}`;
+}
+
 // A conflict is not a failure the user caused; tell them what happened and
 // reload the affected view so their next attempt starts from current state.
 function handleWriteError(error, reload, prefix) {
-  if (error.conflict) {
-    AegisUI.toast(error.message, "warn", { timeout: 8000 });
-    if (typeof reload === "function") reload();
-    return;
-  }
-  AegisUI.toast(`${prefix}: ${error.message}`, "err");
+  const level = error.conflict ? "warn" : "err";
+  AegisUI.toast(describeWriteError(error, prefix), level, error.conflict ? { timeout: 8000 } : undefined);
+  if (error.conflict && typeof reload === "function") reload();
+}
+
+// ─── Loading and empty states ──────────────────
+// Tables used to show a single "加载中…" line and empty tables a dead sentence.
+// Skeleton rows keep the layout from jumping, and an empty state that carries
+// its own action removes the "so where is that button" step.
+
+function skeletonRows(columns, rows = 3) {
+  const cells = `<td><span class="skeleton-bar"></span></td>`.repeat(columns);
+  return `<tr class="skeleton-row" aria-hidden="true">${cells}</tr>`.repeat(rows);
+}
+
+function showSkeleton(tbody, columns, rows = 3) {
+  if (!tbody) return;
+  tbody.innerHTML = skeletonRows(columns, rows);
+}
+
+function emptyStateRow(columns, message, action) {
+  const button = action
+    ? `<button type="button" class="btn-sm" data-empty-action="${escapeHtml(action.id)}">${escapeHtml(action.label)}</button>`
+    : "";
+  return (
+    `<tr><td colspan="${columns}" class="token-table-empty">` +
+    `<span class="empty-state"><span>${escapeHtml(message)}</span>${button}</span>` +
+    `</td></tr>`
+  );
+}
+
+function errorStateRow(columns, error, prefix) {
+  return (
+    `<tr><td colspan="${columns}" class="token-table-empty error-state">` +
+    escapeHtml(describeWriteError(error, prefix)) +
+    `</td></tr>`
+  );
 }
 
 // `level` accepts the legacy boolean (true = error) or "ok" | "warn" | "err".
@@ -196,6 +314,9 @@ function updateHeaderStatus(status) {
 
 let configSections = [];
 const dirtyFields = new Set();
+// Declared here rather than with the rules module: the unload guard below
+// reads both dirty sets.
+const actionMapDirty = new Set();
 
 const SECTION_ICONS = {
   sliders: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>',
@@ -230,7 +351,52 @@ function markDirty(fieldName, card) {
   dirtyFields.add(fieldName);
   if (card) card.classList.add("dirty");
   const item = findField(fieldName);
-  if (item) applyDependencies(item.section);
+  if (item) {
+    applyDependencies(item.section);
+    updateDirtyIndicators();
+  }
+}
+
+// The dirty set used to be write-only: the single blue border was the entire
+// signal, and a reload dropped a dozen edits without a word. Now it drives the
+// save button's count and the leave guard.
+function updateDirtyIndicators() {
+  configSections.forEach((section) => {
+    const counter = document.getElementById(`dirty-${section.id}`);
+    if (!counter) return;
+    const pending = configState.filter(
+      (item) => item.section === section.id && dirtyFields.has(item.field)
+    ).length;
+    counter.textContent = pending ? `（${pending} 项待保存）` : "";
+  });
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!dirtyFields.size && !actionMapDirty.size) return;
+  event.preventDefault();
+  // Chrome ignores custom text but still needs returnValue set to prompt.
+  event.returnValue = "";
+});
+
+function isChangedFromDefault(item) {
+  // Secrets are never echoed to the browser, so there is nothing to compare.
+  if (item.sensitive) return false;
+  return String(item.value) !== String(item.default);
+}
+
+function resetFieldToDefault(fieldName) {
+  const item = findField(fieldName);
+  if (!item || item.sensitive) return;
+  item.value = item.default;
+  dirtyFields.add(fieldName);
+  const card = document.getElementById(`card-${fieldName}`);
+  const replacement = buildFieldCard(item);
+  if (card) {
+    if (card.classList.contains("search-hidden")) replacement.classList.add("search-hidden");
+    card.replaceWith(replacement);
+  }
+  applyDependencies(item.section);
+  updateDirtyIndicators();
 }
 
 function updateFieldValue(fieldName, value, card) {
@@ -323,14 +489,26 @@ function buildFieldCard(item) {
 
   const meta = document.createElement("div");
   meta.className = "meta";
+  const changed = isChangedFromDefault(item);
   const badges = [];
+  if (changed) {
+    badges.push('<span class="field-badge changed" title="当前值与默认值不同">已改</span>');
+  }
   if (item.requires_restart) {
     badges.push('<span class="field-badge restart" title="该字段被 hot_reload 固定，保存后需重启网关才生效">需重启</span>');
   }
   if (item.pending_value !== undefined) {
     badges.push('<span class="field-badge pending" title="已写入 config/.env，但当前进程仍在使用旧值">待生效</span>');
   }
-  const defaultText = item.sensitive ? "" : `<span class="default">默认: ${escapeHtml(String(item.default))}</span>`;
+  // The reset only rewrites the form; the value still goes through the same
+  // save, coercion and range check as anything typed by hand.
+  const defaultText = item.sensitive
+    ? ""
+    : `<span class="default">默认: ${escapeHtml(String(item.default))}` +
+      (changed
+        ? `<button type="button" class="field-reset" data-reset-field="${escapeHtml(item.field)}">恢复默认</button>`
+        : "") +
+      `</span>`;
   meta.innerHTML =
     `<strong>${escapeHtml(item.label)}${badges.join("")}</strong>` +
     `<span class="field-env">${escapeHtml(item.env)}</span>` +
@@ -338,6 +516,7 @@ function buildFieldCard(item) {
     defaultText;
   card.appendChild(meta);
   card.appendChild(item.type === "bool" ? createBoolButton(item, card) : createInputField(item, card));
+  if (dirtyFields.has(item.field)) card.classList.add("dirty");
   return card;
 }
 
@@ -357,6 +536,13 @@ function buildConfigPanel(section) {
       `<input type="search" class="config-search" id="search-${section.id}" placeholder="搜索本页配置项…" aria-label="搜索 ${escapeHtml(section.label)} 配置项">` +
       `<span class="config-count" id="count-${section.id}"></span>` +
     `</div>` +
+    // The badges used to explain themselves only through a title attribute,
+    // which touch and screen-reader users never see.
+    `<p class="config-legend">` +
+      `<span class="field-badge changed">已改</span>当前值与默认值不同` +
+      `<span class="field-badge restart">需重启</span>保存后需重启网关才生效` +
+      `<span class="field-badge pending">待生效</span>已写入 <code>config/.env</code>，当前进程仍用旧值` +
+    `</p>` +
     `<div class="restart-banner hidden" id="restart-banner-${section.id}" role="status"></div>` +
     `<div class="config-groups" id="groups-${section.id}"></div>` +
     `<div class="panel-actions">` +
@@ -364,7 +550,7 @@ function buildConfigPanel(section) {
         `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
         `<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>` +
         `<polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>` +
-        `保存${escapeHtml(section.label)}` +
+        `保存${escapeHtml(section.label)}<span class="save-count" id="dirty-${section.id}"></span>` +
       `</button>` +
       `<span id="${section.id}-save-status" class="status-note" aria-live="polite"></span>` +
     `</div>`;
@@ -374,7 +560,7 @@ function buildConfigPanel(section) {
 function filterSection(sectionId, query) {
   const needle = String(query || "").trim().toLowerCase();
   const groups = document.getElementById(`groups-${sectionId}`);
-  if (!groups) return;
+  if (!groups) return 0;
   let visible = 0;
   groups.querySelectorAll(".config-group").forEach((group) => {
     let groupVisible = 0;
@@ -388,6 +574,92 @@ function filterSection(sectionId, query) {
   });
   const counter = document.getElementById(`count-${sectionId}`);
   if (counter) counter.textContent = needle ? `匹配 ${visible} 项` : `共 ${visible} 项`;
+  return visible;
+}
+
+// 100 fields across 8 panels, and the only search was per-panel: knowing the
+// field but not which section owns it meant searching eight times. This drives
+// every panel at once and folds away the ones with no hit, panel and nav entry
+// together.
+function filterAllSections(query) {
+  const needle = String(query || "").trim().toLowerCase();
+  let matchedFields = 0;
+  let matchedSections = 0;
+  configSections.forEach((section) => {
+    const panel = document.getElementById(section.id);
+    const nav = document.querySelector(`#config-nav a[href="#${section.id}"]`);
+    const box = document.getElementById(`search-${section.id}`);
+    if (box) box.value = needle;
+    const visible = filterSection(section.id, needle);
+    const hidden = Boolean(needle) && visible === 0;
+    if (panel) panel.classList.toggle("search-hidden", hidden);
+    if (nav) nav.classList.toggle("search-hidden", hidden);
+    if (needle && visible) {
+      matchedSections += 1;
+      matchedFields += visible;
+    }
+  });
+  const hits = document.getElementById("config-global-hits");
+  if (!hits) return;
+  if (!needle) hits.textContent = "";
+  else if (matchedFields) hits.textContent = `${matchedSections} 个分区 · ${matchedFields} 项`;
+  else hits.textContent = "无匹配";
+}
+
+// The overview's 安全级别 / 默认上游 cards name a config field, so send the
+// reader to that field rather than to the top of a panel holding 15 of them.
+function revealConfigField(fieldName) {
+  const card = document.getElementById(`card-${fieldName}`);
+  if (!card) return false;
+  card.scrollIntoView({ block: "center" });
+  card.classList.add("field-card-flash");
+  setTimeout(() => card.classList.remove("field-card-flash"), 1600);
+  const control = document.getElementById(`cfg-${fieldName}`);
+  if (control && typeof control.focus === "function") control.focus({ preventScroll: true });
+  return true;
+}
+
+function bindOverviewLinks() {
+  document.querySelectorAll("[data-config-field]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      // Fall through to the plain anchor when the panels have not rendered yet.
+      if (revealConfigField(link.dataset.configField)) event.preventDefault();
+    });
+  });
+}
+
+function bindConfigSearch() {
+  const global = document.getElementById("config-global-search");
+  if (global) {
+    global.addEventListener("input", (event) => filterAllSections(event.target.value));
+    global.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        global.value = "";
+        filterAllSections("");
+      }
+    });
+  }
+  // The per-panel boxes and the global one must never disagree about what is
+  // filtered, so typing in a panel drops the global query.
+  document.getElementById("config-panels").addEventListener("input", (event) => {
+    if (!event.target.classList.contains("config-search")) return;
+    if (global && global.value) {
+      global.value = "";
+      const hits = document.getElementById("config-global-hits");
+      if (hits) hits.textContent = "";
+      configSections.forEach((section) => {
+        const panel = document.getElementById(section.id);
+        const nav = document.querySelector(`#config-nav a[href="#${section.id}"]`);
+        if (panel) panel.classList.remove("search-hidden");
+        if (nav) nav.classList.remove("search-hidden");
+      });
+    }
+  });
+  document.getElementById("config-panels").addEventListener("click", (event) => {
+    const reset = event.target.closest("[data-reset-field]");
+    if (reset) resetFieldToDefault(reset.dataset.resetField);
+  });
 }
 
 function renderConfig(payload) {
@@ -399,6 +671,11 @@ function renderConfig(payload) {
   const navHost = document.getElementById("config-nav");
   const panelHost = document.getElementById("config-panels");
   if (!panelHost) return;
+  // Every save rebuilt all eight panels, which silently threw away whatever the
+  // user had typed into the search boxes and jumped the page back up.
+  const typedQueries = new Map();
+  panelHost.querySelectorAll(".config-search").forEach((box) => typedQueries.set(box.id, box.value));
+  const scrollTop = window.scrollY;
   if (navHost) navHost.innerHTML = "";
   panelHost.innerHTML = "";
 
@@ -443,7 +720,22 @@ function renderConfig(payload) {
     if (pending.length) showRestartBanner(section.id, pending.map((item) => item.label), true);
   });
 
+  typedQueries.forEach((value, id) => {
+    const box = document.getElementById(id);
+    if (box) box.value = value;
+  });
+  const globalQuery = document.getElementById("config-global-search");
+  if (globalQuery && globalQuery.value.trim()) {
+    filterAllSections(globalQuery.value);
+  } else {
+    sections.forEach((section) => {
+      const box = document.getElementById(`search-${section.id}`);
+      if (box && box.value) filterSection(section.id, box.value);
+    });
+  }
+  updateDirtyIndicators();
   initScrollSpy();
+  window.scrollTo({ top: scrollTop });
 }
 
 function showRestartBanner(sectionId, labels, alreadyWritten) {
@@ -506,15 +798,20 @@ async function saveSection(section, statusId) {
       setStatus(statusId, "已保存，配置已热重载。");
       AegisUI.toast("配置已保存并热重载", "ok");
     }
-    await loadBootstrap();
+    // Only the header/overview needs refreshing here. Going through
+    // loadBootstrap re-fetched and re-rendered the whole config a second time
+    // and reset the docs panel to its first document mid-read.
+    await refreshOverview();
   } catch (error) {
     if (error.conflict) {
-      setStatus(statusId, "配置已被其他会话修改", true);
-      AegisUI.toast(error.message, "warn", { timeout: 8000 });
-      await loadBootstrap();
+      setStatus(statusId, "配置已被其他会话修改，已重新加载", true);
+      AegisUI.toast(describeWriteError(error, "保存失败"), "warn", { timeout: 8000 });
+      const fresh = await fetchJson("/__ui__/api/config", { resource: "config" });
+      renderConfig(fresh);
+      await refreshOverview();
       return;
     }
-    setStatus(statusId, `保存失败: ${error.message}`, true);
+    setStatus(statusId, describeWriteError(error, "保存失败"), true);
   }
 }
 
@@ -564,7 +861,11 @@ async function loadDoc(docId) {
   setActiveDoc(docId);
 }
 
-async function loadDocs(preferredDocId) {
+// The catalogue leads with the English README, which is the last thing a
+// first-time reader of this console needs; the Web UI quickstart is.
+const PREFERRED_FIRST_DOC = "WEBUI-QUICKSTART.md";
+
+async function loadDocs() {
   const container = document.getElementById("docs-list");
   container.innerHTML = "";
   const data = await fetchJson("/__ui__/api/docs");
@@ -582,8 +883,22 @@ async function loadDocs(preferredDocId) {
     button.addEventListener("click", () => loadDoc(item.id).catch(showDocError));
     container.appendChild(button);
   });
-  const first = items.find((item) => item.id === preferredDocId) || items[0];
+  const first = items.find((item) => item.id === PREFERRED_FIRST_DOC) || items[0];
   await loadDoc(first.id);
+}
+
+// Relative links inside a rendered document switch the viewer instead of
+// navigating away from the console.
+function bindDocLinks() {
+  const viewer = document.getElementById("doc-content");
+  if (!viewer) return;
+  viewer.addEventListener("click", (event) => {
+    const link = event.target.closest("[data-doc-link]");
+    if (!link) return;
+    event.preventDefault();
+    loadDoc(link.dataset.docLink).catch(showDocError);
+    document.getElementById("docs").scrollIntoView({ block: "start" });
+  });
 }
 
 function showDocError(error) {
@@ -598,7 +913,11 @@ function updateStatusBadge(status) {
   badge.textContent = isRunning ? "运行中" : (status || "未知");
 }
 
-async function loadBootstrap() {
+let docsLoaded = false;
+
+// Status, listen address and the CSRF token only — cheap enough to run after
+// every write without disturbing whatever else the user has open.
+async function refreshOverview() {
   const output = document.getElementById("bootstrap-output");
   const data = await fetchJson("/__ui__/api/bootstrap");
 
@@ -606,17 +925,31 @@ async function loadBootstrap() {
   updateStatusBadge(data.status);
 
   document.getElementById("server-text").textContent = `${data.server.host}:${data.server.port}`;
-  document.getElementById("security-text").textContent = data.security.level || "-";
-  document.getElementById("upstream-text").textContent = data.upstream_base_url || "(未配置)";
+  const security = document.getElementById("security-text");
+  security.textContent = data.security.level || "-";
+  const upstream = document.getElementById("upstream-text");
+  upstream.textContent = data.upstream_base_url || "(未配置)";
+  upstream.classList.toggle("is-unset", !data.upstream_base_url);
 
   uiCsrfToken = data.ui && data.ui.csrf_token ? data.ui.csrf_token : "";
   if (output) output.textContent = JSON.stringify(data, null, 2);
+  bootstrapState = data;
+  renderOnboarding();
+  return data;
+}
+
+async function loadBootstrap() {
+  await refreshOverview();
 
   const configData = await fetchJson("/__ui__/api/config", { resource: "config" });
   renderConfig(configData);
 
-  const preferredDocId = Array.isArray(data.docs) && data.docs.length ? data.docs[0].id : null;
-  await loadDocs(preferredDocId);
+  // The catalogue does not change while the console is open, and reloading it
+  // on every refresh threw away the document the user was reading.
+  if (!docsLoaded) {
+    await loadDocs();
+    docsLoaded = true;
+  }
 }
 
 function getModalFocusableElements(container) {
@@ -664,19 +997,157 @@ function trapModalFocus(modal, event) {
   }
 }
 
+// ─── Onboarding ──────────────────────────────
+// "Logged in" to "first forwarded request" used to be an undocumented path
+// through the sidebar, and the one value it ends in — the client base_url —
+// appeared exactly once, in the dialog shown right after registration.
+
+let bootstrapState = null;
+let tokenItems = [];
+
+// Mirrors gateway_auth._gateway_token_base_url. Deriving it from the browser's
+// own origin is what the user should paste: it is the address they reached the
+// console on, tunnel or reverse proxy included.
+function clientBaseUrl(token) {
+  return `${window.location.origin}/v1/__gw__/t/${token}`;
+}
+
+function copyButton(value, label = "复制") {
+  return `<button type="button" class="btn-sm-ghost copy-btn" data-copy="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+}
+
+function bindCopyButtons(root) {
+  if (!root) return;
+  root.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    const value = button.getAttribute("data-copy") || "";
+    const original = button.dataset.copyLabel || button.textContent;
+    button.dataset.copyLabel = original;
+    try {
+      await navigator.clipboard.writeText(value);
+      button.textContent = "已复制";
+      button.classList.add("copied");
+      setTimeout(() => {
+        button.textContent = original;
+        button.classList.remove("copied");
+      }, 1600);
+    } catch (_error) {
+      AegisUI.toast("浏览器拒绝了剪贴板访问，请手动复制", "warn");
+    }
+  });
+}
+
+function onboardStep(index, state, title, bodyHtml) {
+  const marks = { done: "✓", now: String(index), todo: String(index) };
+  return (
+    `<li class="onboard-step onboard-${state}">` +
+    `<span class="onboard-mark" aria-hidden="true">${marks[state]}</span>` +
+    `<div class="onboard-body"><strong>${escapeHtml(title)}</strong>${bodyHtml}</div>` +
+    `</li>`
+  );
+}
+
+function renderOnboarding() {
+  const host = document.getElementById("onboard");
+  const list = document.getElementById("onboard-steps");
+  if (!host || !list || !bootstrapState) return;
+
+  const first = tokenItems[0];
+  const defaultUpstream = String(bootstrapState.upstream_base_url || "").trim();
+  const baseUrl = first
+    ? clientBaseUrl(first.token)
+    : defaultUpstream
+      ? `${window.location.origin}/v1`
+      : "";
+  const routed = Boolean(first) || Boolean(defaultUpstream);
+
+  const steps = [
+    onboardStep(1, "done", "登录控制台", '<p>你已经在这里了。登录密码就是 <code>config/aegis_gateway.key</code> 的内容。</p>'),
+    routed
+      ? onboardStep(
+          2,
+          "done",
+          "上游已就绪",
+          first
+            ? `<p>已注册 ${tokenItems.length} 个上游 Token，第一个指向 <code>${escapeHtml(first.upstream_base)}</code>。</p>`
+            : `<p>已设置直连上游 <code>${escapeHtml(defaultUpstream)}</code>，<code>/v1/...</code> 可以不带 Token 直接调用。</p>`
+        )
+      : onboardStep(
+          2,
+          "now",
+          "注册上游 Token",
+          '<p>把你的模型服务地址（例如 <code>https://api.openai.com/v1</code>）注册进来，网关会生成一个路由 Token。</p>' +
+            '<p class="onboard-actions"><button type="button" class="btn-sm" data-onboard-action="register">注册 Token</button></p>'
+        ),
+    baseUrl
+      ? onboardStep(
+          3,
+          routed ? "now" : "todo",
+          "把 Base URL 填进客户端",
+          '<p>作为 OpenAI 兼容 API 的 <code>base_url</code> 使用，密钥仍然填上游自己的 key。</p>' +
+            `<div class="onboard-copy">${copyButton(baseUrl, "复制 Base URL")}<code>${escapeHtml(baseUrl)}</code></div>` +
+            `<div class="onboard-copy">${copyButton(`export OPENAI_BASE_URL="${baseUrl}"`, "复制环境变量")}<code>export OPENAI_BASE_URL="${escapeHtml(baseUrl)}"</code></div>`
+        )
+      : onboardStep(3, "todo", "把 Base URL 填进客户端", '<p>完成上一步后，这里会给出可直接复制的地址。</p>'),
+  ];
+
+  list.innerHTML = steps.join("");
+  host.hidden = false;
+  host.classList.toggle("onboard-complete", routed);
+
+  const title = document.getElementById("onboard-title");
+  if (title) title.textContent = routed ? "网关已就绪" : "先把第一个请求跑通";
+
+  // Once a route exists this is reference material, not a task list — collapse
+  // it by default, but remember whatever the user last chose.
+  const stored = localStorage.getItem("aegisgate_onboard_open");
+  const open = stored === null ? !routed : stored === "1";
+  setOnboardOpen(open);
+}
+
+function setOnboardOpen(open) {
+  const host = document.getElementById("onboard");
+  const toggle = document.getElementById("onboard-toggle");
+  if (!host || !toggle) return;
+  host.classList.toggle("collapsed", !open);
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  toggle.textContent = open ? "收起" : "展开";
+}
+
+function bindOnboarding() {
+  const host = document.getElementById("onboard");
+  const toggle = document.getElementById("onboard-toggle");
+  if (!host || !toggle) return;
+  bindCopyButtons(host);
+  toggle.addEventListener("click", () => {
+    const open = toggle.getAttribute("aria-expanded") !== "true";
+    localStorage.setItem("aegisgate_onboard_open", open ? "1" : "0");
+    setOnboardOpen(open);
+  });
+  host.addEventListener("click", (event) => {
+    if (event.target.closest('[data-onboard-action="register"]')) openTokenModal();
+  });
+}
+
 // ─── Token Management ────────────────────────
 
 async function loadTokens() {
   const tbody = document.getElementById("token-tbody");
   const countEl = document.getElementById("token-count");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
+  showSkeleton(tbody, 5);
   try {
     const data = await fetchJson("/__ui__/api/tokens");
     const items = Array.isArray(data.items) ? data.items : [];
+    tokenItems = items;
+    renderOnboarding();
     if (countEl) countEl.textContent = `共 ${items.length} 个 Token`;
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">暂无已注册的 Token，点击右上角「注册 Token」添加。</td></tr>`;
+      tbody.innerHTML = emptyStateRow(5, "还没有注册任何上游 Token。", {
+        id: "token-add",
+        label: "注册 Token",
+      });
       return;
     }
     tbody.innerHTML = "";
@@ -686,15 +1157,22 @@ async function loadTokens() {
       const wlTitle = wlCount
         ? `脱敏豁免字段: ${item.whitelist_keys.join(", ")}`
         : "未设置豁免，所有字段均参与脱敏";
+      const baseUrl = clientBaseUrl(item.token);
       tr.innerHTML = `
         <td>
-          <button class="token-code" title="点击复制完整 Token" data-token="${escapeHtml(item.token)}">
+          <button class="token-code" title="点击复制完整 Token" data-copy="${escapeHtml(item.token)}">
             ${escapeHtml(item.token)}
           </button>
         </td>
+        <td>
+          <div class="token-baseurl">
+            <code title="${escapeHtml(baseUrl)}">${escapeHtml(baseUrl)}</code>
+            ${copyButton(baseUrl, "复制")}
+          </div>
+        </td>
         <td><div class="token-upstream" title="${escapeHtml(item.upstream_base)}">${escapeHtml(item.upstream_base)}</div></td>
-        <td><span class="token-wl-count" title="${escapeHtml(wlTitle)}">${wlCount || "∞"}</span></td>
-        <td style="white-space:nowrap;">
+        <td><span class="token-wl-count" title="${escapeHtml(wlTitle)}">${wlCount}</span></td>
+        <td class="u-nowrap">
           <button class="btn-edit-sm" data-edit-token="${escapeHtml(item.token)}" data-edit-upstream="${escapeHtml(item.upstream_base)}" data-edit-whitelist="${escapeHtml((item.whitelist_keys||[]).join(', '))}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -710,14 +1188,7 @@ async function loadTokens() {
             删除
           </button>
         </td>`;
-      // Copy token on click
-      tr.querySelector(".token-code").addEventListener("click", (e) => {
-        const t = e.currentTarget.dataset.token;
-        navigator.clipboard.writeText(t).then(() => {
-          e.currentTarget.textContent = "已复制!";
-          setTimeout(() => { e.currentTarget.textContent = t; }, 1500);
-        }).catch(() => {});
-      });
+      // Token and base_url both copy through the shared delegated handler.
       // Edit token
       tr.querySelector(".btn-edit-sm").addEventListener("click", (e) => {
         const btn = e.currentTarget;
@@ -751,9 +1222,68 @@ async function loadTokens() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = errorStateRow(5, err, "Token 列表加载失败");
     if (countEl) countEl.textContent = "加载失败";
   }
+}
+
+// ── Upstream address feedback ────────────────
+// The gateway refuses a malformed upstream when it forwards, not when it is
+// registered, so a typo used to surface as a broken client hours later. These
+// checks mirror gateway_keys.upstream_base_error; the server still has the
+// final say, this just says it while the field is in front of the user.
+const UPSTREAM_ENDPOINT_SUFFIXES = [
+  "/chat/completions",
+  "/completions",
+  "/messages",
+  "/embeddings",
+  "/responses",
+];
+
+function upstreamFeedback(raw) {
+  const value = String(raw || "").trim().replace(/\/+$/, "");
+  if (!value) return { level: "", text: "" };
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    return { level: "err", text: "上游地址必须以 http:// 或 https:// 开头" };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { level: "err", text: "上游地址必须以 http:// 或 https:// 开头" };
+  }
+  if (!parsed.hostname) return { level: "err", text: "上游地址缺少主机名" };
+  if (parsed.username || parsed.password) {
+    return { level: "err", text: "上游地址不能包含用户名或密码，请改用请求头传递凭据" };
+  }
+  if (parsed.search || parsed.hash) {
+    return { level: "err", text: "上游地址不能带查询参数或 # 片段" };
+  }
+  const path = parsed.pathname.replace(/\/+$/, "");
+  const endpoint = UPSTREAM_ENDPOINT_SUFFIXES.find((suffix) => path.endsWith(suffix));
+  if (endpoint) {
+    return {
+      level: "warn",
+      text: `这里要填 base URL，不是具体端点：去掉结尾的 ${endpoint} 试试`,
+    };
+  }
+  return { level: "ok", text: `将转发到 ${parsed.origin}${path || ""}` };
+}
+
+function renderUpstreamFeedback() {
+  const note = document.getElementById("modal-upstream-note");
+  const probe = document.getElementById("modal-probe");
+  if (!note) return { level: "", text: "" };
+  const feedback = upstreamFeedback(document.getElementById("modal-upstream").value);
+  note.textContent = feedback.text;
+  note.className = `field-note ${feedback.level}`;
+  if (probe) probe.disabled = feedback.level === "err" || feedback.level === "";
+  return feedback;
+}
+
+function resetTokenModalFeedback() {
+  setStatus("modal-probe-status", "");
+  renderUpstreamFeedback();
 }
 
 function openTokenModal() {
@@ -767,6 +1297,7 @@ function openTokenModal() {
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.add("hidden");
   document.getElementById("modal-submit").textContent = "注册";
+  resetTokenModalFeedback();
   openModal(modal, document.getElementById("modal-upstream"));
 }
 
@@ -781,7 +1312,44 @@ function openEditModal(item) {
   document.getElementById("modal-error").textContent = "";
   document.getElementById("modal-token-field").classList.remove("hidden");
   document.getElementById("modal-submit").textContent = "保存";
+  resetTokenModalFeedback();
   openModal(modal, document.getElementById("modal-upstream"));
+}
+
+async function probeUpstream() {
+  const feedback = renderUpstreamFeedback();
+  if (feedback.level === "err" || !feedback.level) {
+    setStatus("modal-probe-status", "请先填写有效的上游地址", true);
+    return;
+  }
+  const button = document.getElementById("modal-probe");
+  const upstream = document.getElementById("modal-upstream").value.trim();
+  button.disabled = true;
+  setStatus("modal-probe-status", "测试中…");
+  try {
+    const data = await fetchJson("/__ui__/api/tokens/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+      body: JSON.stringify({ upstream_base: upstream }),
+    });
+    if (!data.reachable) {
+      setStatus("modal-probe-status", `不可达：${data.detail}`, true);
+      return;
+    }
+    // 401/403 from an upstream is the healthy answer here: the address resolved
+    // and answered, it just wants the API key the client will send.
+    const auth = data.status_code === 401 || data.status_code === 403;
+    setStatus(
+      "modal-probe-status",
+      `已连通，返回 HTTP ${data.status_code}（${data.elapsed_ms} ms）` +
+        (auth ? " — 需要鉴权，属正常" : ""),
+      auth ? "warn" : "ok"
+    );
+  } catch (err) {
+    setStatus("modal-probe-status", describeWriteError(err, "测试失败"), true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function closeTokenModal() {
@@ -798,6 +1366,8 @@ async function submitTokenModal() {
   const whitelistArr = whitelist ? whitelist.split(",").map((s) => s.trim()).filter(Boolean) : [];
   errorEl.textContent = "";
   if (!upstream) { errorEl.textContent = "请填写上游地址"; return; }
+  const feedback = upstreamFeedback(upstream);
+  if (feedback.level === "err") { errorEl.textContent = feedback.text; return; }
 
   const submitBtn = document.getElementById("modal-submit");
 
@@ -870,12 +1440,29 @@ function bindTokenModal() {
   const cancelBtn  = document.getElementById("modal-cancel");
   const submitBtn  = document.getElementById("modal-submit");
   const overlay    = document.getElementById("token-modal");
+  const upstream   = document.getElementById("modal-upstream");
+  const probeBtn   = document.getElementById("modal-probe");
+  const tokensPanel = document.getElementById("tokens");
 
   if (addBtn)     addBtn.addEventListener("click", openTokenModal);
   if (refreshBtn) refreshBtn.addEventListener("click", loadTokens);
   if (closeBtn)   closeBtn.addEventListener("click", closeTokenModal);
   if (cancelBtn)  cancelBtn.addEventListener("click", closeTokenModal);
   if (submitBtn)  submitBtn.addEventListener("click", submitTokenModal);
+  if (probeBtn)   probeBtn.addEventListener("click", probeUpstream);
+  if (upstream) {
+    upstream.addEventListener("input", () => {
+      renderUpstreamFeedback();
+      // A probe result belongs to the address that produced it.
+      setStatus("modal-probe-status", "");
+    });
+  }
+  bindCopyButtons(tokensPanel);
+  if (tokensPanel) {
+    tokensPanel.addEventListener("click", (event) => {
+      if (event.target.closest('[data-empty-action="token-add"]')) openTokenModal();
+    });
+  }
 
   // Close on overlay click
   if (overlay) {
@@ -902,6 +1489,9 @@ function bindTokenModal() {
 
 function bindActions() {
   document.getElementById("refresh-bootstrap").addEventListener("click", () => {
+    // The getting-started card is derived from the token list too, so a manual
+    // refresh has to pick that up or it reports stale progress.
+    loadTokens();
     loadBootstrap().catch((error) => {
       const output = document.getElementById("bootstrap-output");
       if (output) output.textContent = `加载失败: ${error.message}`;
@@ -922,8 +1512,74 @@ function bindActions() {
   });
 }
 
+// ─── Keyboard ────────────────────────────────
+// The sidebar is 15+ links deep, so reaching a search box by Tab is a chore.
+// "/" jumps to the search box of whichever panel is on screen.
+
+function visibleSearchBox() {
+  const boxes = Array.from(document.querySelectorAll(".config-search, #rules-search, #audit-q"));
+  const onScreen = boxes.find((box) => {
+    if (box.classList.contains("hidden") || box.closest(".search-hidden")) return false;
+    const rect = box.getBoundingClientRect();
+    return rect.height > 0 && rect.top >= 0 && rect.top < window.innerHeight;
+  });
+  return onScreen || document.getElementById("config-global-search");
+}
+
+// A hash in the URL is resolved by the browser while the page is still mostly
+// empty: the config panels, the rules workbench and the redaction list all load
+// afterwards and all sit above #tokens and #docs, so the anchor ends up
+// thousands of pixels short. Re-apply it while the page settles, and stop the
+// moment the reader takes over.
+function honourInitialHash() {
+  const target = window.location.hash && document.querySelector(window.location.hash);
+  if (!target) return;
+  let cancelled = false;
+  const cancel = () => { cancelled = true; };
+  ["wheel", "touchstart", "keydown", "mousedown"].forEach((event) =>
+    window.addEventListener(event, cancel, { once: true, passive: true })
+  );
+  let previousTop = null;
+  let stableTicks = 0;
+  const stop = setInterval(() => {
+    if (cancelled) {
+      clearInterval(stop);
+      return;
+    }
+    const top = Math.round(target.getBoundingClientRect().top + window.scrollY);
+    stableTicks = top === previousTop ? stableTicks + 1 : 0;
+    previousTop = top;
+    target.scrollIntoView();
+    // Two quiet ticks means the loaders above it are done moving things.
+    if (stableTicks >= 2) clearInterval(stop);
+  }, 200);
+  setTimeout(() => clearInterval(stop), 4000);
+}
+
+function bindKeyboardShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+    const active = document.activeElement;
+    const typing = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+    if (typing) return;
+    // A dialog owns the keyboard while it is open.
+    if (document.querySelector(".dialog-overlay, .modal-overlay:not(.hidden)")) return;
+    const box = visibleSearchBox();
+    if (!box) return;
+    event.preventDefault();
+    box.focus();
+    box.select();
+  });
+}
+
 bindActions();
 bindTokenModal();
+bindOnboarding();
+bindConfigSearch();
+bindOverviewLinks();
+bindDocLinks();
+bindKeyboardShortcuts();
+honourInitialHash();
 initScrollSpy();
 loadTokens();
 loadBootstrap().catch((error) => {
@@ -939,13 +1595,16 @@ async function loadRedactValues() {
   const tbody = document.getElementById("redact-tbody");
   const countEl = document.getElementById("redact-count");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
+  showSkeleton(tbody, 4);
   try {
     const data = await fetchJson("/__ui__/api/redact_values", { resource: "redact_values" });
     const items = Array.isArray(data.items) ? data.items : [];
     if (countEl) countEl.textContent = `共 ${items.length} 条`;
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">暂无精确值脱敏配置，点击「添加值」新增。</td></tr>`;
+      tbody.innerHTML = emptyStateRow(4, "还没有配置精确值脱敏。", {
+        id: "redact-add",
+        label: "添加值",
+      });
       return;
     }
     tbody.innerHTML = "";
@@ -953,7 +1612,7 @@ async function loadRedactValues() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${idx}</td>
-        <td><code style="font-size:0.85rem;">${escapeHtml(item.masked)}</code></td>
+        <td><code class="u-code-md">${escapeHtml(item.masked)}</code></td>
         <td>${item.length}</td>
         <td>
           <button class="btn-danger-sm" data-del-redact="${idx}">
@@ -986,7 +1645,7 @@ async function loadRedactValues() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = errorStateRow(4, err, "精确值列表加载失败");
     if (countEl) countEl.textContent = "加载失败";
   }
 }
@@ -1038,8 +1697,14 @@ async function submitRedactModal() {
 function bindRedactUI() {
   const addBtn = document.getElementById("redact-add");
   const refreshBtn = document.getElementById("redact-refresh");
+  const panel = document.getElementById("redact-values");
   if (addBtn) addBtn.addEventListener("click", openRedactModal);
   if (refreshBtn) refreshBtn.addEventListener("click", loadRedactValues);
+  if (panel) {
+    panel.addEventListener("click", (event) => {
+      if (event.target.closest('[data-empty-action="redact-add"]')) openRedactModal();
+    });
+  }
 
   const closeBtn = document.getElementById("redact-modal-close");
   const cancelBtn = document.getElementById("redact-modal-cancel");
@@ -1139,7 +1804,18 @@ function renderRuleSectionList(sections, query) {
   host.appendChild(actionMap);
 }
 
-function selectRulesSection(sectionId) {
+async function selectRulesSection(sectionId) {
+  if (sectionId !== currentRulesSection && actionMapDirty.size) {
+    const ok = await AegisUI.confirm({
+      title: "放弃未保存的动作映射改动？",
+      message: `有 ${actionMapDirty.size} 项处置动作改了还没保存，切走后会丢失。`,
+      confirmLabel: "放弃改动",
+      danger: true,
+    });
+    if (!ok) return;
+    actionMapDirty.clear();
+    updateActionMapDirty();
+  }
   currentRulesSection = sectionId;
   document.querySelectorAll("[data-rules-section]").forEach((node) => {
     const active = node.dataset.rulesSection === sectionId;
@@ -1147,7 +1823,10 @@ function selectRulesSection(sectionId) {
     node.setAttribute("aria-selected", active ? "true" : "false");
   });
   const search = document.getElementById("rules-search");
-  if (search) search.value = "";
+  if (search) {
+    search.value = "";
+    search.placeholder = "按 ID 或正则搜索…";
+  }
   loadRules(sectionId);
 }
 
@@ -1198,7 +1877,7 @@ async function loadRules(section) {
   const addBtn = document.getElementById("rules-add");
   const searchBox = document.getElementById("rules-search");
   const labelEl = document.getElementById("rules-section-label");
-  if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty">加载中…</td></tr>`;
+  showSkeleton(tbody, 4);
   if (tableEl) tableEl.classList.remove("hidden");
   if (actionMapPanel) actionMapPanel.classList.add("hidden");
   if (searchBox) searchBox.classList.remove("hidden");
@@ -1232,7 +1911,9 @@ async function loadRules(section) {
     const colCount = 2 + extraKeys.length + (currentRulesReadonly ? 0 : 1);
 
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="${colCount}" class="token-table-empty">暂无规则，点击「添加规则」新增。</td></tr>`;
+      tbody.innerHTML = currentRulesReadonly
+        ? emptyStateRow(colCount, "该规则组暂无规则。")
+        : emptyStateRow(colCount, "该规则组暂无规则。", { id: "rules-add", label: "添加规则" });
       if (countEl) countEl.textContent = "共 0 条规则";
       return;
     }
@@ -1241,12 +1922,12 @@ async function loadRules(section) {
     items.forEach((item) => {
       const tr = document.createElement("tr");
       tr.dataset.search = `${item.id || ""} ${item.regex || ""}`.toLowerCase();
-      const idCell = `<td><code style="font-size:0.82rem;">${escapeHtml(item.id || "")}</code></td>`;
+      const idCell = `<td><code class="u-code-sm">${escapeHtml(item.id || "")}</code></td>`;
       const regexCell = `<td class="rule-regex-cell" title="${escapeHtml(item.regex || "")}"><code>${escapeHtml(item.regex || "")}</code></td>`;
       const extraCells = extraKeys
         .map((key) => `<td><span class="rule-extra">${escapeHtml(String(item[key] ?? ""))}</span></td>`)
         .join("");
-      const actionCell = currentRulesReadonly ? "" : `<td style="white-space:nowrap;">
+      const actionCell = currentRulesReadonly ? "" : `<td class="u-nowrap">
         <button class="btn-edit-sm" data-rule-id="${escapeHtml(item.id || "")}">编辑</button>
         <button class="btn-danger-sm" data-del-rule-id="${escapeHtml(item.id || "")}">删除</button>
       </td>`;
@@ -1282,7 +1963,7 @@ async function loadRules(section) {
     });
     filterRulesTable(searchBox ? searchBox.value : "");
   } catch (err) {
-    if (tbody) tbody.innerHTML = `<tr><td colspan="4" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+    if (tbody) tbody.innerHTML = errorStateRow(4, err, "规则加载失败");
     if (countEl) countEl.textContent = "加载失败";
   }
 }
@@ -1306,27 +1987,37 @@ async function loadActionMap() {
   if (actionMapPanel) actionMapPanel.classList.remove("hidden");
   if (addBtn) addBtn.classList.add("hidden");
   if (countEl) countEl.textContent = "";
-  if (searchBox) searchBox.classList.add("hidden");
+  // The action map is a long list of categories too, so it keeps the search box
+  // rather than hiding it and leaving people to scroll.
+  if (searchBox) {
+    searchBox.classList.remove("hidden");
+    searchBox.placeholder = "按类别或威胁名搜索…";
+  }
   if (labelEl) { labelEl.textContent = "动作映射"; labelEl.title = "action_map"; }
 
   try {
     const data = await fetchJson("/__ui__/api/rules_action_map", { resource: "rules" });
     const actionMap = data.action_map || {};
     actionMapState = JSON.parse(JSON.stringify(actionMap));
+    actionMapDirty.clear();
+    updateActionMapDirty();
     if (!grid) return;
     grid.innerHTML = "";
     const VALID_ACTIONS = ["block", "review", "sanitize", "pass"];
     Object.entries(actionMap).forEach(([category, threats]) => {
       const header = document.createElement("div");
-      header.className = "field-card wide";
-      header.innerHTML = `<div class="meta"><strong style="color:var(--accent);">${escapeHtml(category)}</strong></div>`;
+      header.className = "field-card wide action-map-header";
+      header.dataset.search = String(category).toLowerCase();
+      header.innerHTML = `<div class="meta"><strong class="u-accent">${escapeHtml(category)}</strong></div>`;
       grid.appendChild(header);
       if (typeof threats === "object" && threats !== null) {
         Object.entries(threats).forEach(([threat, action]) => {
           const card = document.createElement("div");
           card.className = "field-card";
+          card.dataset.search = `${category} ${threat}`.toLowerCase();
           const sel = document.createElement("select");
           sel.className = "action-map-select";
+          sel.setAttribute("aria-label", `${category} / ${threat} 的处置动作`);
           VALID_ACTIONS.forEach((a) => {
             const opt = document.createElement("option");
             opt.value = a; opt.textContent = a;
@@ -1336,6 +2027,13 @@ async function loadActionMap() {
           sel.addEventListener("change", () => {
             if (!actionMapState[category]) actionMapState[category] = {};
             actionMapState[category][threat] = sel.value;
+            // Changing a select and then switching groups used to drop the edit
+            // without a word; now it is marked and the leave prompt covers it.
+            const key = `${category}.${threat}`;
+            if (sel.value === action) actionMapDirty.delete(key);
+            else actionMapDirty.add(key);
+            card.classList.toggle("dirty", sel.value !== action);
+            updateActionMapDirty();
           });
           card.innerHTML = `<div class="meta"><strong>${escapeHtml(threat)}</strong><span class="default">${escapeHtml(category)}</span></div>`;
           card.appendChild(sel);
@@ -1343,9 +2041,25 @@ async function loadActionMap() {
         });
       }
     });
+    filterActionMap(searchBox ? searchBox.value : "");
   } catch (err) {
-    if (grid) grid.innerHTML = `<p style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</p>`;
+    if (grid) grid.innerHTML = `<p class="error-note">${escapeHtml(describeWriteError(err, "动作映射加载失败"))}</p>`;
   }
+}
+
+function updateActionMapDirty() {
+  const counter = document.getElementById("action-map-dirty");
+  if (counter) counter.textContent = actionMapDirty.size ? `（${actionMapDirty.size} 项待保存）` : "";
+}
+
+function filterActionMap(query) {
+  const needle = String(query || "").trim().toLowerCase();
+  const grid = document.getElementById("action-map-grid");
+  if (!grid) return;
+  grid.querySelectorAll(".field-card").forEach((card) => {
+    const hit = !needle || (card.dataset.search || "").includes(needle);
+    card.classList.toggle("search-hidden", !hit);
+  });
 }
 
 function openRuleModal(section, item) {
@@ -1505,13 +2219,24 @@ function bindRulesUI() {
   }
   const ruleSearch = document.getElementById("rules-search");
   if (ruleSearch) {
-    ruleSearch.addEventListener("input", (event) => filterRulesTable(event.target.value));
+    ruleSearch.addEventListener("input", (event) => {
+      if (currentRulesSection === ACTION_MAP_SECTION) filterActionMap(event.target.value);
+      else filterRulesTable(event.target.value);
+    });
   }
   const testBtn = document.getElementById("rule-modal-test");
   if (testBtn) testBtn.addEventListener("click", runRegexLab);
 
   const addBtn = document.getElementById("rules-add");
   if (addBtn) addBtn.addEventListener("click", () => openRuleModal(currentRulesSection, null));
+  const rulesPanel = document.getElementById("rules");
+  if (rulesPanel) {
+    rulesPanel.addEventListener("click", (event) => {
+      if (event.target.closest('[data-empty-action="rules-add"]')) {
+        openRuleModal(currentRulesSection, null);
+      }
+    });
+  }
 
   const closeBtn = document.getElementById("rule-modal-close");
   const cancelBtn = document.getElementById("rule-modal-cancel");
@@ -1532,8 +2257,12 @@ function bindRulesUI() {
       });
       setStatus("action-map-status", "已保存");
       AegisUI.toast("动作映射已保存", "ok");
+      actionMapDirty.clear();
+      updateActionMapDirty();
+      document.querySelectorAll("#action-map-grid .field-card.dirty")
+        .forEach((card) => card.classList.remove("dirty"));
     } catch (err) {
-      setStatus("action-map-status", `失败: ${err.message}`, true);
+      setStatus("action-map-status", describeWriteError(err, "保存失败"), true);
       handleWriteError(err, loadActionMap, "保存失败");
     }
   });
@@ -1617,7 +2346,7 @@ async function viewKey(keyType) {
     const data = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
     showKeyModal(keyType, data);
   } catch (err) {
-    AegisUI.toast(`查看失败: ${err.message}`, "err");
+    AegisUI.toast(describeWriteError(err, "查看失败"), "err");
   }
 }
 
@@ -1647,7 +2376,7 @@ async function rotateKey(keyType) {
     const detail = await fetchJson(`/__ui__/api/keys/${encodeURIComponent(keyType)}`);
     showKeyModal(keyType, detail, {rotated: true});
   } catch (err) {
-    AegisUI.toast(`更换失败: ${err.message}`, "err");
+    AegisUI.toast(describeWriteError(err, "更换失败"), "err");
   }
 }
 
@@ -1693,7 +2422,7 @@ async function loadStats() {
   var tbody = document.getElementById("stats-tbody");
   var sinceEl = document.getElementById("stats-since");
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty">加载中...</td></tr>';
+  showSkeleton(tbody, 6);
   try {
     var data = await fetchJson("/__ui__/api/stats");
     var t = data.totals || {};
@@ -1728,7 +2457,7 @@ async function loadStats() {
       tbody.appendChild(tr);
     });
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty" style="color:var(--error)">加载失败: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = errorStateRow(6, err, "统计加载失败");
   }
 }
 
@@ -1763,7 +2492,7 @@ function bindStatsUI() {
       });
       loadStats();
     } catch (err) {
-      AegisUI.toast("清除失败: " + err.message, "err");
+      AegisUI.toast(describeWriteError(err, "清除失败"), "err");
     }
   });
   loadStats();
@@ -1781,7 +2510,7 @@ async function loadComposeList() {
     var data = await fetchJson("/__ui__/api/compose");
     var items = Array.isArray(data.items) ? data.items : [];
     if (!items.length) {
-      selector.innerHTML = '<span style="font-size:0.83rem;color:var(--muted);">未找到 Compose 文件</span>';
+      selector.innerHTML = '<span class="compose-empty">未找到 Compose 文件</span>';
       return;
     }
     items.forEach(function(item) {
@@ -1793,31 +2522,41 @@ async function loadComposeList() {
         currentComposeFile = item.filename;
         selector.querySelectorAll(".compose-file-btn").forEach(function(b) { b.classList.remove("active"); });
         btn.classList.add("active");
-        loadComposeContent(item.filename);
+        loadComposeContent(item.filename, item.exists);
       });
       selector.appendChild(btn);
     });
-    if (!currentComposeFile && items.length) {
-      currentComposeFile = items[0].filename;
+    // The list already knows which files are missing; fetching one of those
+    // anyway just turned a known-absent file into a 404 and an error message.
+    var current = items.find(function(item) { return item.filename === currentComposeFile; });
+    if (!current && items.length) {
+      current = items[0];
+      currentComposeFile = current.filename;
       selector.querySelector(".compose-file-btn").classList.add("active");
-      loadComposeContent(items[0].filename);
-    } else if (currentComposeFile) {
-      loadComposeContent(currentComposeFile);
     }
+    if (current) loadComposeContent(current.filename, current.exists);
   } catch (err) {
-    selector.innerHTML = '<span style="color:var(--error);font-size:0.83rem;">加载失败: ' + escapeHtml(err.message) + '</span>';
+    selector.innerHTML = '<span class="compose-error">' + escapeHtml(describeWriteError(err, "Compose 列表加载失败")) + '</span>';
   }
 }
 
-async function loadComposeContent(filename) {
+async function loadComposeContent(filename, exists) {
   var editor = document.getElementById("compose-editor");
   if (!editor) return;
+  if (exists === false) {
+    editor.value = "";
+    editor.placeholder = filename + " 还不存在。在这里写入内容并保存即可创建它。";
+    setStatus("compose-save-status", filename + " 尚未创建", "warn");
+    return;
+  }
   editor.value = "加载中…";
   try {
     var data = await fetchJson("/__ui__/api/compose/" + encodeURIComponent(filename), { resource: "compose" });
     editor.value = data.content || "";
+    setStatus("compose-save-status", "");
   } catch (err) {
-    editor.value = "加载失败: " + err.message;
+    editor.value = "";
+    setStatus("compose-save-status", describeWriteError(err, "加载失败"), true);
   }
 }
 
@@ -1837,8 +2576,8 @@ function bindComposeUI() {
       setStatus("compose-save-status", "已保存");
       AegisUI.toast("Compose 文件已保存", "ok");
     } catch (err) {
-      setStatus("compose-save-status", "保存失败: " + err.message, true);
-      handleWriteError(err, function () { loadComposeContent(currentComposeFile); }, "保存失败");
+      setStatus("compose-save-status", describeWriteError(err, "保存失败"), true);
+      handleWriteError(err, function () { loadComposeContent(currentComposeFile, true); }, "保存失败");
     }
   });
   loadComposeList();
@@ -1857,8 +2596,12 @@ function bindRestartButton() {
       danger: true,
     });
     if (!ok) return;
+    // Writing to btn.textContent used to wipe the icon along with the label and
+    // never put either back, so a failed restart left the header stuck on
+    // "重启中…" until a reload.
+    var label = document.getElementById("restart-label");
     btn.disabled = true;
-    btn.querySelector("svg + span, svg ~ *") || (btn.textContent = "重启中…");
+    if (label) label.textContent = "重启中…";
     try {
       await fetchJson("/__ui__/api/restart", {
         method: "POST",
@@ -1867,7 +2610,8 @@ function bindRestartButton() {
       updateHeaderStatus("restarting");
       setTimeout(function() { window.location.reload(); }, 3000);
     } catch (err) {
-      AegisUI.toast("重启失败: " + err.message, "err");
+      AegisUI.toast(describeWriteError(err, "重启失败"), "err");
+      if (label) label.textContent = "重启";
       btn.disabled = false;
     }
   });
