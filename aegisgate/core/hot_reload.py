@@ -10,7 +10,7 @@ import asyncio
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
 
 from aegisgate.util.logger import logger
 
@@ -254,26 +254,77 @@ def reload_settings() -> None:
         logger.exception("hot_reload settings reload failed")
 
 
-def reload_security_rules() -> None:
-    """Invalidate all caches that depend on security_filters.yaml."""
+# Layers that must all succeed for a rules reload to count as applied. A console
+# write that lands on disk but leaves one of these holding stale compiled
+# patterns is a half-applied security policy, so the writer treats any of them
+# failing as a failed write.
+REQUIRED_SECURITY_RULE_RELOAD_LAYERS: tuple[str, ...] = (
+    "yaml",
+    "openai_lru",
+    "v2_lru",
+    "pipeline",
+)
+
+
+def reload_security_rules() -> dict[str, Any]:
+    """Invalidate all caches that depend on security_filters.yaml.
+
+    Every layer used to swallow its own exception, so a caller could not tell an
+    applied reload from one where the V2 LRU still held the previous patterns.
+    The per-layer outcome is returned instead: the console's write transaction
+    needs it to decide whether the bytes it just wrote are actually running.
+    """
+    layers: dict[str, str] = {}
+    errors: list[dict[str, str]] = []
+
+    def _run(layer: str, action: Callable[[], None]) -> bool:
+        try:
+            action()
+        except Exception as exc:
+            logger.exception("hot_reload %s failed", layer)
+            layers[layer] = "failed"
+            errors.append({"layer": layer, "error": f"{type(exc).__name__}: {exc}"})
+            return False
+        layers[layer] = "ok"
+        return True
+
+    def _load_yaml() -> None:
+        from aegisgate.config.security_rules import (
+            invalidate_security_rules_cache,
+            load_security_rules,
+        )
+
+        # Explicit invalidation first: the cache is mtime-keyed, and a reload
+        # asked for by name must not be answered from a stale entry.
+        invalidate_security_rules_cache()
+        load_security_rules()
+
     # 1. security_rules.py has mtime-based cache — next call auto-reloads.
     #    Force a load now so the YAML is parsed once, not per-thread.
-    try:
-        from aegisgate.config.security_rules import load_security_rules
+    if _run("yaml", _load_yaml):
+        # 2. Clear router LRU caches (compiled regex from security rules).
+        _run("openai_lru", _clear_openai_lru_caches)
+        _run("v2_lru", _clear_v2_lru_caches)
+        # 3. Reset filter pipeline so new filter instances pick up fresh rules.
+        _run("pipeline", _reset_filter_pipeline)
+    else:
+        # A YAML that does not parse must not be followed by cache clears: the
+        # layers would rebuild from the same broken file.
+        for layer in REQUIRED_SECURITY_RULE_RELOAD_LAYERS[1:]:
+            layers[layer] = "skipped"
 
-        load_security_rules()
-    except Exception:
-        logger.exception("hot_reload security_rules load failed")
-        return
-
-    # 2. Clear router LRU caches (compiled regex from security rules).
-    _clear_openai_lru_caches()
-    _clear_v2_lru_caches()
-
-    # 3. Reset filter pipeline so new filter instances pick up fresh rules.
-    _reset_filter_pipeline()
-
-    logger.info("hot_reload security rules + pipeline reloaded")
+    ok = all(layers.get(layer) == "ok" for layer in REQUIRED_SECURITY_RULE_RELOAD_LAYERS)
+    result = {
+        "ok": ok,
+        "layers": layers,
+        "errors": errors,
+        "pipeline_generation": get_pipeline_generation(),
+    }
+    if ok:
+        logger.info("hot_reload security rules + pipeline reloaded")
+    else:
+        logger.error("hot_reload security rules reload incomplete layers=%s", layers)
+    return result
 
 
 def reload_gw_tokens() -> None:
@@ -305,50 +356,46 @@ def reload_policy_cache() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _clear_openai_lru_caches() -> None:
-    try:
-        from aegisgate.adapters.openai_compat.router import (
-            _responses_function_output_redaction_patterns,
-            _responses_relaxed_redaction_patterns,
-            _confirmation_hit_regex_patterns,
-            _critical_danger_patterns,
-            _tool_call_guard_patterns,
-        )
+# The three helpers below deliberately let their exception escape:
+# ``reload_security_rules`` records which layer failed. Swallowing it here is
+# what made a partially applied reload indistinguishable from a clean one.
 
-        _responses_function_output_redaction_patterns.cache_clear()
-        _responses_relaxed_redaction_patterns.cache_clear()
-        _confirmation_hit_regex_patterns.cache_clear()
-        _critical_danger_patterns.cache_clear()
-        _tool_call_guard_patterns.cache_clear()
-    except Exception:
-        logger.exception("hot_reload openai lru cache clear failed")
+
+def _clear_openai_lru_caches() -> None:
+    from aegisgate.adapters.openai_compat.router import (
+        _responses_function_output_redaction_patterns,
+        _responses_relaxed_redaction_patterns,
+        _confirmation_hit_regex_patterns,
+        _critical_danger_patterns,
+        _tool_call_guard_patterns,
+    )
+
+    _responses_function_output_redaction_patterns.cache_clear()
+    _responses_relaxed_redaction_patterns.cache_clear()
+    _confirmation_hit_regex_patterns.cache_clear()
+    _critical_danger_patterns.cache_clear()
+    _tool_call_guard_patterns.cache_clear()
 
 
 def _clear_v2_lru_caches() -> None:
-    try:
-        from aegisgate.adapters.v2_proxy.router import (
-            _v2_redaction_patterns,
-            _v2_relaxed_redaction_patterns,
-            _v2_dangerous_command_patterns,
-        )
+    from aegisgate.adapters.v2_proxy.router import (
+        _v2_redaction_patterns,
+        _v2_relaxed_redaction_patterns,
+        _v2_dangerous_command_patterns,
+    )
 
-        _v2_redaction_patterns.cache_clear()
-        _v2_relaxed_redaction_patterns.cache_clear()
-        _v2_dangerous_command_patterns.cache_clear()
-    except Exception:
-        logger.exception("hot_reload v2 lru cache clear failed")
+    _v2_redaction_patterns.cache_clear()
+    _v2_relaxed_redaction_patterns.cache_clear()
+    _v2_dangerous_command_patterns.cache_clear()
 
 
 def _reset_filter_pipeline() -> None:
     """Reset cached pipelines so next request rebuilds with fresh rules."""
-    try:
-        from aegisgate.adapters.openai_compat.pipeline_runtime import (
-            reset_pipeline_cache,
-        )
+    from aegisgate.adapters.openai_compat.pipeline_runtime import (
+        reset_pipeline_cache,
+    )
 
-        reset_pipeline_cache()
-    except Exception:
-        logger.exception("hot_reload pipeline reset failed")
+    reset_pipeline_cache()
 
 
 # Generation counter: incremented on each hot-reload so all threads know
@@ -381,10 +428,11 @@ def build_watcher() -> HotReloader:
     env_candidate = Path.cwd() / "config" / ".env"
     watcher.watch(env_candidate, _watch_label("env", env_candidate), reload_settings)
 
-    # security_filters.yaml
-    rules_path = Path(settings.security_rules_path)
-    if not rules_path.is_absolute():
-        rules_path = Path.cwd() / rules_path
+    # security_filters.yaml — resolved through the one shared resolver, so the
+    # watcher watches the file the runtime actually loads and the console writes.
+    from aegisgate.config.security_rules import resolve_rules_file
+
+    rules_path = resolve_rules_file(settings.security_rules_path)
     watcher.watch(rules_path, "security_filters.yaml", reload_security_rules)
 
     # gw_tokens.json

@@ -53,20 +53,35 @@ def _normalize(raw: str) -> str:
     return f'"{value}"'
 
 
-def if_match_conflict(request: Request, current_etag: str) -> JSONResponse | None:
-    """Return a 409 response when the request's ``If-Match`` is stale.
+def if_match_header(request: Request) -> str | None:
+    """The raw ``If-Match`` header, so a write can validate it under its own lock.
 
-    ``None`` means the write may proceed: either no ``If-Match`` was sent, it is
-    the wildcard, or it matches the current state.
+    Checking the header against an ETag computed *before* the lock is taken is a
+    TOCTOU: the bytes that get written are read later. Handlers therefore lift
+    the header here and hand it to the locked transaction.
     """
-    header = request.headers.get(IF_MATCH_HEADER)
+    return request.headers.get(IF_MATCH_HEADER)
+
+
+def if_match_is_specific(header: str | None) -> bool:
+    """True when the caller named a concrete version rather than nothing or ``*``."""
     if header is None:
-        return None
+        return False
+    candidates = [part.strip() for part in header.split(",") if part.strip()]
+    return bool(candidates) and not any(part == "*" for part in candidates)
+
+
+def if_match_is_stale(header: str | None, current_etag: str) -> bool:
+    """True when *header* names a version that is no longer the current one."""
+    if header is None:
+        return False
     candidates = [part for part in header.split(",") if part.strip()]
     if any(part.strip() == "*" for part in candidates):
-        return None
-    if any(_normalize(part) == current_etag for part in candidates):
-        return None
+        return False
+    return not any(_normalize(part) == current_etag for part in candidates)
+
+
+def etag_conflict_response(current_etag: str) -> JSONResponse:
     return JSONResponse(
         status_code=409,
         content={
@@ -76,6 +91,17 @@ def if_match_conflict(request: Request, current_etag: str) -> JSONResponse | Non
         },
         headers={"ETag": current_etag},
     )
+
+
+def if_match_conflict(request: Request, current_etag: str) -> JSONResponse | None:
+    """Return a 409 response when the request's ``If-Match`` is stale.
+
+    ``None`` means the write may proceed: either no ``If-Match`` was sent, it is
+    the wildcard, or it matches the current state.
+    """
+    if if_match_is_stale(if_match_header(request), current_etag):
+        return etag_conflict_response(current_etag)
+    return None
 
 
 def with_etag(response: JSONResponse, etag: str) -> JSONResponse:

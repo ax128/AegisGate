@@ -657,15 +657,52 @@ def _resolve_rules_file(path: str) -> Path:
         for item in candidates:
             if item.exists():
                 return item.resolve()
-        candidate = candidates[-1].resolve()
+        candidate = candidates[-1]
     if candidate.exists():
-        return candidate
+        return candidate.resolve()
     bootstrap = os.environ.get("AEGIS_BOOTSTRAP_RULES_DIR", "").strip()
     if bootstrap:
         fallback = Path(bootstrap) / "security_filters.yaml"
         if fallback.exists():
             return fallback.resolve()
-    return candidate
+    return candidate.resolve()
+
+
+def resolve_rules_file(path: str | None = None) -> Path:
+    """The one absolute path every component must use for ``security_filters.yaml``.
+
+    Three components used to resolve ``settings.security_rules_path`` with three
+    different rules: this loader walked ``cwd`` → app root → the bootstrap dir,
+    while the console and the hot-reload watcher each only tried ``cwd``. In any
+    deployment where ``cwd != app_root`` — the Docker image and the
+    ``AEGIS_CONFIG_DIR`` layouts both are — that meant the console happily
+    created and edited a ``security_filters.yaml`` under ``cwd`` that the runtime
+    never reads: every check passed, the audit said success, and the rules never
+    took effect. One resolver, one file.
+    """
+    return _resolve_rules_file(path or settings.security_rules_path)
+
+
+def shadow_rules_file_candidates(path: str | None = None) -> list[Path]:
+    """Paths that *look* like the rules file but are not the one in use.
+
+    A deployment that wrote to the wrong file before the resolvers converged
+    still has that file on disk. Listing the leftovers lets the console point at
+    them instead of leaving an admin wondering why an edit changed nothing.
+    """
+    raw = path or settings.security_rules_path
+    active = resolve_rules_file(raw)
+    candidate = Path(raw)
+    others: list[Path] = []
+    if candidate.is_absolute():
+        legacy = [candidate]
+    else:
+        legacy = [Path.cwd() / candidate, Path(__file__).resolve().parents[2] / candidate]
+    for item in legacy:
+        resolved = item.resolve()
+        if resolved != active and resolved.exists() and resolved not in others:
+            others.append(resolved)
+    return others
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -702,6 +739,22 @@ def load_security_rules(path: str | None = None) -> dict[str, Any]:
         _CACHE_MTIME_NS = mtime_ns
         _CACHE_RULES = rules
         return deepcopy(rules)
+
+
+def invalidate_security_rules_cache() -> None:
+    """Drop the parsed-rules cache so the next load re-reads the file.
+
+    ``load_security_rules`` keys its cache on ``st_mtime_ns``, which is enough
+    for the poll-based watcher but not for a console write: two saves can land
+    inside one filesystem timestamp tick, and the second would then be served
+    from the cache while the console reports it applied. A reload is an explicit
+    request, so it drops the cache instead of asking the clock.
+    """
+    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
+    with _CACHE_LOCK:
+        _CACHE_PATH = ""
+        _CACHE_MTIME_NS = -1
+        _CACHE_RULES = None
 
 
 def _warn_relaxed_pii_config_once(key: tuple[str, ...], message: str, *args: Any) -> None:
