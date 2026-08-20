@@ -233,6 +233,19 @@ class TestUpstreamProbe:
         assert response.status_code == 200
         assert response.json()["reachable"] is True
 
+    def test_probe_survives_a_host_httpx_cannot_encode(
+        self, client: TestClient
+    ) -> None:
+        """urlparse accepts "https://xn--/"; idna does not, and IDNAError is not
+        an httpx.HTTPError — it used to escape as a 500."""
+        response = client.post(
+            "/__ui__/api/tokens/probe", json={"upstream_base": "https://xn--/v1"}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["reachable"] is False
+        assert body["reason"] == "invalid_host"
+
     def test_probe_turns_a_transport_failure_into_a_readable_result(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:

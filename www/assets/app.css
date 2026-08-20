@@ -2651,3 +2651,11 @@ tr.search-hidden { display: none; }
   font-size: 0.83rem;
   color: var(--error);
 }
+
+/* Brief confirmation that the overview card sent you to this exact field. */
+.field-card-flash {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+  transition: border-color var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
+}

@@ -86,6 +86,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Token 列表「豁免字段数」显示 `∞`**：未设置豁免时显示 `∞`，但实际语义是「豁免 0 个字段、全部参与脱敏」，与直觉相反。现在显示 `0`
 
+- **带 `#` 锚点打开控制台会落在错的位置**：浏览器解析锚点时页面几乎还是空的，配置面板、规则工作台、精确值列表都在其后加载且都位于 `#tokens` / `#docs` 之上，锚点因此偏出数千像素。改为在页面稳定前重新应用锚点，用户一滚动即停止
+
+- **连通性测试遇到 httpx 无法编码的主机名会返回 500**：`https://xn--/v1` 这类地址能通过 `urlparse` 校验，但 `idna` 会抛 `IDNAError`，而它不是 `httpx.HTTPError`。探测是诊断动作，现在返回可读的失败原因而不是 500
+
 - **控制台改规则不再清空 `security_filters.yaml` 的注释**
   - `_save_rules_yaml()` 走 `yaml.safe_load` → `yaml.dump`，PyYAML 不保留注释，还会重排缩进与引号风格：从 UI 改一条正则会重写整个文件，**80 行注释全部消失**，并产生约 1250 行的 diff
   - 这些注释是安全策略的说明文档（哪些 pattern 在低误报面上保持启用、个别 pattern 的 ReDoS 注意事项等），静默丢失属于实打实的信息损失

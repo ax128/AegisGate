@@ -403,6 +403,17 @@ def register_ui_routes(app: FastAPI) -> None:
                 "detail": str(exc)[:200] or exc.__class__.__name__,
                 "elapsed_ms": elapsed_ms(),
             }
+        except Exception as exc:
+            # A host that urlparse accepts can still be rejected deeper down —
+            # "https://xn--/" raises idna.IDNAError, which is not an HTTPError.
+            # A probe is a diagnostic; reporting the failure beats a 500.
+            logger.warning("ui upstream probe failed unexpectedly error=%s", exc)
+            return {
+                "reachable": False,
+                "reason": "invalid_host",
+                "detail": f"无法解析该地址：{str(exc)[:160] or exc.__class__.__name__}",
+                "elapsed_ms": elapsed_ms(),
+            }
         return {
             "reachable": True,
             "status_code": response.status_code,

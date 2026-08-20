@@ -262,7 +262,7 @@ function showSkeleton(tbody, columns, rows = 3) {
 
 function emptyStateRow(columns, message, action) {
   const button = action
-    ? `<button type="button" class="btn-sm empty-state-action" data-empty-action="${escapeHtml(action.id)}">${escapeHtml(action.label)}</button>`
+    ? `<button type="button" class="btn-sm" data-empty-action="${escapeHtml(action.id)}">${escapeHtml(action.label)}</button>`
     : "";
   return (
     `<tr><td colspan="${columns}" class="token-table-empty">` +
@@ -604,6 +604,28 @@ function filterAllSections(query) {
   if (!needle) hits.textContent = "";
   else if (matchedFields) hits.textContent = `${matchedSections} 个分区 · ${matchedFields} 项`;
   else hits.textContent = "无匹配";
+}
+
+// The overview's 安全级别 / 默认上游 cards name a config field, so send the
+// reader to that field rather than to the top of a panel holding 15 of them.
+function revealConfigField(fieldName) {
+  const card = document.getElementById(`card-${fieldName}`);
+  if (!card) return false;
+  card.scrollIntoView({ block: "center" });
+  card.classList.add("field-card-flash");
+  setTimeout(() => card.classList.remove("field-card-flash"), 1600);
+  const control = document.getElementById(`cfg-${fieldName}`);
+  if (control && typeof control.focus === "function") control.focus({ preventScroll: true });
+  return true;
+}
+
+function bindOverviewLinks() {
+  document.querySelectorAll("[data-config-field]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      // Fall through to the plain anchor when the panels have not rendered yet.
+      if (revealConfigField(link.dataset.configField)) event.preventDefault();
+    });
+  });
 }
 
 function bindConfigSearch() {
@@ -1467,6 +1489,9 @@ function bindTokenModal() {
 
 function bindActions() {
   document.getElementById("refresh-bootstrap").addEventListener("click", () => {
+    // The getting-started card is derived from the token list too, so a manual
+    // refresh has to pick that up or it reports stale progress.
+    loadTokens();
     loadBootstrap().catch((error) => {
       const output = document.getElementById("bootstrap-output");
       if (output) output.textContent = `加载失败: ${error.message}`;
@@ -1501,6 +1526,36 @@ function visibleSearchBox() {
   return onScreen || document.getElementById("config-global-search");
 }
 
+// A hash in the URL is resolved by the browser while the page is still mostly
+// empty: the config panels, the rules workbench and the redaction list all load
+// afterwards and all sit above #tokens and #docs, so the anchor ends up
+// thousands of pixels short. Re-apply it while the page settles, and stop the
+// moment the reader takes over.
+function honourInitialHash() {
+  const target = window.location.hash && document.querySelector(window.location.hash);
+  if (!target) return;
+  let cancelled = false;
+  const cancel = () => { cancelled = true; };
+  ["wheel", "touchstart", "keydown", "mousedown"].forEach((event) =>
+    window.addEventListener(event, cancel, { once: true, passive: true })
+  );
+  let previousTop = null;
+  let stableTicks = 0;
+  const stop = setInterval(() => {
+    if (cancelled) {
+      clearInterval(stop);
+      return;
+    }
+    const top = Math.round(target.getBoundingClientRect().top + window.scrollY);
+    stableTicks = top === previousTop ? stableTicks + 1 : 0;
+    previousTop = top;
+    target.scrollIntoView();
+    // Two quiet ticks means the loaders above it are done moving things.
+    if (stableTicks >= 2) clearInterval(stop);
+  }, 200);
+  setTimeout(() => clearInterval(stop), 4000);
+}
+
 function bindKeyboardShortcuts() {
   document.addEventListener("keydown", (event) => {
     if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1521,8 +1576,10 @@ bindActions();
 bindTokenModal();
 bindOnboarding();
 bindConfigSearch();
+bindOverviewLinks();
 bindDocLinks();
 bindKeyboardShortcuts();
+honourInitialHash();
 initScrollSpy();
 loadTokens();
 loadBootstrap().catch((error) => {
