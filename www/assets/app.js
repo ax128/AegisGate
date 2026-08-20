@@ -2641,7 +2641,10 @@ let requestRedactionState = null;
 function rrSurfaceBadge(surface, effective, overlay) {
   const gated = overlay && overlay.active === false;
   const on = Boolean(effective);
-  const cls = !on ? "badge-muted" : gated ? "badge-warning" : "badge-success";
+  // A surface its master switch has turned off is *not* running, so it reads as
+  // muted like any other inactive one — struck through to say why. Warning
+  // colour here made a switched-off surface louder than a live one.
+  const cls = !on || gated ? "badge-muted" : "badge-success";
   const title = [
     `${surface.code} ${surface.label}`,
     surface.detail ? `范围：${surface.detail}` : "",
@@ -2651,8 +2654,8 @@ function rrSurfaceBadge(surface, effective, overlay) {
     gated ? `已被总控 ${overlay.switch} 关闭` : "",
   ].filter(Boolean).join("\n");
   return (
-    `<span class="badge ${cls} rr-surface-badge" title="${escapeHtml(title)}">` +
-    `${escapeHtml(surface.code)}${gated ? "<span aria-hidden=\"true\">·</span>" : ""}</span>`
+    `<span class="badge ${cls} rr-surface-badge${gated ? " rr-surface-gated" : ""}" ` +
+    `title="${escapeHtml(title)}">${escapeHtml(surface.code)}</span>`
   );
 }
 
@@ -2986,7 +2989,11 @@ function rrFieldSection(data) {
         `<tr><td><strong>${escapeHtml(layer.label)}</strong></td>` +
         `<td>max(${layer.floor}, 配置值) = <strong>${escapeHtml(String(layer.effective_min_len))}</strong></td>` +
         `<td><code>${escapeHtml(layer.fallback_ids.join("、"))}</code></td>` +
-        `<td><code>${escapeHtml(layer.explicit_default_id)}</code></td>` +
+        `<td><code>${escapeHtml(layer.explicit_default_id)}</code>` +
+        (layer.legacy_string_id && layer.legacy_string_id !== layer.explicit_default_id
+          ? `<br><span class="u-note">legacy 字符串条目：<code>${escapeHtml(layer.legacy_string_id)}</code></span>`
+          : "") +
+        `</td>` +
         `<td>${layer.relaxed_filtered ? "是" : "否"}</td>` +
         `<td class="u-note">${escapeHtml(layer.note)}</td></tr>`
     )
@@ -3031,7 +3038,11 @@ function rrFieldSection(data) {
       : "") +
     `</p>` +
     explicit +
-    `<p class="u-note"><a class="rr-jump" href="#rules" data-rr-jump="redaction.field_value_patterns">查看安全规则原始配置</a></p>`
+    // The workbench only lists groups the YAML actually contains, so this link
+    // has somewhere to land only when the file spells the list out.
+    (field.mode === "explicit_yaml"
+      ? `<p class="u-note"><a class="rr-jump" href="#rules" data-rr-jump="redaction.field_value_patterns">查看安全规则原始配置</a></p>`
+      : `<p class="u-note">这两条 fallback 写在代码里，<code>security_filters.yaml</code> 中没有对应条目，因此规则工作台里也看不到它们。</p>`)
   );
 }
 

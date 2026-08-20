@@ -1266,7 +1266,9 @@ def register_ui_routes(app: FastAPI) -> None:
         from aegisgate.core.request_redaction_settings import build_settings_payload
 
         payload = await asyncio.to_thread(build_settings_payload)
-        return with_etag(JSONResponse(content=payload), _rules_etag())
+        # The payload carries the ETag read at the start of its own construction,
+        # so the validator can never be newer than the state it describes.
+        return with_etag(JSONResponse(content=payload), payload["rules_etag"])
 
     @app.patch("/__ui__/api/request_redaction/settings")
     async def local_ui_request_redaction_patch(request: Request) -> JSONResponse:

@@ -744,6 +744,22 @@ def load_security_rules(path: str | None = None) -> dict[str, Any]:
         return deepcopy(rules)
 
 
+def invalidate_security_rules_cache() -> None:
+    """Drop the parsed-rules cache so the next load re-reads the file.
+
+    ``load_security_rules`` keys its cache on ``st_mtime_ns``, which is enough
+    for the poll-based watcher but not for a console write: two saves can land
+    inside one filesystem timestamp tick, and the second would then be served
+    from the cache while the console reports it applied. A reload is an explicit
+    request, so it drops the cache instead of asking the clock.
+    """
+    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
+    with _CACHE_LOCK:
+        _CACHE_PATH = ""
+        _CACHE_MTIME_NS = -1
+        _CACHE_RULES = None
+
+
 def _warn_relaxed_pii_config_once(key: tuple[str, ...], message: str, *args: Any) -> None:
     if key in _WARNED_RELAXED_PII_CONFIG:
         return

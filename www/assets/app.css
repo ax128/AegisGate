@@ -2794,6 +2794,13 @@ tr.search-hidden { display: none; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Struck through rather than recoloured: a master switch that turned this
+   surface off makes it inactive, not noteworthy. */
+.rr-surface-gated {
+  text-decoration: line-through;
+  opacity: 0.72;
+}
+
 .rr-regex {
   font-family: var(--font-mono);
   color: var(--label-2);

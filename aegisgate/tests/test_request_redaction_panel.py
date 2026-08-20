@@ -253,6 +253,18 @@ class TestFieldRules:
         assert by_id["v1_pipeline"]["explicit_default_id"] == "FIELD_SECRET"
         assert by_id["v1_forward"]["explicit_default_id"] == "FIELD_SECRET_{idx}"
         assert by_id["v2_request"]["fallback_ids"] == ["field_secret", "auth_bearer"]
+        # V2 compiles field entries through the same loop as pii_patterns, so a
+        # mapping without an id gets that loop's default rather than a
+        # FIELD_SECRET one; only the legacy bare-string form is numbered.
+        assert by_id["v2_request"]["explicit_default_id"] == "rule"
+        assert by_id["v2_request"]["legacy_string_id"] == "field_secret_{idx}"
+
+    def test_the_v2_layer_states_that_its_fallback_is_not_an_alternative(
+        self, payload: dict
+    ) -> None:
+        """V1 uses the fallback instead of an explicit list; V2 uses both."""
+        by_id = {layer["id"]: layer for layer in payload["field"]["layers"]}
+        assert "同时" in by_id["v2_request"]["note"]
 
     def test_relaxed_filtering_differs_across_layers(self, payload: dict) -> None:
         by_id = {layer["id"]: layer for layer in payload["field"]["layers"]}
@@ -362,6 +374,27 @@ class TestResolverSelfCheck:
         assert payload["rules_file_path"].endswith("security_filters.yaml")
         assert payload["rules_file_resolver_consistent"] is True
         assert payload["shadow_rules_files"] == []
+
+
+class TestValidatorFreshness:
+    """The ETag must never be newer than the payload it validates."""
+
+    def test_the_payload_carries_the_validator_it_was_built_against(
+        self, client, rules_file: Path
+    ) -> None:
+        response = client.get("/__ui__/api/request_redaction/settings")
+        assert response.json()["rules_etag"] == response.headers["ETag"]
+
+    def test_a_write_after_the_read_makes_the_next_save_a_conflict(
+        self, client, rules_file: Path
+    ) -> None:
+        """Reading the validator first means a racing write costs a 409, not an
+        overwrite of something the console never showed."""
+        before = client.get("/__ui__/api/request_redaction/settings").headers["ETag"]
+        rules_file.write_text(
+            rules_file.read_text(encoding="utf-8") + "\n# someone else\n", encoding="utf-8"
+        )
+        assert client.get("/__ui__/api/request_redaction/settings").headers["ETag"] != before
 
 
 class TestNoClientSideDerivation:

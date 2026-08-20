@@ -33,6 +33,7 @@ import re
 import stat
 import tempfile
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,51 +262,107 @@ def _fallback_field_patterns(min_len: int, *, lowercase: bool) -> list[tuple[str
     ]
 
 
-def _pii_entries(rules: dict[str, Any], *, lowercase: bool) -> list[tuple[str, str]]:
+# Each layer reads the same YAML differently, and the pre-write compile is worth
+# nothing unless it models that faithfully: the ids are cased differently, the
+# ``field_value_min_len`` floors differ, the legacy bare-string form gets a
+# positional id in two layers and a fixed one in the third, and V2 compiles its
+# two code fallbacks *in addition to* an explicit list where V1 uses them only
+# when the list is empty.
+@dataclass(frozen=True)
+class _LayerSpec:
+    """One redaction layer's reading of ``redaction.*``."""
+
+    name: str
+    field_floor: int
+    # V2 compiles pii and field entries through one shared loop that lowercases
+    # ids, defaults a missing id to ``rule`` and skips a non-string regex.
+    lowercase: bool
+    field_default_positional: bool
+    always_fallback: bool
+
+
+_LAYER_SPECS: tuple[_LayerSpec, ...] = (
+    # filters/redaction.py
+    _LayerSpec("v1_pipeline", 8, False, False, False),
+    # adapters/openai_compat/sanitize.py
+    _LayerSpec("v1_forward", 8, False, True, False),
+    # adapters/v2_proxy/router.py
+    _LayerSpec("v2_request", 12, True, True, True),
+)
+
+
+def malformed_pii_entries(data: Any) -> list[str]:
+    """Non-mapping ``redaction.pii_patterns`` entries, rendered for reporting."""
+    rules = data.get("redaction") if isinstance(data, dict) else None
+    if not isinstance(rules, dict):
+        return []
+    return [
+        str(item)
+        for item in rules.get("pii_patterns") or []
+        if not isinstance(item, dict)
+    ]
+
+
+def _pii_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
     for item in rules.get("pii_patterns") or []:
         if not isinstance(item, dict):
-            # RedactionFilter calls ``item.get`` with no guard, so a bare string
-            # here takes the V1 pipeline down on the next request. Refusing the
-            # write is the only outcome that leaves a working gateway.
-            raise RulesWriteError(
-                "invalid_pii_pattern_entry",
-                "redaction.pii_patterns 的每一项都必须是映射（含 id 与 regex）",
-                status=400,
-            )
+            # Every layer skips a non-mapping entry. Refusing an unrelated edit
+            # because one is already in the file would only leave the console
+            # unable to fix it; ``malformed_pii_entries`` is what reports them,
+            # and a write that *introduces* one is still refused.
+            continue
         if not rule_enabled(item):
             continue
         regex = item.get("regex")
-        if not regex:
-            continue
-        pattern_id = str(item.get("id", "PII"))
-        entries.append((pattern_id.lower() if lowercase else pattern_id.upper(), str(regex)))
+        if spec.lowercase:
+            if not isinstance(regex, str) or not regex.strip():
+                continue
+            pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
+        else:
+            if not regex:
+                continue
+            pattern_id = str(item.get("id", "PII")).upper()
+        entries.append((pattern_id, str(regex)))
     return entries
 
 
-def _field_entries(
-    rules: dict[str, Any], *, floor: int, lowercase: bool, positional_ids: bool
-) -> list[tuple[str, str]]:
+def _field_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, str]]:
     items = rules.get("field_value_patterns") or []
-    min_len = _field_min_len(rules, floor)
+    fallback = _fallback_field_patterns(
+        _field_min_len(rules, spec.field_floor), lowercase=spec.lowercase
+    )
     if not items:
-        return _fallback_field_patterns(min_len, lowercase=lowercase)
-    entries: list[tuple[str, str]] = []
+        return fallback
+    # V1 treats the code fallback as the *alternative* to an explicit list; V2
+    # compiles it either way, which is why its two fallback ids are always live.
+    entries: list[tuple[str, str]] = list(fallback) if spec.always_fallback else []
     for index, item in enumerate(items, start=1):
-        default_id = f"FIELD_SECRET_{index}" if positional_ids else "FIELD_SECRET"
+        positional_default = (
+            f"FIELD_SECRET_{index}" if spec.field_default_positional else "FIELD_SECRET"
+        )
         if isinstance(item, dict):
             if not rule_enabled(item):
                 continue
             regex = item.get("regex")
-            pattern_id = str(item.get("id", default_id))
-        elif isinstance(item, str):
+            if spec.lowercase:
+                if not isinstance(regex, str) or not regex.strip():
+                    continue
+                pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
+            else:
+                if not regex:
+                    continue
+                pattern_id = str(item.get("id", positional_default)).upper()
+        elif isinstance(item, str) or not spec.lowercase:
+            # The V1 layers hand any non-mapping entry straight to re.compile;
+            # V2 recognises only the bare-string form.
             regex = item
-            pattern_id = f"FIELD_SECRET_{index}"
+            if not regex:
+                continue
+            pattern_id = f"field_secret_{index}" if spec.lowercase else positional_default
         else:
             continue
-        if not regex:
-            continue
-        entries.append((pattern_id.lower() if lowercase else pattern_id.upper(), str(regex)))
+        entries.append((pattern_id, str(regex)))
     return entries
 
 
@@ -318,7 +375,7 @@ def compile_redaction_layers(
     compiled, and the ones that did not. Layers mirror the live call sites —
     ``filters/redaction.py`` (V1 pipeline), ``openai_compat/sanitize.py`` (V1
     forward) and ``v2_proxy/router.py`` (V2) — including their differing default
-    ids and ``field_value_min_len`` floors.
+    ids, ``field_value_min_len`` floors and fallback rules (see ``_LAYER_SPECS``).
     """
     rules = data.get("redaction") if isinstance(data, dict) else None
     if rules is None:
@@ -326,33 +383,18 @@ def compile_redaction_layers(
     if not isinstance(rules, dict):
         raise RulesWriteError("invalid_redaction_section", "redaction 配置段必须是映射", status=400)
 
-    layers = {
-        "v1_pipeline": [
-            *_pii_entries(rules, lowercase=False),
-            *_field_entries(rules, floor=8, lowercase=False, positional_ids=False),
-        ],
-        "v1_forward": [
-            *_pii_entries(rules, lowercase=False),
-            *_field_entries(rules, floor=8, lowercase=False, positional_ids=True),
-        ],
-        "v2_request": [
-            *_pii_entries(rules, lowercase=True),
-            *_field_entries(rules, floor=12, lowercase=True, positional_ids=True),
-        ],
-    }
-
     signature: dict[str, tuple[tuple[str, str], ...]] = {}
     failures: list[tuple[str, str, str]] = []
-    for layer, entries in layers.items():
+    for spec in _LAYER_SPECS:
         compiled: list[tuple[str, str]] = []
-        for pattern_id, regex in entries:
+        for pattern_id, regex in (*_pii_entries(rules, spec), *_field_entries(rules, spec)):
             try:
                 re.compile(regex)
             except re.error as exc:
-                failures.append((layer, regex, str(exc)))
+                failures.append((spec.name, regex, str(exc)))
                 continue
             compiled.append((pattern_id, regex))
-        signature[layer] = tuple(compiled)
+        signature[spec.name] = tuple(compiled)
     return signature, failures
 
 
@@ -408,6 +450,25 @@ def _reject_uncompilable(failures: list[tuple[str, str, str]], changed: list[tup
                 f"正则在 {layer} 层无法编译：{error}",
                 status=400,
             )
+
+
+def _reject_new_malformed_entries(before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Refuse a write that *introduces* a non-mapping ``pii_patterns`` entry.
+
+    One that is already in the file is reported by the panel and skipped by
+    every layer, so failing every write to the whole file over it would only
+    lock the console out of fixing it — including out of removing the entry.
+    Comparison is by value rather than by position, so inserting a rule above an
+    existing malformed entry does not read as introducing one.
+    """
+    existing = Counter(malformed_pii_entries(before))
+    introduced = sorted((Counter(malformed_pii_entries(after)) - existing).elements())
+    if introduced:
+        raise RulesWriteError(
+            "invalid_pii_pattern_entry",
+            "redaction.pii_patterns 的每一项都必须是映射（含 id 与 regex）：" + "、".join(introduced),
+            status=400,
+        )
 
 
 def _probe_changed_regexes(changed: list[tuple[str, str]]) -> None:
@@ -544,25 +605,64 @@ def _reload_rules() -> dict[str, Any]:
     return result if isinstance(result, dict) else {"ok": True, "layers": {}, "errors": []}
 
 
+def _loader_problem(expected: dict[str, Any]) -> str | None:
+    """``None`` when the rules loader is serving the document just written.
+
+    The old check here recompiled the bytes this transaction had produced and
+    compared them with the candidate compiled from the same bytes, so it could
+    never fail. What actually goes wrong after a write is that a *cache* keeps
+    serving the previous document — the loader is mtime-keyed and every layer
+    rebuilds from it — and that is what this asks about.
+    """
+    from aegisgate.config.security_rules import load_security_rules
+
+    wanted = expected.get("redaction")
+    if not isinstance(wanted, dict):
+        return None
+    try:
+        live = load_security_rules().get("redaction", {})
+    except Exception as exc:  # noqa: BLE001 - any loader failure is a failed write
+        return f"loader_failed:{type(exc).__name__}"
+    if not isinstance(live, dict):
+        return "loader_failed:not_a_mapping"
+    for key, value in wanted.items():
+        # Keys the file omits are filled in from the built-in defaults and a
+        # nested mapping is deep-merged rather than replaced, so only the keys
+        # this document actually spells out can be compared.
+        if isinstance(value, dict):
+            continue
+        if live.get(key) != value:
+            return f"loader_stale:{key}"
+    return None
+
+
 def _verify_applied(
     path: Path,
     after_bytes: bytes,
     signature: dict[str, tuple[tuple[str, str], ...]],
     reload_result: dict[str, Any],
+    expected: dict[str, Any],
 ) -> list[str]:
     problems: list[str] = []
+    disk_bytes: bytes | None = None
     try:
-        if path.read_bytes() != after_bytes:
-            problems.append("disk_bytes_mismatch")
+        disk_bytes = path.read_bytes()
     except OSError as exc:
         problems.append(f"disk_unreadable:{type(exc).__name__}")
-    try:
-        disk_data = yaml.safe_load(after_bytes.decode("utf-8")) or {}
-        disk_signature, _ = compile_redaction_layers(disk_data)
-        if disk_signature != signature:
-            problems.append("compiled_patterns_mismatch")
-    except (RulesWriteError, yaml.YAMLError, UnicodeDecodeError):
-        problems.append("recompile_failed")
+    if disk_bytes is not None:
+        if disk_bytes != after_bytes:
+            problems.append("disk_bytes_mismatch")
+        try:
+            disk_signature, _ = compile_redaction_layers(
+                yaml.safe_load(disk_bytes.decode("utf-8")) or {}
+            )
+            if disk_signature != signature:
+                problems.append("compiled_patterns_mismatch")
+        except (RulesWriteError, yaml.YAMLError, UnicodeDecodeError):
+            problems.append("recompile_failed")
+    stale = _loader_problem(expected)
+    if stale:
+        problems.append(stale)
     if not reload_result.get("ok", True):
         failed = [
             layer
@@ -647,6 +747,7 @@ def write_rules_file(
         signature, failures = compile_redaction_layers(change.expected)
         incoming = changed_regexes(before_data, change.expected)
         _reject_uncompilable(failures, incoming)
+        _reject_new_malformed_entries(before_data, change.expected)
         _probe_changed_regexes(incoming)
 
         if not path.parent.is_dir():
@@ -677,7 +778,9 @@ def write_rules_file(
         backup = create_backup(path, before_bytes, mode) if exists else None
         _atomic_write(path, after_bytes, mode)
         reload_result = _reload_rules()
-        problems = _verify_applied(path, after_bytes, signature, reload_result)
+        problems = _verify_applied(
+            path, after_bytes, signature, reload_result, change.expected
+        )
 
         base_audit = {
             "event": event,

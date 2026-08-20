@@ -261,6 +261,7 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 "effective_min_len": max(8, parsed_min_len),
                 "fallback_ids": ["FIELD_SECRET", "AUTH_BEARER"],
                 "explicit_default_id": "FIELD_SECRET",
+                "legacy_string_id": "FIELD_SECRET",
                 "relaxed_filtered": False,
                 "note": "field 规则无视路由恒跑，不受 relaxed 集过滤",
             },
@@ -271,6 +272,7 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 "effective_min_len": max(8, parsed_min_len),
                 "fallback_ids": ["FIELD_SECRET", "AUTH_BEARER"],
                 "explicit_default_id": "FIELD_SECRET_{idx}",
+                "legacy_string_id": "FIELD_SECRET_{idx}",
                 "relaxed_filtered": True,
                 "note": "与 PII 规则合并后整体被 relaxed 过滤；默认 12 项不含这两个 ID，因此默认不生效",
             },
@@ -280,9 +282,14 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 "floor": 12,
                 "effective_min_len": max(12, parsed_min_len),
                 "fallback_ids": ["field_secret", "auth_bearer"],
-                "explicit_default_id": "field_secret_{idx}",
+                # V2 compiles field entries through the same loop as pii_patterns,
+                # so a mapping without an id gets that loop's default, not a
+                # FIELD_SECRET one. Only the legacy bare-string form is numbered.
+                "explicit_default_id": "rule",
+                "legacy_string_id": "field_secret_{idx}",
                 "relaxed_filtered": True,
-                "note": "V2 的 15 项集合含 FIELD_SECRET 与 AUTH_BEARER，故两条 fallback 恒生效",
+                "note": "两条 fallback 与显式列表**同时**编译（V1 只在列表为空时才用 fallback）；"
+                        "15 项集合含 FIELD_SECRET 与 AUTH_BEARER，故它们恒生效",
             },
         ],
     }
@@ -428,6 +435,12 @@ def build_settings_payload() -> dict[str, Any]:
     from aegisgate.core.rules_write import last_applied_write
     from aegisgate.core.ui_etag import etag_for_file
 
+    # Read the validator *before* the state it validates. The other order lets a
+    # write land in between and hand the console an ETag newer than the payload
+    # it is looking at, which is exactly the overwrite If-Match exists to stop;
+    # this way a concurrent write only makes the next save a 409.
+    rules_etag = etag_for_file(resolve_rules_file())
+
     rules = load_security_rules().get("redaction", {})
     if not isinstance(rules, dict):
         rules = {}
@@ -500,6 +513,7 @@ def build_settings_payload() -> dict[str, Any]:
         })
 
     return {
+        "rules_etag": rules_etag,
         **_resolver_report(),
         "relaxed_mode": mode,
         "relaxed_ids_explicit": explicit,
