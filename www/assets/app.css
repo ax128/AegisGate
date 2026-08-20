@@ -2659,3 +2659,156 @@ tr.search-hidden { display: none; }
   transition: border-color var(--dur) var(--ease),
               box-shadow var(--dur) var(--ease);
 }
+
+/* ─── Request-side redaction panel ───────────
+   Read-only, and dense on purpose: the point of the panel is that six execution
+   surfaces disagree with each other, which only reads as a fact when they sit in
+   one table. Everything here reuses the existing table, card and badge
+   treatments; the only new geometry is the surface-badge row. */
+
+.rr-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.rr-block { margin-top: var(--sp-6); }
+.rr-block:first-of-type { margin-top: 0; }
+
+.rr-heading {
+  font: var(--type-headline);
+  color: var(--label-1);
+  margin: 0 0 var(--sp-2);
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.rr-heading-note {
+  font: var(--type-caption);
+  font-weight: 600;
+  color: var(--label-2);
+}
+
+.rr-subheading {
+  font: var(--type-callout);
+  font-weight: 600;
+  color: var(--label-1);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+
+.rr-alerts:empty { display: none; }
+
+.rr-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--separator);
+  margin-bottom: var(--sp-3);
+  font-size: 0.83rem;
+  color: var(--label-1);
+}
+
+.rr-alert strong { font-weight: 700; }
+.rr-alert span { color: var(--label-2); }
+
+.rr-alert-warn {
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.rr-alert-err {
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+
+.rr-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.rr-cards-wide { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+
+.rr-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* A control the console deliberately does not offer reads as an omission unless
+   it is drawn differently from the ones it does. */
+.rr-card-locked { border-style: dashed; }
+
+.rr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.rr-card-head code,
+.rr-card-head strong {
+  font-weight: 700;
+  color: var(--label-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rr-kv {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rr-kv li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: 0.82rem;
+  color: var(--label-2);
+}
+
+.rr-kv span { font-variant-numeric: tabular-nums; color: var(--label-1); }
+
+.rr-surface-cell { white-space: nowrap; }
+
+.rr-surface-badge {
+  margin-right: 3px;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
+}
+
+.rr-regex {
+  font-family: var(--font-mono);
+  color: var(--label-2);
+  overflow-wrap: anywhere;
+}
+
+.rr-regex-bad { color: var(--error); }
+
+.rr-row-emphasis { background: color-mix(in srgb, var(--warning) 7%, transparent); }
+
+.rr-jump {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.rr-jump:hover { text-decoration: underline; }
