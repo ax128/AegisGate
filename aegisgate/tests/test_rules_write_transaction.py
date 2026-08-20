@@ -242,7 +242,38 @@ class TestTypeAndBoundValidation:
         assert response.json()["error"] == "invalid_field_value_min_len"
         assert rules_file.read_bytes() == before
 
-    def test_a_bare_string_pii_entry_is_rejected(self, client, rules_file: Path) -> None:
+    def test_a_write_that_introduces_a_bare_string_pii_entry_is_rejected(
+        self, rules_file: Path
+    ) -> None:
+        """The console must not be able to write the shape that breaks a layer."""
+
+        from aegisgate.core.rules_editor import LeafOp, render_leaf_ops
+
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            data["redaction"]["pii_patterns"].append("legacy-string")
+            ops = [LeafOp(["redaction", "pii_patterns"], "set", data["redaction"]["pii_patterns"])]
+            return RulesChange(
+                expected=data,
+                text=render_leaf_ops(snapshot.text, data, ops),
+                changed_top_keys=("redaction",),
+            )
+
+        before = rules_file.read_bytes()
+        with pytest.raises(RulesWriteError) as exc:
+            write_rules_file(build, if_match=None, event="test")
+        assert exc.value.code == "invalid_pii_pattern_entry"
+        assert rules_file.read_bytes() == before
+
+    def test_a_pre_existing_bare_string_entry_does_not_block_unrelated_writes(
+        self, client, rules_file: Path
+    ) -> None:
+        """Otherwise one bad entry locks the console out of the whole file.
+
+        Every layer skips a non-mapping entry, so there is nothing to protect by
+        refusing here — and the entry has no id, so a refusal would also block
+        the only edits that could clean the file up.
+        """
         rules_file.write_text(
             _MINI_RULES.replace(
                 "    - id: SEED\n      regex: 'seed-pattern'\n",
@@ -250,13 +281,15 @@ class TestTypeAndBoundValidation:
             ),
             encoding="utf-8",
         )
-        before = rules_file.read_bytes()
         response = client.post(
             "/__ui__/api/rules/pii_patterns", json={"id": "T", "regex": "t"}
         )
-        assert response.status_code == 400
-        assert response.json()["error"] == "invalid_pii_pattern_entry"
-        assert rules_file.read_bytes() == before
+        assert response.status_code == 201
+        patterns = yaml.safe_load(rules_file.read_text(encoding="utf-8"))["redaction"][
+            "pii_patterns"
+        ]
+        assert "legacy-string" in patterns
+        assert {"id": "T", "regex": "t"} in patterns
 
     def test_candidate_compile_covers_all_three_layers(self) -> None:
         signature, failures = compile_redaction_layers(yaml.safe_load(_MINI_RULES))
@@ -265,6 +298,38 @@ class TestTypeAndBoundValidation:
         # V2 lowercases ids and floors field_value_min_len at 12; V1 at 8.
         assert ("SEED", "seed-pattern") in signature["v1_pipeline"]
         assert ("seed", "seed-pattern") in signature["v2_request"]
+
+    def test_the_candidate_mirrors_each_layer_s_own_field_rules(self) -> None:
+        """The three layers do not read ``field_value_patterns`` the same way."""
+        data = yaml.safe_load(_MINI_RULES)
+        data["redaction"]["field_value_patterns"] = [{"regex": "explicit-field"}, "legacy-field"]
+        signature, failures = compile_redaction_layers(data)
+        assert failures == []
+
+        ids = {layer: [name for name, _ in entries] for layer, entries in signature.items()}
+        # V1 pipeline: one fixed id for every explicit entry, mapping or legacy
+        # string, and no code fallback because the list is not empty.
+        assert ids["v1_pipeline"] == ["SEED", "FIELD_SECRET", "FIELD_SECRET"]
+        # V1 forward: the same entries, positionally numbered.
+        assert ids["v1_forward"] == ["SEED", "FIELD_SECRET_1", "FIELD_SECRET_2"]
+        # V2: the two code fallbacks are compiled *as well as* the explicit list,
+        # and a mapping without an id falls to the shared loop's own default.
+        assert ids["v2_request"] == [
+            "seed",
+            "field_secret",
+            "auth_bearer",
+            "rule",
+            "field_secret_2",
+        ]
+
+    def test_the_candidate_field_floors_differ_between_v1_and_v2(self) -> None:
+        data = yaml.safe_load(_MINI_RULES)
+        data["redaction"]["field_value_min_len"] = 4
+        signature, _ = compile_redaction_layers(data)
+        pipeline = dict(signature["v1_pipeline"])["FIELD_SECRET"]
+        v2 = dict(signature["v2_request"])["field_secret"]
+        assert "{8,}" in pipeline
+        assert "{12,}" in v2
 
 
 class TestServerSideProbe:
@@ -428,6 +493,48 @@ class TestRollback:
         assert exc.value.extra["rollback"] == "not_restored_concurrent_write"
         assert rules_file.read_text(encoding="utf-8") == other
         assert _AUDIT[-1]["rollback"] == "not_restored_concurrent_write"
+
+
+class TestAppliedVerification:
+    """Step 12 has to ask a question whose answer can be "no"."""
+
+    def test_a_loader_still_serving_the_old_document_fails_the_write(
+        self, rules_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cache that kept the previous rules is the failure this exists for."""
+        stale = yaml.safe_load(_MINI_RULES)
+        monkeypatch.setattr(rules_write, "_reload_rules", lambda: {"ok": True, "layers": {}})
+        monkeypatch.setattr(
+            "aegisgate.config.security_rules.load_security_rules", lambda *a, **k: stale
+        )
+        before = rules_file.read_bytes()
+        with pytest.raises(RulesWriteError) as exc:
+            write_rules_file(
+                lambda snapshot: _noop_change(snapshot, "STALE"), if_match=None, event="test"
+            )
+        assert any(p.startswith("loader_stale:") for p in exc.value.extra["problems"])
+        assert exc.value.extra["rollback"] == "restored"
+        assert rules_file.read_bytes() == before
+
+    def test_a_reload_drops_the_mtime_keyed_cache_instead_of_trusting_the_clock(
+        self, rules_file: Path
+    ) -> None:
+        """Two saves can share one filesystem timestamp tick."""
+        from aegisgate.config import security_rules
+
+        security_rules.load_security_rules()
+        rules_file.write_text(
+            _MINI_RULES.replace("seed-pattern", "second-save"), encoding="utf-8"
+        )
+        # Pin the mtime the loader would key on, so only an explicit
+        # invalidation can produce the new document.
+        stat = rules_file.stat()
+        import os
+
+        os.utime(rules_file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        security_rules.invalidate_security_rules_cache()
+        rules = security_rules.load_security_rules()
+        assert rules["redaction"]["pii_patterns"][0]["regex"] == "second-save"
 
 
 class TestBackups:
