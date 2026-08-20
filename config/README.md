@@ -12,6 +12,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 |------|------|:---:|:---:|:---:|
 | `default.yaml` / `strict.yaml` / `permissive.yaml` | 策略（启用哪些 filter、`risk_threshold`） | 否（首启生成） | 是 | 否 |
 | `security_filters.yaml` | 各 filter 规则与 `action_map` | 否（Docker 首启生成） | 是 | 否 |
+| `security_filters.yaml.bak-<UTC>` | 升级时定点迁移 regex 前的自动备份（见下方 §1） | 否 | — | 否 |
 | `.env` | 运行参数（见下方「运行参数」小节） | 否（从 `.env.example` 生成） | 部分 | 是 |
 | `.env.example` | 完整可调项清单与注释 | 是 | — | 否 |
 | `gw_tokens.json` | token → 上游映射 | 否 | 是 | 是 |
@@ -40,6 +41,15 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 - `security_filters.yaml` 的唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`，**不入库**——此前本目录下也有一份被版本控制的副本，导致同一条安全修复只落到其中一份，Docker 与裸机部署加载了不同的规则。改规则请改包内那份（或通过 UI 编辑运行时那份，但要清楚它只影响本部署）。
   - Docker 部署：`./config` 被挂载覆盖到包内规则目录，本目录下的同名文件由 `init_config` 首次启动时从镜像内的 `/app/bootstrap/rules` 生成。**升级时必须重建镜像**（`docker compose build aegisgate`），否则补写进来的是旧镜像里的旧规则。
   - 裸机部署：直接读包内那份，本目录下不会生成同名文件。
+  - **升级时的定点迁移**：`init_config.migrate_http_smuggling_regex()` 只替换本目录 `security_filters.yaml`
+    里 id 为 `http_smuggling_*` / `web_http_smuggling_*` 的 regex，其余自定义规则原样保留；改写前另存
+    `security_filters.yaml.bak-<UTC>`（`config/*.yaml.bak-*` 已在 `.gitignore` 中）。回滚 = 把备份拷回并回退镜像。
+
+- **v2 的危险命令规则另有一份内置副本**：`aegisgate/adapters/v2_proxy/router.py` 的
+  `_DEFAULT_DANGEROUS_COMMAND_PATTERNS` 会被**无条件编译**，然后再追加 YAML 里的
+  `sanitizer.command_patterns`。两边 id 相同（`web_http_smuggling_cl_te` / `_te_cl` / `_te_te` /
+  `web_http_response_splitting` / `web_http_obs_fold_header`），因此**从控制台删掉这五条并不能让 v2
+  停止命中**。收敛为「YAML 缺失时才兜底」记录在 [ROADMAP.md](../ROADMAP.md) R3。
 
 ### 2. 运行参数（.env）
 
@@ -100,10 +110,22 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
    - 例：`system_prompt_guard` 当前既未列在 `default.yaml`，对应的 `AEGIS_ENABLE_SYSTEM_PROMPT_GUARD` 也默认为 `false`——两个条件都不满足，因此该过滤器默认不会激活。
    - 要启用 `system_prompt_guard`，必须 **同时** 在策略 YAML 中加入该条目 **并且** 在 `.env` 中设置 `AEGIS_ENABLE_SYSTEM_PROMPT_GUARD=true`。
 
-3. **`AEGIS_SECURITY_LEVEL`**：不改变运行哪些过滤器，而是通过策略引擎调整 `risk_threshold`：
-   - `low`：更高阈值（更宽松，更少拦截）
-   - `medium`（默认）：使用 YAML 声明的 `risk_threshold`
-   - `high`：更低阈值（更激进，更多拦截）
+3. **`AEGIS_SECURITY_LEVEL`**：不改变运行哪些过滤器，而是给策略引擎解析出的 `risk_threshold`
+   乘一个系数（`aegisgate/config/security_level.py`），结果 clamp 到 `1.0`：
+
+   | 级别 | 阈值系数 | 地板系数 | `default` 策略（0.85）的有效阈值 |
+   |------|:---:|:---:|:---:|
+   | `high` | ×0.90 | ×1.05 | 0.765 |
+   | `medium`（默认） | ×1.30 | ×0.85 | **1.0**（clamp） |
+   | `low` | ×1.60 | ×0.70 | **1.0**（clamp） |
+
+   注意 `medium` **也**会缩放——它不是「原样使用 YAML 声明值」。因此 `medium` / `low` 配
+   `default` 策略时，基于分数的拦截分支不会触发（`action_map` 的 `block` 最高只抬到 0.95）；
+   这两档的防护来自 `injection_detector` / `rag_poison_guard` 的硬处置与
+   `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。详见 README_zh §5.2 与 [ROADMAP.md](../ROADMAP.md)。
+
+   `AEGIS_RISK_SCORE_THRESHOLD` 是**全局兜底值**：策略 YAML 声明了 `risk_threshold` 就按策略
+   覆盖它，而仓库自带的三个策略都声明了，所以它只对未声明该键的自定义策略 YAML 生效。
 
 热更新限制：`security_level` 变更不会在热更新时生效，需重启。
 
@@ -140,8 +162,9 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 热更新说明：
 - watcher 默认轮询以下文件：`config/.env`、`security_filters.yaml`、策略 YAML、`gw_tokens.json`。
 - `security_filters.yaml` 与策略 YAML 变更后，会清缓存并在下一次请求时重建 filter pipeline。
-- `.env` 仅支持**部分**参数热更新。以下 11 项安全关键参数在启动时固定，热更新不会生效（以 `aegisgate/core/hot_reload.py` 的 `_IMMUTABLE_FIELDS` 为准）：
-  `gateway_key`、`security_level`、`enforce_loopback_only`、`allow_public_numeric_tokens`、`allow_public_passthrough_mode`、`enable_request_hmac_auth`、`request_hmac_secret`、`trusted_proxy_ips`、`xff_strict_internal`、`v2_block_internal_targets`、`local_ui_allow_internal_network`。
+- `.env` 仅支持**部分**参数热更新。以下 12 项安全关键参数在启动时固定，热更新不会生效（以 `aegisgate/core/hot_reload.py` 的 `_IMMUTABLE_FIELDS` 为准）：
+  `gateway_key`、`security_level`、`enforce_loopback_only`、`allow_public_numeric_tokens`、`allow_public_passthrough_mode`、`allow_public_upstream_whitelist`、`enable_request_hmac_auth`、`request_hmac_secret`、`trusted_proxy_ips`、`xff_strict_internal`、`v2_block_internal_targets`、`local_ui_allow_internal_network`。
+  控制台配置页开放其中 11 项（`gateway_key` 走密钥管理页），带 **需重启** 徽章，见 [WEBUI-QUICKSTART.md](../WEBUI-QUICKSTART.md) §4.1。
 - **注意 Web UI 也受此限制**：配置页可以编辑 `AEGIS_SECURITY_LEVEL`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_TRUSTED_PROXY_IPS`，保存会写入 `config/.env` 并提示成功，但运行时取值要到**下次重启**才更新。改完这些项请用 UI 的「重启网关」或 `docker compose restart aegisgate`。`AEGIS_XFF_STRICT_INTERNAL` 同样需重启；设了 `AEGIS_TRUSTED_PROXY_IPS` 之后，仅把该开关改回 `false` **不能**撤销可信代理对 client IP 与限流键的影响，回退办法是清空该变量并重启。
 - `config/model_map.json` **不在** watcher 监听范围内：修改模型映射或 `allowed_models` 后必须重启网关。
 - 对于长连接、流式会话或 Compose 环境，仍建议在变更后执行一次 `docker compose restart aegisgate` 作为稳妥做法。

@@ -65,7 +65,6 @@ class Settings(BaseSettings):
     max_response_length: int = 2_000_000
     gateway_key_header: str = "gateway-key"
     gateway_key: str = ""  # Loaded from config/aegis_gateway.key at startup
-    tenant_id_header: str = "x-tenant-id"
     # Retention for redaction mappings; also drives the periodic mapping-store sweep.
     pending_data_ttl_seconds: int = 86400
     # Whether the confirmation text shows the "matched fragment (safely transformed)" preview; on by default.

@@ -444,11 +444,144 @@ def test_optional_guards_process_when_enabled() -> None:
     assert "[UNTRUSTED_CONTENT_START]" in untrusted_out.messages[0].content
 
 
+def test_builtin_default_policy_pins_default_yaml_threshold() -> None:
+    """The missing-file fallback policy must carry default.yaml's risk_threshold.
+
+    _BUILTIN_DEFAULT_POLICY declares the key on purpose instead of letting
+    resolve() fall back to AEGIS_RISK_SCORE_THRESHOLD, so an empty config mount
+    keeps the shipped threshold rather than silently picking up a different one.
+    That makes it a hand-maintained copy of one number. Its enabled_filters are
+    already pinned by test_default_and_strict_policies_omit_optional_guards.
+    """
+    from aegisgate.policies.policy_engine import _BUILTIN_DEFAULT_POLICY
+
+    default = yaml.safe_load(
+        (_REPO_ROOT / "aegisgate" / "policies" / "rules" / "default.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert _BUILTIN_DEFAULT_POLICY["risk_threshold"] == default["risk_threshold"], (
+        "policy_engine pins risk_threshold="
+        f"{_BUILTIN_DEFAULT_POLICY['risk_threshold']} for the missing-file fallback "
+        f"but default.yaml declares {default['risk_threshold']}."
+    )
+
+
+def test_immutable_field_count_matches_config_readme() -> None:
+    """config/README.md states how many settings are pinned at startup.
+
+    It said 11 and omitted allow_public_upstream_whitelist while the code had 12,
+    so an operator reading the list would not know that flag needs a restart.
+    """
+    from aegisgate.core.hot_reload import _IMMUTABLE_FIELDS
+
+    readme = (_REPO_ROOT / "config" / "README.md").read_text(encoding="utf-8")
+    cited = re.search(r"以下 (\d+) 项安全关键参数在启动时固定", readme)
+    assert cited, "config/README.md no longer states the immutable-field count"
+    assert int(cited.group(1)) == len(_IMMUTABLE_FIELDS), (
+        f"hot_reload pins {len(_IMMUTABLE_FIELDS)} fields but config/README.md says "
+        f"{cited.group(1)}."
+    )
+    for name in _IMMUTABLE_FIELDS:
+        assert f"`{name}`" in readme, (
+            f"{name} is pinned at startup but config/README.md does not list it"
+        )
+
+
+def test_ui_section_count_matches_docs() -> None:
+    """WEBUI-QUICKSTART cites how many panels the config page is split into."""
+    from aegisgate.core.gateway_ui_config import _UI_CONFIG_SECTIONS
+
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    cited = re.search(r"按 (\d+) 个分区呈现", quickstart)
+    assert cited, "WEBUI-QUICKSTART.md no longer states the config section count"
+    assert int(cited.group(1)) == len(_UI_CONFIG_SECTIONS), (
+        f"the console renders {len(_UI_CONFIG_SECTIONS)} config sections but "
+        f"WEBUI-QUICKSTART.md says {cited.group(1)}."
+    )
+
+
+def test_rule_group_and_rule_counts_match_docs() -> None:
+    """WEBUI-QUICKSTART cites the rule-group and rule totals of the workbench.
+
+    Both numbers come from walking security_filters.yaml the same way
+    gateway_ui_routes._discover_rule_sections does, so adding a rule group or a
+    rule to the YAML makes the quickstart stale without this guard.
+    """
+    from aegisgate.core.gateway_ui_routes import _RULE_SECTION_LABELS
+
+    rules = yaml.safe_load(_RULES.read_text(encoding="utf-8"))
+    found: dict[str, int] = {}
+
+    def looks_like_rule_list(value: object) -> bool:
+        if not isinstance(value, list) or not value:
+            return False
+        return all(isinstance(entry, dict) for entry in value) and any(
+            "regex" in entry or "id" in entry for entry in value
+        )
+
+    def walk(node: object, path: list[str]) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            current = path + [str(key)]
+            if looks_like_rule_list(value):
+                found[".".join(current)] = len(value)
+            elif isinstance(value, dict):
+                walk(value, current)
+
+    walk(rules, [])
+    for section_id in _RULE_SECTION_LABELS:
+        found.setdefault(section_id, 0)
+
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    cited = re.search(r"全部 (\d+) 个规则组\*\*（(\d+) 条规则）", quickstart)
+    assert cited, "WEBUI-QUICKSTART.md no longer states the rule group/rule totals"
+    assert (int(cited.group(1)), int(cited.group(2))) == (len(found), sum(found.values())), (
+        f"security_filters.yaml now has {len(found)} groups / {sum(found.values())} rules "
+        f"but WEBUI-QUICKSTART.md says {cited.group(1)} / {cited.group(2)}."
+    )
+
+
+def test_every_setting_has_a_runtime_reader() -> None:
+    """A Settings field the runtime never reads is a knob that silently does nothing.
+
+    AEGIS_RISK_SCORE_THRESHOLD and AEGIS_TENANT_ID_HEADER were both editable in the
+    console and documented as effective while nothing consumed them. settings.py
+    (the declaration) and gateway_ui_config.py (console metadata) do not count as
+    readers — only real runtime use does.
+    """
+    from aegisgate.config.settings import Settings
+
+    # Deliberately kept without a reader; see config/.env.example and ROADMAP.md R7.
+    allowed_without_reader = {"require_confirmation_on_block"}
+
+    sources = [
+        path
+        for path in (_REPO_ROOT / "aegisgate").rglob("*.py")
+        if "tests" not in path.parts
+        and path.name not in {"settings.py", "gateway_ui_config.py"}
+    ]
+    blob = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+    unread = {
+        name
+        for name in Settings.model_fields
+        if name not in allowed_without_reader
+        and not re.search(rf"\b{re.escape(name)}\b", blob)
+    }
+    assert not unread, (
+        f"Settings fields with no runtime reader: {sorted(unread)}. Either wire them "
+        f"up, drop them, or add them to allowed_without_reader with a reason."
+    )
+
+
 def test_removed_dead_code_symbols_are_gone() -> None:
     import aegisgate.core.errors as errors
     import aegisgate.core.semantic as semantic
     import aegisgate.observability as observability
+    import aegisgate.observability.logging as obs_logging
     import aegisgate.observability.metrics as metrics
+    import aegisgate.observability.tracing as obs_tracing
     import aegisgate.storage._helpers as helpers
     from aegisgate.adapters.openai_compat import compat_bridge
 
@@ -463,6 +596,12 @@ def test_removed_dead_code_symbols_are_gone() -> None:
     assert not hasattr(metrics, "inc_filter_hit")
     assert not hasattr(metrics, "emit_counter")
     assert not hasattr(observability, "traced")
+    # Self-labelled "legacy interface preserved for backward compatibility" with
+    # zero callers anywhere, tests included.
+    assert not hasattr(obs_logging, "log_event")
+    assert not hasattr(observability, "log_event")
+    assert not hasattr(obs_tracing, "trace")
+    assert not hasattr(observability, "trace")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("aegisgate.core.registry")
 

@@ -53,10 +53,50 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 - compose 与 Dockerfile 都缺 `healthcheck` / `HEALTHCHECK`，容器挂死时编排层看不出来。
 - Dockerfile 先 `COPY` 源码、后 `pip install`，任何源码改动都会击穿依赖层缓存；镜像里还带着 `aegisgate/tests`。调整 COPY 顺序并排除测试即可，属纯收益改动。
 
+### R6 — 风险阈值与 `block` 语义的一致性（M，**需先决策**）
+
+两处实测行为与文档/控制台呈现出的语义不一致。都属于「行为变更」，要单独 PR、单独回归，不要混进文档 PR。
+
+1. **`medium` 也参与阈值缩放**。`policy_engine.resolve()` 对所有档位都调 `apply_threshold()`，
+   `medium` 的系数是 `1.30`。配 `default` 策略（`risk_threshold: 0.85`）时
+   `0.85 × 1.30 = 1.105`，clamp 后是 **1.0**；`low`（×1.60）同样是 1.0。于是：
+
+   - `low` 与 `medium` 在默认策略下**完全等价**，与「三档分层」的产品语义不符；
+   - `action_map` 的 `block` 最高把风险分抬到 `0.95`，所以 `OutputSanitizer` 里
+     `risk_score >= max(ctx.risk_threshold, self._block_threshold)` 这条**基于分数**的拦截分支
+     在默认配置下永不触发。
+
+   要么把 `medium` 的系数改回 `1.0`，要么把 `default.yaml` 的 `risk_threshold` 降到缩放后仍
+   `< 1.0` 的值。改哪个都会**提高**默认部署的拦截率，需要评估误拦。
+
+2. **`block` 在不同 filter 里语义不同**。`injection_detector` 与 `rag_poison_guard` 的 `block`
+   直接设置 `request_disposition` / `response_disposition`（不依赖阈值）；`restoration` 与
+   `sanitizer` 的 `block` 只做 `risk_score = max(..., 0.95)`，仍受阈值约束——叠加上面第 1 点，
+   在默认配置下不会拦截。控制台「动作映射」页把这四种动作呈现为统一语义，用户无从看出差别。
+
+### R7 — 无消费者的配置项（S）
+
+- `AEGIS_RISK_SCORE_THRESHOLD` 此前没有任何运行时读取者；现已接为「策略 YAML 未声明
+  `risk_threshold` 时的全局兜底值」。但仓库自带的三个策略都声明了该键，所以它对默认部署仍然
+  不起作用。是否要让它成为真正的全局下限，取决于 R6 的决策。
+  策略文件缺失时走的 `policy_engine._BUILTIN_DEFAULT_POLICY` 同样显式声明该键并固定为 `0.85`，
+  那条路径也读不到该环境变量——这是刻意的（配置目录为空不应连带改变阈值），一致性已由
+  `test_builtin_default_policy_pins_default_yaml_threshold` 钉在 `default.yaml` 上。
+- `AEGIS_TENANT_ID_HEADER` 已删除：租户 id 由 `_trusted_scope_id()` / `x-aegis-token-hint` 推导，
+  该字段从来没有读取者，却在控制台可编辑。
+- `require_confirmation_on_block` 仍保留在 `Settings` 里做配置兼容（不在控制台开放）。确认没有
+  部署依赖旧键之后可以删除。
+
 ## 单点待办
 
 - **messages / generic 的 EOF 恢复**：上游 EOF 且无 `[DONE]` 时，chat / responses 会补一条断开提示，messages / generic 没有该分支（见 CHANGELOG 中「EOF 无 `[DONE]`」条目，这是记录在案的当前行为）。补上属于**新增行为**而非缺陷修复，要单独评估客户端兼容性，不要混进 bug 修复 PR。
 - **TF-IDF 资产去留**：`aegisgate/models/tfidf/` 目前定位是「保留的离线实验资产」。这是产品决策 —— 要么接回主链路并给出评估口径，要么整体下架，不要长期挂在中间态。
+- **README 与 UPSTREAM-QUICKSTART 的上游章节仍有重复**：`README_zh.md §上游接入` 与
+  `UPSTREAM-QUICKSTART.md` 覆盖同一组事实（上游表、Base URL 表、`AEGIS_DOCKER_UPSTREAMS`、
+  Caddy 要点）。已加交叉链接，真正的收敛（README_zh 只留速查、细节全部下沉）还没做。
+- **CHANGELOG 结构**：`## [Unreleased]` 下 `### Added` / `### Changed` / `### Fixed` 各出现两次，
+  `### Breaking Changes` 被埋在中间；`## [Previous]` 更乱。文件顶部声明遵循 Keep a Changelog，
+  实际没有。合并同名小节是纯文本搬运，但 diff 很大，建议单独一个 PR 做。
 - **低优先级项**：日志脱敏粒度、权限窗口、局部性能与一致性问题，按需单独立项，不要顺手夹带进相邻 PR。
 
 ## 横切验收口径

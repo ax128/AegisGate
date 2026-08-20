@@ -100,17 +100,6 @@ def trace_span(name: str, **attributes: Any) -> Generator[Any, None, None]:
         yield None
 
 
-# Legacy interface preserved for backward compatibility.
-def trace(span_name: str, **fields: object) -> None:
-    """Fire-and-forget trace event — prefer ``trace_span`` context manager."""
-    if _HAS_OTEL:
-        tracer = _otel_trace.get_tracer(_tracer_name)
-        with tracer.start_as_current_span(span_name, attributes=_coerce_trace_attributes(fields)):
-            pass
-    else:
-        logger.info("trace span=%s fields=%s", span_name, fields)
-
-
 # ---------------------------------------------------------------------------
 # No-op fallback
 # ---------------------------------------------------------------------------

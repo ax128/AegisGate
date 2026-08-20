@@ -6,6 +6,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **文档与代码全面对齐**（本次为文档 + 死配置清理，不改变任何过滤/拦截行为）
+
+  **纠正的事实性错误**
+
+  - `config/README.md` 称 `medium` 档「使用 YAML 声明的 `risk_threshold`」——实际上三档都会缩放。
+    `medium` 系数为 `×1.30`，配 `default` 策略（0.85）时 `0.85 × 1.30 = 1.105` 被 clamp 到 **1.0**，
+    `low`（×1.60）同样是 1.0，两档在默认策略下完全等价。三处文档补上系数表与实测有效阈值
+    （README.md 新增「Security Levels」、README_zh §5.2、config/README.md §配置交互）
+  - `config/README.md` 的不可热更新清单写「11 项」且漏了 `allow_public_upstream_whitelist`，
+    实际 `_IMMUTABLE_FIELDS` 是 12 项——设了这个公网闸门却不重启会以为已生效
+  - README.md 的 PII 特性行与 FAQ 宣称覆盖信用卡/SSN/邮箱/医疗记录，但没写路由限定：
+    `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 默认只跑 `relaxed_pii_ids` 凭据子集
+    （56 条里的 12 条）。两篇 README 的特性行都补上限定
+  - README.md 声称错误响应有 three families 却只给了两个示例；补上第三种（`gateway_auth`
+    的无 `request_id` 信封）
+  - `OTHER_TERMINAL_CLIENTS_USAGE.md` 的 `invalid_parameters` 排查条目与该文场景无关——
+    这个码只由默认关闭的 `/relay/generate` 在缺 `x-upstream-base` 时返回。改为 `token_route_required`
+  - README_zh §5.2 只列了 `injection_detector` 的 5 类强制拦截，遗漏 `rag_poison_guard`；并补充说明
+    `restoration` / `sanitizer` 的 `block` **只抬分不设 disposition**，语义与前两者不同
+  - README_zh 的 `AEGIS_MAX_MESSAGES_COUNT` 未写明只对 `/v1/chat/completions` 生效
+  - `config/.env.example` 头部声称「hot-reloadable items are marked」但全文无任何标记；
+    「Filter switches (all default to true)」紧接着就是 `AEGIS_ENABLE_SYSTEM_PROMPT_GUARD=false`
+  - `README_zh.md` 章节编号从 2.1 直接跳到 2.3（§2.2 从不存在），已顺移并修正交叉引用
+  - `CHANGELOG.md` 的历史配置表仍把 `AEGIS_ENABLE_THREAD_OFFLOAD` 写成「保留字段」，
+    与本文件「删除无效配置」条目冲突，已加 `[已删除]` 标记
+
+  **补齐的空白**
+
+  - README.md 从未说明 `<YOUR_GATEWAY_KEY>` 从哪来，也没提控制台登录密码就是网关密钥——
+    新增「Gateway Key」小节（`cat config/aegis_gateway.key` / `docker compose exec`）
+  - README.md 配置表补 20 个只在 README_zh 里有的变量，其中包括 `AEGIS_V2_BLOCK_INTERNAL_TARGETS`
+    （v2 SSRF 防护）与 `AEGIS_LOCAL_PORT_ROUTING_HOST`（裸机端口路由必须改成 `127.0.0.1`）
+  - **仅支持单进程部署**：统计、限流窗口、内存 nonce 防重放、规则 LRU 缓存、后台 worker 都是
+    进程内单例，多进程会静默破裂。此前 9 篇文档没有任何一处写明，README.md 与 README_zh §6 补上
+  - `config/README.md` 补上升级时 `init_config.migrate_http_smuggling_regex()` 会定点改写挂载目录里的
+    YAML 并留下 `security_filters.yaml.bak-<UTC>`；以及 v2 内置规则表**无条件编译**、
+    从控制台删掉那 5 条 `web_http_*` 并不能让 v2 停止命中
+  - README.md / README_zh.md 新增文档导航表。此前 `UPSTREAM-QUICKSTART.md` 与 `ROADMAP.md`
+    **零入站链接**，英文读者无法发现控制台、上游、终端客户端三篇指南
+  - `SKILL.md` 的本地安装漏了 `.[dev]`（照做后 `pytest` 不可用），并补上相关文档链接
+  - `ROADMAP.md` 新增 R6（阈值与 `block` 语义一致性，需先决策）、R7（无消费者的配置项），
+    以及上游章节重复、CHANGELOG 结构两条待办
+
+### Changed
+
+- **`AEGIS_RISK_SCORE_THRESHOLD` 接上了消费者**：此前 `policy_engine` 的兜底值是硬编码 `0.85`，
+  这个被两篇 README、`.env.example` 和控制台配置页共同宣传的「全局风险阈值」没有任何运行时读取者。
+  现改为策略 YAML 未声明 `risk_threshold` 时的兜底值。**仓库自带的三个策略都声明了该键，因此默认
+  部署的有效阈值不变**；只有自定义的、省略该键的策略 YAML 行为会变（从固定 0.85 变为读该环境变量）
+- `aegisgate/core/gateway_ui_routes.py` 的 `_RULE_SECTION_LABELS` 提升为模块级常量，便于测试直接
+  比对控制台规则组与 `security_filters.yaml`（纯搬运，无行为变化）
+
+### Removed
+
+- **`AEGIS_TENANT_ID_HEADER`**：租户 id 实际由 `_trusted_scope_id()` 与 `x-aegis-token-hint` 推导，
+  该 setting 从来没有读取者，却在控制台配置页可编辑并提示保存成功。配置页可编辑项 100 → 99。
+  `Settings` 为 `extra="ignore"`，旧 `.env` 里的残留键不会导致启动失败
+- `observability.log_event()` 与 `observability.trace()`：两者都自带
+  "Legacy interface preserved for backward compatibility" 注释，但全仓库（含测试）零调用者
+
+### Added
+
+- `test_doc_alignment.py` 新增 5 条守护，把本次人工发现的问题固化进 CI：
+  `_IMMUTABLE_FIELDS` 数量与名单必须与 `config/README.md` 一致、控制台分区数与
+  `WEBUI-QUICKSTART.md` 一致、规则组/规则条数与 `WEBUI-QUICKSTART.md` 一致、
+  **每个 `Settings` 字段都必须有非 UI 非测试的运行时读取者**（`AEGIS_RISK_SCORE_THRESHOLD`
+  与 `AEGIS_TENANT_ID_HEADER` 正是这条能自动抓到的）、策略文件缺失时的兜底策略
+  `_BUILTIN_DEFAULT_POLICY` 的 `risk_threshold` 必须与 `default.yaml` 一致（`enabled_filters`
+  早有守护，这个数是唯一没被钉住的手工副本）；并把 `log_event` / `trace` 加入
+  既有的死代码符号守护
+
 ### Added
 
 - **控制台首次上手引导**
@@ -535,7 +608,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **默认安全级别改为 `medium`**：宽松模式，大部分"可能危险"指令不拦截，仅高危 + 脱敏；高危指令（系统提示泄露、编码攻击、凭据泄露）仍通过 disposition=block 强制拦截。语义复核开关（`AEGIS_ENABLE_SEMANTIC_MODULE`，灰区门控）默认开启；未配置语义服务 URL 时仅在灰区触发降级记录，不做语义风险抬升。
-- **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认保持为 `false`**：当前 Store I/O 与过滤管道已通过独立执行器 offload；该开关主要作为兼容字段保留。
+- **`AEGIS_ENABLE_THREAD_OFFLOAD` 默认保持为 `false`**：当前 Store I/O 与过滤管道已通过独立执行器 offload；该开关主要作为兼容字段保留。（**已过期**：该配置项此后已被删除，见 Unreleased 的「删除无效配置 `AEGIS_ENABLE_THREAD_OFFLOAD`」。）
 - **`confirmation_ttl_seconds` 从 300s 增加到 600s**：给用户更充裕的时间做 yes/no 决策。
   - > **已过期**：yes/no 确认流程已整体移除，该配置项已无运行期消费者。
 - **Stale executing 状态自动恢复**：prune 后台任务每 60s 自动将卡在 `executing` 超过 120s 的确认记录恢复为 `pending`，不再依赖下次请求触发。涉及 SQLite/Redis/PostgreSQL 三个存储后端。
@@ -605,7 +678,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 |---|---|---|
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90.0` | 过滤管道最大执行时间（秒）；请求侧按 `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` 处理，响应侧固定拦截；`0` 表示不限制 |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | 请求过滤管道超时动作：`block`（安全默认）或 `pass`（兼容旧行为） |
-| `AEGIS_ENABLE_THREAD_OFFLOAD` | `false` | （保留字段）历史兼容开关；当前 Store I/O 与过滤管道已通过独立执行器 offload，不依赖此项 |
+| `AEGIS_ENABLE_THREAD_OFFLOAD` | `false` | **[已删除]** 该字段从未接线，已在 Unreleased 的「删除无效配置」条目中移除；旧 `.env` 里的残留键不会导致启动失败 |
 | `AEGIS_REQUIRE_CONFIRMATION_ON_BLOCK` | `false` | **[已废弃]** 放行确认流程已移除，无论值为何均自动遮挡/分割后返回 |
 
 ### 调试日志配置
