@@ -624,6 +624,9 @@ _DEFAULT_RELAXED_PII_IDS = frozenset(
         "CRYPTO_SEED_PHRASE",
     }
 )
+# Public alias: the console renders the built-in default set, so it should not
+# have to read a private name to do it.
+DEFAULT_RELAXED_PII_IDS = _DEFAULT_RELAXED_PII_IDS
 _RELAXED_PII_ALL = "*"
 # Config mistakes are logged once per distinct value, not per pipeline rebuild.
 _WARNED_RELAXED_PII_CONFIG: set[tuple[str, ...]] = set()
@@ -786,6 +789,11 @@ def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
     else:
         ids.update({"FIELD_SECRET", "AUTH_BEARER"})
     return ids
+
+
+def configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
+    """Public alias of :func:`_configured_redaction_pattern_ids` for the console."""
+    return _configured_redaction_pattern_ids(rules)
 
 
 def _relaxed_pii_ids(rules: dict[str, Any]) -> tuple[frozenset[str] | None, bool]:

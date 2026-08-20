@@ -1182,12 +1182,44 @@ def register_ui_routes(app: FastAPI) -> None:
         )
 
     # ------------------------------------------------------------------
+    # Request-side redaction panel (read-only)
+    # ------------------------------------------------------------------
+
+    @app.get("/__ui__/api/request_redaction/settings")
+    async def local_ui_request_redaction_settings() -> JSONResponse:
+        """Everything the request-redaction panel renders, already computed.
+
+        The panel derives nothing: which surfaces a rule is live on depends on
+        the relaxed set, the route split, a role check and a separate hard-coded
+        V2 set, and a second implementation of that in the browser would be free
+        to drift from the one the request path uses.
+
+        The ``ETag`` is the *rules file's*. The four master switches live in
+        ``.env`` and carry their own ``env_etag`` in the body, so the console can
+        notice they went stale without that entering this resource's concurrency
+        control.
+        """
+        from aegisgate.core.request_redaction_settings import build_settings_payload
+
+        payload = await asyncio.to_thread(build_settings_payload)
+        # The payload carries the ETag read at the start of its own construction,
+        # so the validator can never be newer than the state it describes.
+        return with_etag(JSONResponse(content=payload), payload["rules_etag"])
+
+    # ------------------------------------------------------------------
     # Exact-value redaction management
     # ------------------------------------------------------------------
 
+    # v4 §2.6: "V1/V2 均适用" was wrong in both directions — on V1 it only
+    # reaches the flat message text of the chat routes, and on V2 it needs a
+    # second switch.
     _REDACT_VALUES_DESCRIPTION = (
-        "精确值脱敏：配置的字符串若出现在请求/响应体中会被自动替换为 [REDACTED:EXACT_VALUE]。"
-        "最少 10 个字符，适合保护 API Key、密钥等敏感数据。V1/V2 均适用。"
+        "精确值脱敏：配置的字符串命中后替换为 [REDACTED:EXACT_VALUE]，最少 10 个字符，"
+        "适合保护 API Key、密钥等敏感数据。"
+        "覆盖面：V1 仅对话路由（/v1/chat/completions、/v1/responses、/v1/messages）的扁平消息文本生效；"
+        "V1 的结构化内容、instructions、工具定义、通用 /v1/<subpath> JSON 与 multipart 均不生效；"
+        "V2 需 enable_exact_value_redaction 与 v2_enable_request_redaction 同时为 true。"
+        "替换不可还原。"
     )
 
     def _mask_value(val: str) -> str:

@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **控制台新增「请求侧脱敏」面板（只读）**，侧栏位于「安全规则」之前。此前控制台没有任何一处
+  说明四个总控各自控制哪一层、一条 PII 规则到底在哪些执行面上生效，也没有说明两类绕过机制的前置条件。
+  面板集中回答这些问题，**全部由服务端计算后下发，前端不做任何推导**
+  （新端点 `GET /__ui__/api/request_redaction/settings`）：
+
+  - **六个执行面模型**。请求侧脱敏不是「V1 / V2」两桶：E1 V1 管道层·对话路由、E2 V1 管道层·其他路由、
+    E3 V1 转发层·对话消息/system/instructions/tools、E4 V1 转发层·multipart 表单字段、
+    E5 V1 转发层·通用 `/v1/<subpath>` JSON、E6 V2 请求体。其中 **E1/E3/E4 三个受 `relaxed_pii_ids` 支配**。
+    E4 尤其容易被忽略：multipart 路由不在低误报路由白名单里，所以 **E2 用全量集打分，而 E4 用 relaxed 集
+    实际改写外发内容**——把一个 ID 移出 relaxed 集，会同时关掉它在上传表单字段上的转发期脱敏。
+  - **总控真实作用层**。`enable_redaction` 只控制 V1 管道层，不控制 V1 转发期的 `[REDACTED:ID]`；
+    `enable_restoration` 对 `[REDACTED:ID]` 无效；V1 转发期脱敏显示为**强制安全基线，没有关闭开关**。
+  - **豁免与绕过按路由分层**。字段级白名单**只保护指定 key/span，不是整请求绕过**；V1 会把 token 注入的 key
+    再过一遍 denylist 而 V2 不会，所以面板对每个 key 分别标注「V1 忽略 / V2 生效」；
+    上游白名单显示 `allow_public_upstream_whitelist` 与 client_is_internal 两个前置条件的当前值。
+  - **覆盖面表**，含此前三处文档都漏掉的一行：**V1 multipart 的文件内容不脱敏、不扫描**，
+    字节原样转发，分析文本里只放一个 `[BINARY_CONTENT]` 占位。`/v1/files` 是最容易夹带凭据的通道。
+  - **Field 规则只读展示**三层各自的 fallback ID、`field_value_min_len` 下限差异（V1 两层 `max(8,…)`，
+    V2 `max(12,…)`）与是否受 relaxed 过滤。本期不提供逐条启停——那会造出「YAML 已停用但 V2 fallback 仍在跑」的假控制。
+  - **规则文件路径自检**与影子文件提示（见上一版本的路径统一修复）。
+  - 配置里已存在的 `enabled: false` 会显示「待启用语义」告警：当前代码不读取该字段，这些规则仍在运行，
+    生效面按「运行中」计算。
+
+  本阶段**保留全部旧入口与旧 CRUD**，规则增删改仍在「安全规则」中进行。
+
+### Changed
+
+- 精确值脱敏面板的「V1/V2 均适用」文案纠正：V1 只对**对话路由的扁平消息文本**生效，
+  结构化内容、`instructions`、工具定义、通用 `/v1/<subpath>` JSON 与 multipart 均不生效；
+  V2 需 `enable_exact_value_redaction` 与 `v2_enable_request_redaction` 同时开启。替换不可还原。
+- 统计卡口径纠正为「管道层去重后的敏感值替换数（含 PII 与 field 规则，统计期内）」：
+  该计数**含 field 规则**，且因为相同原文复用同一占位符，它是**唯一敏感值个数**而非命中次数；
+  不含 V1 转发层替换、V2 替换与精确值替换（`ExactValueRedactionFilter.report()` 不提供 `replacements`，
+  实际贡献恒为 0）。
+- `adapters/openai_compat/router.py` 导出公开常量 `WHITELIST_HEADER_DENYLIST`（保留下划线别名），
+  `config/security_rules.py` 导出 `DEFAULT_RELAXED_PII_IDS` 与 `configured_redaction_pattern_ids()`，
+  供控制台使用，避免反向依赖私有名。
+- `core/rules_write.py` 记录最近一次**通过写入后校验**的规则应用，供面板显示「当前运行的是哪一版」；
+  重新从磁盘计算一遍集合回答的是另一个问题。
+- 面板下发的 `ETag` 改为在构造响应体**之前**读取，并随响应体一并返回（`rules_etag`）。
+  原先的顺序会在并发写入时把一个比响应体更新的校验值交给控制台——那正是 `If-Match` 要拦的覆盖；
+  改成先读校验值后，并发写入只会让下一次保存变成 409。
+- 执行面徽章在被总控关掉时改为置灰加删除线，不再用警告色——那会让一个已关闭的执行面比生效的还醒目。
+- Field 层表更正 V2 一列：V2 与 `pii_patterns` 共用同一个编译循环，因此没有 id 的映射条目缺省为
+  `rule` 而不是 `field_secret_{idx}`（后者只用于 legacy 字符串条目），并注明 V2 的两条 fallback
+  与显式列表**同时**编译，而 V1 只在列表为空时才用 fallback。
+- 「查看安全规则原始配置」链接仅在 `field_value_patterns` 确实写在 YAML 里时才渲染：
+  规则工作台只列出文件中存在的规则组，否则该链接会落到一个不相干的组上。
+
 ### Fixed
 
 - **控制台可能写入运行时从不读取的规则文件（路径解析统一）**。`config/security_rules.py`、

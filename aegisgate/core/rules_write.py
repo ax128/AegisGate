@@ -121,6 +121,29 @@ class RulesChange:
 
 
 # ---------------------------------------------------------------------------
+# Last confirmed application
+# ---------------------------------------------------------------------------
+
+# Only a write that passed post-write verification lands here. The console has to
+# be able to say "this is what is running", and recomputing the compiled set from
+# the file on disk would answer a different question.
+_LAST_APPLIED: dict[str, Any] | None = None
+_LAST_APPLIED_GUARD = threading.Lock()
+
+
+def last_applied_write() -> dict[str, Any] | None:
+    """The most recent verified rules write, or ``None`` since process start."""
+    with _LAST_APPLIED_GUARD:
+        return dict(_LAST_APPLIED) if _LAST_APPLIED else None
+
+
+def _record_applied(payload: dict[str, Any]) -> None:
+    global _LAST_APPLIED
+    with _LAST_APPLIED_GUARD:
+        _LAST_APPLIED = payload
+
+
+# ---------------------------------------------------------------------------
 # The per-file lock, shared by every section
 # ---------------------------------------------------------------------------
 
@@ -796,6 +819,14 @@ def write_rules_file(
             "result": "ok",
             "etag": new_etag,
             "reload": reload_result,
+        })
+        _record_applied({
+            "event": event,
+            "etag": new_etag,
+            "rules_file": str(path),
+            "backup": backup.name if backup else None,
+            "reload": reload_result,
+            "at": datetime.now(tz=timezone.utc).isoformat(),
         })
         return {
             "etag": new_etag,

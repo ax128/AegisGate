@@ -2617,9 +2617,506 @@ function bindRestartButton() {
   });
 }
 
+
+// ─── Request-side redaction (read-only) ───────
+// Every fact this panel shows is computed server-side and rendered verbatim.
+// Whether a rule is live on a given surface depends on the relaxed set, a route
+// split, a message-role check and a separate hard-coded V2 set; re-deriving any
+// of that here would be a second implementation free to drift from the one the
+// request path actually runs. So: no derivation below, only rendering.
+
+let requestRedactionState = null;
+
+function rrSurfaceBadge(surface, effective, overlay) {
+  const gated = overlay && overlay.active === false;
+  const on = Boolean(effective);
+  // A surface its master switch has turned off is *not* running, so it reads as
+  // muted like any other inactive one — struck through to say why. Warning
+  // colour here made a switched-off surface louder than a live one.
+  const cls = !on || gated ? "badge-muted" : "badge-success";
+  const title = [
+    `${surface.code} ${surface.label}`,
+    surface.detail ? `范围：${surface.detail}` : "",
+    `使用集合：${rrPatternSetLabel(surface.pattern_set)}`,
+    surface.note || "",
+    on ? "该规则在此执行面生效" : "该规则在此执行面不生效",
+    gated ? `已被总控 ${overlay.switch} 关闭` : "",
+  ].filter(Boolean).join("\n");
+  return (
+    `<span class="badge ${cls} rr-surface-badge${gated ? " rr-surface-gated" : ""}" ` +
+    `title="${escapeHtml(title)}">${escapeHtml(surface.code)}</span>`
+  );
+}
+
+function rrPatternSetLabel(kind) {
+  if (kind === "relaxed") return "relaxed 集";
+  if (kind === "full") return "全量集";
+  return "V2 固定 15 项集合";
+}
+
+function rrBoolBadge(value, onLabel, offLabel) {
+  return value
+    ? `<span class="badge badge-success">${escapeHtml(onLabel)}</span>`
+    : `<span class="badge badge-muted">${escapeHtml(offLabel)}</span>`;
+}
+
+function rrTruncate(text, limit) {
+  const value = String(text || "");
+  return value.length > limit ? value.slice(0, limit) + "…" : value;
+}
+
+function rrAlerts(data) {
+  const alerts = [];
+  if (!data.rules_file_resolver_consistent) {
+    alerts.push({
+      level: "warn",
+      title: "规则文件路径自检不一致",
+      body:
+        `控制台与运行时现在都使用 ${data.rules_file_path}；` +
+        `按旧的「相对启动目录」规则会解析到 ${data.legacy_cwd_path}。` +
+        (data.shadow_rules_files.length
+          ? `磁盘上仍存在这些疑似影子文件，请人工核对后清理：${data.shadow_rules_files.join("、")}`
+          : "该路径下当前没有残留文件。"),
+    });
+  }
+  if (data.write_blocked) {
+    alerts.push({
+      level: "err",
+      title: "存在归一化 ID 冲突，相关写入已阻断",
+      body: data.normalized_collisions
+        .map((item) => `${item.source} 中 ${item.raw.join("、")} 归一化后都是 ${item.normalized}`)
+        .join("；") + "。请先在「安全规则」中消除冲突，工具不会代为选择保留哪一条。",
+    });
+  }
+  if (data.malformed_pii_entries.length) {
+    alerts.push({
+      level: "err",
+      title: "pii_patterns 中存在非映射条目",
+      body:
+        "V1 管道层对每一项直接取字段，这类条目会让请求管道抛错：" +
+        data.malformed_pii_entries.map((item) => `第 ${item.index} 项（${rrTruncate(item.value, 40)}）`).join("、"),
+    });
+  }
+  if (data.pending_enabled_false_ids.length) {
+    alerts.push({
+      level: "warn",
+      title: "检测到待启用语义的配置，当前版本尚未执行",
+      body:
+        `以下规则在 YAML 中写了 enabled: false，但当前代码不读取该字段，它们仍在运行：` +
+        `${data.pending_enabled_false_ids.join("、")}。下方的生效面按「运行中」计算。` +
+        "后续版本启用该语义后，这些规则将开始真正停用，请提前确认。",
+    });
+  }
+  if (data.unresolved_ids.length) {
+    alerts.push({
+      level: "warn",
+      title: "relaxed 集中有悬空 ID",
+      body:
+        `${data.unresolved_ids.join("、")} 在当前配置里找不到对应规则。` +
+        "这不改变任何行为（集合过滤只会跳过它们），但通常说明规则被删过。",
+    });
+  }
+  const node = document.getElementById("rr-alerts");
+  if (!node) return;
+  node.innerHTML = alerts
+    .map(
+      (alert) =>
+        `<div class="rr-alert rr-alert-${alert.level}">` +
+        `<strong>${escapeHtml(alert.title)}</strong>` +
+        `<span>${escapeHtml(alert.body)}</span></div>`
+    )
+    .join("");
+}
+
+function rrMasterSection(data) {
+  const switches = Object.entries(data.master_switches)
+    .map(([name, value]) => {
+      const scope = data.master_switch_scopes[name] || "";
+      const rendered = renderInline(scope);
+      return (
+        `<div class="rr-card">` +
+        `<div class="rr-card-head"><code>${escapeHtml(name)}</code>` +
+        rrBoolBadge(value, "已开启", "已关闭") +
+        `</div><p class="u-note">${rendered}</p></div>`
+      );
+    })
+    .join("");
+
+  const mandatory =
+    `<div class="rr-card rr-card-locked">` +
+    `<div class="rr-card-head"><strong>V1 转发期脱敏</strong>` +
+    `<span class="badge badge-success">强制安全基线</span></div>` +
+    `<p class="u-note">保护结构化内容、工具定义、通用 JSON 与 multipart 表单字段，` +
+    `<strong>没有关闭开关</strong>，本期也不新增。<code>enable_redaction</code> 关闭后它依旧运行。</p></div>`;
+
+  const normalization =
+    `<div class="rr-card">` +
+    `<div class="rr-card-head"><strong>输入归一化</strong></div>` +
+    `<ul class="rr-kv">` +
+    `<li><code>normalize_nfkc</code><span>${data.normalize_nfkc ? "true" : "false"}</span></li>` +
+    `<li><code>strip_invisible_chars</code><span>${data.strip_invisible_chars ? "true" : "false"}</span></li>` +
+    `<li><code>request_prefix_max_len</code><span>${escapeHtml(String(data.request_prefix_max_len))}</span></li>` +
+    `</ul></div>`;
+
+  return (
+    `<h3 class="rr-heading">总控与状态</h3>` +
+    `<p class="u-note u-note-block">四个总控各自控制哪一层，是这个面板存在的第一个理由——` +
+    `它们的名字看起来都像「关掉脱敏」，实际控制的层并不相同。</p>` +
+    `<div class="rr-cards">${switches}${mandatory}${normalization}</div>`
+  );
+}
+
+function rrSurfaceLegend(data) {
+  return (
+    `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+    `<th scope="col">执行面</th><th scope="col">范围</th>` +
+    `<th scope="col">使用的 PII 集合</th><th scope="col">总控</th><th scope="col">说明</th>` +
+    `</tr></thead><tbody>` +
+    data.surfaces
+      .map((surface) => {
+        const overlay = data.master_switch_overlay[surface.id] || {};
+        const gated = overlay.active === false;
+        return (
+          `<tr><td><strong>${escapeHtml(surface.code)}</strong> ${escapeHtml(surface.label)}</td>` +
+          `<td class="u-note">${escapeHtml(surface.detail || "—")}</td>` +
+          `<td>${escapeHtml(rrPatternSetLabel(surface.pattern_set))}</td>` +
+          `<td>${
+            overlay.switch
+              ? `<code>${escapeHtml(overlay.switch)}</code>${
+                  gated ? ' <span class="badge badge-warning">已关闭</span>' : ""
+                }`
+              : '<span class="badge badge-muted">无总控</span>'
+          }</td>` +
+          `<td class="u-note">${escapeHtml(surface.note || "")}</td></tr>`
+        );
+      })
+      .join("") +
+    `</tbody></table></div>`
+  );
+}
+
+function rrStatusSection(data) {
+  const reload = data.last_applied_write;
+  const reloadCell = reload
+    ? `最近一次已确认应用：${escapeHtml(reload.at)}（${escapeHtml(reload.event)}）` +
+      `，热重载 ${reload.reload && reload.reload.ok ? "全部层成功" : "存在失败层"}` +
+      (reload.backup ? `，备份 <code>${escapeHtml(reload.backup)}</code>` : "")
+    : "本进程启动后尚未通过控制台写入过规则文件。";
+
+  const relaxedLabels = { default: "使用代码默认值", all: "全部（[\"*\"]）", custom: "自定义列表", invalid: "配置类型非法，已回落到代码默认值" };
+
+  return (
+    `<h3 class="rr-heading">六个执行面</h3>` +
+    `<p class="u-note u-note-block">请求侧脱敏不是「V1 / V2」两桶，而是六个执行面，其中 ` +
+    `<strong>E1、E3、E4 三个受 relaxed 集支配</strong>；E2、E5 恒用全量集，E6 用自己的固定集合。</p>` +
+    rrSurfaceLegend(data) +
+    `<div class="rr-cards rr-cards-wide">` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>relaxed 集</strong>` +
+    `<span class="badge badge-muted">${escapeHtml(relaxedLabels[data.relaxed_mode] || data.relaxed_mode)}</span></div>` +
+    `<p class="u-note">支配 E1、E3、E4。当前解析结果：` +
+    (data.relaxed_ids_resolved === null
+      ? "所有已配置规则"
+      : `${data.relaxed_ids_resolved.length} 项 — ${escapeHtml(data.relaxed_ids_resolved.join("、"))}`) +
+    `</p></div>` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>V2 固定集合（E6）</strong>` +
+    `<span class="badge badge-muted">${data.v2_effective_ids.length} 项</span></div>` +
+    `<p class="u-note">硬编码，与 <code>relaxed_pii_ids</code> 完全解耦；其中 ` +
+    `${escapeHtml(data.v2_field_ids_in_set.join("、"))} 是 field 规则 ID，不是 PII 规则。</p></div>` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>规则文件</strong>` +
+    (data.rules_file_resolver_consistent
+      ? '<span class="badge badge-success">三处解析一致</span>'
+      : '<span class="badge badge-warning">解析不一致</span>') +
+    `</div><p class="u-note"><code>${escapeHtml(data.rules_file_path)}</code></p>` +
+    `<p class="u-note">${reloadCell}</p></div>` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>管道层替换统计</strong>` +
+    `<span class="badge badge-muted" id="rr-stat-value">—</span></div>` +
+    `<p class="u-note">管道层去重后的敏感值替换数（含 PII 与 field 规则，统计期内）。` +
+    `同一原文复用同一占位符，所以这是<strong>唯一敏感值个数</strong>而非命中次数。` +
+    `不含 V1 转发层替换、V2 替换与精确值替换。</p></div>` +
+    `</div>`
+  );
+}
+
+function rrPiiSection(data) {
+  const surfaces = data.surfaces;
+  const header =
+    `<tr><th scope="col">启用</th><th scope="col">relaxed</th><th scope="col">ID</th>` +
+    `<th scope="col">类别</th><th scope="col">生效面</th><th scope="col">正则</th><th scope="col">操作</th></tr>`;
+
+  const rows = data.pii_rules
+    .map((rule) => {
+      const enabledCell = data.enabled_semantics_active
+        ? rrBoolBadge(rule.enabled, "启用", "已停用")
+        : rule.enabled
+        ? '<span class="badge badge-success">运行中</span>'
+        : '<span class="badge badge-warning" title="YAML 写了 enabled: false，但当前版本不读取该字段">待启用语义</span>';
+      const relaxedCell = rule.relaxed_member
+        ? '<span class="badge badge-success">在集内</span>'
+        : '<span class="badge badge-muted">不在集内</span>';
+      const badges = surfaces
+        .map((surface) =>
+          rrSurfaceBadge(
+            surface,
+            rule.effective_surfaces[surface.id],
+            data.master_switch_overlay[surface.id]
+          )
+        )
+        .join("");
+      const regexClass = rule.regex_status === "ok" ? "" : " rr-regex-bad";
+      return (
+        `<tr><td>${enabledCell}</td><td>${relaxedCell}</td>` +
+        `<td><code>${escapeHtml(rule.id)}</code></td>` +
+        `<td class="u-note">${escapeHtml(rule.category || "未分类")}</td>` +
+        `<td class="rr-surface-cell">${badges}</td>` +
+        `<td><code class="rr-regex${regexClass}" title="${escapeHtml(rule.regex)}">${escapeHtml(
+          rrTruncate(rule.regex, 46)
+        )}</code>${
+          rule.regex_status === "invalid"
+            ? ' <span class="badge badge-error">无法编译</span>'
+            : ""
+        }</td>` +
+        `<td><a class="rr-jump" href="#rules" data-rr-jump="redaction.pii_patterns">在安全规则中编辑</a></td></tr>`
+      );
+    })
+    .join("");
+
+  return (
+    `<h3 class="rr-heading">PII 规则<span class="rr-heading-note">${data.pii_rules.length} 条</span></h3>` +
+    `<p class="u-note u-note-block">「relaxed」一列写的是该 ID 是否属于 <code>relaxed_pii_ids</code>，` +
+    `<strong>支配 V1 对话路由（管道 + 转发）与 V1 multipart 转发</strong>——不是「在 V1 对话路由启用」，` +
+    `也不是「全部路由」。生效面徽章由服务端计算后下发，面板不做任何推导。` +
+    `本版为只读，增删改仍在「安全规则 → PII 脱敏规则」中进行。</p>` +
+    `<div class="token-table-wrap"><table class="token-table"><thead>${header}</thead>` +
+    `<tbody>${rows || emptyStateRow(7, "当前配置没有 PII 规则")}</tbody></table></div>`
+  );
+}
+
+function rrFieldSection(data) {
+  const field = data.field;
+  const layers = field.layers
+    .map(
+      (layer) =>
+        `<tr><td><strong>${escapeHtml(layer.label)}</strong></td>` +
+        `<td>max(${layer.floor}, 配置值) = <strong>${escapeHtml(String(layer.effective_min_len))}</strong></td>` +
+        `<td><code>${escapeHtml(layer.fallback_ids.join("、"))}</code></td>` +
+        `<td><code>${escapeHtml(layer.explicit_default_id)}</code>` +
+        (layer.legacy_string_id && layer.legacy_string_id !== layer.explicit_default_id
+          ? `<br><span class="u-note">legacy 字符串条目：<code>${escapeHtml(layer.legacy_string_id)}</code></span>`
+          : "") +
+        `</td>` +
+        `<td>${layer.relaxed_filtered ? "是" : "否"}</td>` +
+        `<td class="u-note">${escapeHtml(layer.note)}</td></tr>`
+    )
+    .join("");
+
+  const explicit = field.explicit_rules.length
+    ? `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+      `<th scope="col">#</th><th scope="col">ID</th><th scope="col">正则</th><th scope="col">形态</th>` +
+      `</tr></thead><tbody>` +
+      field.explicit_rules
+        .map(
+          (rule) =>
+            `<tr><td>${rule.index}</td><td><code>${escapeHtml(rule.id)}</code></td>` +
+            `<td><code class="rr-regex" title="${escapeHtml(rule.regex)}">${escapeHtml(
+              rrTruncate(rule.regex, 60)
+            )}</code></td>` +
+            `<td>${
+              rule.legacy_string
+                ? '<span class="badge badge-warning">legacy 字符串条目</span>'
+                : '<span class="badge badge-muted">映射条目</span>'
+            }</td></tr>`
+        )
+        .join("") +
+      `</tbody></table></div>`
+    : `<p class="u-note">当前未配置 <code>field_value_patterns</code>，三层各自使用自己的代码 fallback。</p>`;
+
+  return (
+    `<h3 class="rr-heading">Field 规则<span class="rr-heading-note">${
+      field.mode === "explicit_yaml" ? "YAML 显式列表" : "代码默认"
+    }</span></h3>` +
+    `<p class="u-note u-note-block">Field 规则不能套用 PII 的 relaxed 算法：管道层无视路由恒跑，` +
+    `转发层与 PII 合并后整体被 relaxed 过滤（默认 12 项不含这两个 ID），V2 的固定集合又恰好含它们。` +
+    `本版只读——提供逐条启停会造出「YAML 已停用但 V2 fallback 仍在跑」的假控制。</p>` +
+    `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+    `<th scope="col">层</th><th scope="col">最小长度下限</th><th scope="col">代码 fallback ID</th>` +
+    `<th scope="col">显式条目缺省 ID</th><th scope="col">受 relaxed 过滤</th><th scope="col">说明</th>` +
+    `</tr></thead><tbody>${layers}</tbody></table></div>` +
+    `<p class="u-note u-note-block"><code>field_value_min_len</code> 当前配置值 ` +
+    `<strong>${escapeHtml(String(field.field_value_min_len_configured))}</strong>，本版只读。` +
+    (field.explicit_disables_min_len
+      ? "注意：已配置显式 field 列表，该参数<strong>完全失效</strong>（只用于 fallback 正则）。"
+      : "") +
+    `</p>` +
+    explicit +
+    // The workbench only lists groups the YAML actually contains, so this link
+    // has somewhere to land only when the file spells the list out.
+    (field.mode === "explicit_yaml"
+      ? `<p class="u-note"><a class="rr-jump" href="#rules" data-rr-jump="redaction.field_value_patterns">查看安全规则原始配置</a></p>`
+      : `<p class="u-note">这两条 fallback 写在代码里，<code>security_filters.yaml</code> 中没有对应条目，因此规则工作台里也看不到它们。</p>`)
+  );
+}
+
+function rrCoverageSection(data) {
+  const rows = data.coverage_matrix
+    .map((row) => {
+      const restorable =
+        row.restorable === true
+          ? '<span class="badge badge-success">可还原</span>'
+          : row.restorable === false
+          ? '<span class="badge badge-warning">不可还原</span>'
+          : '<span class="badge badge-muted">不适用</span>';
+      return (
+        `<tr${row.emphasis ? ' class="rr-row-emphasis"' : ""}>` +
+        `<td><strong>${escapeHtml(row.surface)}</strong>${
+          row.note ? `<br><span class="u-note">${escapeHtml(row.note)}</span>` : ""
+        }</td>` +
+        `<td>${escapeHtml(row.exact_value)}</td>` +
+        `<td><code>${escapeHtml(row.pii_form)}</code></td>` +
+        `<td>${restorable}</td></tr>`
+      );
+    })
+    .join("");
+  return (
+    `<h3 class="rr-heading">精确值与替换形态覆盖面</h3>` +
+    `<p class="u-note u-note-block">不承诺所有请求侧脱敏都可还原，也不承诺 multipart 上传的<strong>文件内容</strong>被扫描。</p>` +
+    `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+    `<th scope="col">执行面</th><th scope="col">请求侧精确值脱敏</th>` +
+    `<th scope="col">PII 替换形态</th><th scope="col">可还原</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table></div>`
+  );
+}
+
+function rrExemptionsSection(data) {
+  const ex = data.exemptions;
+  const whitelistRows = ex.field_whitelist.tokens
+    .flatMap((token) =>
+      token.keys.map(
+        (key) =>
+          `<tr><td class="u-note">${escapeHtml(token.upstream_base || "—")}<br>` +
+          `<code>${escapeHtml(token.token_masked)}</code></td>` +
+          `<td><code>${escapeHtml(key.key)}</code></td>` +
+          `<td>${
+            key.v1_effective
+              ? '<span class="badge badge-success">生效</span>'
+              : '<span class="badge badge-error">被 denylist 忽略</span>'
+          }</td>` +
+          `<td><span class="badge badge-success">生效</span></td>` +
+          `<td class="u-note">${
+            key.denylist_hits.length
+              ? `命中 denylist 子串：${escapeHtml(key.denylist_hits.join("、"))}`
+              : "—"
+          }</td></tr>`
+      )
+    )
+    .join("");
+
+  const matrix = ex.surface_matrix
+    .map(
+      (row) =>
+        `<tr><td><strong>${escapeHtml(row.surface)}</strong></td>` +
+        `<td class="u-note">${escapeHtml(row.field_whitelist)}</td>` +
+        `<td class="u-note">${escapeHtml(row.passthrough)}</td>` +
+        `<td class="u-note">${escapeHtml(row.upstream_whitelist)}</td></tr>`
+    )
+    .join("");
+
+  const upstream = ex.upstream_whitelist;
+  return (
+    `<h3 class="rr-heading">豁免与绕过</h3>` +
+    `<p class="u-note u-note-block">字段级白名单<strong>只保护指定 key/span</strong>，不是整请求绕过；` +
+    `passthrough 与上游白名单才是整请求绕过，且各自只在部分路由可用。</p>` +
+    `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+    `<th scope="col">执行面</th><th scope="col">字段级 whitelist_key</th>` +
+    `<th scope="col">passthrough</th><th scope="col">上游白名单</th>` +
+    `</tr></thead><tbody>${matrix}</tbody></table></div>` +
+    `<h4 class="rr-subheading">Token 字段白名单</h4>` +
+    `<p class="u-note u-note-block">V1 会把 token 注入的 key 再过一遍 denylist，V2 直接读 token scope 且<strong>没有 denylist</strong>。` +
+    `所以同一个 key 可能「V1 忽略 / V2 生效」。客户端自带的 <code>x-aegis-redaction-whitelist</code> 头在两处都会被剥离，` +
+    `不是独立来源。</p>` +
+    `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
+    `<th scope="col">Token</th><th scope="col">whitelist_key</th>` +
+    `<th scope="col">V1</th><th scope="col">V2</th><th scope="col">原因</th>` +
+    `</tr></thead><tbody>${
+      whitelistRows || emptyStateRow(5, "没有 token 配置了字段级白名单")
+    }</tbody></table></div>` +
+    `<p class="u-note">denylist 子串：<code>${escapeHtml(ex.field_whitelist.denylist.join(", "))}</code></p>` +
+    `<h4 class="rr-subheading">上游白名单</h4>` +
+    `<div class="rr-cards">` +
+    `<div class="rr-card"><div class="rr-card-head"><code>allow_public_upstream_whitelist</code>` +
+    rrBoolBadge(upstream.allow_public_upstream_whitelist, "已开启", "已关闭") +
+    `</div><p class="u-note">关闭时，只有 <code>client_is_internal</code> 不为 False 的客户端才能拿到这个绕过。</p></div>` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>client_is_internal</strong>` +
+    (upstream.requires_internal_client
+      ? '<span class="badge badge-warning">必须为内网客户端</span>'
+      : '<span class="badge badge-muted">不作要求</span>') +
+    `</div><p class="u-note">按请求判定，面板显示的是当前前置条件而非某次请求的结果。</p></div>` +
+    `<div class="rr-card"><div class="rr-card-head"><strong>白名单上游</strong>` +
+    `<span class="badge badge-muted">${upstream.configured_bases.length} 个</span></div>` +
+    `<p class="u-note">${
+      upstream.configured_bases.length
+        ? escapeHtml(upstream.configured_bases.join("、"))
+        : "未配置，当前没有任何上游可绕过过滤。"
+    }</p></div></div>`
+  );
+}
+
+async function loadRequestRedaction() {
+  const summary = document.getElementById("rr-summary");
+  if (summary) summary.textContent = "加载中…";
+  try {
+    const data = await fetchJson("/__ui__/api/request_redaction/settings", { resource: "rules" });
+    requestRedactionState = data;
+    rrAlerts(data);
+    document.getElementById("rr-master").innerHTML = rrMasterSection(data);
+    document.getElementById("rr-status").innerHTML = rrStatusSection(data);
+    document.getElementById("rr-pii").innerHTML = rrPiiSection(data);
+    document.getElementById("rr-field").innerHTML = rrFieldSection(data);
+    document.getElementById("rr-coverage").innerHTML = rrCoverageSection(data);
+    document.getElementById("rr-exemptions").innerHTML = rrExemptionsSection(data);
+    if (summary) {
+      summary.textContent =
+        `${data.pii_rules.length} 条 PII 规则 · relaxed 集 ` +
+        (data.relaxed_ids_resolved === null ? "全部" : `${data.relaxed_ids_resolved.length} 项`) +
+        ` · Field ${data.field.mode === "explicit_yaml" ? "显式列表" : "代码默认"}`;
+    }
+    loadRequestRedactionStat();
+  } catch (err) {
+    if (summary) summary.textContent = describeWriteError(err, "加载失败");
+  }
+}
+
+async function loadRequestRedactionStat() {
+  const node = document.getElementById("rr-stat-value");
+  if (!node) return;
+  try {
+    const stats = await fetchJson("/__ui__/api/stats");
+    const total = (stats.totals && stats.totals.redactions) || 0;
+    node.textContent = String(total);
+  } catch (_err) {
+    node.textContent = "不可用";
+  }
+}
+
+function bindRequestRedactionUI() {
+  const refresh = document.getElementById("rr-refresh");
+  if (refresh) refresh.addEventListener("click", loadRequestRedaction);
+  const panel = document.getElementById("request-redaction");
+  if (panel) {
+    panel.addEventListener("click", (event) => {
+      const jump = event.target.closest("[data-rr-jump]");
+      if (!jump) return;
+      // Land on the rules workbench with the right group already selected,
+      // instead of on a panel the reader still has to search.
+      loadRuleSections(jump.getAttribute("data-rr-jump"));
+    });
+  }
+  loadRequestRedaction();
+}
+
 // ─── Init new UI modules ─────────────────────
 
 bindRulesUI();
+bindRequestRedactionUI();
 bindKeysUI();
 bindStatsUI();
 bindComposeUI();

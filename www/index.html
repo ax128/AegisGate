@@ -99,6 +99,13 @@
               <span id="config-global-hits" class="sidebar-search-hits" aria-live="polite"></span>
             </div>
             <div id="config-nav"></div>
+            <a href="#request-redaction" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3l7 3v6c0 4.5-3 7.7-7 9-4-1.3-7-4.5-7-9V6l7-3z"/>
+                <path d="M9 12h6"/>
+              </svg>
+              请求侧脱敏
+            </a>
             <a href="#rules" class="nav-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/>
@@ -376,6 +383,40 @@
           <div id="config-panels"></div>
 
           <!-- Security Rules -->
+          <!-- Request-side redaction: read-only in this release -->
+          <section id="request-redaction" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3l7 3v6c0 4.5-3 7.7-7 9-4-1.3-7-4.5-7-9V6l7-3z"/>
+                  <path d="M9 12h6"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>请求侧脱敏</h2>
+                <p class="panel-desc">发往上游前的 PII、字段级与精确值脱敏：各总控真正控制哪一层、每条规则在六个执行面上的真实生效面、以及两类绕过机制各自的前置条件。本版为只读视图，增删改仍在「安全规则」中进行。</p>
+              </div>
+            </div>
+
+            <div class="rr-toolbar">
+              <span id="rr-summary" class="u-note">加载中…</span>
+              <button id="rr-refresh" class="btn-sm-ghost" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
+                  <polyline points="23,4 23,10 17,10"/>
+                  <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                </svg>刷新
+              </button>
+            </div>
+
+            <div id="rr-alerts" class="rr-alerts"></div>
+            <div id="rr-master" class="rr-block"></div>
+            <div id="rr-status" class="rr-block"></div>
+            <div id="rr-pii" class="rr-block"></div>
+            <div id="rr-field" class="rr-block"></div>
+            <div id="rr-coverage" class="rr-block"></div>
+            <div id="rr-exemptions" class="rr-block"></div>
+          </section>
+
           <section id="rules" class="panel">
             <div class="panel-head">
               <div class="panel-head-icon">
@@ -442,7 +483,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>精确值脱敏</h2>
-                <p class="panel-desc">配置需要精确匹配脱敏的敏感值（API Key、密钥等），命中后替换为 <code>[REDACTED:EXACT_VALUE]</code>。最少 10 个字符，V1/V2 均适用。</p>
+                <p class="panel-desc">配置需要精确匹配脱敏的敏感值（API Key、密钥等），命中后替换为 <code>[REDACTED:EXACT_VALUE]</code>，最少 10 个字符，替换不可还原。覆盖面：V1 仅对话路由（<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/messages</code>）的扁平消息文本生效，结构化内容、<code>instructions</code>、工具定义、通用 <code>/v1/&lt;subpath&gt;</code> JSON 与 multipart 均不生效；V2 需 <code>enable_exact_value_redaction</code> 与 <code>v2_enable_request_redaction</code> 同时开启。详见<a href="#request-redaction">请求侧脱敏</a>面板。</p>
               </div>
             </div>
             <div class="token-toolbar">

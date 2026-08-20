@@ -2604,7 +2604,10 @@ _CONFIRMATION_TEMPLATE_PREFIX_MARKERS: tuple[str, ...] = (
 # Allowing a client to whitelist these would bypass PII redaction for the most
 # sensitive secrets.  The check is substring-based so partial names like
 # "access_token" or "api_secret" are also caught.
-_WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset(
+# Public so the console can explain why a whitelist key named `access_token` is
+# honoured on V2 and silently dropped on V1. The underscore alias stays for the
+# existing in-module call site.
+WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset(
     {
         "password",
         "passwd",
@@ -2625,6 +2628,7 @@ _WHITELIST_HEADER_DENYLIST: frozenset[str] = frozenset(
         "access_key",
     }
 )
+_WHITELIST_HEADER_DENYLIST = WHITELIST_HEADER_DENYLIST
 
 
 def _extract_redaction_whitelist_keys(
