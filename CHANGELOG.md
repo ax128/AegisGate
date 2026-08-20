@@ -70,11 +70,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `test_doc_alignment.py` 新增 4 条守护，把本次人工发现的问题固化进 CI：
+- `test_doc_alignment.py` 新增 5 条守护，把本次人工发现的问题固化进 CI：
   `_IMMUTABLE_FIELDS` 数量与名单必须与 `config/README.md` 一致、控制台分区数与
   `WEBUI-QUICKSTART.md` 一致、规则组/规则条数与 `WEBUI-QUICKSTART.md` 一致、
   **每个 `Settings` 字段都必须有非 UI 非测试的运行时读取者**（`AEGIS_RISK_SCORE_THRESHOLD`
-  与 `AEGIS_TENANT_ID_HEADER` 正是这条能自动抓到的）；并把 `log_event` / `trace` 加入
+  与 `AEGIS_TENANT_ID_HEADER` 正是这条能自动抓到的）、策略文件缺失时的兜底策略
+  `_BUILTIN_DEFAULT_POLICY` 的 `risk_threshold` 必须与 `default.yaml` 一致（`enabled_filters`
+  早有守护，这个数是唯一没被钉住的手工副本）；并把 `log_event` / `trace` 加入
   既有的死代码符号守护
 
 ### Added

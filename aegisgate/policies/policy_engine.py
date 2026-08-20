@@ -19,7 +19,9 @@ from aegisgate.util.logger import logger
 
 
 # Built-in default used when the policy file is missing (e.g. an empty config mount); matches
-# default.yaml
+# default.yaml. It declares risk_threshold on purpose rather than letting resolve() fall back to
+# AEGIS_RISK_SCORE_THRESHOLD: a missing policy file must not quietly move the threshold too. That
+# makes the number below a hand-maintained copy, so test_doc_alignment pins it to default.yaml.
 _BUILTIN_DEFAULT_POLICY: dict[str, Any] = {
     "enabled_filters": [
         "exact_value_redaction",

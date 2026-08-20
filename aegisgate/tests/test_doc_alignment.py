@@ -444,6 +444,29 @@ def test_optional_guards_process_when_enabled() -> None:
     assert "[UNTRUSTED_CONTENT_START]" in untrusted_out.messages[0].content
 
 
+def test_builtin_default_policy_pins_default_yaml_threshold() -> None:
+    """The missing-file fallback policy must carry default.yaml's risk_threshold.
+
+    _BUILTIN_DEFAULT_POLICY declares the key on purpose instead of letting
+    resolve() fall back to AEGIS_RISK_SCORE_THRESHOLD, so an empty config mount
+    keeps the shipped threshold rather than silently picking up a different one.
+    That makes it a hand-maintained copy of one number. Its enabled_filters are
+    already pinned by test_default_and_strict_policies_omit_optional_guards.
+    """
+    from aegisgate.policies.policy_engine import _BUILTIN_DEFAULT_POLICY
+
+    default = yaml.safe_load(
+        (_REPO_ROOT / "aegisgate" / "policies" / "rules" / "default.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert _BUILTIN_DEFAULT_POLICY["risk_threshold"] == default["risk_threshold"], (
+        "policy_engine pins risk_threshold="
+        f"{_BUILTIN_DEFAULT_POLICY['risk_threshold']} for the missing-file fallback "
+        f"but default.yaml declares {default['risk_threshold']}."
+    )
+
+
 def test_immutable_field_count_matches_config_readme() -> None:
     """config/README.md states how many settings are pinned at startup.
 
@@ -466,12 +489,16 @@ def test_immutable_field_count_matches_config_readme() -> None:
 
 
 def test_ui_section_count_matches_docs() -> None:
+    """WEBUI-QUICKSTART cites how many panels the config page is split into."""
     from aegisgate.core.gateway_ui_config import _UI_CONFIG_SECTIONS
 
     quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
     cited = re.search(r"按 (\d+) 个分区呈现", quickstart)
     assert cited, "WEBUI-QUICKSTART.md no longer states the config section count"
-    assert int(cited.group(1)) == len(_UI_CONFIG_SECTIONS)
+    assert int(cited.group(1)) == len(_UI_CONFIG_SECTIONS), (
+        f"the console renders {len(_UI_CONFIG_SECTIONS)} config sections but "
+        f"WEBUI-QUICKSTART.md says {cited.group(1)}."
+    )
 
 
 def test_rule_group_and_rule_counts_match_docs() -> None:

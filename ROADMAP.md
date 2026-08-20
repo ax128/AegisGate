@@ -79,6 +79,9 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 - `AEGIS_RISK_SCORE_THRESHOLD` 此前没有任何运行时读取者；现已接为「策略 YAML 未声明
   `risk_threshold` 时的全局兜底值」。但仓库自带的三个策略都声明了该键，所以它对默认部署仍然
   不起作用。是否要让它成为真正的全局下限，取决于 R6 的决策。
+  策略文件缺失时走的 `policy_engine._BUILTIN_DEFAULT_POLICY` 同样显式声明该键并固定为 `0.85`，
+  那条路径也读不到该环境变量——这是刻意的（配置目录为空不应连带改变阈值），一致性已由
+  `test_builtin_default_policy_pins_default_yaml_threshold` 钉在 `default.yaml` 上。
 - `AEGIS_TENANT_ID_HEADER` 已删除：租户 id 由 `_trusted_scope_id()` / `x-aegis-token-hint` 推导，
   该字段从来没有读取者，却在控制台可编辑。
 - `require_confirmation_on_block` 仍保留在 `Settings` 里做配置兼容（不在控制台开放）。确认没有
