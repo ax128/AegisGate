@@ -26,17 +26,19 @@ from aegisgate.config.security_rules import (
     configured_redaction_pattern_ids,
     load_security_rules,
     resolve_rules_file,
+    rule_enabled,
     shadow_rules_file_candidates,
 )
 from aegisgate.config.settings import settings
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 
-# Flipped on by the release that makes a rule's YAML ``enabled: false`` actually
-# skip compilation (v4 §7 F2). Until then the panel must compute surfaces the way
-# the running code does, and the running code ignores the flag entirely — a row
-# greyed out here while the pattern still redacts traffic is the one outcome a
-# security console must never produce.
-ENABLED_SEMANTICS_ACTIVE = False
+# The release that makes ``enabled: false`` actually skip compilation is the one
+# that turns this on, in the same version as the switch that writes it. Shipping
+# the runtime half first would leave a rule disabled with no way to bring it
+# back; shipping the UI half first would grey out a row whose pattern still
+# redacts traffic. Both compile sites and this panel read the same
+# ``rule_enabled`` predicate, so they cannot disagree about a given entry.
+ENABLED_SEMANTICS_ACTIVE = True
 
 _RELAXED_ALL = "*"
 
@@ -469,11 +471,24 @@ def build_settings_payload() -> dict[str, Any]:
     for item in entries:
         pattern_id = str(item.get("id", "PII"))
         normalized = _normalize_id(pattern_id)
-        enabled = item.get("enabled", True)
-        enabled = True if enabled is None else bool(enabled)
-        if not enabled:
+        # The same predicate the compile sites use, so "disabled here" and
+        # "not compiled there" can never come apart.
+        enabled = rule_enabled(item)
+        if not enabled and not ENABLED_SEMANTICS_ACTIVE:
             pending_enabled_false.append(pattern_id)
         relaxed_member = relaxed_all or normalized in resolved_set
+        # What deleting or unlisting this rule would do to relaxed_pii_ids,
+        # decided here rather than in the browser: the answer depends on the
+        # relaxed *mode*, not just on membership, and a confirmation dialog that
+        # describes the wrong consequence is worse than no dialog.
+        if relaxed_all:
+            reference = "all"
+        elif mode == "custom" and normalized in explicit_normalized:
+            reference = "custom_list"
+        elif mode in {"default", "invalid"} and normalized in DEFAULT_RELAXED_PII_IDS:
+            reference = "code_default"
+        else:
+            reference = "none"
         pii_rules.append({
             "id": pattern_id,
             "regex": str(item.get("regex", "")),
@@ -486,6 +501,9 @@ def build_settings_payload() -> dict[str, Any]:
             "enabled_runtime": True if not ENABLED_SEMANTICS_ACTIVE else enabled,
             "relaxed_member": relaxed_member,
             "relaxed_editable": not relaxed_all,
+            "relaxed_reference": reference,
+            "relaxed_removal_empties_list": reference == "custom_list"
+            and len(explicit_normalized) == 1,
             "effective_surfaces": _effective_surfaces(
                 runtime_enabled=True if not ENABLED_SEMANTICS_ACTIVE else enabled,
                 relaxed_member=relaxed_member,
@@ -527,3 +545,374 @@ def build_settings_payload() -> dict[str, Any]:
         "last_applied_write": last_applied_write(),
         "env_etag": etag_for_file(_ENV_PATH),
     }
+
+
+# ---------------------------------------------------------------------------
+# Writes: strongly typed domain operations, never arbitrary key paths
+# ---------------------------------------------------------------------------
+
+RELAXED_PATH = ["redaction", "relaxed_pii_ids"]
+REQUEST_PREFIX_MAX_LEN_BOUNDS = (1, 64)
+
+_VALUE_FIELDS = ("normalize_nfkc", "strip_invisible_chars", "request_prefix_max_len")
+_RELAXED_OPERATION_ARGS: dict[str, set[str]] = {
+    "set_mode": {"mode"},
+    "set_membership": {"id", "enabled", "confirm_empty", "confirm_materialize"},
+    "materialize_custom": {"source", "confirm", "confirm_empty"},
+    "remove_unresolved": {"id", "confirm", "confirm_empty"},
+}
+
+
+def _error(code: str, detail: str, status: int = 400, **extra: Any):
+    from aegisgate.core.rules_write import RulesWriteError
+
+    return RulesWriteError(code, detail, status=status, extra=extra or None)
+
+
+def _require_no_unknown_keys(payload: dict[str, Any], allowed: set[str], where: str) -> None:
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise _error("unknown_field", f"{where} 不支持字段：{'、'.join(unknown)}")
+
+
+def _configured_pii_ids(redaction: dict[str, Any]) -> dict[str, str]:
+    """``{normalized id: id as written}`` for every configured PII rule.
+
+    Disabled rules are included: a disabled rule is still a configured one, and
+    its relaxed membership must stay editable so re-enabling it has no hidden
+    state (v4 §2.3).
+    """
+    entries, _ = _pii_entries(redaction)
+    return {_normalize_id(item.get("id", "PII")): str(item.get("id", "PII")) for item in entries}
+
+
+def _guard_collisions(redaction: dict[str, Any]) -> None:
+    entries, _ = _pii_entries(redaction)
+    collisions = _collisions(
+        [str(item.get("id", "PII")) for item in entries], "pii_patterns"
+    ) + _collisions([str(item) for item in _relaxed_mode(redaction)[1]], "relaxed_pii_ids")
+    if collisions:
+        raise _error(
+            "id_normalization_conflict",
+            "存在仅大小写或空白不同的重复 ID，必须先人工消除；工具不会替你选择保留哪一条："
+            + "；".join(
+                f"{item['source']} 中 {'、'.join(item['raw'])}" for item in collisions
+            ),
+            status=409,
+            collisions=collisions,
+        )
+
+
+def _guard_id_collision(redaction: dict[str, Any], rule_id: str) -> None:
+    """Refuse a CRUD write aimed at an id the file spells more than one way.
+
+    Deliberately narrower than :func:`_guard_collisions`: only writes whose
+    meaning is ambiguous are refused. Deleting one of the two spellings is how an
+    operator gets out of the state, so the delete path does not call this.
+    """
+    normalized = _normalize_id(rule_id)
+    entries, _ = _pii_entries(redaction)
+    spellings = [
+        str(item.get("id", "PII"))
+        for item in entries
+        if _normalize_id(item.get("id", "PII")) == normalized
+    ]
+    if len(spellings) > 1:
+        raise _error(
+            "id_normalization_conflict",
+            f"'{rule_id}' 在 pii_patterns 中有多个仅大小写或空白不同的写法："
+            + "、".join(spellings)
+            + "。请先删除其中一条，工具不会替你选择保留哪一个。",
+            status=409,
+            collisions=[{"normalized": normalized, "source": "pii_patterns", "raw": spellings}],
+        )
+
+
+def guard_pii_rule_write(redaction: Any, rule_id: str, *, is_new: bool) -> None:
+    """The uniqueness contract for a PII rule id (v4 §2.3).
+
+    Ids are compared with whitespace stripped and case folded, because that is
+    how ``relaxed_pii_ids`` resolves them: a file holding both ``EMAIL`` and
+    ``Email`` cannot say which one a relaxed member refers to, and the panel
+    blocks itself the moment one exists. Letting the console create that state is
+    the console handing itself a jam.
+    """
+    if not isinstance(redaction, dict):
+        return
+    if is_new:
+        normalized = _normalize_id(rule_id)
+        entries, _ = _pii_entries(redaction)
+        clash = [
+            str(item.get("id", "PII"))
+            for item in entries
+            if _normalize_id(item.get("id", "PII")) == normalized
+        ]
+        if clash:
+            raise _error(
+                "id_normalization_conflict",
+                f"'{rule_id}' 与已有规则 {'、'.join(clash)} 归一化后相同（去空白、忽略大小写）。"
+                "relaxed 集按归一化后的 ID 解析，两条同名规则会让它无法判断指向哪一条。",
+                status=409,
+            )
+        return
+    _guard_id_collision(redaction, rule_id)
+
+
+def _set_relaxed_list(
+    redaction: dict[str, Any],
+    members: list[str],
+    confirm_empty: Any,
+    audit: dict[str, Any] | None = None,
+):
+    from aegisgate.core.rules_editor import LeafOp
+
+    if not members and confirm_empty is not True:
+        raise _error(
+            "confirm_empty_required",
+            "该操作会把 relaxed 集清空，届时 V1 对话路由（管道 + 转发）与 multipart 转发上"
+            "不再有任何 PII 规则生效。如确认，请带上 confirm_empty=true。",
+            status=409,
+        )
+    redaction["relaxed_pii_ids"] = members
+    if audit is not None:
+        # Ids, not pattern text: the reviewer of an audit log needs to see that
+        # the set was emptied, and "which field changed" does not tell them.
+        audit["relaxed_members_after"] = list(members)
+        audit["relaxed_emptied"] = not members
+    return [LeafOp(list(RELAXED_PATH), "set", members)]
+
+
+def _op_set_mode(payload: dict[str, Any], redaction: dict[str, Any], audit: dict[str, Any]):
+    from aegisgate.core.rules_editor import LeafOp
+
+    mode = payload.get("mode")
+    if mode not in {"default", "all"}:
+        raise _error(
+            "invalid_mode",
+            "mode 只能是 'default'（删除 key，恢复代码默认值）或 'all'（写入 [\"*\"]）；"
+            "自定义列表请用 set_membership 或 materialize_custom",
+        )
+    audit["relaxed_mode_after"] = mode
+    if mode == "default":
+        # Writing today's default set back into the file would freeze it; the
+        # point of "use the code default" is that it keeps tracking the code.
+        redaction.pop("relaxed_pii_ids", None)
+        return [LeafOp(list(RELAXED_PATH), "delete")]
+    redaction["relaxed_pii_ids"] = [_RELAXED_ALL]
+    return [LeafOp(list(RELAXED_PATH), "set", [_RELAXED_ALL])]
+
+
+def _op_set_membership(payload: dict[str, Any], redaction: dict[str, Any], audit: dict[str, Any]):
+    raw_id = payload.get("id")
+    enabled = payload.get("enabled")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise _error("invalid_id", "id 必须是非空字符串")
+    if not isinstance(enabled, bool):
+        raise _error("invalid_type", "enabled 必须是 JSON 布尔值")
+
+    _guard_collisions(redaction)
+    normalized = _normalize_id(raw_id)
+    configured = _configured_pii_ids(redaction)
+    if normalized not in configured:
+        raise _error(
+            "unknown_pii_id",
+            f"'{raw_id}' 不是当前已配置的 PII 规则 ID。新增未知 ID 会产生悬空引用，已拒绝。",
+        )
+
+    mode, explicit = _relaxed_mode(redaction)
+    audit.update({"relaxed_id": configured[normalized], "relaxed_member_after": enabled})
+    if mode == "all":
+        raise _error(
+            "relaxed_all_readonly",
+            "当前 relaxed 集为 [\"*\"]，逐条成员不可编辑。先用 materialize_custom 展开为自定义列表。",
+            status=409,
+        )
+    if mode in {"default", "invalid"}:
+        if payload.get("confirm_materialize") is not True:
+            raise _error(
+                "materialize_required",
+                "当前使用代码默认 relaxed 集（未写入文件）。逐条修改会把它固化成自定义列表，"
+                "此后不再跟随代码默认值。如确认，请带上 confirm_materialize=true。",
+                status=409,
+                would_materialize=sorted(DEFAULT_RELAXED_PII_IDS),
+            )
+        baseline = sorted(DEFAULT_RELAXED_PII_IDS)
+        audit["relaxed_materialized_from"] = mode
+    else:
+        baseline = list(explicit)
+
+    # Incremental semantics: field ids and unresolved members this operation did
+    # not name stay exactly as the file spells them.
+    members = [item for item in baseline if _normalize_id(item) != normalized]
+    if enabled:
+        members.append(configured[normalized])
+    audit["relaxed_mode_after"] = "custom"
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
+
+
+def _op_materialize_custom(
+    payload: dict[str, Any], redaction: dict[str, Any], audit: dict[str, Any]
+):
+    if payload.get("source", "current") != "current":
+        raise _error("invalid_source", "source 只支持 'current'")
+    if payload.get("confirm") is not True:
+        raise _error("confirm_required", "展开为自定义列表需要 confirm=true", status=409)
+
+    # Expansion walks every configured id, and the normalised set would quietly
+    # fold two spellings into one member.
+    _guard_collisions(redaction)
+    mode, _ = _relaxed_mode(redaction)
+    if mode == "custom":
+        raise _error("already_custom", "当前已经是自定义列表，无需展开", status=409)
+    if mode == "all":
+        members = sorted(configured_redaction_pattern_ids(redaction))
+    else:
+        members = sorted(DEFAULT_RELAXED_PII_IDS)
+    audit.update({"relaxed_materialized_from": mode, "relaxed_mode_after": "custom"})
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
+
+
+def _op_remove_unresolved(
+    payload: dict[str, Any], redaction: dict[str, Any], audit: dict[str, Any]
+):
+    raw_id = payload.get("id")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise _error("invalid_id", "id 必须是非空字符串")
+    if payload.get("confirm") is not True:
+        raise _error("confirm_required", "清理悬空成员需要 confirm=true", status=409)
+
+    _guard_collisions(redaction)
+    mode, explicit = _relaxed_mode(redaction)
+    if mode != "custom":
+        raise _error(
+            "not_a_custom_list",
+            "只有自定义列表里才存在可清理的悬空成员",
+            status=409,
+        )
+    normalized = _normalize_id(raw_id)
+    configured = configured_redaction_pattern_ids(redaction)
+    if normalized in configured:
+        raise _error(
+            "id_not_unresolved",
+            f"'{raw_id}' 对应一条已配置的规则，请用 set_membership 移除它的 relaxed 归属",
+        )
+    if normalized not in {_normalize_id(item) for item in explicit}:
+        raise _error("id_not_in_list", f"'{raw_id}' 不在当前 relaxed 列表中", status=404)
+
+    audit.update({"relaxed_id": raw_id, "relaxed_unresolved_removed": True})
+    members = [item for item in explicit if _normalize_id(item) != normalized]
+    return _set_relaxed_list(redaction, members, payload.get("confirm_empty"), audit)
+
+
+_RELAXED_OPERATIONS = {
+    "set_mode": _op_set_mode,
+    "set_membership": _op_set_membership,
+    "materialize_custom": _op_materialize_custom,
+    "remove_unresolved": _op_remove_unresolved,
+}
+
+
+def _apply_values(values: Any, redaction: dict[str, Any], audit: dict[str, Any]):
+    from aegisgate.core.rules_editor import LeafOp
+
+    if not isinstance(values, dict) or not values:
+        raise _error("invalid_values", "values 必须是非空对象")
+    _require_no_unknown_keys(values, set(_VALUE_FIELDS), "values")
+    low, high = REQUEST_PREFIX_MAX_LEN_BOUNDS
+    ops = []
+    for key in _VALUE_FIELDS:
+        if key not in values:
+            continue
+        value = values[key]
+        if key == "request_prefix_max_len":
+            # A negative value silently truncates the prefix to "" rather than
+            # erroring, so the bound is not cosmetic.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise _error("invalid_type", f"{key} 必须是整数")
+            if not low <= value <= high:
+                raise _error("out_of_range", f"{key} 必须在 {low}–{high} 之间")
+        elif not isinstance(value, bool):
+            raise _error("invalid_type", f"{key} 必须是 JSON 布尔值")
+        redaction[key] = value
+        ops.append(LeafOp(["redaction", key], "set", value))
+    audit["values"] = sorted(key for key in _VALUE_FIELDS if key in values)
+    return ops
+
+
+def apply_settings_patch(body: Any, data: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    """Validate *body* against *data*, mutate *data*, and return ``(ops, audit)``.
+
+    Only named domain operations are accepted — never an arbitrary key path. All
+    of it runs inside the write transaction, against the document read under the
+    lock, so "is this a known id?" is answered against the bytes being edited.
+    """
+    if not isinstance(body, dict) or not body:
+        raise _error("empty_patch", "请求体不能为空")
+    _require_no_unknown_keys(body, {"relaxed", "values"}, "请求体")
+
+    redaction = data.setdefault("redaction", {})
+    if not isinstance(redaction, dict):
+        raise _error("invalid_redaction_section", "redaction 配置段必须是映射", status=500)
+
+    audit: dict[str, Any] = {"relaxed_mode_before": _relaxed_mode(redaction)[0]}
+    ops: list[Any] = []
+    if "values" in body:
+        ops.extend(_apply_values(body["values"], redaction, audit))
+    if "relaxed" in body:
+        payload = body["relaxed"]
+        if not isinstance(payload, dict):
+            raise _error("invalid_relaxed", "relaxed 必须是对象")
+        operation = payload.get("operation")
+        if operation not in _RELAXED_OPERATIONS:
+            raise _error(
+                "unknown_operation",
+                f"relaxed.operation 只支持：{'、'.join(sorted(_RELAXED_OPERATIONS))}",
+            )
+        _require_no_unknown_keys(
+            payload, {"operation"} | _RELAXED_OPERATION_ARGS[operation], f"relaxed.{operation}"
+        )
+        audit["relaxed_operation"] = operation
+        ops.extend(_RELAXED_OPERATIONS[operation](payload, redaction, audit))
+    return ops, audit
+
+
+def relaxed_cleanup_for_deleted_rule(
+    redaction: dict[str, Any], rule_id: str, *, confirm_referenced: bool, confirm_empty: bool
+) -> tuple[list[Any], dict[str, Any]]:
+    """What deleting *rule_id* should do to ``relaxed_pii_ids`` (v4 §3.B).
+
+    Deliberately never a ``409 rule_referenced``: a dangling member changes no
+    behaviour — the filter is a set intersection and simply skips it, warning
+    once. Refusing the delete would force an admin through a relaxed-mode
+    migration to fix something harmless, and that migration is exactly the
+    "freeze the code default into the file" move this feature promises not to do.
+    """
+    mode, explicit = _relaxed_mode(redaction)
+    normalized = _normalize_id(rule_id)
+
+    if mode in {"default", "invalid"}:
+        if normalized in {_normalize_id(item) for item in DEFAULT_RELAXED_PII_IDS}:
+            return [], {
+                "relaxed_dangling": True,
+                "note": "该 ID 仍被代码默认 relaxed 集引用，删除后为无害悬空引用："
+                        "集合过滤只会跳过它，并记录一次告警。未修改 relaxed 配置。",
+            }
+        return [], {}
+
+    if mode == "all":
+        return [], {}
+
+    if normalized not in {_normalize_id(item) for item in explicit}:
+        return [], {}
+
+    if confirm_referenced:
+        return [], {
+            "relaxed_dangling": True,
+            "note": "已按 confirm_referenced 保留 relaxed 列表中的悬空引用。",
+        }
+
+    members = [item for item in explicit if _normalize_id(item) != normalized]
+    # An empty result still needs the same confirmation any other emptying does.
+    note: dict[str, Any] = {"relaxed_member_removed": True}
+    ops = _set_relaxed_list(redaction, members, confirm_empty, note)
+    return ops, note

@@ -14,6 +14,7 @@ from typing import Any
 from aegisgate.config.security_rules import (
     is_low_false_positive_route,
     load_security_rules,
+    rule_enabled,
     select_relaxed_pii_patterns,
 )
 from aegisgate.config.settings import settings
@@ -49,6 +50,16 @@ class RedactionFilter(BaseFilter):
 
         compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
         for item in redaction_rules.get("pii_patterns", []):
+            # A bare string here used to raise AttributeError out of the pipeline
+            # build, taking every V1 request with it.
+            if not isinstance(item, dict):
+                logger.warning(
+                    "redaction pii_pattern skipped (entry is not a mapping) value=%s",
+                    str(item)[:80],
+                )
+                continue
+            if not rule_enabled(item):
+                continue
             pattern_id = str(item.get("id", "PII")).upper()
             regex = item.get("regex")
             if not regex:
@@ -77,6 +88,8 @@ class RedactionFilter(BaseFilter):
         if items:
             for item in items:
                 if isinstance(item, dict):
+                    if not rule_enabled(item):
+                        continue
                     pattern_id = str(item.get("id", "FIELD_SECRET")).upper()
                     regex = item.get("regex")
                 else:

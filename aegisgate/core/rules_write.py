@@ -41,7 +41,7 @@ from typing import Any, Callable
 
 import yaml
 
-from aegisgate.config.security_rules import resolve_rules_file
+from aegisgate.config.security_rules import resolve_rules_file, rule_enabled
 from aegisgate.core.audit import write_audit
 from aegisgate.core.regex_probe import MAX_REGEX_LEN, probe
 from aegisgate.core.ui_etag import ABSENT_ETAG, etag_for_bytes
@@ -312,6 +312,8 @@ def _pii_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, str
             # unable to fix it; ``malformed_pii_entries`` is what reports them,
             # and a write that *introduces* one is still refused.
             continue
+        if not rule_enabled(item):
+            continue
         regex = item.get("regex")
         if spec.lowercase:
             if not isinstance(regex, str) or not regex.strip():
@@ -340,6 +342,8 @@ def _field_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, s
             f"FIELD_SECRET_{index}" if spec.field_default_positional else "FIELD_SECRET"
         )
         if isinstance(item, dict):
+            if not rule_enabled(item):
+                continue
             regex = item.get("regex")
             if spec.lowercase:
                 if not isinstance(regex, str) or not regex.strip():

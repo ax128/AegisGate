@@ -1752,6 +1752,8 @@ function renderRuleSectionList(sections, query) {
 
   const byFilter = new Map();
   sections.forEach((section) => {
+    // A group the request-redaction panel owns is edited there, not here.
+    if (section.hidden) return;
     if (needle && !`${section.label} ${section.id}`.toLowerCase().includes(needle)) return;
     if (!byFilter.has(section.filter)) byFilter.set(section.filter, []);
     byFilter.get(section.filter).push(section);
@@ -1834,11 +1836,12 @@ async function loadRuleSections(preferredSection) {
   try {
     const data = await fetchJson("/__ui__/api/rules");
     rulesSectionIndex = Array.isArray(data.sections) ? data.sections : [];
-    const fallback = rulesSectionIndex.length ? rulesSectionIndex[0].id : ACTION_MAP_SECTION;
+    const selectable = rulesSectionIndex.filter((s) => !s.hidden);
+    const fallback = selectable.length ? selectable[0].id : ACTION_MAP_SECTION;
     const target = preferredSection
-      || (rulesSectionIndex.some((s) => s.id === currentRulesSection) ? currentRulesSection : null)
-      || "redaction.pii_patterns";
-    currentRulesSection = rulesSectionIndex.some((s) => s.id === target) ? target : fallback;
+      || (selectable.some((s) => s.id === currentRulesSection) ? currentRulesSection : null)
+      || fallback;
+    currentRulesSection = selectable.some((s) => s.id === target) ? target : fallback;
     renderRuleSectionList(rulesSectionIndex, "");
     await loadRules(currentRulesSection);
   } catch (err) {
@@ -2062,7 +2065,12 @@ function filterActionMap(query) {
   });
 }
 
-function openRuleModal(section, item) {
+let ruleModalOnSaved = null;
+
+function openRuleModal(section, item, onSaved) {
+  // The request-redaction panel reuses this modal (it carries the regex lab), so
+  // a save has to refresh whichever view opened it.
+  ruleModalOnSaved = typeof onSaved === "function" ? onSaved : null;
   const modal = document.getElementById("rule-modal");
   if (!modal) return;
   document.getElementById("rule-modal-section").value = section;
@@ -2195,13 +2203,16 @@ async function submitRuleModal() {
         body: JSON.stringify(body),
       });
     }
+    const onSaved = ruleModalOnSaved;
     closeRuleModal();
     AegisUI.toast(isEdit ? "规则已更新，已热重载生效" : "规则已添加，已热重载生效", "ok");
-    await refreshRulesAfterWrite(section);
+    if (onSaved) await onSaved();
+    else await refreshRulesAfterWrite(section);
   } catch (err) {
     if (err.conflict) {
+      const onSaved = ruleModalOnSaved;
       closeRuleModal();
-      handleWriteError(err, () => loadRules(section), "保存失败");
+      handleWriteError(err, onSaved || (() => loadRules(section)), "保存失败");
       return;
     }
     errEl.textContent = err.message;
@@ -2753,10 +2764,30 @@ function rrMasterSection(data) {
     `<div class="rr-card">` +
     `<div class="rr-card-head"><strong>输入归一化</strong></div>` +
     `<ul class="rr-kv">` +
-    `<li><code>normalize_nfkc</code><span>${data.normalize_nfkc ? "true" : "false"}</span></li>` +
-    `<li><code>strip_invisible_chars</code><span>${data.strip_invisible_chars ? "true" : "false"}</span></li>` +
-    `<li><code>request_prefix_max_len</code><span>${escapeHtml(String(data.request_prefix_max_len))}</span></li>` +
-    `</ul></div>`;
+    `<li><code>normalize_nfkc</code>` +
+    rrToggle({
+      on: data.normalize_nfkc,
+      onLabel: "true",
+      offLabel: "false",
+      action: "toggle-value",
+      id: "normalize_nfkc",
+    }) +
+    `</li>` +
+    `<li><code>strip_invisible_chars</code>` +
+    rrToggle({
+      on: data.strip_invisible_chars,
+      onLabel: "true",
+      offLabel: "false",
+      action: "toggle-value",
+      id: "strip_invisible_chars",
+    }) +
+    `</li>` +
+    `<li><code>request_prefix_max_len</code>` +
+    `<input class="rr-number" type="number" min="1" max="64" step="1" ` +
+    `aria-label="request_prefix_max_len" data-rr-action="set-prefix-len" ` +
+    `value="${escapeHtml(String(data.request_prefix_max_len))}"></li>` +
+    `</ul>` +
+    `<p class="u-note">1–64。负数会让占位符前缀被静默截空，因此有下界。</p></div>`;
 
   return (
     `<h3 class="rr-heading">总控与状态</h3>` +
@@ -2813,11 +2844,29 @@ function rrStatusSection(data) {
     `<div class="rr-cards rr-cards-wide">` +
     `<div class="rr-card"><div class="rr-card-head"><strong>relaxed 集</strong>` +
     `<span class="badge badge-muted">${escapeHtml(relaxedLabels[data.relaxed_mode] || data.relaxed_mode)}</span></div>` +
+    `<div class="rr-modes" role="group" aria-label="relaxed 集模式">` +
+    rrModeButton(data, "default", "代码默认") +
+    rrModeButton(data, "all", "全部") +
+    rrModeButton(data, "custom", "自定义") +
+    `</div>` +
     `<p class="u-note">支配 E1、E3、E4。当前解析结果：` +
     (data.relaxed_ids_resolved === null
       ? "所有已配置规则"
       : `${data.relaxed_ids_resolved.length} 项 — ${escapeHtml(data.relaxed_ids_resolved.join("、"))}`) +
-    `</p></div>` +
+    `</p>` +
+    (data.unresolved_ids.length
+      ? `<p class="u-note">悬空成员：` +
+        data.unresolved_ids
+          .map(
+            (id) =>
+              `<code>${escapeHtml(id)}</code> ` +
+              `<button class="btn-danger-sm" type="button" data-rr-action="remove-unresolved" ` +
+              `data-rr-id="${escapeHtml(id)}">清理</button>`
+          )
+          .join("　") +
+        `</p>`
+      : "") +
+    `</div>` +
     `<div class="rr-card"><div class="rr-card-head"><strong>V2 固定集合（E6）</strong>` +
     `<span class="badge badge-muted">${data.v2_effective_ids.length} 项</span></div>` +
     `<p class="u-note">硬编码，与 <code>relaxed_pii_ids</code> 完全解耦；其中 ` +
@@ -2843,16 +2892,31 @@ function rrPiiSection(data) {
     `<tr><th scope="col">启用</th><th scope="col">relaxed</th><th scope="col">ID</th>` +
     `<th scope="col">类别</th><th scope="col">生效面</th><th scope="col">正则</th><th scope="col">操作</th></tr>`;
 
+  const blocked = data.write_blocked;
   const rows = data.pii_rules
     .map((rule) => {
-      const enabledCell = data.enabled_semantics_active
-        ? rrBoolBadge(rule.enabled, "启用", "已停用")
-        : rule.enabled
-        ? '<span class="badge badge-success">运行中</span>'
-        : '<span class="badge badge-warning" title="YAML 写了 enabled: false，但当前版本不读取该字段">待启用语义</span>';
-      const relaxedCell = rule.relaxed_member
-        ? '<span class="badge badge-success">在集内</span>'
-        : '<span class="badge badge-muted">不在集内</span>';
+      const enabledCell = rrToggle({
+        on: rule.enabled,
+        onLabel: "启用",
+        offLabel: "已停用",
+        disabled: blocked,
+        action: "toggle-enabled",
+        id: rule.id,
+        title: rule.enabled
+          ? "停用后该规则不再被任何执行面编译"
+          : "启用后该规则重新参与编译",
+      });
+      const relaxedCell = rrToggle({
+        on: rule.relaxed_member,
+        onLabel: "在集内",
+        offLabel: "不在集内",
+        disabled: blocked || !rule.relaxed_editable,
+        action: "toggle-relaxed",
+        id: rule.id,
+        title: rule.relaxed_editable
+          ? "支配 E1 / E3 / E4"
+          : 'relaxed 集为 ["*"]，逐条成员不可编辑',
+      });
       const badges = surfaces
         .map((surface) =>
           rrSurfaceBadge(
@@ -2875,19 +2939,45 @@ function rrPiiSection(data) {
             ? ' <span class="badge badge-error">无法编译</span>'
             : ""
         }</td>` +
-        `<td><a class="rr-jump" href="#rules" data-rr-jump="redaction.pii_patterns">在安全规则中编辑</a></td></tr>`
+        `<td class="u-nowrap">` +
+        `<button class="btn-edit-sm" type="button" data-rr-action="edit" data-rr-id="${escapeHtml(
+          rule.id
+        )}">测试 / 编辑</button>` +
+        `<button class="btn-danger-sm" type="button" data-rr-action="delete" data-rr-id="${escapeHtml(
+          rule.id
+        )}">删除</button></td></tr>`
       );
     })
     .join("");
 
   return (
-    `<h3 class="rr-heading">PII 规则<span class="rr-heading-note">${data.pii_rules.length} 条</span></h3>` +
+    `<h3 class="rr-heading">PII 规则<span class="rr-heading-note">${data.pii_rules.length} 条</span>` +
+    `<button class="btn-sm" type="button" data-rr-action="add">添加规则</button></h3>` +
     `<p class="u-note u-note-block">「relaxed」一列写的是该 ID 是否属于 <code>relaxed_pii_ids</code>，` +
     `<strong>支配 V1 对话路由（管道 + 转发）与 V1 multipart 转发</strong>——不是「在 V1 对话路由启用」，` +
-    `也不是「全部路由」。生效面徽章由服务端计算后下发，面板不做任何推导。` +
-    `本版为只读，增删改仍在「安全规则 → PII 脱敏规则」中进行。</p>` +
+    `也不是「全部路由」。两个控件各写一个维度：停用不会删除 relaxed 归属，重新启用后的范围没有隐藏状态。` +
+    `生效面徽章由服务端计算后下发，面板不做任何推导。</p>` +
+    (blocked
+      ? `<p class="u-note u-note-block">存在归一化 ID 冲突，逐条修改与同 ID 的增删改已阻断。</p>`
+      : "") +
     `<div class="token-table-wrap"><table class="token-table"><thead>${header}</thead>` +
-    `<tbody>${rows || emptyStateRow(7, "当前配置没有 PII 规则")}</tbody></table></div>`
+    `<tbody>${
+      rows ||
+      emptyStateRow(7, "当前配置没有 PII 规则", { id: "rr-add", label: "添加规则" })
+    }</tbody></table></div>`
+  );
+}
+
+function rrToggle(options) {
+  const cls = options.on ? "on" : "off";
+  const label = options.on ? options.onLabel : options.offLabel;
+  return (
+    `<button type="button" role="switch" aria-checked="${options.on ? "true" : "false"}" ` +
+    `aria-label="${escapeHtml(options.id)} ${escapeHtml(label)}" ` +
+    `class="rr-toggle ${cls}"${options.disabled ? " disabled" : ""} ` +
+    `data-rr-action="${options.action}" data-rr-id="${escapeHtml(options.id)}" ` +
+    `data-rr-next="${options.on ? "false" : "true"}" ` +
+    `title="${escapeHtml(options.title || "")}">${escapeHtml(label)}</button>`
   );
 }
 
@@ -3060,25 +3150,220 @@ function rrExemptionsSection(data) {
   );
 }
 
+function rrModeButton(data, mode, label) {
+  const active = data.relaxed_mode === mode;
+  return (
+    `<button type="button" role="tab" aria-selected="${active ? "true" : "false"}" ` +
+    `class="rr-mode${active ? " active" : ""}" data-rr-action="set-mode" data-rr-mode="${mode}"` +
+    `${active ? " disabled" : ""}>${escapeHtml(label)}</button>`
+  );
+}
+
+// Every write from this panel goes through here: one place decides how a 409
+// that asks for confirmation is turned into a question, and a refused
+// confirmation leaves the file untouched.
+async function rrPatch(body, prefix) {
+  try {
+    const data = await fetchJson("/__ui__/api/request_redaction/settings", {
+      method: "PATCH",
+      resource: "rules",
+      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+      body: JSON.stringify(body),
+    });
+    requestRedactionState = data;
+    rrRender(data);
+    AegisUI.toast("已保存，已热重载生效", "ok");
+    return true;
+  } catch (err) {
+    handleWriteError(err, loadRequestRedaction, prefix);
+    return false;
+  }
+}
+
+async function rrConfirmedPatch(body, prefix, confirmation) {
+  const ok = await AegisUI.confirm(confirmation);
+  if (!ok) return false;
+  return rrPatch(body, prefix);
+}
+
+async function rrSetMode(mode, data) {
+  if (mode === "custom") {
+    return rrConfirmedPatch(
+      { relaxed: { operation: "materialize_custom", source: "current", confirm: true } },
+      "切换 relaxed 模式失败",
+      {
+        title: "展开为自定义列表",
+        message:
+          data.relaxed_mode === "all"
+            ? "将按当前完整的已配置 ID 集合生成一次快照。两处已知的、无害的不等价：" +
+              "正则编译失败的条目也会被收进来（成为无害悬空项）；" +
+              "legacy 字符串 field 条目按 FIELD_SECRET_{idx} 展开，与真正受 relaxed 过滤的 E3/E4 一致。"
+            : "将把当前代码默认集合固化进 YAML。此后它不再跟随代码默认值变化。",
+        detail:
+          data.relaxed_mode === "all"
+            ? "来源：当前完整 configured ID 集"
+            : `来源：代码默认 ${data.default_relaxed_ids.length} 项`,
+        confirmLabel: "展开",
+      }
+    );
+  }
+  const isAll = mode === "all";
+  return rrConfirmedPatch(
+    { relaxed: { operation: "set_mode", mode } },
+    "切换 relaxed 模式失败",
+    {
+      title: isAll ? "relaxed 集设为「全部」" : "恢复代码默认值",
+      message: isAll
+        ? "所有已启用的 PII 规则都会在 E1 / E3 / E4 上运行——更严格，代价是更多误报。"
+        : "将从 YAML 中删除 relaxed_pii_ids 这个 key，而不是写入当前默认集合，" +
+          "这样它继续跟随代码默认值。当前的自定义列表会丢失。",
+      confirmLabel: isAll ? "设为全部" : "恢复默认",
+      danger: !isAll,
+    }
+  );
+}
+
+async function rrSetMembership(ruleId, enabled, data) {
+  const body = { relaxed: { operation: "set_membership", id: ruleId, enabled } };
+  if (data.relaxed_mode === "default") {
+    const ok = await AegisUI.confirm({
+      title: "转换为自定义 relaxed 列表",
+      message:
+        "当前使用代码默认 relaxed 集（未写入文件）。逐条修改会以当前默认集合为基线固化成自定义列表，" +
+        "此后不再跟随代码默认值。",
+      detail: `基线：${data.default_relaxed_ids.length} 项`,
+      confirmLabel: "转换并修改",
+    });
+    if (!ok) return false;
+    body.relaxed.confirm_materialize = true;
+  }
+  if (!enabled) {
+    const rule = data.pii_rules.find((item) => item.id === ruleId);
+    if (rule && rule.relaxed_removal_empties_list) {
+      const ok = await AegisUI.confirm({
+        title: "清空 relaxed 集",
+        message:
+          "移除后 relaxed 集为空：V1 对话路由（管道 + 转发）与 multipart 转发上将不再有任何 PII 规则生效。",
+        detail: ruleId,
+        confirmLabel: "确认清空",
+        danger: true,
+      });
+      if (!ok) return false;
+      body.relaxed.confirm_empty = true;
+    }
+  }
+  return rrPatch(body, "修改 relaxed 归属失败");
+}
+
+async function rrSetEnabled(ruleId, enabled) {
+  if (!enabled) {
+    const ok = await AegisUI.confirm({
+      title: "停用 PII 规则",
+      message: "停用后该规则不再被 E1–E6 任何执行面编译，立即热重载生效。relaxed 归属会保留。",
+      detail: ruleId,
+      confirmLabel: "停用",
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  try {
+    await fetchJson(
+      `/__ui__/api/rules/redaction.pii_patterns/${encodeURIComponent(ruleId)}`,
+      {
+        method: "PATCH",
+        resource: "rules",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify({ enabled }),
+      }
+    );
+    AegisUI.toast(enabled ? "规则已启用" : "规则已停用", "ok");
+    await loadRequestRedaction();
+  } catch (err) {
+    handleWriteError(err, loadRequestRedaction, enabled ? "启用失败" : "停用失败");
+  }
+}
+
+async function rrDeleteRule(ruleId, data) {
+  // The server already decided what this delete means for relaxed_pii_ids.
+  const rule = data.pii_rules.find((item) => item.id === ruleId) || {};
+  const inCustomList = rule.relaxed_reference === "custom_list";
+  const inCodeDefault = rule.relaxed_reference === "code_default";
+
+  const ok = await AegisUI.confirm({
+    title: "删除 PII 规则",
+    message:
+      "删除后立即热重载生效，该规则在 E1–E6 上的脱敏一并消失。" +
+      (inCustomList
+        ? "它同时会从自定义 relaxed 列表中移除——同一次写入内完成。"
+        : inCodeDefault
+        ? "代码默认 relaxed 集仍会引用这个 ID，删除后是无害悬空引用：集合过滤只会跳过它。"
+        : ""),
+    detail: ruleId,
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+
+  const params = new URLSearchParams();
+  if (rule.relaxed_removal_empties_list) {
+    // The server refuses this without confirm_empty, and answering that on the
+    // caller's behalf would turn its question into a formality. Emptying the
+    // list is its own decision, so it gets its own dialog.
+    const confirmedEmpty = await AegisUI.confirm({
+      title: "这会清空 relaxed 集",
+      message:
+        "它是自定义列表里的最后一个成员。移除后 relaxed 集为空，V1 对话路由（管道 + 转发）与 " +
+        "multipart 转发上将没有任何 PII 规则生效——其余执行面不受影响。" +
+        "若要保留一个悬空引用而不清空列表，请改从 relaxed 开关移除它，或先添加别的成员。",
+      detail: ruleId,
+      confirmLabel: "确认清空并删除",
+      danger: true,
+    });
+    if (!confirmedEmpty) return;
+    params.set("confirm_empty", "true");
+  }
+  const query = params.toString();
+  try {
+    const result = await fetchJson(
+      `/__ui__/api/rules/redaction.pii_patterns/${encodeURIComponent(ruleId)}` +
+        (query ? `?${query}` : ""),
+      {
+        method: "DELETE",
+        resource: "rules",
+        headers: { "x-aegis-ui-csrf": uiCsrfToken },
+      }
+    );
+    AegisUI.toast(result.note || "规则已删除，已热重载生效", "ok", result.note ? { timeout: 8000 } : undefined);
+    await loadRequestRedaction();
+  } catch (err) {
+    handleWriteError(err, loadRequestRedaction, "删除失败");
+  }
+}
+
+function rrRender(data) {
+  rrAlerts(data);
+  document.getElementById("rr-master").innerHTML = rrMasterSection(data);
+  document.getElementById("rr-status").innerHTML = rrStatusSection(data);
+  document.getElementById("rr-pii").innerHTML = rrPiiSection(data);
+  document.getElementById("rr-field").innerHTML = rrFieldSection(data);
+  document.getElementById("rr-coverage").innerHTML = rrCoverageSection(data);
+  document.getElementById("rr-exemptions").innerHTML = rrExemptionsSection(data);
+  const summary = document.getElementById("rr-summary");
+  if (summary) {
+    summary.textContent =
+      `${data.pii_rules.length} 条 PII 规则 · relaxed 集 ` +
+      (data.relaxed_ids_resolved === null ? "全部" : `${data.relaxed_ids_resolved.length} 项`) +
+      ` · Field ${data.field.mode === "explicit_yaml" ? "显式列表" : "代码默认"}`;
+  }
+}
+
 async function loadRequestRedaction() {
   const summary = document.getElementById("rr-summary");
   if (summary) summary.textContent = "加载中…";
   try {
     const data = await fetchJson("/__ui__/api/request_redaction/settings", { resource: "rules" });
     requestRedactionState = data;
-    rrAlerts(data);
-    document.getElementById("rr-master").innerHTML = rrMasterSection(data);
-    document.getElementById("rr-status").innerHTML = rrStatusSection(data);
-    document.getElementById("rr-pii").innerHTML = rrPiiSection(data);
-    document.getElementById("rr-field").innerHTML = rrFieldSection(data);
-    document.getElementById("rr-coverage").innerHTML = rrCoverageSection(data);
-    document.getElementById("rr-exemptions").innerHTML = rrExemptionsSection(data);
-    if (summary) {
-      summary.textContent =
-        `${data.pii_rules.length} 条 PII 规则 · relaxed 集 ` +
-        (data.relaxed_ids_resolved === null ? "全部" : `${data.relaxed_ids_resolved.length} 项`) +
-        ` · Field ${data.field.mode === "explicit_yaml" ? "显式列表" : "代码默认"}`;
-    }
+    rrRender(data);
     loadRequestRedactionStat();
   } catch (err) {
     if (summary) summary.textContent = describeWriteError(err, "加载失败");
@@ -3101,15 +3386,74 @@ function bindRequestRedactionUI() {
   const refresh = document.getElementById("rr-refresh");
   if (refresh) refresh.addEventListener("click", loadRequestRedaction);
   const panel = document.getElementById("request-redaction");
-  if (panel) {
-    panel.addEventListener("click", (event) => {
-      const jump = event.target.closest("[data-rr-jump]");
-      if (!jump) return;
-      // Land on the rules workbench with the right group already selected,
-      // instead of on a panel the reader still has to search.
+  if (!panel) return;
+
+  panel.addEventListener("click", async (event) => {
+    const jump = event.target.closest("[data-rr-jump]");
+    if (jump) {
       loadRuleSections(jump.getAttribute("data-rr-jump"));
-    });
-  }
+      return;
+    }
+    if (event.target.closest('[data-empty-action="rr-add"]')) {
+      openRuleModal("redaction.pii_patterns", null, loadRequestRedaction);
+      return;
+    }
+    const trigger = event.target.closest("[data-rr-action]");
+    if (!trigger || trigger.disabled) return;
+    const data = requestRedactionState;
+    if (!data) return;
+    const action = trigger.getAttribute("data-rr-action");
+    const ruleId = trigger.getAttribute("data-rr-id");
+
+    if (action === "set-mode") {
+      await rrSetMode(trigger.getAttribute("data-rr-mode"), data);
+    } else if (action === "toggle-relaxed") {
+      await rrSetMembership(ruleId, trigger.getAttribute("data-rr-next") === "true", data);
+    } else if (action === "toggle-enabled") {
+      await rrSetEnabled(ruleId, trigger.getAttribute("data-rr-next") === "true");
+    } else if (action === "toggle-value") {
+      await rrPatch(
+        { values: { [ruleId]: trigger.getAttribute("data-rr-next") === "true" } },
+        "保存失败"
+      );
+    } else if (action === "remove-unresolved") {
+      await rrConfirmedPatch(
+        { relaxed: { operation: "remove_unresolved", id: ruleId, confirm: true } },
+        "清理失败",
+        {
+          title: "清理悬空 relaxed 成员",
+          message:
+            "该 ID 在当前配置里没有对应规则。移除它不改变任何行为，只是让列表与配置一致。",
+          detail: ruleId,
+          confirmLabel: "清理",
+        }
+      );
+    } else if (action === "add") {
+      openRuleModal("redaction.pii_patterns", null, loadRequestRedaction);
+    } else if (action === "edit") {
+      const rule = data.pii_rules.find((item) => item.id === ruleId);
+      openRuleModal(
+        "redaction.pii_patterns",
+        { id: ruleId, regex: rule ? rule.regex : "", category: rule ? rule.category : "" },
+        loadRequestRedaction
+      );
+    } else if (action === "delete") {
+      await rrDeleteRule(ruleId, data);
+    }
+  });
+
+  panel.addEventListener("change", async (event) => {
+    const input = event.target.closest('[data-rr-action="set-prefix-len"]');
+    if (!input) return;
+    const value = Number(input.value);
+    if (!Number.isInteger(value)) {
+      AegisUI.toast("request_prefix_max_len 必须是整数", "err");
+      loadRequestRedaction();
+      return;
+    }
+    await rrPatch({ values: { request_prefix_max_len: value } }, "保存失败");
+  });
+
   loadRequestRedaction();
 }
 

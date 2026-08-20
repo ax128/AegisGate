@@ -773,6 +773,11 @@ def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
     The request filter compiles only ``pii_patterns`` while the responses-API
     sanitizer also compiles ``field_value_patterns``, so validation has to look
     at the config rather than at one caller's compiled list.
+
+    Disabled rules stay in here on purpose: this set is what decides whether a
+    ``relaxed_pii_ids`` member is a known id, and a disabled rule is still a
+    configured one. Filtering them out would make every relaxed member naming a
+    temporarily disabled rule report as unknown.
     """
     ids: set[str] = set()
     for item in rules.get("pii_patterns", []) or []:
@@ -789,6 +794,23 @@ def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
     else:
         ids.update({"FIELD_SECRET", "AUTH_BEARER"})
     return ids
+
+
+def rule_enabled(item: Any) -> bool:
+    """Whether a YAML rule entry should be compiled.
+
+    Only an explicit boolean ``false`` disables a rule. A stray string or number
+    leaves it running: for a redaction rule "keep redacting" is the fail-safe
+    reading of an ambiguous value, and the console only ever writes real bools.
+    A non-mapping entry (the legacy bare-string form) carries no flag to read and
+    is always compiled — asking it for ``.get("enabled")`` is what used to crash.
+
+    Every compile site and the console share this one predicate, so the panel
+    cannot show a rule as disabled while the request path still runs it.
+    """
+    if not isinstance(item, dict):
+        return True
+    return item.get("enabled") is not False
 
 
 def configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:

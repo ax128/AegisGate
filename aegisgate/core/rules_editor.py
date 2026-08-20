@@ -342,13 +342,7 @@ def _key_path_absent(text: str, path: list[str]) -> bool:
     return False
 
 
-def render_rules_yaml(text: str, expected: dict, edit: RuleEdit) -> str | None:
-    """YAML text for *expected* with comments intact, or ``None``.
-
-    The patched text is re-parsed and compared with *expected* in full; only an
-    exact match is returned. ``None`` means the file's shape is not one this
-    module can patch safely — the caller must fail the write rather than dump.
-    """
+def _patch_rule(text: str, expected: dict, edit: RuleEdit) -> str | None:
     patched = apply_edit(text, edit)
     if patched is None and edit.op == "add" and _key_path_absent(text, edit.path):
         # The group's key is absent from the file altogether — a hand-edited
@@ -366,21 +360,53 @@ def render_rules_yaml(text: str, expected: dict, edit: RuleEdit) -> str | None:
             "rules edit could not be applied as a text patch path=%s op=%s id=%s",
             ".".join(edit.path), edit.op, edit.rule_id,
         )
+    return patched
+
+
+def _verify(patched: str | None, expected: dict, label: str) -> str | None:
+    if patched is None:
         return None
     try:
         if yaml.safe_load(patched) == expected:
             return patched
     except yaml.YAMLError as exc:
-        logger.warning(
-            "rules edit patch produced invalid YAML path=%s op=%s id=%s error=%s",
-            ".".join(edit.path), edit.op, edit.rule_id, exc,
-        )
+        logger.warning("rules patch produced invalid YAML %s error=%s", label, exc)
         return None
-    logger.warning(
-        "rules edit patch verification mismatch path=%s op=%s id=%s",
-        ".".join(edit.path), edit.op, edit.rule_id,
-    )
+    logger.warning("rules patch verification mismatch %s", label)
     return None
+
+
+def render_rules_yaml(text: str, expected: dict, edit: RuleEdit) -> str | None:
+    """YAML text for *expected* with comments intact, or ``None``.
+
+    The patched text is re-parsed and compared with *expected* in full; only an
+    exact match is returned. ``None`` means the file's shape is not one this
+    module can patch safely — the caller must fail the write rather than dump.
+    """
+    return _verify(
+        _patch_rule(text, expected, edit),
+        expected,
+        f"path={'.'.join(edit.path)} op={edit.op} id={edit.rule_id}",
+    )
+
+
+def render_rule_with_leaf_ops(
+    text: str, expected: dict, edit: RuleEdit, ops: list[LeafOp]
+) -> str | None:
+    """One rule edit *and* a batch of leaf changes, verified as a single patch.
+
+    Deleting a PII rule that a custom ``relaxed_pii_ids`` list still names has to
+    drop both in the same write: two writes would leave a window where the list
+    references a rule that no longer exists.
+    """
+    patched = _patch_rule(text, expected, edit)
+    if patched is None:
+        return None
+    if ops:
+        patched = apply_leaf_ops(patched, ops)
+    return _verify(
+        patched, expected, f"path={'.'.join(edit.path)} op={edit.op} id={edit.rule_id} +leaf"
+    )
 
 
 # ---------------------------------------------------------------------------
