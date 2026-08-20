@@ -106,6 +106,10 @@ python -m pip install -e .
 uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
 ```
 
+可选依赖组：`.[redis]` / `.[postgres]` / `.[observability]`；要跑测试用 `.[dev]`（CI 用的是
+`pip install -e ".[dev,semantic]"`）。语义复核本身不需要任何 extra——它只调
+`AEGIS_SEMANTIC_SERVICE_URL` 指向的外部服务。
+
 ## 6) How to connect upstream LLM providers? 接入方式选择
 
 ### 6.1 What is token routing? Token 路由（多租户，推荐）
@@ -272,3 +276,11 @@ docker compose up -d --build
 - 不在日志或工单中明文粘贴密钥、token、cookie、私钥、助记词。
 - 生产环境定期轮换 `config/aegis_gateway.key`（替换文件内容后重启服务）。
 - `whitelist_key` 字段只填真正需要豁免脱敏的字段名，最小化敏感数据明文透传范围。
+
+## 12) Where to read more? 相关文档
+
+- [README.md](README.md) / [README_zh.md](README_zh.md)：完整能力、环境变量与安全边界
+- [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md)：CLIProxyAPI / Sub2API / AIClient-2-API 接入
+- [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)：Web 控制台与 `__ui__` 接口契约
+- [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md)：终端与 IDE 客户端
+- [config/README.md](config/README.md)：挂载配置目录与热更新限制

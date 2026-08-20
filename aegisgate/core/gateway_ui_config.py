@@ -12,12 +12,15 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
 
 # Root-level Markdown that must never be served through the UI docs page.
-# The last three are gitignored local/internal reports: they are absent from a clean
-# checkout but may exist in a developer's working copy, so keep excluding them by name.
+# CHANGELOG.md and ROADMAP.md are maintainer-facing repo history/plans, not operator
+# guides — they stay on GitHub. The last three are gitignored local/internal reports:
+# they are absent from a clean checkout but may exist in a developer's working copy,
+# so keep excluding them by name.
 _EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
     {
         "AGENTS.md",
         "CHANGELOG.md",
+        "ROADMAP.md",
         "PRODUCTION_READINESS_TEST_REPORT.md",
         "OPEN_SOURCE_CHECKLIST.md",
         "PR_DESCRIPTION_2026-02-26-security-hardening.md",
@@ -314,7 +317,6 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     _f("AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST", "allow_public_upstream_whitelist", "允许公网走上游白名单",
        "bool", "access", "公网闸门"),
     _f("AEGIS_GATEWAY_KEY_HEADER", "gateway_key_header", "网关密钥请求头名", "string", "access", "请求头"),
-    _f("AEGIS_TENANT_ID_HEADER", "tenant_id_header", "租户 ID 请求头名", "string", "access", "请求头"),
     _f("AEGIS_ENABLE_REQUEST_HMAC_AUTH", "enable_request_hmac_auth", "启用请求 HMAC 签名", "bool",
        "access", "请求签名"),
     _f("AEGIS_REQUEST_HMAC_SECRET", "request_hmac_secret", "HMAC 密钥", "string", "access", "请求签名",

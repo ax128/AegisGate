@@ -66,14 +66,3 @@ def _current_trace_ids() -> tuple[str, str]:
     except ImportError:
         pass
     return "", ""
-
-
-# Legacy interface preserved for backward compatibility.
-def log_event(event: str, **payload: object) -> None:
-    """Emit a structured log event."""
-    trace_id, span_id = _current_trace_ids()
-    extra = dict(payload)
-    if trace_id:
-        extra["trace_id"] = trace_id
-        extra["span_id"] = span_id
-    logger.info("event=%s payload=%s", event, extra)

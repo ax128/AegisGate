@@ -1,6 +1,6 @@
 # Terminal Clients Wiki (AegisGate)
 
-This page is the **Wiki-style navigation hub** for connecting terminal/desktop IDE clients to AegisGate.
+How to point terminal and desktop IDE clients at AegisGate.
 
 ## Start Here
 
@@ -8,20 +8,6 @@ This page is the **Wiki-style navigation hub** for connecting terminal/desktop I
 2. Single-upstream fast path: use `AEGIS_UPSTREAM_BASE_URL` only for localhost/internal clients calling `/v1/...` directly.
 3. For Claude, use `POST /v1/messages` (supports streaming).
 4. OAuth-hosted login mode is **not supported**.
-
----
-
-## Wiki Navigation
-
-- [Quick Start (Token Mode)](#quick-start-token-mode)
-- [Quick Start (Direct v1 Mode)](#quick-start-direct-v1-mode-internal-only)
-- [Claude API Support](#claude-api-support)
-- [Platform Notes (Windows/macOS/Linux/WSL2)](#platform-notes-windowsmacoslinuxwsl2)
-- [Client Matrix](#client-matrix)
-- [Client Profiles](#client-profiles)
-- [Config Templates](#config-templates)
-- [Troubleshooting](#troubleshooting)
-- [Security Baseline](#security-baseline)
 
 ---
 
@@ -116,29 +102,9 @@ curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-vers
 | VS Code extensions | Extension-dependent | Yes (if base URL configurable) | No |
 | Cursor | Yes | Yes | No |
 
----
-
-## Client Profiles
-
-### Codex CLI
-- Recommended: Token mode.
-- Requirement: customizable `baseUrl` + API key mode.
-
-### OpenCodeX
-- Use OpenAI-compatible provider mode.
-- Recommended: Token mode.
-
-### Cherry Studio
-- Provider: OpenAI-compatible.
-- Use Token `baseUrl` + upstream API key.
-
-### VS Code
-- Must use an extension that supports custom OpenAI-compatible endpoint.
-- OAuth-only extension mode is not supported.
-
-### Cursor
-- Use custom OpenAI-compatible endpoint mode.
-- Recommended: Token mode.
+Every client in the table is configured the same way: pick the provider's
+"OpenAI-compatible / custom endpoint" mode, set `base_url` to the gateway, and use the **upstream's**
+API key. No client needs a gateway-specific setting.
 
 ---
 
@@ -153,11 +119,21 @@ api_key: <UPSTREAM_API_KEY>
 model: claude-3-5-sonnet-latest
 ```
 
+### Direct v1 Mode (Internal Only)
+
+```yaml
+provider: openai_compatible
+base_url: http://127.0.0.1:18080/v1
+api_key: <UPSTREAM_API_KEY>
+model: claude-3-5-sonnet-latest
+```
+
 ## Troubleshooting
 
-### `invalid_parameters`
-- Request path is not token route or required fields are invalid.
-- Use token `base_url` and verify request JSON fields.
+### `token_route_required`
+- A non-token `/v1` or `/v2` request was rejected by the security boundary.
+- Either switch the client to a token `base_url`, or — for direct v1 mode — make sure the caller is
+  on localhost/internal and `AEGIS_UPSTREAM_BASE_URL` is set.
 
 ### `token_not_found`
 - Token not registered, removed, or token file not persisted.
@@ -188,4 +164,6 @@ model: claude-3-5-sonnet-latest
 
 ## Related Docs
 
-- `README.md`
+- [README.md](README.md) / [README_zh.md](README_zh.md) — full reference
+- [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md) — connecting the upstream itself
+- [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) — registering tokens from the admin console

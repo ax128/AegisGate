@@ -11,7 +11,7 @@ AegisGate is a self-hosted, pipeline-based security proxy designed to protect LL
 ### Key Features
 
 - **Prompt Injection Protection** — Multi-layer detection: regex patterns, optional semantic review (gray-zone gated: `AEGIS_ENABLE_SEMANTIC_MODULE` + `AEGIS_SEMANTIC_SERVICE_URL` + `AEGIS_SEMANTIC_GRAY_LOW/HIGH`), Unicode/encoding attack detection, typoglycemia defense
-- **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers
+- **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers. On the three structured LLM routes (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) a credential-only subset runs by default to avoid corrupting prompts — see [PII Redaction Coverage](#pii-redaction-coverage-50-categories)
 - **Dangerous Response Sanitization** — Automatic obfuscation of high-risk LLM outputs (shell commands, SQL injection payloads, HTTP smuggling) with configurable security levels (low/medium/high)
 - **OpenAI-Compatible + Anthropic Messages API** — Drop-in routes for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and the generic proxy; works with OpenAI-compatible providers and Anthropic-compatible Messages upstreams
 - **Anthropic ↔ OpenAI Protocol Conversion** — Token-based `compat` mode converts Anthropic `/v1/messages` requests to OpenAI `/v1/responses` on the fly, enabling Claude Code / Anthropic SDK to talk to OpenAI-compatible upstreams (GPT-5.4, etc.) without code changes
@@ -103,6 +103,7 @@ Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/r
 
 **What data does AegisGate redact?**
 Over 50 PII pattern categories including: API keys and tokens (OpenAI, AWS, GitHub, Slack), credit card numbers, SSNs, email addresses, phone numbers, crypto wallet addresses and seed phrases, medical record numbers, IP addresses, internal URLs, and infrastructure identifiers. Custom exact-value redaction is also supported for arbitrary secrets.
+Which of them run depends on the route: `/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured conversation payloads, so by default only the credential-only `redaction.relaxed_pii_ids` subset runs there (12 of the 56 shipped patterns — tokens, JWT, PEM private keys, AWS/GitHub/Slack keys, exchange secrets, crypto WIF/xprv/seed phrases). Every other route runs the full set. Set `redaction.relaxed_pii_ids: ["*"]` in `security_filters.yaml` to run all patterns on those three routes too.
 
 **Can I use AegisGate with AI coding agents like Cursor, Claude Code, or Codex?**
 Yes. AegisGate supports MCP (Model Context Protocol) and Agent SKILL integration. Point your agent's `baseUrl` to the gateway and it will transparently filter all LLM traffic. See [SKILL.md](SKILL.md) for agent-specific setup instructions.
@@ -136,6 +137,24 @@ Health check: `curl http://127.0.0.1:18080/health`
 Readiness check: `curl http://127.0.0.1:18080/ready`
 
 Admin UI login: `http://localhost:18080/__ui__/login`
+
+### Gateway Key (admin endpoints + UI login)
+
+The gateway key is generated on first start into `config/aegis_gateway.key` (chmod 600). The same
+value authenticates every `/__gw__/*` admin endpoint (as the `gateway_key` JSON field) **and** is the
+password for the admin UI — there is no default password.
+
+```bash
+# Bare metal / local run
+cat config/aegis_gateway.key
+
+# Docker: the file lives inside the container
+docker compose exec aegisgate cat config/aegis_gateway.key
+```
+
+Override it with `AEGIS_GATEWAY_KEY` for Docker/CI. Rotate it from the console's key-management page
+or by replacing the file contents and restarting. See [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) for
+the full console guide.
 
 Notes:
 
@@ -298,6 +317,13 @@ Extend the list without touching code by adding names to `allowed_models` in `co
 
 > `untrusted content guard` and `system prompt guard` are constructed into the pipeline but not part of the default policy's `enabled_filters`; enable them via policy YAML plus the matching feature flag.
 
+> Execution **order** is fixed by `_build_pipeline()` in
+> [`aegisgate/adapters/openai_compat/pipeline_runtime.py`](aegisgate/adapters/openai_compat/pipeline_runtime.py);
+> a policy YAML's `enabled_filters` only decides *whether* a filter runs, never in what order.
+> A filter runs only when it is listed in the policy YAML **and** its matching `enable_<filter>`
+> feature flag is on — except `redaction` / `exact_value_redaction`, which the policy engine force-enables
+> whenever their flags are on, even if the YAML omits them.
+
 ### Error Response Format
 
 AegisGate does not use one single JSON error envelope for every route. Current behavior falls into three families:
@@ -320,6 +346,22 @@ AegisGate does not use one single JSON error envelope for every route. Current b
   "detail": "<human-readable reason>",
   "request_id": "<request_id>",
   "aegisgate": { "...": "..." }
+}
+```
+
+The third family is the boundary/admin rejection, which uses the same envelope **without** `request_id`
+(`aegisgate/core/gateway_auth.py`):
+
+```json
+{
+  "error": {
+    "message": "<human-readable reason>",
+    "type": "aegisgate_error",
+    "code": "<error_code>"
+  },
+  "error_code": "<error_code>",
+  "detail": "<human-readable reason>",
+  "aegisgate": { "action": "block", "risk_score": 1.0, "reasons": ["<error_code>"] }
 }
 ```
 
@@ -432,7 +474,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST` | `false` | Allow whitelist bypass from public/non-internal clients (dangerous; default: internal-only, same shape as `__passthrough`) |
 | `AEGIS_STORAGE_FAILURE_ACTION` | `block` | Behaviour when the storage backend fails: `block` rejects the request. `forward` only skips persisting mapping/audit records; it does not change filter verdicts or response-side block behaviour. Unregistered request filters still fail closed. |
 | `AEGIS_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
-| `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
+| `AEGIS_RISK_SCORE_THRESHOLD` | `0.7` | Global risk score threshold (0–1); lower = stricter. A policy YAML that declares `risk_threshold` overrides it per policy, and every shipped policy does (`default`/`permissive` = `0.85`, `strict` = `0.50`), so this value only applies to a policy YAML that omits the key. The resolved value is then scaled by `AEGIS_SECURITY_LEVEL` — see [Security Levels](#security-levels-aegis_security_level) |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | `true` | Enable semantic review (gray-zone gated; see `AEGIS_SEMANTIC_GRAY_LOW/HIGH`) |
 | `AEGIS_SEMANTIC_SERVICE_URL` | _(empty)_ | Semantic service endpoint. When empty, gray-zone cases record `semantic_service_unconfigured` and skip semantic escalation |
 | `AEGIS_SEMANTIC_GRAY_LOW` | `0.25` | Lower bound for triggering semantic review (only when `risk_score` is between low/high) |
@@ -462,6 +504,58 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
 | `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. Behind Caddy on localhost use `127.0.0.1`. Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it |
 | `AEGIS_XFF_STRICT_INTERNAL` | `true` | Treat X-Forwarded-For from an untrusted direct peer as a public client (admin, default `/v1`, UI). Set `false` to restore the old checks without setting trusted proxies. Restart required |
+| `AEGIS_GATEWAY_KEY` | _(file)_ | Overrides `config/aegis_gateway.key` (Docker/CI). Authenticates every `/__gw__/*` admin call and the console login |
+| `AEGIS_ENCRYPTION_KEY` | _(auto)_ | Fernet key for redaction-mapping storage; generated into `config/aegis_fernet.key` (chmod 600) when empty |
+| `AEGIS_LOG_LEVEL` | `info` | Log level |
+| `AEGIS_LOG_FULL_REQUEST_BODY` | `false` | At DEBUG level, print the full request body (includes function/tool output). Controlled environments only |
+| `AEGIS_AUDIT_LOG_PATH` | `logs/audit.jsonl` | Audit log path; empty string disables the audit file |
+| `AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG` | `false` | Store response-side dangerous samples (date-split, files older than 10 days pruned) |
+| `AEGIS_DANGEROUS_RESPONSE_LOG_PATH` | `logs/dangerous_response_samples.jsonl` | Base path for the dangerous-response sample log |
+| `AEGIS_LOCAL_PORT_ROUTING_HOST` | `host.docker.internal` | Target host for numeric-token port routing. **Bare-metal deployments must set this to `127.0.0.1`** |
+| `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK` | `false` | Allow the admin console from internal-network clients (default: loopback only). Restart required |
+| `AEGIS_LOCAL_UI_SECURE_COOKIE` | `true` | Issue the UI session cookie with `Secure`. Over plain HTTP on a non-`localhost` host the browser drops it and login bounces back |
+| `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | `30` | Admin endpoint rate limit, per client IP |
+| `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | `250000` | Maximum length of a single message |
+| `AEGIS_MAX_RESPONSE_LENGTH` | `2000000` | Maximum response length |
+| `AEGIS_V2_BLOCK_INTERNAL_TARGETS` | `true` | v2 SSRF protection: reject targets on private/loopback/link-local IPs and cloud metadata endpoints. Restart required |
+| `AEGIS_V2_ENABLE_REQUEST_REDACTION` | `true` | v2 request-body redaction |
+| `AEGIS_V2_ENABLE_RESPONSE_COMMAND_FILTER` | `true` | v2 response-side HTTP-attack filter |
+| `AEGIS_V2_RESPONSE_FILTER_OBVIOUS_ONLY` | `true` | v2 minimum-false-positive mode: only protocol-level signatures (request smuggling / response splitting) |
+| `AEGIS_V2_RESPONSE_FILTER_BYPASS_HOSTS` | _(empty)_ | Hosts that skip the v2 response filter. **Not** a target allowlist — that is `AEGIS_V2_TARGET_ALLOWLIST` |
+| `AEGIS_V2_RESPONSE_FILTER_MAX_CHARS` | `200000` | v2 response scan limit |
+| `AEGIS_V2_SSE_FILTER_PROBE_MAX_CHARS` | `4000` | v2 SSE streaming probe window |
+
+### Security Levels (`AEGIS_SECURITY_LEVEL`)
+
+The level does not change *which* filters run. It scales the resolved `risk_threshold` and the
+per-filter score floors (`aegisgate/config/security_level.py`):
+
+| Level | Threshold multiplier | Floor multiplier | Effective threshold with the `default` policy (`0.85`) |
+|-------|----------------------|------------------|--------------------------------------------------------|
+| `high` | ×0.90 | ×1.05 | `0.765` |
+| `medium` (default) | ×1.30 | ×0.85 | `1.0` (clamped) |
+| `low` | ×1.60 | ×0.70 | `1.0` (clamped) |
+
+The scaled value is clamped to `1.0`, so with the stock `default` policy at `medium` or `low` the
+**score-based** block path in `OutputSanitizer` never fires — the highest score an `action_map`
+`block` assigns is `0.95`. Protection at those levels comes from the hard-disposition paths instead:
+`injection_detector` and `rag_poison_guard` set a `block` disposition directly, independent of the
+threshold, as does `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`. Use `high`, or a policy YAML with a lower
+`risk_threshold` (`strict` uses `0.50`), if you want score-based blocking. Whether `medium` should
+scale at all is an open question tracked in [ROADMAP.md](ROADMAP.md).
+
+These categories are force-blocked at every level and are not reduced by research/quotation context
+(`action_map.injection_detector` + `non_reducible_categories` in `security_filters.yaml`):
+`system_exfil`, `obfuscated`, `unicode_bidi`, `tool_call_injection`, `spam_noise`.
+
+### Deployment Model
+
+AegisGate is **single-process only**. Request statistics, the admin/UI rate-limit windows, the
+in-memory HMAC nonce replay cache (`AEGIS_NONCE_CACHE_BACKEND=memory`), the compiled-rule LRU caches
+and the background prune worker are all per-process singletons. Running `uvicorn --workers > 1`, or
+several instances against one config directory, breaks those semantics silently rather than raising
+an error. Scale with a Redis storage/nonce backend and separate config directories, or scale up
+rather than out.
 
 Full configuration reference: [`aegisgate/config/settings.py`](aegisgate/config/settings.py) and [`config/.env.example`](config/.env.example).
 
@@ -478,6 +572,18 @@ The semantic service should return a JSON object:
 ```json
 {"risk_score":0.0,"tags":[],"reasons":[]}
 ```
+
+## Documentation
+
+| Document | Contents |
+|----------|----------|
+| [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) | Admin console: login, CSRF/ETag API contract, config center, rules workbench, audit explorer, which settings need a restart |
+| [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md) | Connecting CLIProxyAPI / Sub2API / AIClient-2-API, port routing vs Docker service mapping |
+| [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md) | Codex CLI, Cherry Studio, VS Code, Cursor, WSL2 |
+| [SKILL.md](SKILL.md) | Agent-executable install and integration runbook |
+| [config/README.md](config/README.md) | Mounted config directory, hot-reload limits, `model_map.json`, `gw_tokens.json` |
+| [CHANGELOG.md](CHANGELOG.md) | Release history and breaking changes |
+| [ROADMAP.md](ROADMAP.md) | Architectural work not yet done, and known trade-offs |
 
 ## Agent Skill
 

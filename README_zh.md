@@ -11,7 +11,7 @@ AegisGate 是一个自托管的流水线式安全代理，专为保护 LLM API �
 ### 核心特性
 
 - **提示词注入防护** — 多层检测：正则模式、可选语义复核（灰区门控：`AEGIS_ENABLE_SEMANTIC_MODULE` + `AEGIS_SEMANTIC_SERVICE_URL` + `AEGIS_SEMANTIC_GRAY_LOW/HIGH`）、Unicode/编码攻击检测、拼写混淆防御
-- **PII / 密钥脱敏** — 50+ 模式类别，覆盖 API Key、Token、信用卡号、身份证号、加密货币钱包地址/助记词、医疗记录等
+- **PII / 密钥脱敏** — 50+ 模式类别，覆盖 API Key、Token、信用卡号、身份证号、加密货币钱包地址/助记词、医疗记录等。注意 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三条结构化会话路由**默认只跑凭据类子集**，避免误报破坏提示词，详见 [§1.2 脱敏覆盖范围](#12-脱敏覆盖范围当前)
 - **危险响应净化** — 自动遮挡高风险 LLM 输出（Shell 命令、SQL 注入载荷、HTTP 走私），可配置安全等级（low/medium/high）
 - **OpenAI 兼容 + Anthropic Messages 接口** — 直接替换 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 及通用代理；兼容 OpenAI 兼容服务商与 Anthropic Messages 上游
 - **Anthropic ↔ OpenAI 协议转换** — Token 级 `compat` 模式自动将 Anthropic `/v1/messages` 请求转为 OpenAI `/v1/responses` 格式，Claude Code / Anthropic SDK 无需改代码即可对接 OpenAI 兼容上游（GPT-5.4 等）
@@ -22,19 +22,27 @@ AegisGate 是一个自托管的流水线式安全代理，专为保护 LLM API �
 
 > **快速开始：** 先创建 `cliproxyapi_default` 与 `sub2api-deploy_sub2api-network` 两个 external network，再执行 `docker compose up -d --build`；网关运行在 18080 端口，管理界面登录页 `http://localhost:18080/__ui__/login`
 
----
-
-AegisGate 是一个面向 LLM 调用链的安全网关。业务方把 `baseUrl` 指向网关，网关在请求/响应两侧执行安全策略，再转发到真实上游模型。支持 **MCP**（Model Context Protocol）与 **Agent SKILL** 接入，可与 Cursor/Codex 等 Agent 环境配合使用。
-
 核心目标：
 
 - 统一入口：把安全策略集中在网关层，而不是散落在各个 Agent/应用里。
 - 降低泄露面：请求侧脱敏与输入清洗、响应侧风险检测与阻断。
 - 可追踪：统一审计、风险标签、自动遮挡/分割危险内容。
 
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) | 本地 Web 控制台：登录、CSRF/ETag 接口契约、配置中心、规则工作台、审计检索、哪些配置需重启 |
+| [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md) | 上游接入速查：CLIProxyAPI / Sub2API / AIClient-2-API，端口路由与 Docker 服务映射 |
+| [OTHER_TERMINAL_CLIENTS_USAGE.md](OTHER_TERMINAL_CLIENTS_USAGE.md) | Codex CLI、Cherry Studio、VS Code、Cursor、WSL2 接入 |
+| [SKILL.md](SKILL.md) | 给 Agent 直接执行的安装与接入手册 |
+| [config/README.md](config/README.md) | 挂载配置目录、热更新限制、`model_map.json`、`gw_tokens.json` |
+| [CHANGELOG.md](CHANGELOG.md) | 变更历史与破坏性变更 |
+| [ROADMAP.md](ROADMAP.md) | 尚未落地的架构级工作与已知取舍 |
+
 ## 上游接入
 
-本地 Web 控制台使用说明见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md)。
+> 本节是速查版；三个已验证上游的完整接入步骤（含 Docker 服务名、网络连通性排查）见 [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md)。
 
 AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。上游按各自官方文档独立安装运行，客户端请求时经网关即可。
 
@@ -76,7 +84,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - 客户端的 `Authorization: Bearer <key>` 直接透传到上游
 - 多个上游可同时使用，互不冲突
 - **无需注册 token、无需编辑配置、无需重启网关**
-- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.4 过滤模式](#24-过滤模式token__redact--token__passthrough)
+- 支持过滤模式后缀：`token__redact`（仅脱敏）或 `token__passthrough`（直接穿透），详见 [§ 2.3 过滤模式](#23-过滤模式token__redact--token__passthrough)
 - **安全默认**：纯数字端口 token（1024–65535，例如 `/v1/__gw__/t/8317/...`）默认按**仅内网**处理。对公网暴露时建议注册随机 token（推荐）或启用请求 HMAC；如需强行放开可设置 `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`。
 - **安全默认**：`token__passthrough` 会禁用全部过滤器，默认按**仅内网**处理；如需对公网放开可设置 `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE=true`（危险）。
 
@@ -462,7 +470,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
   -d '{"token":"ExampleToken24CharsAbc12","gateway_key":"<YOUR_GATEWAY_KEY>","whitelist_key":["okx_key"]}'
 ```
 
-### 2.3 协议转换（Anthropic → OpenAI）
+### 2.2 协议转换（Anthropic → OpenAI）
 
 当 token 配置了 `"compat": "openai_chat"` 时，网关自动将 Anthropic `/v1/messages` 请求转为 OpenAI `/v1/responses` 格式，并将响应转回。Claude Code 和 Anthropic SDK 无需改代码即可对接 OpenAI 兼容上游。
 
@@ -514,7 +522,7 @@ curl -X POST http://127.0.0.1:18080/__gw__/remove \
 
 接入新上游模型无需改代码：在 `config/model_map.json` 的 `allowed_models` 数组中追加即可，它与内置清单取并集——内置集合是下界，配置只能增加、不能删除或清空。注意 `config/model_map.json` 仅在启动时读取，修改后需重启网关。
 
-### 2.4 过滤模式（`token__redact` / `token__passthrough`）
+### 2.3 过滤模式（`token__redact` / `token__passthrough`）
 
 在 token 后追加 `__redact` 或 `__passthrough` 后缀，可按需切换网关对该请求的过滤行为：
 
@@ -548,7 +556,7 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 7. **安全提示**：`passthrough` 模式跳过所有安全检查，建议仅在受信环境或调试场景使用。
 8. **公网提示**：默认情况下，纯数字端口 token（1024–65535）与 `__passthrough` 模式会被公网/非内网客户端拒绝；对公网请使用随机 token（推荐），或启用 HMAC / 显式放开开关。
 
-### 2.5 Claude 接入快速示例
+### 2.4 Claude 接入快速示例
 
 ```bash
 # 非流式
@@ -757,11 +765,11 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_DANGEROUS_RESPONSE_LOG_PATH` | 危险样本日志基路径；运行时会自动按日期切分为 `dangerous_response_samples-YYYY-MM-DD` 形式，带扩展名时会保留扩展名，并自动清理 10 天前旧文件；不可写时回退 `/tmp/aegisgate/dangerous_response_samples-YYYY-MM-DD.jsonl` | `logs/dangerous_response_samples.jsonl` |
 | `AEGIS_GW_TOKENS_PATH` | token 映射文件路径 | `config/gw_tokens.json` |
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | 请求体上限 | `12000000` |
-| `AEGIS_MAX_MESSAGES_COUNT` | messages 条数上限 | `500` |
+| `AEGIS_MAX_MESSAGES_COUNT` | `messages` 条数上限（**仅对 `/v1/chat/completions` 生效**） | `500` |
 | `AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE` | 单条消息长度上限 | `250000` |
 | `AEGIS_MAX_RESPONSE_LENGTH` | 响应长度上限 | `2000000` |
 | `AEGIS_SECURITY_LEVEL` | `low`/`medium`/`high`（见下方安全级别说明） | `medium` |
-| `AEGIS_RISK_SCORE_THRESHOLD` | 全局风险评分阈值（0–1），越低越严格；策略 YAML 的 `risk_threshold` 可按策略覆盖（默认策略为 0.85） | `0.7` |
+| `AEGIS_RISK_SCORE_THRESHOLD` | 全局风险评分阈值（0–1），越低越严格。策略 YAML 声明了 `risk_threshold` 就按策略覆盖它，而仓库自带的三个策略都声明了（`default`/`permissive` = 0.85，`strict` = 0.50），因此该值只对**未声明该键**的策略 YAML 生效。解析后的值还会再按 `AEGIS_SECURITY_LEVEL` 缩放，见 [§5.2](#52-安全级别aegis_security_level) | `0.7` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用语义复核（灰区门控：仅当风险评分落在 `(AEGIS_SEMANTIC_GRAY_LOW, AEGIS_SEMANTIC_GRAY_HIGH)` 才触发） | `true` |
 | `AEGIS_SEMANTIC_SERVICE_URL` | 当前主链路使用的语义服务地址；留空时**仅灰区触发**会记录 `semantic_service_unconfigured` 并降级（不做语义风险抬升） | 空 |
 | `AEGIS_SEMANTIC_GRAY_LOW` | 语义复核灰区下界（0–1） | `0.25` |
@@ -825,15 +833,32 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 | `low`            | 极宽松，基本只脱敏    | 阈值放大（×1.60），地板大幅降低（×0.70），几乎不触发 risk-based 拦截 |
 
 
-**所有级别下，`disposition=block` 的特殊类别始终强制拦截**（不受阈值影响）：
+**缩放后的阈值会被 clamp 到 `1.0`**。因此在仓库自带的 `default` 策略下，`medium` 与 `low` 的有效阈值都是 `1.0`：
 
-- `system_exfil`（系统提示泄露）
-- `obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）
-- `unicode_bidi`（bidi 方向控制攻击）
-- `tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等约 26 种模式）
-- `spam_noise`（赌博/色情/平台垃圾内容噪声，>=2 类别组合时触发）
+| 级别 | `default`（0.85） | `strict`（0.50） |
+| --- | --- | --- |
+| `high` | 0.765 | 0.45 |
+| `medium`（默认） | **1.0** | 0.65 |
+| `low` | **1.0** | 0.80 |
 
-以上五项同时列入 `non_reducible_categories`：即使命中「研究/教学/引用」等讨论上下文，风险分也不会被下调。
+`action_map` 的 `block` 最高把风险分抬到 `0.95`，所以 `medium` / `low` + `default` 策略下，
+`OutputSanitizer` 里**基于分数**的拦截分支不会触发。这两档的防护来自不依赖阈值的硬处置路径
+（见下），以及 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。需要基于分数的拦截请用 `high`，
+或改用 `risk_threshold` 更低的策略 YAML（`strict` 为 0.50）。
+`medium` 是否应该参与缩放属于未决问题，记录在 [ROADMAP.md](ROADMAP.md)。
+
+**不依赖阈值的硬处置**：`injection_detector` 与 `rag_poison_guard` 的 `block` 会直接设置
+`request_disposition` / `response_disposition`，任何级别下都强制拦截：
+
+- `injection_detector`：`system_exfil`（系统提示泄露）、`obfuscated`（编码混淆攻击，含消息级多脚本噪声注入）、`unicode_bidi`（bidi 方向控制攻击）、`tool_call_injection`（伪造工具调用，覆盖 OpenAI/Anthropic/Gemini/Bedrock/ReAct/MCP 等约 26 种模式）、`spam_noise`（赌博/色情/平台垃圾内容噪声，>=2 类别组合时触发）
+- `rag_poison_guard`：`ingestion_poison`、`poison_propagation`
+
+以上 `injection_detector` 的五项同时列入 `non_reducible_categories`：即使命中「研究/教学/引用」等讨论上下文，风险分也不会被下调。
+
+> **注意 `block` 语义并不统一**：`restoration`（`exfiltration` / `too_many_placeholders` /
+> `stale_mapping`）与 `sanitizer`（`system_leak`）配的 `block` **只把风险分抬到 0.95**，不设置
+> disposition，因此仍然受上表的阈值约束——在 `medium` / `low` + `default` 策略下不会真正拦截。
+> 控制台「动作映射」页把这四种动作呈现为统一语义，与此处的实现差异一并记录在 [ROADMAP.md](ROADMAP.md)。
 
 > 如果你的场景确实需要放宽 `tool_call_injection`（例如上游会正常回传工具调用的文本表示），可在 `security_filters.yaml` 中把 `action_map.injection_detector.tool_call_injection` 改为 `review`，并把它从 `non_reducible_categories` 中移除。默认保持强拦截。
 
@@ -858,6 +883,11 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 
 ## 6. 安全与边界说明
 
+- **仅支持单进程部署**：请求统计、admin/UI 限流窗口、内存态 HMAC nonce 防重放缓存
+  （`AEGIS_NONCE_CACHE_BACKEND=memory`）、规则编译 LRU 缓存与后台清理 worker 都是**进程内单例**。
+  以 `uvicorn --workers > 1` 或多实例共用同一份配置目录部署时，这些语义会**静默破裂**而不是报错
+  （统计丢数、限流与防重放被绕过）。需要水平扩展请改用 Redis 存储/nonce 后端并拆分配置目录，
+  或优先纵向扩容。
 - 网关是安全中间层，不负责上游模型参数（如 model/api-key/超时）语义正确性。
 - 默认会写日志和审计文件到本地；是否包含正文取决于日志级别与策略配置。
 - 当 `AEGIS_LOG_LEVEL=debug` 且 `AEGIS_LOG_FULL_REQUEST_BODY=true` 时，请求体会完整打印（含 function/tool 输出原文），仅建议在受控环境短时开启。

@@ -1,6 +1,6 @@
 """Observability package — metrics, tracing, and structured logging."""
 
-from aegisgate.observability.logging import configure_logging, log_event
+from aegisgate.observability.logging import configure_logging
 from aegisgate.observability.metrics import (
     get_metrics_app,
     inc_request,
@@ -9,7 +9,6 @@ from aegisgate.observability.metrics import (
 from aegisgate.observability.tracing import (
     get_tracer,
     init_tracing,
-    trace,
     trace_span,
 )
 
@@ -19,8 +18,6 @@ __all__ = [
     "get_tracer",
     "inc_request",
     "init_tracing",
-    "log_event",
     "observe_request_duration",
-    "trace",
     "trace_span",
 ]

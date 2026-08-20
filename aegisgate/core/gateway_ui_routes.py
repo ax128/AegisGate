@@ -69,6 +69,46 @@ _WWW_DIR = (Path(__file__).resolve().parents[2] / "www").resolve()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+# Every editable rule group in security_filters.yaml, addressed by its dotted
+# path. Discovery below picks up anything not listed here, so a new group in
+# the YAML shows up in the console without a code change; the seed exists so
+# a group whose last rule was deleted keeps its label and stays editable.
+_RULE_SECTION_LABELS: dict[str, str] = {
+    "redaction.pii_patterns": "PII 脱敏规则",
+    "restoration.suspicious_context_patterns": "还原可疑上下文",
+    "untrusted_content_guard.instructional_patterns": "不可信内容指令",
+    "injection_detector.direct_patterns": "直接注入规则",
+    "injection_detector.system_exfil_patterns": "提示词窃取规则",
+    "injection_detector.html_markdown_patterns": "HTML/Markdown 注入",
+    "injection_detector.remote_content_patterns": "远程内容注入",
+    "injection_detector.indirect_injection_patterns": "间接注入规则",
+    "injection_detector.remote_content_instruction_patterns": "远程内容指令",
+    "injection_detector.tool_call_injection_patterns": "工具调用注入规则",
+    "injection_detector.spam_noise_patterns": "垃圾噪声规则",
+    "rag_poison_guard.ingestion_poison_patterns": "RAG 入库投毒",
+    "rag_poison_guard.retrieval_poison_patterns": "RAG 检索投毒",
+    "rag_poison_guard.propagation_patterns": "RAG 扩散传播",
+    "privilege_guard.blocked_patterns": "越权阻断规则",
+    "anomaly_detector.command_patterns": "异常命令规则",
+    "request_sanitizer.strong_intent_patterns": "请求强意图规则",
+    "request_sanitizer.leak_check_patterns": "请求泄露检查",
+    "request_sanitizer.shape_anomaly_patterns": "请求形态异常",
+    "request_sanitizer.command_patterns": "请求命令规则",
+    "request_sanitizer.encoded_payload_patterns": "请求编码载荷",
+    "sanitizer.command_patterns": "响应命令规则",
+    "sanitizer.force_block_command_patterns": "强制阻断命令",
+    "sanitizer.encoded_payload_patterns": "响应编码载荷",
+    "sanitizer.system_leak_patterns": "系统信息泄露",
+    "sanitizer.unsafe_markup_patterns": "不安全标记",
+    "sanitizer.unsafe_uri_patterns": "不安全 URI",
+    "tool_call_guard.parameter_rules": "工具参数规则",
+    "tool_call_guard.dangerous_param_patterns": "危险参数规则",
+    "tool_call_guard.semantic_approval_patterns": "语义放行规则",
+    "post_restore_guard.lure_patterns": "还原后诱导规则",
+    "post_restore_guard.secret_patterns": "还原后密钥规则",
+}
+
+
 def register_ui_routes(app: FastAPI) -> None:
     """Register all UI, key management, rules CRUD, and compose endpoints on *app*."""
 
@@ -640,45 +680,6 @@ def register_ui_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
     # Security rules YAML CRUD
     # ------------------------------------------------------------------
-
-    # Every editable rule group in security_filters.yaml, addressed by its dotted
-    # path. Discovery below picks up anything not listed here, so a new group in
-    # the YAML shows up in the console without a code change; the seed exists so
-    # a group whose last rule was deleted keeps its label and stays editable.
-    _RULE_SECTION_LABELS: dict[str, str] = {
-        "redaction.pii_patterns": "PII 脱敏规则",
-        "restoration.suspicious_context_patterns": "还原可疑上下文",
-        "untrusted_content_guard.instructional_patterns": "不可信内容指令",
-        "injection_detector.direct_patterns": "直接注入规则",
-        "injection_detector.system_exfil_patterns": "提示词窃取规则",
-        "injection_detector.html_markdown_patterns": "HTML/Markdown 注入",
-        "injection_detector.remote_content_patterns": "远程内容注入",
-        "injection_detector.indirect_injection_patterns": "间接注入规则",
-        "injection_detector.remote_content_instruction_patterns": "远程内容指令",
-        "injection_detector.tool_call_injection_patterns": "工具调用注入规则",
-        "injection_detector.spam_noise_patterns": "垃圾噪声规则",
-        "rag_poison_guard.ingestion_poison_patterns": "RAG 入库投毒",
-        "rag_poison_guard.retrieval_poison_patterns": "RAG 检索投毒",
-        "rag_poison_guard.propagation_patterns": "RAG 扩散传播",
-        "privilege_guard.blocked_patterns": "越权阻断规则",
-        "anomaly_detector.command_patterns": "异常命令规则",
-        "request_sanitizer.strong_intent_patterns": "请求强意图规则",
-        "request_sanitizer.leak_check_patterns": "请求泄露检查",
-        "request_sanitizer.shape_anomaly_patterns": "请求形态异常",
-        "request_sanitizer.command_patterns": "请求命令规则",
-        "request_sanitizer.encoded_payload_patterns": "请求编码载荷",
-        "sanitizer.command_patterns": "响应命令规则",
-        "sanitizer.force_block_command_patterns": "强制阻断命令",
-        "sanitizer.encoded_payload_patterns": "响应编码载荷",
-        "sanitizer.system_leak_patterns": "系统信息泄露",
-        "sanitizer.unsafe_markup_patterns": "不安全标记",
-        "sanitizer.unsafe_uri_patterns": "不安全 URI",
-        "tool_call_guard.parameter_rules": "工具参数规则",
-        "tool_call_guard.dangerous_param_patterns": "危险参数规则",
-        "tool_call_guard.semantic_approval_patterns": "语义放行规则",
-        "post_restore_guard.lure_patterns": "还原后诱导规则",
-        "post_restore_guard.secret_patterns": "还原后密钥规则",
-    }
 
     _RULE_FILTER_LABELS: dict[str, str] = {
         "redaction": "脱敏",
