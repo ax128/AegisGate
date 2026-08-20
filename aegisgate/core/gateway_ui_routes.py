@@ -48,7 +48,13 @@ from aegisgate.core.gateway_ui_config import (
     _ui_config_payload,
     _write_env_updates,
 )
-from aegisgate.core.rules_editor import RuleEdit, render_rules_yaml, render_scalar_updates
+from aegisgate.core.rules_editor import (
+    RuleEdit,
+    render_leaf_ops,
+    render_rule_with_leaf_ops,
+    render_rules_yaml,
+    render_scalar_updates,
+)
 from aegisgate.core.rules_write import (
     RulesChange,
     RulesSnapshot,
@@ -717,9 +723,19 @@ def register_ui_routes(app: FastAPI) -> None:
     # viewable, not editable.
     _READONLY_SECTIONS: frozenset[str] = frozenset({"tool_call_guard.parameter_rules"})
 
+    # Groups the request-redaction panel now owns end to end. The CRUD endpoints
+    # stay open — that panel drives them — but the generic rules workbench stops
+    # listing them, so a PII rule has exactly one place to be edited from and the
+    # relaxed-set consequences of a delete are always shown.
+    _PANEL_OWNED_SECTIONS: frozenset[str] = frozenset({"redaction.pii_patterns"})
+
     # Per-rule metadata the editor may write besides id/regex. Anything else in an
     # existing rule is preserved untouched on update.
     _RULE_EXTRA_STRING_FIELDS: frozenset[str] = frozenset({"kind", "category", "tool", "param"})
+    # `enabled` decides whether the rule is compiled at all, so it must stay a
+    # real bool: running it through the string path above would write the YAML
+    # scalar "False", which is a non-empty string and therefore true.
+    _RULE_EXTRA_BOOL_FIELDS: frozenset[str] = frozenset({"enabled"})
 
     def _looks_like_rule_list(value: object) -> bool:
         if not isinstance(value, list) or not value:
@@ -763,6 +779,7 @@ def register_ui_routes(app: FastAPI) -> None:
             info["filter"] = filter_key
             info["filter_label"] = _RULE_FILTER_LABELS.get(filter_key, filter_key)
             info["readonly"] = section_id in _READONLY_SECTIONS
+            info["hidden"] = section_id in _PANEL_OWNED_SECTIONS
         return found
 
     def _resolve_rules_file() -> Path:
@@ -891,6 +908,14 @@ def register_ui_routes(app: FastAPI) -> None:
             if key in body:
                 target[key] = str(body[key])
                 applied[key] = target[key]
+        for key in _RULE_EXTRA_BOOL_FIELDS:
+            if key in body:
+                if not isinstance(body[key], bool):
+                    raise RulesWriteError(
+                        "invalid_type", f"{key} 必须是 JSON 布尔值", status=400
+                    )
+                target[key] = body[key]
+                applied[key] = target[key]
         if isinstance(body.get("patterns"), list):
             target["patterns"] = body["patterns"]
             applied["patterns"] = target["patterns"]
@@ -908,6 +933,7 @@ def register_ui_routes(app: FastAPI) -> None:
                 "filter_label": info["filter_label"],
                 "count": len(_get_section_list(data, info["path"])),
                 "readonly": info["readonly"],
+                "hidden": info["hidden"],
             }
             for info in discovered.values()
         ]
@@ -1052,7 +1078,22 @@ def register_ui_routes(app: FastAPI) -> None:
         )
 
     @app.delete("/__ui__/api/rules/{section}/{rule_id}")
-    async def local_ui_rules_delete(section: str, rule_id: str, request: Request) -> JSONResponse:
+    async def local_ui_rules_delete(
+        section: str,
+        rule_id: str,
+        request: Request,
+        confirm_referenced: bool = False,
+        confirm_empty: bool = False,
+    ) -> JSONResponse:
+        """Delete a rule, settling its ``relaxed_pii_ids`` membership in the same write.
+
+        There is deliberately no "409, this rule is referenced": a dangling
+        relaxed member changes no behaviour — the filter is a set intersection
+        and simply skips it — so refusing would force an admin through a
+        relaxed-mode migration to fix something harmless.
+        """
+        from aegisgate.core.request_redaction_settings import relaxed_cleanup_for_deleted_rule
+
         def build(snapshot: RulesSnapshot) -> RulesChange:
             data = snapshot.data
             info = _rule_section_or_error(data, section)
@@ -1065,20 +1106,43 @@ def register_ui_routes(app: FastAPI) -> None:
             if len(new_items) == len(items):
                 raise RulesWriteError("rule_not_found", f"规则 '{rule_id}' 不存在", status=404)
             _set_section_list(data, info["path"], new_items)
-            return _rules_change(
-                snapshot,
-                data,
-                info,
-                RuleEdit(path=list(info["path"]), op="delete", rule_id=rule_id),
-                audit={"section": info["id"], "rule_id": rule_id, "operation": "delete"},
-                payload={"section": info["id"]},
+
+            ops: list[Any] = []
+            relaxed_note: dict[str, Any] = {}
+            if info["id"] == "redaction.pii_patterns":
+                ops, relaxed_note = relaxed_cleanup_for_deleted_rule(
+                    data.get("redaction") or {},
+                    rule_id,
+                    confirm_referenced=confirm_referenced,
+                    confirm_empty=confirm_empty,
+                )
+            edit = RuleEdit(path=list(info["path"]), op="delete", rule_id=rule_id)
+            text = (
+                render_rule_with_leaf_ops(snapshot.text, data, edit, ops)
+                if snapshot.exists
+                else None
+            )
+            return RulesChange(
+                expected=data,
+                text=text,
+                changed_top_keys=(str(info["path"][0]),),
+                audit={
+                    "section": info["id"],
+                    "rule_id": rule_id,
+                    "operation": "delete",
+                    **relaxed_note,
+                },
+                payload={"section": info["id"], "relaxed": relaxed_note},
             )
 
         result = await _run_rules_write(build, request=request, event="ui_rule_deleted")
         if isinstance(result, JSONResponse):
             return result
         return with_etag(
-            JSONResponse(content={"ok": True, "section": result["section"]}), result["etag"]
+            JSONResponse(
+                content={"ok": True, "section": result["section"], **result["relaxed"]}
+            ),
+            result["etag"],
         )
 
     @app.post("/__ui__/api/rules_test")
@@ -1203,6 +1267,56 @@ def register_ui_routes(app: FastAPI) -> None:
 
         payload = await asyncio.to_thread(build_settings_payload)
         return with_etag(JSONResponse(content=payload), _rules_etag())
+
+    @app.patch("/__ui__/api/request_redaction/settings")
+    async def local_ui_request_redaction_patch(request: Request) -> JSONResponse:
+        """Apply one strongly typed domain change to the redaction config.
+
+        No arbitrary key paths: the accepted shapes are named operations
+        (``set_mode``, ``set_membership``, ``materialize_custom``,
+        ``remove_unresolved``) plus three scalar values. Everything is validated
+        inside the write transaction against the document read under the lock, so
+        "is this a known id?" is answered about the bytes being edited.
+
+        Unlike ``/rules/{section}``, this endpoint **requires** a concrete
+        ``If-Match``. It is new, so there is no client that predates the header,
+        and the whole point of these operations is that they rewrite a list the
+        caller was looking at.
+        """
+        from aegisgate.core.request_redaction_settings import (
+            apply_settings_patch,
+            build_settings_payload,
+        )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            ops, audit = apply_settings_patch(body, data)
+            text = (
+                render_leaf_ops(snapshot.text, data, ops) if snapshot.exists else None
+            )
+            return RulesChange(
+                expected=data,
+                text=text,
+                changed_top_keys=("redaction",),
+                audit={"section": "redaction", **audit},
+                payload={},
+            )
+
+        result = await _run_rules_write(
+            build,
+            request=request,
+            event="ui_request_redaction_settings_updated",
+            require_if_match=True,
+        )
+        if isinstance(result, JSONResponse):
+            return result
+        payload = await asyncio.to_thread(build_settings_payload)
+        return with_etag(JSONResponse(content={"ok": True, **payload}), result["etag"])
 
     # ------------------------------------------------------------------
     # Exact-value redaction management

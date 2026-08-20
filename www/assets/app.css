@@ -2812,3 +2812,74 @@ tr.search-hidden { display: none; }
 }
 
 .rr-jump:hover { text-decoration: underline; }
+
+/* Two-state controls in the PII table. They read as pills rather than switches
+   because the row already carries six state badges; another switch track next to
+   those would be one more thing to decode. State is in the label, not only the
+   colour. */
+.rr-toggle {
+  border: 1px solid var(--separator);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  background: var(--fill-3);
+  color: var(--label-2);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  white-space: nowrap;
+}
+
+.rr-toggle.on {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  color: var(--success);
+}
+
+.rr-toggle:hover:not(:disabled) { background: var(--fill-2); }
+
+.rr-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.rr-modes {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--fill-3);
+  border-radius: var(--radius-sm);
+}
+
+.rr-mode {
+  border: none;
+  background: transparent;
+  color: var(--label-2);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: calc(var(--radius-sm) - 3px);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.rr-mode:hover:not(:disabled) { color: var(--label-1); }
+
+.rr-mode.active {
+  background: var(--bg-elevated);
+  color: var(--label-1);
+  box-shadow: var(--shadow-sm);
+  cursor: default;
+}
+
+.rr-number {
+  width: 5.5rem;
+  padding: 2px 8px;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--label-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.rr-heading .btn-sm { margin-left: auto; }

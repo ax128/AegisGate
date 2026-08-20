@@ -11,7 +11,11 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
-from aegisgate.config.security_rules import load_security_rules, select_relaxed_pii_patterns
+from aegisgate.config.security_rules import (
+    load_security_rules,
+    rule_enabled,
+    select_relaxed_pii_patterns,
+)
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -210,6 +214,8 @@ def _responses_function_output_redaction_patterns() -> tuple[
     for item in redaction_rules.get("pii_patterns", []):
         if not isinstance(item, dict):
             continue
+        if not rule_enabled(item):
+            continue
         pattern_id = str(item.get("id", "PII")).upper()
         regex = item.get("regex")
         if not regex:
@@ -222,6 +228,8 @@ def _responses_function_output_redaction_patterns() -> tuple[
     if field_patterns:
         for idx, item in enumerate(field_patterns, start=1):
             if isinstance(item, dict):
+                if not rule_enabled(item):
+                    continue
                 pattern_id = str(item.get("id", f"FIELD_SECRET_{idx}")).upper()
                 regex = item.get("regex")
             else:

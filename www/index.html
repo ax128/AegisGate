@@ -114,12 +114,6 @@
               </svg>
               安全规则
             </a>
-            <a href="#redact-values" class="nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-              </svg>
-              精确值脱敏
-            </a>
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">资源</span>
@@ -394,7 +388,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>请求侧脱敏</h2>
-                <p class="panel-desc">发往上游前的 PII、字段级与精确值脱敏：各总控真正控制哪一层、每条规则在六个执行面上的真实生效面、以及两类绕过机制各自的前置条件。本版为只读视图，增删改仍在「安全规则」中进行。</p>
+                <p class="panel-desc">发往上游前的 PII、字段级与精确值脱敏：各总控真正控制哪一层、每条规则在六个执行面上的真实生效面、以及两类绕过机制各自的前置条件。PII 规则与精确值在此管理；Field 规则按实际行为只读展示。</p>
               </div>
             </div>
 
@@ -415,6 +409,52 @@
             <div id="rr-field" class="rr-block"></div>
             <div id="rr-coverage" class="rr-block"></div>
             <div id="rr-exemptions" class="rr-block"></div>
+
+            <!-- Exact-value redaction, moved in from its own top-level section.
+                 A div rather than a section: the scroll spy selects
+                 `main section[id]`, so a nested one would compete with the panel
+                 that contains it. The #redact-values bookmark still lands here,
+                 and .panel is a class selector, so the treatment is unchanged. -->
+            <div id="redact-values" class="panel rr-block">
+              <div class="panel-head">
+                <div class="panel-head-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+                  </svg>
+                </div>
+                <div class="panel-head-info">
+                  <h2>精确值脱敏</h2>
+                  <p class="panel-desc">配置需要精确匹配脱敏的敏感值（API Key、密钥等），命中后替换为 <code>[REDACTED:EXACT_VALUE]</code>，最少 10 个字符，替换不可还原。覆盖面：V1 仅对话路由（<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/messages</code>）的扁平消息文本生效，结构化内容、<code>instructions</code>、工具定义、通用 <code>/v1/&lt;subpath&gt;</code> JSON 与 multipart 均不生效；V2 需 <code>enable_exact_value_redaction</code> 与 <code>v2_enable_request_redaction</code> 同时开启。逐条覆盖面见上方「精确值与替换形态覆盖面」。</p>
+                </div>
+              </div>
+              <div class="token-toolbar">
+                <span id="redact-count" class="u-note">加载中…</span>
+                <div class="u-actions">
+                  <button id="redact-refresh" class="btn-sm-ghost" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
+                      <polyline points="23,4 23,10 17,10"/>
+                      <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                    </svg>刷新
+                  </button>
+                  <button id="redact-add" class="btn-sm" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    添加值
+                  </button>
+                </div>
+              </div>
+              <div class="token-table-wrap">
+                <table class="token-table">
+                  <thead>
+                    <tr><th scope="col">#</th><th scope="col">脱敏值（已遮蔽）</th><th scope="col">长度</th><th scope="col">操作</th></tr>
+                  </thead>
+                  <tbody id="redact-tbody">
+                    <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </section>
 
           <section id="rules" class="panel">
@@ -473,47 +513,6 @@
             </div><!-- /rules-layout -->
           </section>
 
-          <!-- Exact Value Redaction -->
-          <section id="redact-values" class="panel">
-            <div class="panel-head">
-              <div class="panel-head-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-                </svg>
-              </div>
-              <div class="panel-head-info">
-                <h2>精确值脱敏</h2>
-                <p class="panel-desc">配置需要精确匹配脱敏的敏感值（API Key、密钥等），命中后替换为 <code>[REDACTED:EXACT_VALUE]</code>，最少 10 个字符，替换不可还原。覆盖面：V1 仅对话路由（<code>/v1/chat/completions</code>、<code>/v1/responses</code>、<code>/v1/messages</code>）的扁平消息文本生效，结构化内容、<code>instructions</code>、工具定义、通用 <code>/v1/&lt;subpath&gt;</code> JSON 与 multipart 均不生效；V2 需 <code>enable_exact_value_redaction</code> 与 <code>v2_enable_request_redaction</code> 同时开启。详见<a href="#request-redaction">请求侧脱敏</a>面板。</p>
-              </div>
-            </div>
-            <div class="token-toolbar">
-              <span id="redact-count" class="u-note">加载中…</span>
-              <div class="u-actions">
-                <button id="redact-refresh" class="btn-sm-ghost" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
-                    <polyline points="23,4 23,10 17,10"/>
-                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
-                  </svg>刷新
-                </button>
-                <button id="redact-add" class="btn-sm" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  添加值
-                </button>
-              </div>
-            </div>
-            <div class="token-table-wrap">
-              <table class="token-table">
-                <thead>
-                  <tr><th scope="col">#</th><th scope="col">脱敏值（已遮蔽）</th><th scope="col">长度</th><th scope="col">操作</th></tr>
-                </thead>
-                <tbody id="redact-tbody">
-                  <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
 
           <!-- Token management -->
           <section id="tokens" class="panel">

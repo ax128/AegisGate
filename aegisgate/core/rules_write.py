@@ -40,7 +40,7 @@ from typing import Any, Callable
 
 import yaml
 
-from aegisgate.config.security_rules import resolve_rules_file
+from aegisgate.config.security_rules import resolve_rules_file, rule_enabled
 from aegisgate.core.audit import write_audit
 from aegisgate.core.regex_probe import MAX_REGEX_LEN, probe
 from aegisgate.core.ui_etag import ABSENT_ETAG, etag_for_bytes
@@ -273,6 +273,8 @@ def _pii_entries(rules: dict[str, Any], *, lowercase: bool) -> list[tuple[str, s
                 "redaction.pii_patterns 的每一项都必须是映射（含 id 与 regex）",
                 status=400,
             )
+        if not rule_enabled(item):
+            continue
         regex = item.get("regex")
         if not regex:
             continue
@@ -292,6 +294,8 @@ def _field_entries(
     for index, item in enumerate(items, start=1):
         default_id = f"FIELD_SECRET_{index}" if positional_ids else "FIELD_SECRET"
         if isinstance(item, dict):
+            if not rule_enabled(item):
+                continue
             regex = item.get("regex")
             pattern_id = str(item.get("id", default_id))
         elif isinstance(item, str):

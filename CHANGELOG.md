@@ -8,6 +8,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **PII 规则的 `enabled` 开始真正生效，并在同一版本提供对应 UI**。此前 `redaction.pii_patterns`
+  条目上的 `enabled` 字段没有任何读取者：写了 `enabled: false` 的规则照常编译、照常脱敏。
+  现在 V1 管道层、V1 转发层与 V2 三处编译循环统一读同一个谓词
+  （`config/security_rules.rule_enabled()`），控制台面板也读它——**面板显示为停用的规则，
+  不可能仍在改写流量**。
+
+  谓词是 fail-safe 的：只有显式的布尔 `false` 才停用规则。`enabled: "false"`（字符串）或
+  `enabled: 0` 一律按启用处理——对脱敏规则来说，「继续脱敏」是歧义值的安全读法，而控制台只会写真布尔。
+  legacy 的字符串形式条目没有这个字段可读，恒编译。
+
+  **升级前请检查配置里是否已存在 `enabled: false`**：这些规则此前一直在运行，本版本起将真正停用。
+  上一版本的面板会列出它们并给出「待启用语义」告警。
+  **回滚前同样需要确认**：旧版本忽略该字段，会把这些规则重新启用。
+
+- **新增 `PATCH /__ui__/api/request_redaction/settings`**，只接受强类型领域操作，不接受任意 key path：
+
+  - `relaxed.set_mode`（`default` / `all`）、`relaxed.set_membership`、
+    `relaxed.materialize_custom`、`relaxed.remove_unresolved`；
+  - `values`：`normalize_nfkc`、`strip_invisible_chars`、`request_prefix_max_len`（有界 1–64）。
+
+  该端点**强制携带具体 `If-Match`**，缺失或 `*` 返回 428。既有 `/__ui__/api/rules/{section}` 与
+  `/__ui__/api/rules_action_map` 维持「present 则校验」的历史契约不变——改成强制会让所有不发
+  `If-Match` 的既有脚本对**任意**规则组的写入直接失败。
+
+- **控制台面板可管理 PII 规则与 relaxed 集**：逐条启用/停用、逐条 relaxed 归属、增删改、
+  正则测试（复用规则工作台的正则实验室，含服务端固定对抗样本探针）、以及三个归一化参数。
+  两个控件各写一个维度：**停用不会删除 relaxed 归属**，重新启用后的范围没有隐藏状态。
+
+  relaxed 模式之间的转换不对称，因此都要求明确触发：
+
+  - 自定义 → 代码默认：**删除 YAML key**，而不是写入当前默认集合（写入会把它冻结）；
+  - 代码默认 → 自定义：以当前默认集合为基线，需要 `confirm_materialize`；
+  - 全部 → 自定义：按当前完整 configured ID 集展开，需要 `confirm`，
+    确认框列出两处已知的无害不等价（编译失败的条目会被收进来；legacy 字符串 field 条目按
+    `FIELD_SECRET_{idx}` 展开，与真正受 relaxed 过滤的 E3/E4 一致）；
+  - 任意模式 → 空列表：`confirm_empty` 二次确认并写审计。
+
+  逐条修改采用**增量语义**：未被操作的 field ID 与悬空成员原样保留。新增未知 ID 一律拒绝；
+  删除既有悬空 ID 必须走 `remove_unresolved`。存在归一化 ID 冲突时相关写入返回
+  `409 id_normalization_conflict`，不替管理员选择保留哪一条。
+
+- **删除 PII 规则会在同一次写入里处理它的 relaxed 归属**，且**没有** `409 rule_referenced`：
+  自定义列表模式下一并移除该成员（或按 `confirm_referenced=true` 保留悬空引用）；
+  代码默认模式下直接允许删除，响应附「无害悬空引用」提示并写审计——悬空 ID 只会让集合过滤跳过它
+  并记录一次告警，为此强制管理员先做一次 relaxed 模式迁移，等于把代码默认集写死进 YAML。
+
+### Changed
+
+- 精确值脱敏从独立的顶层 `<section>` 迁入「请求侧脱敏」面板，改为 `<div id="redact-values">`：
+  `#redact-values` 旧书签仍然定位正确，但滚动到该区域时侧栏高亮的是「请求侧脱敏」。
+  嵌套 `<section>` 会与包含它的面板争夺 scroll spy（选择器是 `main section[id]`），故用 `div`；
+  `.panel` 是类选择器，样式不变。精确值的旧侧栏入口已移除。
+- 规则工作台不再列出 `redaction.pii_patterns`——它现在由请求侧脱敏面板端到端管理。
+  CRUD 端点保持开放（面板正是通过它们工作），`/__ui__/api/rules` 为该组返回 `hidden: true`。
+  这样一条 PII 规则只有一个编辑入口，删除时的 relaxed 后果也总会被展示。
+- `enabled` 通过独立的布尔白名单处理，不再经过 `_RULE_EXTRA_STRING_FIELDS`——
+  后者会把值 `str()` 成 `"False"`，而非空字符串在 YAML 里是真值。非布尔值返回 400。
+- `adapters/v2_proxy/router.py` 的 `_compile_patterns` 由 `pii_patterns`、`field_value_patterns`
+  与 `sanitizer.command_patterns` 共用，因此这三组的 dict 条目现在都遵守 `enabled`。
+
+### Added
+
 - **控制台新增「请求侧脱敏」面板（只读）**，侧栏位于「安全规则」之前。此前控制台没有任何一处
   说明四个总控各自控制哪一层、一条 PII 规则到底在哪些执行面上生效，也没有说明两类绕过机制的前置条件。
   面板集中回答这些问题，**全部由服务端计算后下发，前端不做任何推导**

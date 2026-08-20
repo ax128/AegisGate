@@ -19,7 +19,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from aegisgate.config.security_rules import load_security_rules
+from aegisgate.config.security_rules import load_security_rules, rule_enabled
 from aegisgate.util.ip_safety import (
     resolve_public_ips,
     bound_connect_url,
@@ -414,6 +414,8 @@ def _compile_patterns(
             continue
     for index, item in enumerate(items or [], start=1):
         if isinstance(item, dict):
+            if not rule_enabled(item):
+                continue
             regex_value = item.get("regex")
             pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
         elif legacy_string_ids and isinstance(item, str):

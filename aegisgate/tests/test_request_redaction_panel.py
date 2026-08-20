@@ -224,20 +224,23 @@ class TestMasterSwitchOverlay:
         assert "enable_request_egress_redaction" not in source
 
 
-class TestPendingEnabledSemantics:
-    def test_enabled_false_is_reported_but_not_yet_applied(self, payload: dict) -> None:
-        assert payload["enabled_semantics_active"] is False
-        assert payload["pending_enabled_false_ids"] == ["RETIRED"]
+class TestEnabledSemantics:
+    """``enabled: false`` now actually stops the rule being compiled."""
+
+    def test_a_disabled_rule_leaves_every_surface(self, payload: dict) -> None:
+        assert payload["enabled_semantics_active"] is True
+        assert payload["pending_enabled_false_ids"] == []
         retired = _rule(payload, "RETIRED")
         assert retired["enabled"] is False
-        # The running code ignores the flag, so the surfaces must say "running".
-        assert retired["enabled_runtime"] is True
-        assert retired["effective_surfaces"]["v1_pipeline_other"] is True
+        assert retired["enabled_runtime"] is False
+        assert not any(retired["effective_surfaces"].values())
 
-    def test_the_panel_warns_instead_of_showing_a_disabled_row(self) -> None:
-        js = _APP_JS.read_text(encoding="utf-8")
-        assert "待启用语义" in js
-        assert "检测到待启用语义的配置，当前版本尚未执行" in js
+    def test_disabling_does_not_touch_relaxed_membership(self, payload: dict) -> None:
+        """v4 §2.3: the two controls write one dimension each."""
+        retired = _rule(payload, "RETIRED")
+        assert retired["relaxed_member"] is False
+        token = _rule(payload, "TOKEN")
+        assert token["relaxed_member"] is True
 
 
 class TestFieldRules:
@@ -371,11 +374,15 @@ class TestNoClientSideDerivation:
     def test_the_panel_never_recomputes_relaxed_membership(self) -> None:
         js = _APP_JS.read_text(encoding="utf-8")
         panel = js[js.index("// ─── Request-side redaction"):]
-        # Reading `relaxed_member` to draw a column is fine; testing membership
-        # against an id list in the browser is the drift this forbids.
+        # Reading `relaxed_member` / `relaxed_reference` to draw a column or word
+        # a dialog is fine; testing membership against an id list in the browser
+        # is the drift this forbids — including in the confirmation copy, where a
+        # wrong consequence is worse than none.
         assert "default_relaxed_ids.includes" not in panel
         assert "v2_effective_ids.includes" not in panel
         assert "relaxed_ids_resolved.includes" not in panel
+        assert "relaxed_ids_explicit.some" not in panel
+        assert "relaxed_ids_explicit.filter" not in panel
 
     def test_the_stats_card_states_the_real_measure(self) -> None:
         js = _APP_JS.read_text(encoding="utf-8")
@@ -384,33 +391,41 @@ class TestNoClientSideDerivation:
         assert "不含 V1 转发层替换、V2 替换与精确值替换" in js
 
 
-class TestOldEntriesSurvive:
-    def test_the_rules_and_exact_value_nav_entries_are_still_there(self) -> None:
+class TestEntriesAfterTheMove:
+    def test_the_exact_value_entry_moved_into_the_panel(self) -> None:
+        """Its own sidebar entry is gone; the bookmark still lands on the block."""
+        html = _INDEX.read_text(encoding="utf-8")
+        assert 'href="#redact-values"' not in html
+        assert re.search(r'<div id="redact-values" class="panel', html)
+        assert re.search(r'<section id="redact-values"', html) is None
+
+    def test_the_moved_block_sits_inside_the_panel(self) -> None:
+        html = _INDEX.read_text(encoding="utf-8")
+        panel = html[
+            html.index('<section id="request-redaction"') : html.index('<section id="rules"')
+        ]
+        assert 'id="redact-values"' in panel
+        # A nested <section> would compete with the panel in the scroll spy,
+        # which selects `main section[id]`.
+        assert panel.count("<section") == 1
+
+    def test_the_rules_entry_survives_and_follows_the_new_one(self) -> None:
         html = _INDEX.read_text(encoding="utf-8")
         assert 'href="#rules"' in html
-        assert 'href="#redact-values"' in html
-        assert 'href="#request-redaction"' in html
-
-    def test_the_exact_value_bookmark_still_resolves(self) -> None:
-        html = _INDEX.read_text(encoding="utf-8")
-        assert re.search(r'<section id="redact-values"', html)
-
-    def test_the_new_entry_precedes_the_rules_entry(self) -> None:
-        html = _INDEX.read_text(encoding="utf-8")
         assert html.index('href="#request-redaction"') < html.index('href="#rules"')
 
-    def test_old_pii_crud_still_works(self, client) -> None:
+    def test_the_pii_group_is_hidden_from_the_rules_workbench(self, client) -> None:
+        sections = {s["id"]: s for s in client.get("/__ui__/api/rules").json()["sections"]}
+        assert sections["redaction.pii_patterns"]["hidden"] is True
+        assert sections["injection_detector.direct_patterns"]["hidden"] is False
+
+    def test_the_crud_endpoints_stay_open_for_the_panel(self, client) -> None:
+        """Hidden in the workbench, still driven by the panel."""
         assert client.post(
             "/__ui__/api/rules/pii_patterns", json={"id": "STILL_EDITABLE", "regex": "s"}
         ).status_code == 201
         ids = [item["id"] for item in client.get("/__ui__/api/rules/pii_patterns").json()["items"]]
         assert "STILL_EDITABLE" in ids
-
-    def test_the_panel_is_read_only(self, client) -> None:
-        """No PATCH route yet: full management lands with the enabled semantics."""
-        assert client.patch(
-            "/__ui__/api/request_redaction/settings", json={}
-        ).status_code == 405
 
 
 class TestCollisionBlocking:
@@ -451,7 +466,7 @@ class TestRelaxedModes:
             assert payload["relaxed_ids_resolved"] is None
             assert all(rule["relaxed_editable"] is False for rule in payload["pii_rules"])
 
-    def test_all_mode_puts_every_rule_on_the_relaxed_surfaces(
+    def test_all_mode_puts_every_enabled_rule_on_the_relaxed_surfaces(
         self, rules_file: Path
     ) -> None:
         rules_file.write_text(
@@ -462,7 +477,8 @@ class TestRelaxedModes:
             encoding="utf-8",
         )
         for rule in build_settings_payload()["pii_rules"]:
-            assert rule["effective_surfaces"]["v1_forward_multipart"] is True
+            # "*" is about membership; a disabled rule is not compiled at all.
+            assert rule["effective_surfaces"]["v1_forward_multipart"] is rule["enabled"]
 
 
 class TestMalformedEntries:
