@@ -10,8 +10,13 @@ patterns) and losing them silently is real information loss.
 So a rule edit is applied as a **line-level patch** to the original text: only
 the lines belonging to the affected rule change, everything else stays byte for
 byte. Text surgery on YAML is fragile, so the result is never trusted blindly —
-it is re-parsed and compared against the structure the caller intended. Only an
-exact match is written; anything else falls back to the old dump path, loudly.
+it is re-parsed and compared against the structure the caller intended.
+
+Only an exact match is returned. There is deliberately **no dump fallback**: a
+write that silently swaps the documented policy file for a comment-free dump and
+then reports success is worse than a write that refuses. Every renderer here
+returns ``None`` when it cannot produce a verified patch, and the caller turns
+that into a non-2xx response without touching the file.
 """
 
 from __future__ import annotations
@@ -38,6 +43,20 @@ class RuleEdit:
     op: str  # "add" | "update" | "delete"
     rule_id: str
     fields: dict[str, Any] | None = None
+
+
+@dataclass
+class LeafOp:
+    """One key-path level change: set a value, or remove the key entirely.
+
+    ``delete`` is what restores "use the built-in default" for a key like
+    ``redaction.relaxed_pii_ids``: writing today's default set back into the file
+    would freeze it, so the key is removed instead.
+    """
+
+    path: list[str]
+    op: str  # "set" | "delete"
+    value: Any = None
 
 
 def _is_skippable(line: str) -> bool:
@@ -81,17 +100,46 @@ def _find_key(lines: list[str], start: int, end: int, key: str) -> tuple[int, in
     return None
 
 
-def _locate_list(lines: list[str], path: list[str]) -> tuple[int, int, int] | None:
-    """Resolve *path* to its list block: ``(first_item, end, item_indent)``."""
+def _flush_list_end(lines: list[str], start: int, indent: int) -> int:
+    """End of a list whose items sit at the *same* indent as their key.
+
+    ``yaml.dump`` writes lists that way, so any file that ever went through the
+    old dump path has this shape — and ``_block_end`` reports such a block as
+    empty, because the first item already dedents to the key's own level.
+    """
+    for index in range(start, len(lines)):
+        if _is_skippable(lines[index]):
+            continue
+        line_indent = _indent_of(lines[index])
+        if line_indent < indent:
+            return index
+        if line_indent == indent and not _ITEM_RE.match(lines[index]):
+            return index
+    return len(lines)
+
+
+def _locate_list(lines: list[str], path: list[str]) -> tuple[int, int, int, int] | None:
+    """Resolve *path* to its list: ``(key_line, first_item, end, item_indent)``.
+
+    An empty list written inline as ``key: []`` is normalised in place to a block
+    key so a first item can be added back to a group whose rules were all
+    deleted.
+    """
     start, end, parent_indent = 0, len(lines), -1
     key_index = -1
-    for key in path:
+    for depth, key in enumerate(path):
         found = _find_key(lines, start, end, key)
         if found is None:
             return None
         key_index, key_indent = found
-        if _KEY_RE.match(lines[key_index]).group(3):  # type: ignore[union-attr]
-            return None  # key has an inline value, so it is not a block list
+        match = _KEY_RE.match(lines[key_index])
+        if match is None:
+            return None
+        inline = match.group(3).strip()
+        if inline:
+            if inline != "[]" or depth != len(path) - 1:
+                return None  # an inline value this cannot patch
+            lines[key_index] = f"{match.group(1)}{match.group(2)}:"
         start = key_index + 1
         end = _block_end(lines, start, key_indent)
         parent_indent = key_indent
@@ -99,12 +147,20 @@ def _locate_list(lines: list[str], path: list[str]) -> tuple[int, int, int] | No
     for index in range(start, end):
         if _is_skippable(lines[index]):
             continue
-        match = _ITEM_RE.match(lines[index])
-        if not match:
+        item = _ITEM_RE.match(lines[index])
+        if not item:
             return None  # first payload line is not a list item
-        return index, end, len(match.group(1))
-    # An empty list block: items would go directly under the key.
-    return start, end, parent_indent + 2
+        return key_index, index, end, len(item.group(1))
+
+    # The indented block is empty. Either the list is written flush with its key,
+    # or there really are no items and new ones go one level in.
+    for index in range(start, len(lines)):
+        if _is_skippable(lines[index]):
+            continue
+        if _ITEM_RE.match(lines[index]) and _indent_of(lines[index]) == parent_indent:
+            return key_index, index, _flush_list_end(lines, index, parent_indent), parent_indent
+        break
+    return key_index, start, end, parent_indent + 2
 
 
 def _entry_ranges(lines: list[str], start: int, end: int, item_indent: int) -> list[tuple[int, int]]:
@@ -209,7 +265,7 @@ def apply_edit(text: str, edit: RuleEdit) -> str | None:
     located = _locate_list(lines, edit.path)
     if located is None:
         return None
-    list_start, list_end, item_indent = located
+    key_index, list_start, list_end, item_indent = located
     ranges = _entry_ranges(lines, list_start, list_end, item_indent)
 
     if edit.op == "add":
@@ -246,6 +302,13 @@ def apply_edit(text: str, edit: RuleEdit) -> str | None:
         while stop > first + 1 and _is_skippable(lines[stop - 1]):
             stop -= 1
         del lines[first:stop]
+        if len(ranges) == 1:
+            # That was the last rule. A bare ``key:`` parses as null, not as an
+            # empty list, so the emptiness has to be written out.
+            key_match = _KEY_RE.match(lines[key_index])
+            if key_match is None:
+                return None
+            lines[key_index] = f"{key_match.group(1)}{key_match.group(2)}: []"
         return "\n".join(lines) + "\n"
 
     if edit.op == "update":
@@ -267,90 +330,221 @@ def apply_edit(text: str, edit: RuleEdit) -> str | None:
     return None
 
 
-def render_rules_yaml(text: str, expected: dict, edit: RuleEdit) -> str:
-    """YAML text for *expected*, keeping comments when the patch verifies.
+def _key_path_absent(text: str, path: list[str]) -> bool:
+    try:
+        node: Any = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return False
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+        if node is None:
+            return True
+    return False
+
+
+def render_rules_yaml(text: str, expected: dict, edit: RuleEdit) -> str | None:
+    """YAML text for *expected* with comments intact, or ``None``.
 
     The patched text is re-parsed and compared with *expected* in full; only an
-    exact match is returned. Otherwise this falls back to a plain dump — correct,
-    but comment-free — and says so in the log.
+    exact match is returned. ``None`` means the file's shape is not one this
+    module can patch safely — the caller must fail the write rather than dump.
     """
     patched = apply_edit(text, edit)
-    if patched is not None:
-        try:
-            if yaml.safe_load(patched) == expected:
-                return patched
-            logger.warning(
-                "rules edit patch verification mismatch path=%s op=%s id=%s; falling back to full dump "
-                "(comments in security_filters.yaml will be lost)",
-                ".".join(edit.path), edit.op, edit.rule_id,
-            )
-        except yaml.YAMLError as exc:
-            logger.warning(
-                "rules edit patch produced invalid YAML path=%s op=%s id=%s error=%s; "
-                "falling back to full dump",
-                ".".join(edit.path), edit.op, edit.rule_id, exc,
-            )
-    else:
+    if patched is None and edit.op == "add" and _key_path_absent(text, edit.path):
+        # The group's key is absent from the file altogether — a hand-edited
+        # config, since the console writes ``key: []`` when the last rule goes.
+        # Write the list out once so the group is not a dead end. Shapes that do
+        # exist but cannot be patched stay a refusal: silently reformatting
+        # someone's file is what this module is here to avoid.
+        target: Any = expected
+        for key in edit.path:
+            target = target.get(key) if isinstance(target, dict) else None
+        if isinstance(target, list):
+            patched = apply_leaf_ops(text, [LeafOp(list(edit.path), "set", target)])
+    if patched is None:
         logger.warning(
-            "rules edit could not be applied as a text patch path=%s op=%s id=%s; "
-            "falling back to full dump (comments will be lost)",
+            "rules edit could not be applied as a text patch path=%s op=%s id=%s",
             ".".join(edit.path), edit.op, edit.rule_id,
         )
-    return yaml.dump(expected, allow_unicode=True, default_flow_style=False, sort_keys=False)
-
-
-# ---------------------------------------------------------------------------
-# action_map: leaf-scalar updates on an existing key path
-# ---------------------------------------------------------------------------
-
-def apply_scalar_update(text: str, path: list[str], value: Any) -> str | None:
-    """Replace the inline value of an existing ``a: b: c`` key path."""
-    lines = text.splitlines()
-    start, end = 0, len(lines)
-    for depth, key in enumerate(path):
-        found = _find_key(lines, start, end, key)
-        if found is None:
-            return None  # key path does not exist yet; caller falls back
-        key_index, key_indent = found
-        match = _KEY_RE.match(lines[key_index])
-        if match is None:
-            return None
-        if depth == len(path) - 1:
-            existing = match.group(3).strip()
-            if not existing or existing.startswith(("|", ">", "#")):
-                return None
-            rendered = _emit_scalar(value)
-            if rendered is None:
-                return None
-            lines[key_index] = f"{match.group(1)}{key}: {rendered}"
-            return "\n".join(lines) + "\n"
-        if match.group(3):
-            return None  # intermediate key has an inline value
-        start = key_index + 1
-        end = _block_end(lines, start, key_indent)
-    return None
-
-
-def render_scalar_updates(text: str, expected: dict, updates: list[tuple[list[str], Any]]) -> str:
-    """Like :func:`render_rules_yaml`, for a batch of leaf-scalar updates."""
-    patched = text
-    for path, value in updates:
-        result = apply_scalar_update(patched, path, value)
-        if result is None:
-            logger.warning(
-                "action_map patch could not be applied path=%s; falling back to full dump "
-                "(comments in security_filters.yaml will be lost)",
-                ".".join(path),
-            )
-            return yaml.dump(expected, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        patched = result
+        return None
     try:
         if yaml.safe_load(patched) == expected:
             return patched
-    except yaml.YAMLError:
-        pass
+    except yaml.YAMLError as exc:
+        logger.warning(
+            "rules edit patch produced invalid YAML path=%s op=%s id=%s error=%s",
+            ".".join(edit.path), edit.op, edit.rule_id, exc,
+        )
+        return None
     logger.warning(
-        "action_map patch verification mismatch; falling back to full dump "
-        "(comments in security_filters.yaml will be lost)"
+        "rules edit patch verification mismatch path=%s op=%s id=%s",
+        ".".join(edit.path), edit.op, edit.rule_id,
     )
-    return yaml.dump(expected, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Leaf key paths: update, insert and delete, comments preserved
+# ---------------------------------------------------------------------------
+
+def _shallowest_indent(lines: list[str], start: int, end: int) -> int | None:
+    for index in range(start, end):
+        if _is_skippable(lines[index]):
+            continue
+        return _indent_of(lines[index])
+    return None
+
+
+def _trimmed_end(lines: list[str], start: int, end: int) -> int:
+    """*end* with trailing blank/comment lines excluded.
+
+    Those lines sit inside the block only by indentation; in practice they
+    introduce whatever comes next. Sweeping them into a replaced or deleted block
+    is exactly the silent comment loss this module exists to prevent.
+    """
+    stop = end
+    while stop > start and _is_skippable(lines[stop - 1]):
+        stop -= 1
+    return stop
+
+
+def _resolve_container(
+    lines: list[str], path: list[str], *, create: bool
+) -> tuple[int, int, int] | None:
+    """``(start, end, child_indent)`` of the mapping that owns ``path[-1]``.
+
+    With *create* set, a missing intermediate key is written as an empty mapping
+    header so a brand-new nested key path can still be inserted.
+    """
+    start, end, indent = 0, len(lines), -1
+    for key in path[:-1]:
+        found = _find_key(lines, start, end, key)
+        if found is None:
+            if not create:
+                return None
+            child_indent = _shallowest_indent(lines, start, end)
+            if child_indent is None:
+                child_indent = indent + 2
+            insert_at = _trimmed_end(lines, start, end)
+            lines.insert(insert_at, f"{' ' * child_indent}{key}:")
+            start, end, indent = insert_at + 1, insert_at + 1, child_indent
+            continue
+        key_index, key_indent = found
+        match = _KEY_RE.match(lines[key_index])
+        if match is None or match.group(3).strip():
+            return None  # inline value: not a mapping this can descend into
+        start, end, indent = key_index + 1, _block_end(lines, key_index + 1, key_indent), key_indent
+    child_indent = _shallowest_indent(lines, start, end)
+    if child_indent is None:
+        child_indent = indent + 2
+    return start, end, child_indent
+
+
+def _render_mapping_item(entry: dict[str, Any], indent: str) -> list[str] | None:
+    rendered: list[str] = []
+    for position, (key, value) in enumerate(entry.items()):
+        scalar = _emit_scalar(value, quoted=key in _ALWAYS_QUOTED_FIELDS)
+        if scalar is None:
+            return None
+        prefix = f"{indent}- " if position == 0 else f"{indent}  "
+        rendered.append(f"{prefix}{key}: {scalar}")
+    return rendered or None
+
+
+def _render_leaf(key: str, value: Any, indent: int) -> list[str] | None:
+    """``key: value`` as lines, block-style for lists, or ``None`` if unsupported."""
+    pad = " " * indent
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return [f"{pad}{key}: []"]
+        rendered = [f"{pad}{key}:"]
+        for entry in value:
+            if isinstance(entry, dict):
+                item_lines = _render_mapping_item(entry, pad + "  ")
+                if item_lines is None:
+                    return None
+                rendered.extend(item_lines)
+                continue
+            item = _emit_scalar(entry)
+            if item is None:
+                return None
+            rendered.append(f"{pad}  - {item}")
+        return rendered
+    scalar = _emit_scalar(value)
+    if scalar is None:
+        return None
+    return [f"{pad}{key}: {scalar}"]
+
+
+def _apply_leaf_op(lines: list[str], op: LeafOp) -> bool:
+    if not op.path or op.op not in {"set", "delete"}:
+        return False
+    container = _resolve_container(lines, op.path, create=op.op == "set")
+    if container is None:
+        return False
+    start, end, child_indent = container
+    key = op.path[-1]
+    found = _find_key(lines, start, end, key)
+
+    if found is None:
+        if op.op == "delete":
+            return True  # already absent: the requested end state
+        rendered = _render_leaf(key, op.value, child_indent)
+        if rendered is None:
+            return False
+        insert_at = _trimmed_end(lines, start, end)
+        lines[insert_at:insert_at] = rendered
+        return True
+
+    key_index, key_indent = found
+    stop = _trimmed_end(lines, key_index + 1, _block_end(lines, key_index + 1, key_indent))
+    # Replacing or dropping a block that documents itself would destroy the very
+    # comments this module protects, so that shape is refused instead.
+    if any(line.strip().startswith("#") for line in lines[key_index + 1 : stop]):
+        return False
+    if op.op == "delete":
+        del lines[key_index:stop]
+        return True
+    rendered = _render_leaf(key, op.value, key_indent)
+    if rendered is None:
+        return False
+    lines[key_index:stop] = rendered
+    return True
+
+
+def apply_leaf_ops(text: str, ops: list[LeafOp]) -> str | None:
+    """Apply every op to *text* in memory, or ``None`` if any shape is unsupported."""
+    lines = text.splitlines()
+    for op in ops:
+        if not _apply_leaf_op(lines, op):
+            return None
+    return "\n".join(lines) + "\n"
+
+
+def render_leaf_ops(text: str, expected: dict, ops: list[LeafOp]) -> str | None:
+    """Patched text whose re-parse equals *expected*, or ``None``."""
+    patched = apply_leaf_ops(text, ops)
+    if patched is None:
+        logger.warning(
+            "leaf patch could not be applied paths=%s",
+            ",".join(".".join(op.path) for op in ops),
+        )
+        return None
+    try:
+        if yaml.safe_load(patched) == expected:
+            return patched
+    except yaml.YAMLError as exc:
+        logger.warning("leaf patch produced invalid YAML error=%s", exc)
+        return None
+    logger.warning(
+        "leaf patch verification mismatch paths=%s",
+        ",".join(".".join(op.path) for op in ops),
+    )
+    return None
+
+
+def render_scalar_updates(
+    text: str, expected: dict, updates: list[tuple[list[str], Any]]
+) -> str | None:
+    """Like :func:`render_rules_yaml`, for a batch of leaf updates."""
+    return render_leaf_ops(text, expected, [LeafOp(list(path), "set", value) for path, value in updates])

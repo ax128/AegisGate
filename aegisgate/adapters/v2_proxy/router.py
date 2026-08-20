@@ -76,7 +76,10 @@ _DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
         rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{_DEFAULT_FIELD_VALUE_MIN_LEN},}}",
     ),
 )
-_V2_RELAXED_PII_IDS = frozenset(
+# Public so the console can report the V2 request-redaction id set without
+# reaching into this adapter's private names. The underscore alias stays for the
+# existing in-module call sites.
+V2_RELAXED_PII_IDS = frozenset(
     {
         "TOKEN",
         "JWT",
@@ -95,6 +98,7 @@ _V2_RELAXED_PII_IDS = frozenset(
         "AUTH_BEARER",
     }
 )
+_V2_RELAXED_PII_IDS = V2_RELAXED_PII_IDS
 _V2_NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
 )
@@ -383,19 +387,42 @@ async def close_v2_async_client() -> None:
 
 
 def _compile_patterns(
-    items: list[dict[str, Any]] | None, fallback: tuple[tuple[str, str], ...]
+    items: list[Any] | None,
+    fallback: tuple[tuple[str, str], ...],
+    *,
+    legacy_string_ids: bool = False,
 ) -> list[tuple[str, re.Pattern[str]]]:
+    """Compile *fallback* plus the configured *items*.
+
+    ``items`` comes straight from YAML, so an entry is not guaranteed to be a
+    mapping: ``field_value_patterns`` has always accepted the legacy bare-string
+    form, which both the V1 pipeline and the V1 forward path still compile. This
+    function used to call ``item.get("regex")`` unconditionally, so one such
+    entry raised ``AttributeError`` out of ``_v2_redaction_patterns()`` — and
+    because ``lru_cache`` does not cache a raising call, it raised again on every
+    single V2 request instead of failing once. Non-mapping entries are now
+    handled the same way the other two layers handle them: compiled with a
+    positional ``field_secret_{idx}`` id where the caller says the legacy form is
+    meaningful (matching ``sanitize.py``'s ``FIELD_SECRET_{idx}``), skipped
+    otherwise.
+    """
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for pattern_id, regex in fallback:
         try:
             compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
         except re.error:
             continue
-    for item in items or []:
-        regex_value = item.get("regex")
+    for index, item in enumerate(items or [], start=1):
+        if isinstance(item, dict):
+            regex_value = item.get("regex")
+            pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
+        elif legacy_string_ids and isinstance(item, str):
+            regex_value = item
+            pattern_id = f"field_secret_{index}"
+        else:
+            continue
         if not isinstance(regex_value, str) or not regex_value.strip():
             continue
-        pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
         try:
             compiled.append((pattern_id, re.compile(regex_value, re.IGNORECASE)))
         except re.error as exc:
@@ -430,6 +457,7 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
         _compile_patterns(
             field_patterns if isinstance(field_patterns, list) else None,
             fallback=fallback_field_patterns,
+            legacy_string_ids=True,
         )
     )
     return compiled

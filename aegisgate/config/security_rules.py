@@ -657,15 +657,52 @@ def _resolve_rules_file(path: str) -> Path:
         for item in candidates:
             if item.exists():
                 return item.resolve()
-        candidate = candidates[-1].resolve()
+        candidate = candidates[-1]
     if candidate.exists():
-        return candidate
+        return candidate.resolve()
     bootstrap = os.environ.get("AEGIS_BOOTSTRAP_RULES_DIR", "").strip()
     if bootstrap:
         fallback = Path(bootstrap) / "security_filters.yaml"
         if fallback.exists():
             return fallback.resolve()
-    return candidate
+    return candidate.resolve()
+
+
+def resolve_rules_file(path: str | None = None) -> Path:
+    """The one absolute path every component must use for ``security_filters.yaml``.
+
+    Three components used to resolve ``settings.security_rules_path`` with three
+    different rules: this loader walked ``cwd`` → app root → the bootstrap dir,
+    while the console and the hot-reload watcher each only tried ``cwd``. In any
+    deployment where ``cwd != app_root`` — the Docker image and the
+    ``AEGIS_CONFIG_DIR`` layouts both are — that meant the console happily
+    created and edited a ``security_filters.yaml`` under ``cwd`` that the runtime
+    never reads: every check passed, the audit said success, and the rules never
+    took effect. One resolver, one file.
+    """
+    return _resolve_rules_file(path or settings.security_rules_path)
+
+
+def shadow_rules_file_candidates(path: str | None = None) -> list[Path]:
+    """Paths that *look* like the rules file but are not the one in use.
+
+    A deployment that wrote to the wrong file before the resolvers converged
+    still has that file on disk. Listing the leftovers lets the console point at
+    them instead of leaving an admin wondering why an edit changed nothing.
+    """
+    raw = path or settings.security_rules_path
+    active = resolve_rules_file(raw)
+    candidate = Path(raw)
+    others: list[Path] = []
+    if candidate.is_absolute():
+        legacy = [candidate]
+    else:
+        legacy = [Path.cwd() / candidate, Path(__file__).resolve().parents[2] / candidate]
+    for item in legacy:
+        resolved = item.resolve()
+        if resolved != active and resolved.exists() and resolved not in others:
+            others.append(resolved)
+    return others
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

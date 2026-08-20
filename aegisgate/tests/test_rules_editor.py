@@ -7,8 +7,10 @@ and quoting, turning a one-line change into ~1250 lines of diff and erasing all
 
 The patch path is text surgery on YAML, which is fragile by nature — so the
 guarantee these tests protect is twofold: comments survive, *and* the resulting
-document is always semantically exactly what the caller asked for, falling back
-to the old dump when it cannot be.
+document is always semantically exactly what the caller asked for. When it
+cannot be, the renderer returns ``None`` and the write is refused: a dump that
+silently trades the documented policy file for a comment-free one and still
+reports success is the outcome these tests exist to prevent.
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ from fastapi.testclient import TestClient
 
 from aegisgate.core import gateway_ui_routes
 from aegisgate.core.rules_editor import (
+    LeafOp,
     RuleEdit,
     apply_edit,
-    apply_scalar_update,
+    apply_leaf_ops,
+    render_leaf_ops,
     render_rules_yaml,
     render_scalar_updates,
 )
@@ -203,46 +207,185 @@ class TestRealRulesFile:
         )
 
 
-class TestFallbackSafety:
-    """When the patch cannot be trusted, correctness wins over comments."""
+class TestNoSilentDump:
+    """A patch that cannot be trusted is refused, never dumped over the file."""
 
-    def test_unknown_path_falls_back_to_a_correct_dump(self) -> None:
+    def test_unknown_path_returns_none(self) -> None:
         expected = yaml.safe_load(_SAMPLE)
-        out = render_rules_yaml(
-            _SAMPLE, expected, RuleEdit(["nope", "missing"], "delete", "X")
+        assert (
+            render_rules_yaml(_SAMPLE, expected, RuleEdit(["nope", "missing"], "delete", "X"))
+            is None
         )
-        assert yaml.safe_load(out) == expected
-        assert _comment_lines(out) == []  # dumped, comments gone — but correct
 
-    def test_unknown_rule_id_falls_back(self) -> None:
+    def test_unknown_rule_id_returns_none(self) -> None:
         expected = yaml.safe_load(_SAMPLE)
-        out = render_rules_yaml(
-            _SAMPLE, expected, RuleEdit(["redaction", "pii_patterns"], "delete", "NOT_THERE")
+        assert (
+            render_rules_yaml(
+                _SAMPLE, expected, RuleEdit(["redaction", "pii_patterns"], "delete", "NOT_THERE")
+            )
+            is None
         )
-        assert yaml.safe_load(out) == expected
 
     def test_patch_is_rejected_when_it_disagrees_with_the_expected_document(self) -> None:
         """The safety net: a patch that would produce the wrong document is dropped."""
         wrong = yaml.safe_load(_SAMPLE)
         wrong["version"] = 999  # the edit descriptor says nothing about this
-        out = render_rules_yaml(
-            _SAMPLE,
-            wrong,
-            RuleEdit(["redaction", "pii_patterns"], "update", "EMAIL", {"regex": "x"}),
+        assert (
+            render_rules_yaml(
+                _SAMPLE,
+                wrong,
+                RuleEdit(["redaction", "pii_patterns"], "update", "EMAIL", {"regex": "x"}),
+            )
+            is None
         )
-        assert yaml.safe_load(out) == wrong
 
-    def test_scalar_update_on_a_missing_key_falls_back(self) -> None:
+    def test_apply_edit_returns_none_rather_than_guessing(self) -> None:
+        assert apply_edit(_SAMPLE, RuleEdit(["version"], "add", "X", {"regex": "x"})) is None
+
+
+class TestEmptyingAndRefillingAGroup:
+    """Without a dump to fall back on, these two shapes have to patch cleanly."""
+
+    _ONE_RULE = """\
+redaction:
+  # documented
+  pii_patterns:
+    - id: ONLY
+      regex: 'only'
+"""
+
+    def test_deleting_the_last_rule_leaves_an_explicit_empty_list(self) -> None:
+        expected = {"redaction": {"pii_patterns": []}}
+        out = render_rules_yaml(
+            self._ONE_RULE, expected, RuleEdit(["redaction", "pii_patterns"], "delete", "ONLY")
+        )
+        assert out is not None
+        assert yaml.safe_load(out) == expected  # not None: `key:` alone would be
+        assert _comment_lines(out) == _comment_lines(self._ONE_RULE)
+
+    def test_a_rule_can_be_added_to_a_group_the_file_never_declared(self) -> None:
+        source = "version: 3\nredaction:\n  # note\n  request_prefix_max_len: 12\n"
+        expected = yaml.safe_load(source)
+        expected["redaction"]["pii_patterns"] = [{"id": "NEW", "regex": "n"}]
+        out = render_rules_yaml(
+            source, expected, RuleEdit(["redaction", "pii_patterns"], "add", "NEW", {"regex": "n"})
+        )
+        assert out is not None
+        assert yaml.safe_load(out) == expected
+        assert _comment_lines(out) == _comment_lines(source)
+
+    def test_a_rule_can_be_added_back_to_an_emptied_group(self) -> None:
+        emptied = render_rules_yaml(
+            self._ONE_RULE,
+            {"redaction": {"pii_patterns": []}},
+            RuleEdit(["redaction", "pii_patterns"], "delete", "ONLY"),
+        )
+        assert emptied is not None
+        expected = {"redaction": {"pii_patterns": [{"id": "BACK", "regex": "back"}]}}
+        out = render_rules_yaml(
+            emptied,
+            expected,
+            RuleEdit(["redaction", "pii_patterns"], "add", "BACK", {"regex": "back"}),
+        )
+        assert out is not None
+        assert yaml.safe_load(out) == expected
+        assert _comment_lines(out) == _comment_lines(self._ONE_RULE)
+
+
+class TestLeafOps:
+    """Insert, update and delete a key path without touching the comments."""
+
+    def test_missing_scalar_key_is_inserted(self) -> None:
+        expected = yaml.safe_load(_SAMPLE)
+        expected["redaction"]["field_value_min_len"] = 16
+        out = render_leaf_ops(
+            _SAMPLE, expected, [LeafOp(["redaction", "field_value_min_len"], "set", 16)]
+        )
+        assert out is not None
+        assert _comment_lines(out) == _comment_lines(_SAMPLE)
+        assert yaml.safe_load(out) == expected
+
+    def test_missing_list_key_is_inserted_as_a_block_list(self) -> None:
+        expected = yaml.safe_load(_SAMPLE)
+        expected["redaction"]["relaxed_pii_ids"] = ["TOKEN", "JWT"]
+        out = render_leaf_ops(
+            _SAMPLE,
+            expected,
+            [LeafOp(["redaction", "relaxed_pii_ids"], "set", ["TOKEN", "JWT"])],
+        )
+        assert out is not None
+        assert _comment_lines(out) == _comment_lines(_SAMPLE)
+        assert "  - TOKEN" in out  # block list, not inline flow style
+        assert yaml.safe_load(out) == expected
+
+    def test_existing_list_key_is_replaced(self) -> None:
+        seeded = render_leaf_ops(
+            _SAMPLE,
+            {
+                **yaml.safe_load(_SAMPLE),
+                "redaction": {
+                    **yaml.safe_load(_SAMPLE)["redaction"],
+                    "relaxed_pii_ids": ["TOKEN"],
+                },
+            },
+            [LeafOp(["redaction", "relaxed_pii_ids"], "set", ["TOKEN"])],
+        )
+        assert seeded is not None
+        expected = yaml.safe_load(seeded)
+        expected["redaction"]["relaxed_pii_ids"] = ["*"]
+        out = render_leaf_ops(
+            seeded, expected, [LeafOp(["redaction", "relaxed_pii_ids"], "set", ["*"])]
+        )
+        assert out is not None
+        assert yaml.safe_load(out) == expected
+        assert _comment_lines(out) == _comment_lines(_SAMPLE)
+
+    def test_delete_removes_the_key_and_restores_the_code_default(self) -> None:
+        base = yaml.safe_load(_SAMPLE)
+        seeded_expected = {
+            **base,
+            "redaction": {**base["redaction"], "relaxed_pii_ids": ["TOKEN", "JWT"]},
+        }
+        seeded = render_leaf_ops(
+            _SAMPLE,
+            seeded_expected,
+            [LeafOp(["redaction", "relaxed_pii_ids"], "set", ["TOKEN", "JWT"])],
+        )
+        assert seeded is not None
+        out = render_leaf_ops(
+            seeded, base, [LeafOp(["redaction", "relaxed_pii_ids"], "delete")]
+        )
+        assert out is not None
+        assert "relaxed_pii_ids" not in yaml.safe_load(out)["redaction"]
+        assert _comment_lines(out) == _comment_lines(_SAMPLE)
+
+    def test_commented_out_example_is_left_alone_when_the_key_is_inserted(self) -> None:
+        """The shipped file documents relaxed_pii_ids as a commented-out block."""
+        source = _REAL_RULES.read_text(encoding="utf-8")
+        expected = yaml.safe_load(source)
+        expected["redaction"]["relaxed_pii_ids"] = ["TOKEN"]
+        out = render_leaf_ops(
+            source, expected, [LeafOp(["redaction", "relaxed_pii_ids"], "set", ["TOKEN"])]
+        )
+        assert out is not None
+        assert _comment_lines(out) == _comment_lines(source)
+        assert yaml.safe_load(out) == expected
+
+    def test_missing_intermediate_key_is_created(self) -> None:
         expected = yaml.safe_load(_SAMPLE)
         expected["action_map"]["brand_new"] = {"threat": "block"}
         out = render_scalar_updates(
             _SAMPLE, expected, [(["action_map", "brand_new", "threat"], "block")]
         )
+        assert out is not None
         assert yaml.safe_load(out) == expected
+        assert _comment_lines(out) == _comment_lines(_SAMPLE)
 
-    def test_apply_edit_returns_none_rather_than_guessing(self) -> None:
-        assert apply_edit(_SAMPLE, RuleEdit(["version"], "add", "X", {"regex": "x"})) is None
-        assert apply_scalar_update(_SAMPLE, ["action_map", "missing", "k"], "block") is None
+    def test_replacing_a_block_that_carries_comments_is_refused(self) -> None:
+        assert (
+            apply_leaf_ops(_SAMPLE, [LeafOp(["redaction", "pii_patterns"], "set", ["x"])])
+            is None
+        )
 
 
 class TestRoutesKeepComments:

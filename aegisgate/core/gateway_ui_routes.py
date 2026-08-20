@@ -48,10 +48,17 @@ from aegisgate.core.gateway_ui_config import (
     _ui_config_payload,
     _write_env_updates,
 )
-from aegisgate.core.rules_editor import RuleEdit
+from aegisgate.core.rules_editor import RuleEdit, render_rules_yaml, render_scalar_updates
+from aegisgate.core.rules_write import (
+    RulesChange,
+    RulesSnapshot,
+    RulesWriteError,
+    write_rules_file,
+)
 from aegisgate.core.ui_etag import (
     etag_for_file,
     if_match_conflict,
+    if_match_header,
     with_etag,
 )
 from aegisgate.core.gw_tokens import (
@@ -759,10 +766,16 @@ def register_ui_routes(app: FastAPI) -> None:
         return found
 
     def _resolve_rules_file() -> Path:
-        p = Path(settings.security_rules_path)
-        if not p.is_absolute():
-            p = Path.cwd() / p
-        return p.resolve()
+        """The one resolver, shared with the rules loader and the hot-reload watcher.
+
+        The console used to resolve a relative ``security_rules_path`` against
+        ``cwd`` only. Wherever ``cwd`` is not the app root — the Docker image and
+        the ``AEGIS_CONFIG_DIR`` layout both — that wrote a second, shadow rules
+        file that the runtime never read.
+        """
+        from aegisgate.config.security_rules import resolve_rules_file
+
+        return resolve_rules_file(settings.security_rules_path)
 
     def _load_rules_yaml() -> dict:
         path = _resolve_rules_file()
@@ -771,50 +784,59 @@ def register_ui_routes(app: FastAPI) -> None:
         with path.open(encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    def _write_rules_text(path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", delete=False, dir=str(path.parent), suffix=".tmp"
-        ) as tmp:
-            tmp.write(text)
-            tmp_path = Path(tmp.name)
-        tmp_path.replace(path)
-        try:
-            from aegisgate.core.hot_reload import reload_security_rules
-            reload_security_rules()
-        except Exception:
-            pass
-
-    def _save_rules_yaml(data: dict, edit: "RuleEdit | None" = None) -> None:
-        """Persist *data*, keeping the file's comments when *edit* describes the change.
-
-        A plain dump would drop all 80 comment lines in security_filters.yaml —
-        the file documents the security policy, so the edit is applied as a text
-        patch instead, verified against *data* before it is written.
-        """
-        path = _resolve_rules_file()
-        if edit is not None and path.is_file():
-            from aegisgate.core.rules_editor import render_rules_yaml
-
-            original = path.read_text(encoding="utf-8")
-            _write_rules_text(path, render_rules_yaml(original, data, edit))
-            return
-        _write_rules_text(
-            path,
-            yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+    def _rules_write_error_response(exc: RulesWriteError) -> JSONResponse:
+        headers = {}
+        current_etag = exc.extra.get("current_etag")
+        if isinstance(current_etag, str):
+            headers["ETag"] = current_etag
+        return JSONResponse(
+            status_code=exc.status, content=exc.as_payload(), headers=headers or None
         )
 
-    def _save_action_map_yaml(data: dict, updates: list[tuple[list[str], object]]) -> None:
-        path = _resolve_rules_file()
-        if path.is_file():
-            from aegisgate.core.rules_editor import render_scalar_updates
+    async def _run_rules_write(
+        build, *, request: Request, event: str, require_if_match: bool = False
+    ):
+        """Run one rules-file transaction off the event loop.
 
-            original = path.read_text(encoding="utf-8")
-            _write_rules_text(path, render_scalar_updates(original, data, updates))
-            return
-        _write_rules_text(
-            path,
-            yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False),
+        The transaction holds a blocking, process-wide lock and does file IO plus
+        a regex probe, so it belongs on a worker thread; the lock is what makes
+        two concurrent console writes — to the same section or to different ones
+        — mutually exclusive.
+        """
+        try:
+            return await asyncio.to_thread(
+                write_rules_file,
+                build,
+                if_match=if_match_header(request),
+                event=event,
+                actor=request.client.host if request.client else "unknown",
+                require_if_match=require_if_match,
+            )
+        except RulesWriteError as exc:
+            return _rules_write_error_response(exc)
+
+    def _rule_section_or_error(data: dict, section: str) -> dict[str, Any]:
+        info = _section_info(data, section)
+        if info is None:
+            raise RulesWriteError("unknown_section", section, status=404)
+        if info["readonly"]:
+            raise RulesWriteError(
+                "section_readonly",
+                f"规则组 '{info['id']}' 以 tool+param 为标识，暂不支持通过控制台编辑",
+                status=403,
+            )
+        return info
+
+    def _rules_change(
+        snapshot: RulesSnapshot, data: dict, info: dict[str, Any], edit: RuleEdit, **kwargs
+    ) -> RulesChange:
+        """Bundle the patched text for *edit* with the document it must produce."""
+        text = render_rules_yaml(snapshot.text, data, edit) if snapshot.exists else None
+        return RulesChange(
+            expected=data,
+            text=text,
+            changed_top_keys=(str(info["path"][0]),),
+            **kwargs,
         )
 
     def _section_info(data: dict, section: str) -> dict[str, Any] | None:
@@ -856,15 +878,6 @@ def register_ui_routes(app: FastAPI) -> None:
     def _unknown_section_response(section: str) -> JSONResponse:
         return JSONResponse(
             status_code=404, content={"error": "unknown_section", "detail": section}
-        )
-
-    def _readonly_section_response(section: str) -> JSONResponse:
-        return JSONResponse(
-            status_code=403,
-            content={
-                "error": "section_readonly",
-                "detail": f"规则组 '{section}' 以 tool+param 为标识，暂不支持通过控制台编辑",
-            },
         )
 
     def _apply_rule_extras(target: dict, body: dict[str, Any]) -> dict[str, Any]:
@@ -924,15 +937,6 @@ def register_ui_routes(app: FastAPI) -> None:
 
     @app.post("/__ui__/api/rules/{section}")
     async def local_ui_rules_add(section: str, request: Request) -> JSONResponse:
-        data = _load_rules_yaml()
-        info = _section_info(data, section)
-        if info is None:
-            return _unknown_section_response(section)
-        if info["readonly"]:
-            return _readonly_section_response(info["id"])
-        conflict = if_match_conflict(request, _rules_etag())
-        if conflict is not None:
-            return conflict
         try:
             body = await request.json()
         except Exception:
@@ -946,92 +950,136 @@ def register_ui_routes(app: FastAPI) -> None:
         invalid_regex = _invalid_regex_response(regex)
         if invalid_regex is not None:
             return invalid_regex
-        items = _get_section_list(data, info["path"])
-        if any(str(item.get("id", "")) == rule_id for item in items):
-            return JSONResponse(status_code=409, content={"error": "id_exists", "detail": f"规则 id '{rule_id}' 已存在"})
-        new_item: dict = {"id": rule_id, "regex": regex}
-        _apply_rule_extras(new_item, body)
-        items.append(new_item)
-        _set_section_list(data, info["path"], items)
-        _save_rules_yaml(
-            data,
-            RuleEdit(
-                path=list(info["path"]),
-                op="add",
-                rule_id=rule_id,
-                fields={k: v for k, v in new_item.items() if k != "id"},
-            ),
-        )
+
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            info = _rule_section_or_error(data, section)
+            items = _get_section_list(data, info["path"])
+            if any(
+                isinstance(item, dict) and str(item.get("id", "")) == rule_id for item in items
+            ):
+                raise RulesWriteError(
+                    "id_exists", f"规则 id '{rule_id}' 已存在", status=409
+                )
+            new_item: dict = {"id": rule_id, "regex": regex}
+            _apply_rule_extras(new_item, body)
+            items.append(new_item)
+            _set_section_list(data, info["path"], items)
+            return _rules_change(
+                snapshot,
+                data,
+                info,
+                RuleEdit(
+                    path=list(info["path"]),
+                    op="add",
+                    rule_id=rule_id,
+                    fields={k: v for k, v in new_item.items() if k != "id"},
+                ),
+                audit={"section": info["id"], "rule_id": rule_id, "operation": "add"},
+                payload={"section": info["id"], "item": new_item},
+            )
+
+        result = await _run_rules_write(build, request=request, event="ui_rule_added")
+        if isinstance(result, JSONResponse):
+            return result
         return with_etag(
-            JSONResponse(status_code=201, content={"ok": True, "section": info["id"], "item": new_item}),
-            _rules_etag(),
+            JSONResponse(
+                status_code=201,
+                content={"ok": True, "section": result["section"], "item": result["item"]},
+            ),
+            result["etag"],
         )
 
     @app.patch("/__ui__/api/rules/{section}/{rule_id}")
     async def local_ui_rules_update(section: str, rule_id: str, request: Request) -> JSONResponse:
-        data = _load_rules_yaml()
-        info = _section_info(data, section)
-        if info is None:
-            return _unknown_section_response(section)
-        if info["readonly"]:
-            return _readonly_section_response(info["id"])
-        conflict = if_match_conflict(request, _rules_etag())
-        if conflict is not None:
-            return conflict
         try:
             body = await request.json()
         except Exception:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
-        items = _get_section_list(data, info["path"])
-        changed: dict[str, object] = {}
-        for item in items:
-            if str(item.get("id", "")) == rule_id:
-                if "regex" in body:
-                    regex = _required_rule_regex(body)
-                    if regex is None:
-                        return JSONResponse(status_code=400, content={"error": "missing_regex"})
-                    invalid_regex = _invalid_regex_response(regex)
-                    if invalid_regex is not None:
-                        return invalid_regex
-                    item["regex"] = regex
-                    changed["regex"] = regex
-                changed.update(_apply_rule_extras(item, body))
-                _set_section_list(data, info["path"], items)
-                _save_rules_yaml(
-                    data,
-                    RuleEdit(
-                        path=list(info["path"]),
-                        op="update",
-                        rule_id=rule_id,
-                        fields=changed,
-                    ),
-                )
-                return with_etag(
-                    JSONResponse(content={"ok": True, "section": info["id"], "item": item}), _rules_etag()
-                )
-        return JSONResponse(status_code=404, content={"error": "rule_not_found"})
+        regex: str | None = None
+        if "regex" in body:
+            regex = _required_rule_regex(body)
+            if regex is None:
+                return JSONResponse(status_code=400, content={"error": "missing_regex"})
+            invalid_regex = _invalid_regex_response(regex)
+            if invalid_regex is not None:
+                return invalid_regex
+
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            info = _rule_section_or_error(data, section)
+            items = _get_section_list(data, info["path"])
+            target = next(
+                (
+                    item
+                    for item in items
+                    if isinstance(item, dict) and str(item.get("id", "")) == rule_id
+                ),
+                None,
+            )
+            if target is None:
+                raise RulesWriteError("rule_not_found", f"规则 '{rule_id}' 不存在", status=404)
+            changed: dict[str, object] = {}
+            if regex is not None:
+                target["regex"] = regex
+                changed["regex"] = regex
+            changed.update(_apply_rule_extras(target, body))
+            _set_section_list(data, info["path"], items)
+            return _rules_change(
+                snapshot,
+                data,
+                info,
+                RuleEdit(
+                    path=list(info["path"]), op="update", rule_id=rule_id, fields=changed
+                ),
+                audit={
+                    "section": info["id"],
+                    "rule_id": rule_id,
+                    "operation": "update",
+                    "fields": sorted(changed),
+                },
+                payload={"section": info["id"], "item": target},
+            )
+
+        result = await _run_rules_write(build, request=request, event="ui_rule_updated")
+        if isinstance(result, JSONResponse):
+            return result
+        return with_etag(
+            JSONResponse(
+                content={"ok": True, "section": result["section"], "item": result["item"]}
+            ),
+            result["etag"],
+        )
 
     @app.delete("/__ui__/api/rules/{section}/{rule_id}")
     async def local_ui_rules_delete(section: str, rule_id: str, request: Request) -> JSONResponse:
-        conflict = if_match_conflict(request, _rules_etag())
-        if conflict is not None:
-            return conflict
-        data = _load_rules_yaml()
-        info = _section_info(data, section)
-        if info is None:
-            return _unknown_section_response(section)
-        if info["readonly"]:
-            return _readonly_section_response(info["id"])
-        items = _get_section_list(data, info["path"])
-        new_items = [item for item in items if str(item.get("id", "")) != rule_id]
-        if len(new_items) == len(items):
-            return JSONResponse(status_code=404, content={"error": "rule_not_found"})
-        _set_section_list(data, info["path"], new_items)
-        _save_rules_yaml(
-            data,
-            RuleEdit(path=list(info["path"]), op="delete", rule_id=rule_id),
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            info = _rule_section_or_error(data, section)
+            items = _get_section_list(data, info["path"])
+            new_items = [
+                item
+                for item in items
+                if not (isinstance(item, dict) and str(item.get("id", "")) == rule_id)
+            ]
+            if len(new_items) == len(items):
+                raise RulesWriteError("rule_not_found", f"规则 '{rule_id}' 不存在", status=404)
+            _set_section_list(data, info["path"], new_items)
+            return _rules_change(
+                snapshot,
+                data,
+                info,
+                RuleEdit(path=list(info["path"]), op="delete", rule_id=rule_id),
+                audit={"section": info["id"], "rule_id": rule_id, "operation": "delete"},
+                payload={"section": info["id"]},
+            )
+
+        result = await _run_rules_write(build, request=request, event="ui_rule_deleted")
+        if isinstance(result, JSONResponse):
+            return result
+        return with_etag(
+            JSONResponse(content={"ok": True, "section": result["section"]}), result["etag"]
         )
-        return with_etag(JSONResponse(content={"ok": True, "section": info["id"]}), _rules_etag())
 
     @app.post("/__ui__/api/rules_test")
     async def local_ui_rules_test(request: Request) -> JSONResponse:
@@ -1081,35 +1129,56 @@ def register_ui_routes(app: FastAPI) -> None:
 
     @app.patch("/__ui__/api/rules_action_map")
     async def local_ui_action_map_update(request: Request) -> JSONResponse:
-        conflict = if_match_conflict(request, _rules_etag())
-        if conflict is not None:
-            return conflict
         try:
             body = await request.json()
         except Exception:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
         allowed_actions = {"block", "review", "sanitize", "pass"}
-        data = _load_rules_yaml()
-        action_map = data.get("action_map") or {}
-        updates: list[tuple[list[str], object]] = []
-        for category, threats in body.items():
-            if not isinstance(threats, dict):
-                continue
-            if category not in action_map:
-                action_map[category] = {}
-            for threat, action in threats.items():
-                if str(action) not in allowed_actions:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": "invalid_action", "detail": f"'{action}' 不是有效动作"},
-                    )
-                if action_map[category].get(threat) != str(action):
-                    updates.append((["action_map", str(category), str(threat)], str(action)))
-                action_map[category][threat] = str(action)
-        data["action_map"] = action_map
-        _save_action_map_yaml(data, updates)
+
+        def build(snapshot: RulesSnapshot) -> RulesChange:
+            data = snapshot.data
+            action_map = data.get("action_map") or {}
+            updates: list[tuple[list[str], object]] = []
+            for category, threats in body.items():
+                # An empty threat map asks for nothing; materialising the
+                # category anyway would leave a key no patch can account for.
+                if not isinstance(threats, dict) or not threats:
+                    continue
+                bucket = action_map.setdefault(str(category), {})
+                for threat, action in threats.items():
+                    if str(action) not in allowed_actions:
+                        raise RulesWriteError(
+                            "invalid_action", f"'{action}' 不是有效动作", status=400
+                        )
+                    if bucket.get(threat) != str(action):
+                        updates.append(
+                            (["action_map", str(category), str(threat)], str(action))
+                        )
+                    bucket[threat] = str(action)
+            data["action_map"] = action_map
+            text = (
+                render_scalar_updates(snapshot.text, data, updates)
+                if snapshot.exists
+                else None
+            )
+            return RulesChange(
+                expected=data,
+                text=text,
+                changed_top_keys=("action_map",),
+                audit={
+                    "section": "action_map",
+                    "operation": "update",
+                    "entries": [".".join(path[1:]) for path, _ in updates],
+                },
+                payload={"action_map": action_map},
+            )
+
+        result = await _run_rules_write(build, request=request, event="ui_action_map_updated")
+        if isinstance(result, JSONResponse):
+            return result
         return with_etag(
-            JSONResponse(content={"ok": True, "action_map": action_map}), _rules_etag()
+            JSONResponse(content={"ok": True, "action_map": result["action_map"]}),
+            result["etag"],
         )
 
     # ------------------------------------------------------------------

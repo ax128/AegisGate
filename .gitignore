@@ -35,6 +35,10 @@ config/default.yaml
 config/strict.yaml
 config/permissive.yaml
 config/*.yaml.bak-*
+# Timestamped rules backups the console takes before every write. They land next
+# to the file being edited, which is the runtime config dir in one deployment
+# and the packaged policies dir in another, so the pattern is not path-scoped.
+*.yaml.bak-*
 
 # Encryption keys and token mappings (NEVER commit)
 config/aegis_fernet.key

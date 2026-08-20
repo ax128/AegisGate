@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **控制台可能写入运行时从不读取的规则文件（路径解析统一）**。`config/security_rules.py`、
+  `core/gateway_ui_routes.py`、`core/hot_reload.py` 三处各自解析 `AEGIS_SECURITY_RULES_PATH`：
+  加载器走 `cwd` → 包根 → `AEGIS_BOOTSTRAP_RULES_DIR`，控制台与热重载监听器只试 `cwd`。
+  在 `cwd != 应用根目录` 的部署（Docker 镜像、`AEGIS_CONFIG_DIR` 布局）里，控制台会在 `cwd` 下
+  凭空建出一份 `security_filters.yaml` 并对它做 ETag、备份与校验，**所有校验都通过、审计记录成功，
+  但规则从未生效**。三处现统一调用 `config/security_rules.py` 的 `resolve_rules_file()`。
+  **这是本次唯一的对外行为变化**：升级后控制台写入的就是运行时读取的文件；请检查此前是否留下过
+  这类「影子文件」（典型位置：启动目录下与 `AEGIS_SECURITY_RULES_PATH` 同名的相对路径）。
+- **一条 legacy 字符串形式的 `redaction.field_value_patterns` 会让每个 V2 请求脱敏抛错**。
+  `adapters/v2_proxy/router.py` 的 `_compile_patterns` 直接对每一项调用 `item.get("regex")`，
+  没有 `isinstance` 判断；而 `lru_cache` 不缓存抛异常的调用，所以 `AttributeError` 会在**每个**
+  V2 请求上重新抛出，不是一次性故障。现按 V1 管道层与转发层已有的双分支语义编译
+  （V2 侧 id 小写，`field_secret_{idx}`，对齐 `sanitize.py` 的 `FIELD_SECRET_{idx}`）。
+- 规则组的最后一条规则被删除后，YAML 里留下的裸 `key:` 会被解析成 `null` 而不是空列表，
+  且此后无法再通过控制台加回规则。删除会写出显式的 `key: []`，新增能识别该形态。
+
+### Security
+
+- **规则文件写入改为串行化事务**（`core/rules_write.py`）。此前 `security_filters.yaml` 有三条
+  互不加锁的整档 read-modify-write 路径（PII/规则 CRUD、action_map、以及各 section 共用的保存函数），
+  `If-Match` 又是在读取「真正被写入的字节」之前校验的。并发写入下的表现不是丢一次编辑，而是
+  一份显示「已保存」、实际仍在执行旧策略的安全策略。现在所有写入共用**同一把规则文件级、
+  全 section 共享的进程内写锁**，锁内重新读字节、重算 ETag、校验 `If-Match`，然后：
+  保留注释地打补丁 → 重新解析并证明本次目标 section 之外的内容逐字节未变 → 在文件外编译
+  V1 管道 / V1 转发 / V2 三层的候选正则产物 → 对**新增或修改**的正则跑服务端固定对抗样本探针
+  （子进程 + 2s 超时）→ 毫秒级时间戳备份 → 原子替换 → 结构化热重载 → 校验磁盘字节与各层重编译
+  产物 → 失败时 **compare-and-restore** 回滚。
+- **回滚不再覆盖并发写入者已提交的改动**。无条件恢复旧字节会把另一位管理员刚落盘的规则静默回退；
+  现在只有磁盘当前字节仍等于本次写入的字节时才恢复，否则返回 `409 concurrent_write_detected`
+  并在响应与审计中标注「未回滚，磁盘已被其他写入者变更」。
+- **保存路径不再接受调用方自选的简单样本**。控制台的正则测试器由调用方提供样本，
+  用「hello」测 `(a+)+$` 会顺利通过；保存路径改为额外跑一组服务端维护的固定对抗样本，
+  超时即拒绝保存，并强制 `MAX_REGEX_LEN` 上限。
+- **规则写入全部落审计**：新增/修改/删除、写入失败、回滚结果，以及「检测到并发写入、未回滚」
+  这一分支。审计不记录正则命中的敏感原文。
+- 规则备份改为毫秒级时间戳并在同毫秒冲突时追加序号（此前连续写入会互相覆盖），
+  权限与原文件一致，保留数量有上限，且命名保证不被 `policies_dir.glob("*.yaml")` 当成策略文件。
+  `.gitignore` 现覆盖任意目录下的 `*.yaml.bak-*`。
+- `_write_rules_text` 不再 `mkdir(parents=True)`：目标目录不存在说明路径解析出了问题，
+  应报错而不是造出一棵目录树。
+
+### Changed
+
+- **规则编辑器失败时返回错误，不再退回全量 `yaml.dump`**。此前补丁不适用时会 dump 整个文档并
+  返回成功，代价是 `security_filters.yaml` 的全部 80 行注释——那些注释就是安全策略的文档。
+  现在无法安全打补丁时返回非 2xx 且**不写文件**。为此补齐了两种此前只能靠 dump 兜底的形态：
+  与 key 同缩进的 block list（`yaml.dump` 的默认输出），以及键路径的插入/删除。
+- `core/rules_editor.py` 新增 `LeafOp` / `apply_leaf_ops` / `render_leaf_ops`：保留注释地插入、
+  替换、删除一个键路径。删除是「恢复代码默认值」的实现方式——把当前默认集合写回文件会把它冻结。
+  `apply_scalar_update` 被 `render_leaf_ops` 取代（后者还能创建缺失的键）。
+- `reload_security_rules()` 返回结构化的分层结果（YAML 加载、OpenAI LRU、V2 LRU、pipeline、
+  错误列表、pipeline generation），不再逐层吞掉异常。任一必需层失败都会让本次写入判定为失败并回滚。
+- `adapters/v2_proxy/router.py` 导出公开常量 `V2_RELAXED_PII_IDS`（保留 `_V2_RELAXED_PII_IDS`
+  别名），供控制台读取，避免反向依赖适配器内部名。
+
 ### Documentation
 
 - **文档与代码全面对齐**（本次为文档 + 死配置清理，不改变任何过滤/拦截行为）
