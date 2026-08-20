@@ -61,11 +61,21 @@ uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
 
 > **安全提示**：当前版本不再提供默认初始密码。Web UI 登录始终使用真实的网关密钥。
 
-查看网关密钥：
+查看网关密钥（登录页的「怎么拿到网关密钥？」里也有这两条命令，可直接复制）：
 
 ```bash
+# 裸机 / 本机部署
 cat config/aegis_gateway.key
+
+# Docker 部署：这个路径在容器内，宿主机上直接 cat 是拿不到的
+docker compose exec aegisgate cat config/aegis_gateway.key
 ```
+
+### 3.0 登录成功却弹回登录页？
+
+`AEGIS_LOCAL_UI_SECURE_COOKIE` 默认为 `true`，会下发 `Secure` cookie。浏览器只在 HTTPS 或 `localhost` 下保存这类 cookie，所以用 `http://<内网 IP>` 或 HTTP 反向代理访问时，登录本身成功、cookie 却被丢弃，跳转会立刻退回登录页。
+
+登录页会先验证会话再跳转，遇到这种情况直接把原因写在错误区。两种处理方式：改用 HTTPS 访问，或把 `AEGIS_LOCAL_UI_SECURE_COOKIE=false` 后重启网关（仅建议在受信网络里这么做）。
 
 ### 3.1 UI API 会话与 CSRF
 
@@ -125,9 +135,13 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 
 ## 4. UI 能力
 
+- **首次上手引导**：概览页给出「登录 → 注册上游 Token → 复制 Base URL」三步清单，未完成的那一步直接带动作按钮；已有 Token 或已配置 `AEGIS_UPSTREAM_BASE_URL` 时自动折叠
 - 查看服务状态、监听地址、安全级别、默认上游
 - 编辑运行参数，共 100 项，按 8 个分区呈现：基础设置、存储与保留、限额与超时、安全策略、访问控制、协议转换与路由、v2 代理、控制台
+  - 侧栏顶部有**全局搜索**，一次过滤全部 8 个分区，无命中的分区连同导航项一起折叠；快捷键 `/` 聚焦当前可见分区的搜索框
   - 每个分区带搜索框；字段按用途分组，并标注对应的环境变量名与默认值
+  - 当前值与默认值不同的字段带 **已改** 徽章，旁边有「恢复默认」（只回填表单，仍需点保存）
+  - 有未保存改动时保存按钮显示「（N 项待保存）」，离开页面前会提示
   - 未开放编辑的 4 项：`app_name`、`gateway_key`（走密钥管理页）、`require_confirmation_on_block`（已废弃）、`internal_forwarding_kernel_rollout`（内部灰度开关）
 - 安全过滤规则增删改查：覆盖 `security_filters.yaml` 中**全部 32 个规则组**（228 条规则）
   - 规则组由 YAML 结构自动发现，往文件里新增一组规则即可在控制台看到，无需改代码
@@ -143,10 +157,13 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 反向分块读取并设有单次扫描字节上限，日志涨到几百 MB 也不会拖垮网关
   - 同页可浏览危险响应样本（按日期切分，默认只含 sha256 与长度，不含原文）
 - Token 管理：注册/编辑/删除/重命名
+  - 列表直接给出**客户端 Base URL**（`<origin>/v1/__gw__/t/<token>`）并支持一键复制
+  - 上游地址即时校验：缺 `http(s)://`、缺主机名、带查询参数或 `#` 片段会当场拦下，填成 `/chat/completions` 这类具体端点会提示改回 base URL
+  - 「测试连通性」按钮，见 §4.2
 - 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
 - Docker Compose 配置文件在线编辑
 - 一键重启网关（SIGTERM，配合 Docker `restart: unless-stopped` 自动恢复）
-- 阅读仓库内嵌 Markdown 文档
+- 阅读仓库内嵌 Markdown 文档（支持表格与链接渲染；默认打开本篇）
 
 ### 4.1 哪些配置改完需要重启
 
@@ -166,6 +183,31 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 已写入 `.env` 但当前进程尚未采用的字段，会额外带 **待生效** 徽章，并显示 `.env` 中的新值而不是进程里的旧值。
 
 改完这些项，请用本页的「重启网关」按钮，或执行 `docker compose restart aegisgate` / `python aegisgate-local.py restart`。**注意**：设了 `AEGIS_TRUSTED_PROXY_IPS` 之后，仅把 `AEGIS_XFF_STRICT_INTERNAL=false` **回滚不了** client IP 与限流键的变化；配置侧回退是清空该变量并重启。完整的不可热更新清单见 [config/README.md](config/README.md) 的「热更新说明」。
+
+### 4.2 上游连通性测试
+
+Token 表单里的「测试连通性」按钮对应 `POST /__ui__/api/tokens/probe`，由**网关**向你填的上游发一次请求，把结果直接显示在表单里。上游返回 `401` / `403` 会被标为正常——说明地址通了，只是要带上客户端自己的 API key。
+
+这是控制台里唯一一个主动对外发起请求的接口，因此边界是收紧的：
+
+- 目标先过注册用的同一套校验（`http(s)://`、有主机名、无查询参数与 `#` 片段、无内嵌凭据）
+- 云元数据地址（`169.254.169.254`、`169.254.170.2`、`metadata.google.internal`、`metadata.goog`）直接拒绝，返回 `400 probe_target_forbidden`
+- 单次请求：先 `HEAD`，仅当上游回 `405` / `501` 时退回 `GET`
+- 不带任何凭据、不跟随重定向、3 秒硬超时
+- 只返回 `{reachable, status_code, elapsed_ms}` 或失败原因，**不回传响应体**
+- 与管理接口共用限流（`AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE`），并需要有效会话与 `x-aegis-ui-csrf`
+- 每次探测写审计事件 `ui_upstream_probe`（只记录主机名）
+
+私网目标（`127.0.0.1`、`host.docker.internal`、局域网地址）**保持允许**：本地 Ollama / vLLM / LM Studio 正是这个页面最常配置的上游，而能进控制台的人本来就能注册这个地址并让网关向它转发。
+
+```bash
+curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
+  -H "Content-Type: application/json" \
+  -H "x-aegis-ui-csrf: <TOKEN>" \
+  -b /tmp/aegisgate-ui.cookie \
+  -d '{"upstream_base":"https://api.openai.com/v1"}'
+# {"ok":true,"reachable":true,"status_code":401,"elapsed_ms":214}
+```
 
 ## 5. 安全说明
 

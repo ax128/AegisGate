@@ -6,7 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **控制台首次上手引导**
+  - 概览页新增「先把第一个请求跑通」卡片：登录 → 注册上游 Token → 复制 Base URL 三步，每步带完成状态，未完成的那一步直接给出动作按钮
+  - 已有 Token 或已配置 `AEGIS_UPSTREAM_BASE_URL` 时自动折叠为「网关已就绪」，折叠状态记在 localStorage
+  - 第三步给出可直接复制的 `base_url` 与 `export OPENAI_BASE_URL=...`，这两个值此前只在注册成功的那一次弹窗里出现过
+
+- **Token 列表新增「客户端 Base URL」列**
+  - 值由浏览器当前 origin 拼出（与 `gateway_auth._gateway_token_base_url` 同构），带一键复制
+  - 此前列表只显示 token 本身，完整的 `/v1/__gw__/t/<token>` 路径在整个控制台里没有任何地方写着，关掉注册弹窗就再也找不回来
+
+- **上游地址连通性测试**：`POST /__ui__/api/tokens/probe`
+  - Token 表单里的「测试连通性」按钮。返回 401 / 403 会明确说明「地址通了，只是需要鉴权，属正常」
+  - 边界是收紧的：目标先过注册用的同一套校验；云元数据地址（`169.254.169.254`、`metadata.google.internal` 等）直接拒绝；单次请求、不带任何凭据、不跟随重定向、3 秒硬超时；只返回状态码与耗时，**不回传响应体**；复用管理接口限流；每次探测写审计（`ui_upstream_probe`）
+  - 私网目标保持允许：本地 Ollama / vLLM / LM Studio 正是这个页面最常配置的上游，`.internal` 后缀规则只适用于转发路径上客户端可控的目标（否则会误伤 Docker 部署文档里的 `host.docker.internal`）
+
+- **配置中心全局搜索**：侧栏「配置」分组顶部新增搜索框，一次过滤全部 8 个分区，无命中的分区连同其导航项一并折叠；快捷键 `/` 聚焦当前可见分区的搜索框
+
+- **配置项「已改」标识与「恢复默认」**：当前值与默认值不同的字段带徽章，旁边给出恢复默认按钮（只回填表单，仍需点保存，不绕过任何服务端校验与范围检查）
+
 ### Changed
+
+- **保存配置不再重置整个控制台**
+  - `saveSection` 此前在 `renderConfig` 之后又调 `loadBootstrap()`，后者会再拉一次 `/api/config` 并二次渲染，同时重新加载文档目录
+  - 结果是保存一个分区会重建全部 8 个面板两次、清空每个面板的搜索框、把「使用说明」强制切回第一篇。现在只刷新概览所需的 bootstrap 字段，并在重建前后保留搜索内容与滚动位置
+
+- **未保存的改动不再静默丢失**：`dirtyFields` 此前是只写的，唯一反馈是一圈蓝边。现在保存按钮显示「（N 项待保存）」，离开页面前有浏览器提示；动作映射同样有待保存计数，切换规则组前会确认
+
+- **文档面板支持表格与链接**：内置 Markdown 渲染器此前既不认表格也不认链接，而 README.md 有 96 行表格、README_zh.md 有 120 行，全部会被拼成一段管道符文本。链接只放行 `http(s)` 与站内 `.md`（相对链接在面板内切换文档），`javascript:` 等一律保留为原文
+  - 默认打开的文档由英文 README 改为《Web UI 快速上手》
+
+- **上游地址校验前移**
+  - `gateway_keys.upstream_base_error()` 复用转发路径的 `_normalize_upstream_base` 作为唯一真源，注册 / 编辑 Token 时即时拦下缺 scheme、缺主机名、带查询参数或 `#` 片段的地址
+  - 此前这些地址能注册成功，直到第一个真实请求才失败，控制台里看不出任何异常
+  - 额外拒绝 URL 内嵌的用户名密码（凭据会进日志，应走请求头）——这是收紧，不是放宽
+  - 表单侧同步做即时反馈，并对填成 `/chat/completions`、`/messages` 这类具体端点的情况给出提示
+
+- **错误提示收敛为一处**：409 / 403 CSRF / 429 / 5xx 各有可读中文说明。此前 403 会把后端的英文 `missing or invalid csrf token` 原样弹给用户，同一个 409 在配置页弹两条、在规则页弹一条
+
+- **登录页**
+  - 取密钥的提示改为两条可复制命令（裸机 / Docker）。此前只有一个相对路径 `config/aegis_gateway.key`，Docker 部署时它在容器里
+  - 429 限流不再显示英文 `too many login attempts`
+  - HTTP 访问下 `AEGIS_LOCAL_UI_SECURE_COOKIE=true` 导致 Cookie 被浏览器丢弃时，此前表现为「登录成功 → 弹回登录页 → 页面上什么都没有」。现在跳转前先验一次会话，失败时明确说明是哪个配置项
+
+- **加载态与空态**：表格加载改用骨架行（`prefers-reduced-motion` 下不动画），空态直接带「注册 Token」/「添加值」/「添加规则」按钮
+
+- **窄屏与键盘**
+  - ≤720px 时顶栏按钮只留图标（保留 `aria-label`）。此前品牌加五个带文字的按钮撑破手机视口，整页出现横向滚动
+  - ≤980px 的横向导航条右侧加渐变遮罩，暗示可横滑
+  - 新增「跳到主内容」跳转链接；焦点样式在原有 glow 之外补 `outline` 兜底
+  - 动作映射页保留搜索框（此前被整个隐藏），可按类别或威胁名过滤
 
 - **Web 控制台改用 Apple HIG 设计系统**
   - 中性色由 `--text` / `--muted` 两级扩展为 **四级 label + 三级 fill + 独立 separator**：标题、正文、次要说明、占位符不再靠字号硬拉开层次
@@ -29,6 +79,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - 所有可聚焦控件统一 `:focus-visible` 焦点环
 
 ### Fixed
+
+- **重启失败后顶栏按钮永久停在「重启中…」**
+  - `btn.querySelector("svg + span, svg ~ *") || (btn.textContent = "重启中…")` 两个选择器都匹配不到按钮里的纯文本节点，于是走 `textContent` 赋值，把 `<svg>` 一起冲掉；失败分支只恢复 `disabled`，不恢复文案和图标
+  - 改为只更新独立的 `#restart-label`，失败时还原
+
+- **Token 列表「豁免字段数」显示 `∞`**：未设置豁免时显示 `∞`，但实际语义是「豁免 0 个字段、全部参与脱敏」，与直觉相反。现在显示 `0`
 
 - **控制台改规则不再清空 `security_filters.yaml` 的注释**
   - `_save_rules_yaml()` 走 `yaml.safe_load` → `yaml.dump`，PyYAML 不保留注释，还会重排缩进与引号风格：从 UI 改一条正则会重写整个文件，**80 行注释全部消失**，并产生约 1250 行的 diff

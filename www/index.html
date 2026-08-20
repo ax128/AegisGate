@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/__ui__/assets/app.css">
   </head>
   <body>
+    <a class="skip-link" href="#overview">跳到主内容</a>
     <div class="app-shell">
 
       <!-- ── Header ── -->
@@ -24,41 +25,41 @@
           <span class="header-status-label" id="status-text">连接中…</span>
         </div>
         <div class="header-actions">
-          <button id="theme-toggle" class="btn-hdr" type="button" title="切换主题">
-            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+          <button id="theme-toggle" class="btn-hdr" type="button" title="切换主题" aria-label="切换主题">
+            <svg class="icon-sun u-hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
             </svg>
             <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
             </svg>
-            主题
+            <span class="btn-hdr-label">主题</span>
           </button>
-          <button id="refresh-bootstrap" class="btn-hdr" type="button" title="刷新状态">
+          <button id="refresh-bootstrap" class="btn-hdr" type="button" title="刷新状态" aria-label="刷新状态">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="23,4 23,10 17,10"/>
               <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
             </svg>
-            刷新
+            <span class="btn-hdr-label">刷新</span>
           </button>
-          <button id="open-health" class="btn-hdr" type="button" title="Health JSON">
+          <button id="open-health" class="btn-hdr" type="button" title="Health JSON" aria-label="查看 Health JSON">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/>
             </svg>
-            Health
+            <span class="btn-hdr-label">Health</span>
           </button>
-          <button id="restart-button" class="btn-hdr" type="button" title="重启网关">
+          <button id="restart-button" class="btn-hdr" type="button" title="重启网关" aria-label="重启网关">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
             </svg>
-            重启
+            <span class="btn-hdr-label" id="restart-label">重启</span>
           </button>
-          <button id="logout-button" class="btn-hdr btn-hdr-danger" type="button">
+          <button id="logout-button" class="btn-hdr btn-hdr-danger" type="button" title="退出登录" aria-label="退出登录">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
               <polyline points="16,17 21,12 16,7"/>
               <line x1="21" y1="12" x2="9" y2="12"/>
             </svg>
-            退出
+            <span class="btn-hdr-label">退出</span>
           </button>
         </div>
       </header>
@@ -93,6 +94,10 @@
           </div>
           <div class="sidebar-section">
             <span class="sidebar-section-label">配置</span>
+            <div class="sidebar-search">
+              <input type="search" id="config-global-search" class="config-search" placeholder="搜索全部配置项…（按 /）" aria-label="搜索全部配置项">
+              <span id="config-global-hits" class="sidebar-search-hits" aria-live="polite"></span>
+            </div>
             <div id="config-nav"></div>
             <a href="#rules" class="nav-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -153,14 +158,14 @@
             </a>
           </div>
           <div class="sidebar-footer">
-            <a href="https://github.com/ax128/AegisGate" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;color:var(--muted);text-decoration:none;font-size:0.82rem;transition:color 0.15s;">
+            <a class="sidebar-footer-link" href="https://github.com/ax128/AegisGate" target="_blank" rel="noopener noreferrer">
               <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16">
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
               </svg>
               GitHub
             </a>
-            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">·</span>
-            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">AegisGate</span>
+            <span class="sidebar-footer-dim">·</span>
+            <span class="sidebar-footer-dim">AegisGate</span>
           </div>
         </aside>
 
@@ -168,7 +173,7 @@
         <main class="content">
 
           <!-- Overview -->
-          <section id="overview">
+          <section id="overview" tabindex="-1">
             <div class="stat-grid">
               <div class="stat-card">
                 <div class="stat-card-label">服务状态</div>
@@ -182,12 +187,22 @@
               </div>
               <div class="stat-card">
                 <div class="stat-card-label">安全级别</div>
-                <div class="stat-card-value" id="security-text">—</div>
+                <div class="stat-card-value"><a class="stat-card-link" href="#security" id="security-text">—</a></div>
               </div>
               <div class="stat-card">
                 <div class="stat-card-label">默认上游</div>
-                <div class="stat-card-value" id="upstream-text" style="font-size:0.88rem;word-break:break-all;">—</div>
+                <div class="stat-card-value"><a class="stat-card-link stat-card-url" href="#general" id="upstream-text">—</a></div>
               </div>
+            </div>
+
+            <!-- Getting started: the path from "logged in" to "first forwarded
+                 request", which used to live only in the docs. -->
+            <div class="onboard" id="onboard" hidden>
+              <div class="onboard-head">
+                <h2 id="onboard-title">先把第一个请求跑通</h2>
+                <button id="onboard-toggle" class="btn-sm-ghost" type="button" aria-expanded="true" aria-controls="onboard-steps">收起</button>
+              </div>
+              <ol class="onboard-steps" id="onboard-steps"></ol>
             </div>
           </section>
 
@@ -228,7 +243,7 @@
               </div>
             </div>
 
-            <div class="rules-tabs" role="tablist" aria-label="统计视图" style="margin-top:16px;">
+            <div class="rules-tabs u-gap-top" role="tablist" aria-label="统计视图">
               <button class="rules-tab active" role="tab" aria-selected="true" data-stats-view="hourly">按小时</button>
               <button class="rules-tab" role="tab" aria-selected="false" data-stats-view="daily">按天</button>
             </div>
@@ -244,9 +259,9 @@
               </table>
             </div>
 
-            <div class="token-toolbar" style="margin-top:8px;">
-              <span id="stats-since" style="font-size:0.83rem;color:var(--muted);"></span>
-              <div style="display:flex;gap:8px;">
+            <div class="token-toolbar u-gap-top-sm">
+              <span id="stats-since" class="u-note"></span>
+              <div class="u-actions">
                 <button id="stats-refresh" class="btn-sm-ghost" type="button">刷新</button>
                 <button id="stats-clear" class="btn-danger-sm" type="button">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -386,7 +401,7 @@
               <div class="rules-toolbar">
                 <strong id="rules-section-label" class="rules-section-label">加载中…</strong>
                 <input type="search" id="rules-search" class="config-search" placeholder="按 ID 或正则搜索…" aria-label="搜索规则">
-                <span id="rules-count" style="font-size:0.83rem;color:var(--muted);"></span>
+                <span id="rules-count" class="u-note"></span>
                 <button id="rules-add" class="btn-sm" type="button">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -405,10 +420,10 @@
                 </table>
               </div>
               <div id="action-map-panel" class="hidden">
-                <p style="font-size:0.85rem;color:var(--muted);margin-bottom:12px;">编辑各威胁类别的处置动作（block / review / sanitize / pass）</p>
+                <p class="u-note u-note-block">编辑各威胁类别的处置动作（block / review / sanitize / pass）</p>
                 <div id="action-map-grid" class="form-grid"></div>
                 <div class="panel-actions">
-                  <button id="save-action-map" class="btn-save" type="button">保存动作映射</button>
+                  <button id="save-action-map" class="btn-save" type="button">保存动作映射<span class="save-count" id="action-map-dirty"></span></button>
                   <span id="action-map-status" class="status-note" aria-live="polite"></span>
                 </div>
               </div>
@@ -431,10 +446,10 @@
               </div>
             </div>
             <div class="token-toolbar">
-              <span id="redact-count" style="font-size:0.83rem;color:var(--muted);">加载中…</span>
-              <div style="display:flex;gap:8px;">
+              <span id="redact-count" class="u-note">加载中…</span>
+              <div class="u-actions">
                 <button id="redact-refresh" class="btn-sm-ghost" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
                     <polyline points="23,4 23,10 17,10"/>
                     <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
                   </svg>刷新
@@ -477,10 +492,10 @@
             </div>
 
             <div class="token-toolbar">
-              <span id="token-count" style="font-size:0.83rem;color:var(--muted);">加载中…</span>
-              <div style="display:flex;gap:8px;">
+              <span id="token-count" class="u-note">加载中…</span>
+              <div class="u-actions">
                 <button id="token-refresh" class="btn-sm-ghost" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
                     <polyline points="23,4 23,10 17,10"/>
                     <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
                   </svg>刷新
@@ -499,13 +514,14 @@
                 <thead>
                   <tr>
                     <th scope="col">Token（路由令牌）</th>
+                    <th scope="col">客户端 Base URL</th>
                     <th scope="col">上游地址</th>
-                    <th scope="col">脱敏豁免字段</th>
+                    <th scope="col">豁免字段数</th>
                     <th scope="col">操作</th>
                   </tr>
                 </thead>
                 <tbody id="token-tbody">
-                  <tr><td colspan="4" class="token-table-empty">加载中…</td></tr>
+                  <tr><td colspan="5" class="token-table-empty">加载中…</td></tr>
                 </tbody>
               </table>
             </div>
@@ -548,7 +564,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>密钥管理</h2>
-                <p class="panel-desc">查看或更换三个密钥文件；更换后重启服务生效。<strong style="color:var(--error)">Fernet 密钥更换后历史脱敏映射将无法解密。</strong></p>
+                <p class="panel-desc">查看或更换三个密钥文件；更换后重启服务生效。<strong class="u-required">Fernet 密钥更换后历史脱敏映射将无法解密。</strong></p>
               </div>
             </div>
             <div id="keys-grid" class="keys-grid">
@@ -654,14 +670,33 @@
             <p class="field-hint">URL 路径中的路由标识符；更改后旧 base_url 立即失效，请同步更新客户端配置</p>
           </div>
           <div class="modal-field">
-            <label for="modal-upstream">上游地址 <span style="color:var(--error)">*</span></label>
-            <input id="modal-upstream" type="text" placeholder="https://api.openai.com/v1">
-            <p class="field-hint">转发目标的 base URL，末尾无需加斜线</p>
+            <label for="modal-upstream">上游地址 <span class="u-required">*</span></label>
+            <input id="modal-upstream" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+                   list="upstream-suggestions" placeholder="https://api.openai.com/v1"
+                   aria-describedby="modal-upstream-note">
+            <datalist id="upstream-suggestions">
+              <option value="https://api.openai.com/v1"></option>
+              <option value="https://api.anthropic.com/v1"></option>
+              <option value="https://generativelanguage.googleapis.com/v1beta/openai"></option>
+              <option value="https://api.deepseek.com/v1"></option>
+              <option value="http://127.0.0.1:11434/v1"></option>
+              <option value="http://host.docker.internal:11434/v1"></option>
+            </datalist>
+            <p class="field-hint">转发目标的 base URL，填到 <code>/v1</code> 为止，末尾无需加斜线</p>
+            <p id="modal-upstream-note" class="field-note" role="status" aria-live="polite"></p>
+            <div class="modal-field-actions">
+              <button id="modal-probe" class="btn-sm-ghost" type="button">测试连通性</button>
+              <span id="modal-probe-status" class="status-note" aria-live="polite"></span>
+            </div>
           </div>
           <div class="modal-field">
             <label for="modal-whitelist">脱敏豁免字段（可选）</label>
             <input id="modal-whitelist" type="text" placeholder="api_key, secret, token">
-            <p class="field-hint">逗号分隔的<strong>字段名</strong>；请求体中 <code>field=value</code> / <code>field:value</code> / <code>"field":"value"</code> 形式的值将<strong>跳过脱敏</strong>，直接原样转发上游。留空则所有字段均参与脱敏。</p>
+            <p class="field-hint">逗号分隔的<strong>字段名</strong>，留空则所有字段均参与脱敏。</p>
+            <details class="field-details">
+              <summary>豁免字段是怎么匹配的？</summary>
+              <p>请求体中 <code>field=value</code> / <code>field:value</code> / <code>"field":"value"</code> 形式的值将<strong>跳过脱敏</strong>，直接原样转发上游。填的是<strong>字段名</strong>，不是要豁免的值本身。</p>
+            </details>
           </div>
         </div>
         <div class="modal-foot">
@@ -684,9 +719,9 @@
           </button>
         </div>
         <div class="modal-body">
-          <p style="font-size:0.83rem;color:var(--muted);margin-bottom:8px;">请妥善保管，不要在不安全环境中展示。</p>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <code id="key-modal-value" style="flex:1;word-break:break-all;background:var(--surface2);padding:10px 12px;border-radius:6px;font-size:0.85rem;"></code>
+          <p class="u-note u-note-tight">请妥善保管，不要在不安全环境中展示。</p>
+          <div class="key-modal-row">
+            <code id="key-modal-value" class="key-modal-value"></code>
             <button id="key-modal-copy" class="btn-sm-ghost" type="button">复制</button>
           </div>
         </div>
@@ -711,12 +746,12 @@
         </div>
         <div class="modal-body">
           <div class="modal-field">
-            <label for="rule-modal-id">规则 ID <span style="color:var(--error)">*</span></label>
+            <label for="rule-modal-id">规则 ID <span class="u-required">*</span></label>
             <input id="rule-modal-id" type="text" placeholder="MY_CUSTOM_RULE">
           </div>
           <div class="modal-field">
-            <label for="rule-modal-regex">正则表达式 <span style="color:var(--error)">*</span></label>
-            <input id="rule-modal-regex" type="text" placeholder="(?i)your_pattern_here" style="font-family:monospace;">
+            <label for="rule-modal-regex">正则表达式 <span class="u-required">*</span></label>
+            <input id="rule-modal-regex" class="u-mono" type="text" placeholder="(?i)your_pattern_here">
           </div>
           <div class="modal-field" id="rule-modal-kind-field">
             <label for="rule-modal-kind">类型（kind，可选）</label>
@@ -754,7 +789,7 @@
         </div>
         <div class="modal-body">
           <div class="modal-field">
-            <label for="redact-modal-value">敏感值 <span style="color:var(--error)">*</span></label>
+            <label for="redact-modal-value">敏感值 <span class="u-required">*</span></label>
             <input id="redact-modal-value" type="text" placeholder="输入需要精确脱敏的值">
             <p class="field-hint">至少 10 个字符，命中后替换为 <code>[REDACTED:EXACT_VALUE]</code></p>
           </div>

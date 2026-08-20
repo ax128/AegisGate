@@ -136,7 +136,7 @@
     if (!append) {
       cursor = null;
       rowSeq = 0;
-      tbody.innerHTML = '<tr><td colspan="6" class="token-table-empty">加载中…</td></tr>';
+      showSkeleton(tbody, 6);
     }
     try {
       const params = readFilters();
@@ -161,7 +161,7 @@
       if (countEl) countEl.textContent = `已加载 ${total} 条`;
       setScanNote(data);
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="6" class="token-table-empty" style="color:var(--error)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
+      tbody.innerHTML = errorStateRow(6, err, "审计记录加载失败");
       if (countEl) countEl.textContent = "";
     } finally {
       loading = false;
