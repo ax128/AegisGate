@@ -497,17 +497,19 @@ def _reject_zero_width(key: str, regex: str, outcome: dict[str, Any]) -> None:
     body, not a weakened filter.
     """
     try:
-        if re.compile(regex).match("") is not None:
-            raise RulesWriteError(
-                "regex_matches_empty",
-                f"规则 {key} 的正则能匹配空字符串，会在文本的每个位置插入占位符，"
-                "把转发给上游的请求体撑大一个数量级，已拒绝保存",
-                status=400,
-            )
+        compiled = re.compile(regex)
     except re.error:
-        # Compilation failures are reported by the probe below, which names the
-        # layer they would break.
+        # Unreachable in practice — the probe above already refused anything that
+        # does not compile — and kept narrow so a future caller cannot turn this
+        # into a place where a compile error is silently dropped.
         return
+    if compiled.match("") is not None:
+        raise RulesWriteError(
+            "regex_matches_empty",
+            f"规则 {key} 的正则能匹配空字符串，会在文本的每个位置插入占位符，"
+            "把转发给上游的请求体撑大一个数量级，已拒绝保存",
+            status=400,
+        )
     for result in outcome.get("results") or []:
         for span in result.get("spans") or []:
             if len(span) == 2 and span[0] == span[1]:
