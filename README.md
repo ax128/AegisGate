@@ -136,6 +136,13 @@ Health check: `curl http://127.0.0.1:18080/health`
 
 Readiness check: `curl http://127.0.0.1:18080/ready`
 
+The response body carries a `checks` map and a `degraded_checks` list. One check is
+reported without failing readiness: `security_rules` reads `stale: <error>` when the
+rules file on disk stops parsing. The gateway keeps enforcing the last document it
+loaded successfully, so it is still ready to serve — and since every replica reads
+the same file, failing readiness there would drop them all at once and turn a config
+typo into an outage. Alert on `degraded_checks` rather than on the status code alone.
+
 Admin UI login: `http://localhost:18080/__ui__/login`
 
 ### Gateway Key (admin endpoints + UI login)

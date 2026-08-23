@@ -1792,11 +1792,41 @@ def ready() -> JSONResponse:
     except Exception:
         checks["hot_reload"] = "unknown"
 
-    all_ok = all(v in ("ok", "disabled") for v in checks.values())
+    # Security rules health — reported, deliberately not gating (see below).
+    try:
+        from aegisgate.config.security_rules import security_rules_load_error
+
+        reason = security_rules_load_error()
+        checks["security_rules"] = "ok" if reason is None else f"stale: {reason}"
+    except Exception:
+        checks["security_rules"] = "unknown"
+
+    # A rules file that does not parse leaves the process enforcing the last good
+    # document rather than failing requests, which is the whole point of that
+    # behaviour — so it must not also take the gateway out of rotation. Every
+    # replica reads the same file, so gating here would drop all of them together
+    # and turn one config typo into a full outage. It is reported instead: the
+    # check is in the body for monitoring, and there is an ERROR in the log.
+    _NON_GATING_CHECKS = frozenset({"security_rules"})
+    all_ok = all(
+        value in ("ok", "disabled")
+        for name, value in checks.items()
+        if name not in _NON_GATING_CHECKS
+    )
+    degraded = [
+        name for name, value in checks.items() if value not in ("ok", "disabled")
+    ]
     status_code = 200 if all_ok else 503
     return JSONResponse(
         status_code=status_code,
-        content={"status": "ready" if all_ok else "degraded", "checks": checks},
+        content={
+            "status": "ready" if all_ok else "degraded",
+            "checks": checks,
+            # Named separately so a non-gating problem is still visible to anyone
+            # reading only the top of the body, not just to whoever diffs
+            # ``checks`` against a list of expected values.
+            "degraded_checks": degraded,
+        },
     )
 
 

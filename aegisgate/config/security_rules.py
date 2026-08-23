@@ -603,6 +603,16 @@ _CACHE_LOCK = Lock()
 _CACHE_PATH = ""
 _CACHE_MTIME_NS = -1
 _CACHE_RULES: dict[str, Any] | None = None
+# Why the rules file last failed to parse, or ``None`` while it is being read
+# successfully. Since a failed reload keeps the previously loaded document in
+# memory rather than raising at every later caller, the process goes on
+# enforcing a policy the file no longer describes — correctly, and completely
+# silently. This is the fact a readiness probe can ask about.
+_CACHE_LOAD_ERROR: str | None = None
+# A YAML error spans several lines and quotes the offending source. That reads
+# well in a log and badly in a health probe, where the value is a field someone
+# alerts on, so it is folded to one bounded line before being stored.
+_LOAD_ERROR_MAX_LEN = 300
 
 # Credential-only default for the low-false-positive surfaces (the /v1 chat,
 # responses and messages routes, plus the relaxed responses-API roles). Kept as
@@ -717,8 +727,16 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return base
 
 
+def _one_line(detail: str) -> str:
+    """Collapse *detail* to a single bounded line."""
+    folded = " ".join(detail.split())
+    if len(folded) <= _LOAD_ERROR_MAX_LEN:
+        return folded
+    return folded[: _LOAD_ERROR_MAX_LEN - 1] + "…"
+
+
 def load_security_rules(path: str | None = None) -> dict[str, Any]:
-    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
+    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES, _CACHE_LOAD_ERROR
 
     rules_path = _resolve_rules_file(path or settings.security_rules_path)
     path_key = str(rules_path.resolve())
@@ -729,19 +747,45 @@ def load_security_rules(path: str | None = None) -> dict[str, Any]:
             return deepcopy(_CACHE_RULES)
 
         rules = deepcopy(_DEFAULT_RULES)
-        if rules_path.exists():
-            raw = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
-            if not isinstance(raw, dict):
-                raise ValueError(f"security rules file must be a mapping: {rules_path}")
-            rules = _deep_merge(rules, raw)
-            logger.info("security rules loaded path=%s", rules_path)
-        else:
-            logger.info("security rules file not found, using defaults path=%s", rules_path)
+        try:
+            if rules_path.exists():
+                raw = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
+                if not isinstance(raw, dict):
+                    raise ValueError(f"security rules file must be a mapping: {rules_path}")
+                rules = _deep_merge(rules, raw)
+                logger.info("security rules loaded path=%s", rules_path)
+            else:
+                logger.info("security rules file not found, using defaults path=%s", rules_path)
+        except Exception as exc:
+            # Recorded on the way out, not swallowed: every caller still sees the
+            # failure it would have seen. What changes is that the failure stops
+            # being invisible to anything that did not make this call — a health
+            # probe above all, since a stale-but-working process looks identical
+            # to a healthy one from outside.
+            _CACHE_LOAD_ERROR = _one_line(f"{type(exc).__name__}: {exc}")
+            raise
 
         _CACHE_PATH = path_key
         _CACHE_MTIME_NS = mtime_ns
         _CACHE_RULES = rules
+        _CACHE_LOAD_ERROR = None
         return deepcopy(rules)
+
+
+def security_rules_load_error() -> str | None:
+    """Why the rules file on disk does not parse, or ``None`` if it does.
+
+    Set by whichever load last touched the file and cleared by the next one that
+    succeeds, so it describes the file rather than any single caller. A cache hit
+    leaves it alone on purpose: the hit means nothing has changed on disk, and a
+    file that was broken a moment ago is still broken.
+
+    Exists because a failed reload is deliberately survivable — the process keeps
+    enforcing the last good document — and survivable failures are the ones that
+    go unnoticed for weeks.
+    """
+    with _CACHE_LOCK:
+        return _CACHE_LOAD_ERROR
 
 
 def invalidate_security_rules_cache() -> None:
