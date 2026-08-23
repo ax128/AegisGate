@@ -752,12 +752,77 @@ def invalidate_security_rules_cache() -> None:
     inside one filesystem timestamp tick, and the second would then be served
     from the cache while the console reports it applied. A reload is an explicit
     request, so it drops the cache instead of asking the clock.
+
+    Prefer :func:`reload_security_rules_cache` when the drop is immediately
+    followed by a load: this one leaves the cache empty if that load fails.
     """
     global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
     with _CACHE_LOCK:
         _CACHE_PATH = ""
         _CACHE_MTIME_NS = -1
         _CACHE_RULES = None
+
+
+def reload_security_rules_cache(path: str | None = None) -> dict[str, Any]:
+    """Re-read the rules file, keeping the last good document if it will not parse.
+
+    A file that stops parsing used to cost the process two things, not one. The
+    first is expected and handled: the reload reports its ``yaml`` layer as
+    failed and its caller skips the cache clears below it, so the patterns
+    already compiled keep filtering traffic. The second is not. This cache is
+    keyed on the file's mtime, so the broken save invalidates it all by itself,
+    and every caller that has to build from scratch afterwards — a pipeline
+    thread the executor has not spawned yet, the console's own redaction panel —
+    re-parses and raises instead of seeing the rules still being enforced. The
+    symptom is intermittent 500s that follow traffic, not the edit.
+
+    So on failure the last good document is re-pinned under the *current* file
+    identity: while the bad bytes sit on disk the process keeps answering with
+    what it is actually running, and the moment the file changes again — fixed
+    or not — the mtime moves and it is read afresh. The parse error itself is
+    not swallowed; it is raised so the caller can record the failed layer.
+    """
+    global _CACHE_PATH, _CACHE_MTIME_NS, _CACHE_RULES
+    with _CACHE_LOCK:
+        previous = _CACHE_RULES
+        _CACHE_PATH = ""
+        _CACHE_MTIME_NS = -1
+        _CACHE_RULES = None
+    try:
+        return load_security_rules(path)
+    except Exception as exc:
+        if previous is None:
+            # Nothing good was ever loaded — a file broken at startup has no
+            # last-known-good to fall back to, and pretending otherwise would
+            # serve the built-in defaults as if they were the deployment's.
+            raise
+        rules_path = _resolve_rules_file(path or settings.security_rules_path)
+        identity: tuple[str, int] | None
+        try:
+            identity = (
+                str(rules_path.resolve()),
+                rules_path.stat().st_mtime_ns if rules_path.exists() else -1,
+            )
+        except OSError:
+            # No readable identity to pin the previous document to. Report the
+            # parse failure and leave the cache empty rather than raising this
+            # over it — the parse error is the one the caller needs to see.
+            identity = None
+        if identity is not None:
+            with _CACHE_LOCK:
+                # A concurrent loader that filled the cache in between read the
+                # same bytes this one failed on, so its result is newer than the
+                # snapshot; leave it alone.
+                if _CACHE_RULES is None:
+                    _CACHE_PATH, _CACHE_MTIME_NS = identity
+                    _CACHE_RULES = previous
+        logger.error(
+            "security rules file does not parse path=%s error=%s — keeping the "
+            "previously loaded rules in memory until the file changes again",
+            rules_path,
+            exc,
+        )
+        raise
 
 
 def _warn_relaxed_pii_config_once(key: tuple[str, ...], message: str, *args: Any) -> None:

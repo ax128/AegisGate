@@ -321,3 +321,117 @@ def test_storage_backend_change_swaps_once(monkeypatch: pytest.MonkeyPatch) -> N
     finally:
         pipeline_runtime.store.swap = original_swap
 
+
+class TestReloadSecurityRulesKeepsLastGood:
+    """A rules file that stops parsing must not also take the running one down.
+
+    Two failures used to follow one bad edit. The first is handled on purpose:
+    ``reload_security_rules`` reports the ``yaml`` layer as failed and skips the
+    three cache clears below it, so patterns already compiled keep filtering. The
+    second was not handled at all — the parsed-rules cache is keyed on mtime, so
+    the broken save invalidated it by itself, and everything that had to build
+    from scratch afterwards (a pipeline thread the executor had not spawned yet,
+    the console's own redaction panel) re-parsed the bad file and raised. The
+    symptom follows traffic rather than the edit, which is what made it hard to
+    read as a config problem.
+    """
+
+    _GOOD = """\
+version: 3
+redaction:
+  field_value_min_len: 12
+  pii_patterns:
+    - id: SEED
+      regex: 'seed-pattern'
+"""
+    _BROKEN = "redaction:\n  pii_patterns:\n   - id: X\n  bad: : :\n"
+
+    @pytest.fixture()
+    def rules_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from aegisgate.config import security_rules
+        from aegisgate.config.settings import settings
+
+        path = tmp_path / "security_filters.yaml"
+        path.write_text(self._GOOD, encoding="utf-8")
+        monkeypatch.setattr(settings, "security_rules_path", str(path), raising=False)
+        security_rules.invalidate_security_rules_cache()
+        yield path
+        security_rules.invalidate_security_rules_cache()
+
+    @staticmethod
+    def _rewrite(path: Path, text: str) -> None:
+        """Write *text* and push mtime forward, so the cache genuinely misses.
+
+        Without this the two saves can share a filesystem timestamp tick and the
+        loader would answer from cache — the test would pass without ever
+        exercising the path it is about.
+        """
+        import os
+
+        before = path.stat().st_mtime_ns
+        path.write_text(text, encoding="utf-8")
+        after = before + 1_000_000_000
+        os.utime(path, ns=(after, after))
+
+    @staticmethod
+    def _seed_id() -> str:
+        from aegisgate.config.security_rules import load_security_rules
+
+        return load_security_rules()["redaction"]["pii_patterns"][0]["id"]
+
+    def test_broken_file_keeps_serving_the_last_good_document(
+        self, rules_file: Path
+    ) -> None:
+        assert self._seed_id() == "SEED"
+
+        self._rewrite(rules_file, self._BROKEN)
+        result = hot_reload.reload_security_rules()
+
+        assert result["ok"] is False
+        assert result["layers"]["yaml"] == "failed"
+        # Skipped, not run: rebuilding these from the same broken file is how a
+        # parse error would reach the compiled patterns that are still working.
+        assert result["layers"]["pipeline"] == "skipped"
+        # The parse error is reported, not swallowed — that is the only signal a
+        # caller gets that the file on disk and the rules in memory disagree.
+        assert result["errors"] and result["errors"][0]["layer"] == "yaml"
+        assert "Error" in result["errors"][0]["error"]
+
+        # The part that used to raise. A fresh build now sees the rules the
+        # process is actually enforcing instead of the bad bytes on disk.
+        assert self._seed_id() == "SEED"
+
+    def test_fixing_the_file_is_picked_up_again(self, rules_file: Path) -> None:
+        assert self._seed_id() == "SEED"
+        self._rewrite(rules_file, self._BROKEN)
+        assert hot_reload.reload_security_rules()["ok"] is False
+
+        # Pinning the last good document must not outlive the bad bytes: the
+        # next change to the file has to be read, or a repaired file would never
+        # take effect without a restart.
+        self._rewrite(rules_file, self._GOOD.replace("SEED", "REPAIRED"))
+        result = hot_reload.reload_security_rules()
+
+        assert result["ok"] is True
+        assert self._seed_id() == "REPAIRED"
+
+    def test_broken_from_the_start_still_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aegisgate.config import security_rules
+        from aegisgate.config.settings import settings
+
+        path = tmp_path / "security_filters.yaml"
+        path.write_text(self._BROKEN, encoding="utf-8")
+        monkeypatch.setattr(settings, "security_rules_path", str(path), raising=False)
+        security_rules.invalidate_security_rules_cache()
+        try:
+            # Nothing good was ever loaded, so there is nothing to keep. Serving
+            # the built-in defaults here would quietly present them as the
+            # deployment's own policy.
+            result = hot_reload.reload_security_rules()
+            assert result["ok"] is False
+            with pytest.raises(Exception):
+                security_rules.load_security_rules()
+        finally:
+            security_rules.invalidate_security_rules_cache()

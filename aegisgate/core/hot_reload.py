@@ -289,15 +289,15 @@ def reload_security_rules() -> dict[str, Any]:
         return True
 
     def _load_yaml() -> None:
-        from aegisgate.config.security_rules import (
-            invalidate_security_rules_cache,
-            load_security_rules,
-        )
+        from aegisgate.config.security_rules import reload_security_rules_cache
 
-        # Explicit invalidation first: the cache is mtime-keyed, and a reload
-        # asked for by name must not be answered from a stale entry.
-        invalidate_security_rules_cache()
-        load_security_rules()
+        # The cache is mtime-keyed, so a reload asked for by name must not be
+        # answered from a stale entry — but a file that will not parse must not
+        # *cost* us the running document either. This drops the cache, and on a
+        # parse failure re-pins the last good rules under the current file so
+        # later builds still see them; the layers below are skipped either way,
+        # so the process keeps enforcing what it already compiled.
+        reload_security_rules_cache()
 
     # 1. security_rules.py has mtime-based cache — next call auto-reloads.
     #    Force a load now so the YAML is parsed once, not per-thread.
