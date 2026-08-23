@@ -747,6 +747,17 @@ def register_ui_routes(app: FastAPI) -> None:
     # Groups whose ids the relaxed set resolves case-insensitively, so two
     # spellings of one id are ambiguous rather than merely untidy.
     _NORMALIZED_ID_SECTIONS: frozenset[str] = frozenset({"redaction.pii_patterns"})
+    # Groups whose ids end up inside the reversible ``{{AG_<prefix>_<id>_<n>}}``
+    # placeholder the V1 pipeline writes. The restoration side finds those with a
+    # fixed ``[A-Z0-9_]`` grammar, so an id outside it produces a placeholder the
+    # volume cap, the partial-restore check and the exfiltration guard cannot see.
+    # The request path folds such ids defensively (a hand-edited file reaches it
+    # too), but a rule authored here should say so up front rather than quietly
+    # becoming something else.
+    _PLACEHOLDER_ID_SECTIONS: frozenset[str] = frozenset(
+        {"redaction.pii_patterns", "redaction.field_value_patterns"}
+    )
+    _RULE_ID_ALLOWED = re.compile(r"^[A-Za-z0-9_]{1,64}$")
     # Rule fields whose value is the sensitive part of the rule and never enters
     # an audit record.
     _AUDIT_OPAQUE_RULE_FIELDS: frozenset[str] = frozenset({"regex", "patterns"})
@@ -906,6 +917,31 @@ def register_ui_routes(app: FastAPI) -> None:
             )
         return None
 
+    def _invalid_rule_id_response(section: str, rule_id: str) -> JSONResponse | None:
+        """Reject an id this group cannot carry through a placeholder.
+
+        Only on create: the id is not editable afterwards, and refusing a PATCH
+        because of an id that is already in the file would lock the console out
+        of fixing that rule's regex.
+        """
+        canonical = _LEGACY_SECTION_ALIASES.get(section, section)
+        if canonical not in _PLACEHOLDER_ID_SECTIONS:
+            return None
+        if _RULE_ID_ALLOWED.match(rule_id):
+            return None
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_rule_id",
+                "detail": (
+                    f"规则 ID '{rule_id}' 含有占位符无法承载的字符。该规则组的 ID 会写进 "
+                    "{{AG_…}} 占位符，而还原侧按 [A-Za-z0-9_] 识别它——超出这个字符集会让"
+                    "数量上限、部分还原与诱导外泄三道检查都看不到这些占位符。"
+                    "请只使用字母、数字与下划线（1–64 个字符）。"
+                ),
+            },
+        )
+
     def _unknown_section_response(section: str) -> JSONResponse:
         return JSONResponse(
             status_code=404, content={"error": "unknown_section", "detail": section}
@@ -999,6 +1035,9 @@ def register_ui_routes(app: FastAPI) -> None:
         invalid_regex = _invalid_regex_response(regex)
         if invalid_regex is not None:
             return invalid_regex
+        invalid_id = _invalid_rule_id_response(section, rule_id)
+        if invalid_id is not None:
+            return invalid_id
 
         def build(snapshot: RulesSnapshot) -> RulesChange:
             data = snapshot.data

@@ -315,3 +315,74 @@ class TestRegexProbeRoute:
         before = client.rules_path.read_text(encoding="utf-8")
         client.post("/__ui__/api/rules_test", json={"regex": "x", "samples": ["x"]})
         assert client.rules_path.read_text(encoding="utf-8") == before
+
+
+class TestPlaceholderSafeRuleIds:
+    """Ids in the two redaction groups end up inside ``{{AG_<prefix>_<id>_<n>}}``.
+
+    The restoration side finds those with a fixed ``[A-Z0-9_]`` grammar, so an id
+    outside it produced a placeholder that the volume cap, the partial-restore
+    check and the exfiltration guard could not see — while restoration itself
+    still substituted the plaintext back, because that goes through the mapping
+    by literal string. The request path folds such ids defensively (a
+    hand-edited file reaches it too); this refuses to author one in the first
+    place, so the rule that gets saved is the rule that runs.
+    """
+
+    @pytest.mark.parametrize("rule_id", ["MY-RULE", "RULE.V2", "MY RULE", "身份证", "a" * 65])
+    def test_an_id_the_placeholder_cannot_carry_is_refused(
+        self, client, rule_id: str
+    ) -> None:
+        response = client.post(
+            "/__ui__/api/rules/redaction.pii_patterns",
+            json={"id": rule_id, "regex": "x"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_rule_id"
+
+    @pytest.mark.parametrize("rule_id", ["MY_RULE", "CN_BANK_CARD", "lower_case", "RULE2"])
+    def test_a_conforming_id_is_accepted(self, client, rule_id: str) -> None:
+        assert client.post(
+            "/__ui__/api/rules/redaction.pii_patterns",
+            json={"id": rule_id, "regex": "x"},
+        ).status_code == 201
+
+    def test_the_field_group_is_guarded_too(self, client) -> None:
+        # field_value_patterns feeds the same placeholder on the V1 pipeline.
+        assert client.post(
+            "/__ui__/api/rules/redaction.field_value_patterns",
+            json={"id": "BAD-FIELD", "regex": "x"},
+        ).status_code == 400
+
+    def test_the_legacy_alias_is_guarded_too(self, client) -> None:
+        # `pii_patterns` still resolves to redaction.pii_patterns for old clients.
+        assert client.post(
+            "/__ui__/api/rules/pii_patterns", json={"id": "BAD-ALIAS", "regex": "x"}
+        ).status_code == 400
+
+    def test_groups_without_a_placeholder_are_not_constrained(self, client) -> None:
+        # These ids never enter a placeholder — they are report labels. Applying
+        # the rule there would reject ids the shipped file already uses.
+        assert client.post(
+            "/__ui__/api/rules/injection_detector.direct_patterns",
+            json={"id": "ignore-previous-xx", "regex": "x"},
+        ).status_code == 201
+
+    def test_an_existing_bad_id_can_still_be_edited(self, client) -> None:
+        """Only creation is refused.
+
+        Blocking a PATCH because of an id already in the file would lock the
+        console out of fixing that rule's regex — and the id is not editable, so
+        there would be no way out short of deleting the rule.
+        """
+        rules = yaml.safe_load(client.rules_path.read_text(encoding="utf-8"))
+        rules["redaction"]["pii_patterns"].append({"id": "LEGACY-BAD", "regex": "x"})
+        client.rules_path.write_text(
+            yaml.dump(rules, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
+
+        assert client.patch(
+            "/__ui__/api/rules/redaction.pii_patterns/LEGACY-BAD",
+            json={"regex": "updated-pattern"},
+        ).status_code == 200

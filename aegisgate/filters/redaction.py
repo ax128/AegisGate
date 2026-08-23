@@ -29,8 +29,36 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys, protect
 
 
 _MAX_LOG_MARKERS = 10
+# The restoration side finds placeholders with ``\{\{AG_[A-Z0-9]+_[A-Z0-9_]+_\d+\}\}``.
+# A rule id is written by an admin, and nothing has ever constrained its
+# characters, so ``MY-RULE`` or ``身份证`` produced a placeholder that regex could
+# not see. Restoration still substituted it — that goes through the mapping by
+# literal string — but the three checks in front of the substitution are driven
+# by the regex, so the volume cap, the partial-restore check and the
+# exfiltration guard all silently skipped those values. A response that asked to
+# dump the secret got the plaintext back.
+#
+# Sanitising happens *here*, at placeholder construction, and deliberately not
+# where patterns are compiled: ``relaxed_pii_ids`` resolves against the id as
+# configured, so rewriting the compiled id would drop the rule off the relaxed
+# surfaces instead. Collisions are harmless — the serial keeps every placeholder
+# unique, and the id is only a label inside it.
+_PLACEHOLDER_KIND_UNSAFE = re.compile(r"[^A-Z0-9_]")
+_PLACEHOLDER_KIND_FALLBACK = "PII"
+
 _DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
 _DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
+
+
+def placeholder_kind(pattern_id: str) -> str:
+    """The rule id as it may appear inside ``{{AG_…}}``.
+
+    Mirrors :meth:`RedactionFilter._request_prefix`: fold what the placeholder
+    grammar cannot carry, and never return empty — an empty segment makes the
+    whole placeholder unmatchable, which is the failure this exists to prevent.
+    """
+    folded = _PLACEHOLDER_KIND_UNSAFE.sub("_", str(pattern_id).upper())
+    return folded or _PLACEHOLDER_KIND_FALLBACK
 
 
 class RedactionFilter(BaseFilter):
@@ -82,6 +110,11 @@ class RedactionFilter(BaseFilter):
         self._strip_table = str.maketrans("", "", "".join(self._invisible_chars | self._bidi_chars))
 
         self._field_patterns = self._build_field_patterns(redaction_rules.get("field_value_patterns", []))
+
+        self._placeholder_kinds = {
+            pattern_id: placeholder_kind(pattern_id)
+            for pattern_id, _ in (*self._pii_patterns, *self._field_patterns)
+        }
 
     def _build_field_patterns(self, items: list[dict] | list[str]) -> list[tuple[str, re.Pattern[str]]]:
         compiled: list[tuple[str, re.Pattern[str]]] = []
@@ -184,7 +217,7 @@ class RedactionFilter(BaseFilter):
             nonlocal serial
             protected_spans = protected_spans_for_text(text, ctx.redaction_whitelist_keys)
 
-            def _replace_match(match: re.Match[str], kind: str) -> str:
+            def _replace_match(match: re.Match[str], kind: str, label: str) -> str:
                 nonlocal serial
                 raw_value = match.group(0)
                 if protected_spans and range_overlaps_protected(
@@ -198,7 +231,7 @@ class RedactionFilter(BaseFilter):
                     return existing
 
                 serial += 1
-                placeholder = f"{{{{AG_{request_prefix}_{kind}_{serial}}}}}"
+                placeholder = f"{{{{AG_{request_prefix}_{label}_{serial}}}}}"
                 mapping[placeholder] = raw_value
                 value_to_placeholder[raw_value] = placeholder
                 if len(log_markers) < _MAX_LOG_MARKERS:
@@ -214,7 +247,13 @@ class RedactionFilter(BaseFilter):
                 return placeholder
 
             def _apply_pattern(pattern: re.Pattern[str], kind: str, source_text: str) -> str:
-                return pattern.sub(lambda match: _replace_match(match, kind), source_text)
+                # Resolved once per pattern, not per match: this runs over every
+                # message of every request. The log marker below keeps the id as
+                # configured, so an admin can still recognise their own rule.
+                label = self._placeholder_kinds.get(kind) or placeholder_kind(kind)
+                return pattern.sub(
+                    lambda match: _replace_match(match, kind, label), source_text
+                )
 
             for kind, pattern in active_pii_patterns:
                 text = _apply_pattern(pattern, kind, text)
