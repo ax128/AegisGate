@@ -46,6 +46,9 @@ _MAX_LOG_MARKERS = 10
 _PLACEHOLDER_KIND_UNSAFE = re.compile(r"[^A-Z0-9_]")
 _PLACEHOLDER_KIND_FALLBACK = "PII"
 
+_DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
+_DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
+
 
 def placeholder_kind(pattern_id: str) -> str:
     """The rule id as it may appear inside ``{{AG_…}}``.
@@ -56,9 +59,6 @@ def placeholder_kind(pattern_id: str) -> str:
     """
     folded = _PLACEHOLDER_KIND_UNSAFE.sub("_", str(pattern_id).upper())
     return folded or _PLACEHOLDER_KIND_FALLBACK
-
-_DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
-_DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
 
 
 class RedactionFilter(BaseFilter):
