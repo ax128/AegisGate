@@ -788,6 +788,36 @@ def security_rules_load_error() -> str | None:
         return _CACHE_LOAD_ERROR
 
 
+def prime_security_rules_cache() -> str | None:
+    """Read the rules once at startup. Returns the parse error, or ``None``.
+
+    Two things this buys. A file that does not parse otherwise announces itself
+    as a 500 on the first request that has to build a filter pipeline, which is a
+    long way from the edit that caused it. And :func:`security_rules_load_error`
+    — what ``/ready`` reports — stays ``None`` until *something* attempts a load,
+    so a process booted on a broken file looked healthy right up until traffic
+    arrived.
+
+    Deliberately does not stop startup, and does not raise. Requests that bypass
+    the filter pipeline (passthrough, whitelist) return before it is ever built,
+    so they are served without reading these rules at all; refusing to boot would
+    take those down too. Same trade the loader makes when it keeps the last good
+    document rather than raising at every later caller.
+    """
+    try:
+        load_security_rules()
+    except Exception as exc:
+        logger.error(
+            "security rules file does not parse at startup path=%s error=%s — "
+            "filtered routes will fail until it is fixed, and /ready reports it "
+            "under checks.security_rules",
+            _resolve_rules_file(settings.security_rules_path),
+            exc,
+        )
+        return security_rules_load_error()
+    return None
+
+
 def invalidate_security_rules_cache() -> None:
     """Drop the parsed-rules cache so the next load re-reads the file.
 
