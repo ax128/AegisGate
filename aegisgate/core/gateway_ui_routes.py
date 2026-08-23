@@ -1380,16 +1380,51 @@ def register_ui_routes(app: FastAPI) -> None:
 
         return etag_for_file(_config_path())
 
+    _REDACT_VALUES_DEGRADED_DETAIL = (
+        "精确值文件当前无法读取（密钥不匹配、或文件损坏），精确值脱敏已停止生效。"
+        "文件里原有的值仍在磁盘上但本进程读不出来，此时写入会用新内容整体覆盖它、"
+        "永久丢弃那些值，因此拒绝写入。请先恢复正确的 Fernet 密钥或从备份还原该文件。"
+    )
+
+    def _redact_values_unreadable() -> JSONResponse | None:
+        """Refuse a write while the file's contents cannot be read.
+
+        The console edits this list read-modify-write, so a save made against a
+        file that failed to decrypt would replace real values with just the one
+        being added. Callers must run :func:`load_redact_values` first — the flag
+        describes the most recent load, and the loader is mtime-cached.
+        """
+        from aegisgate.config.redact_values import redact_values_degraded
+
+        if not redact_values_degraded():
+            return None
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "values_file_unreadable",
+                "detail": _REDACT_VALUES_DEGRADED_DETAIL,
+            },
+        )
+
     @app.get("/__ui__/api/redact_values")
     async def local_ui_redact_values_list() -> JSONResponse:
-        from aegisgate.config.redact_values import load_redact_values
+        from aegisgate.config.redact_values import (
+            load_redact_values,
+            redact_values_degraded,
+        )
 
         values = load_redact_values()
+        # An unreadable file also yields an empty list, and rendering that as
+        # "nothing configured yet" is what invited the overwrite: the console
+        # offered an add button whose save would have discarded the real values.
+        degraded = redact_values_degraded()
         items = [{"masked": _mask_value(v), "length": len(v)} for v in values]
         return with_etag(
             JSONResponse(content={
                 "items": items,
                 "count": len(items),
+                "degraded": degraded,
+                "degraded_detail": _REDACT_VALUES_DEGRADED_DETAIL if degraded else None,
                 "description": _REDACT_VALUES_DESCRIPTION,
             }),
             _redact_values_etag(),
@@ -1413,6 +1448,9 @@ def register_ui_routes(app: FastAPI) -> None:
         if len(value) < 10:
             return JSONResponse(status_code=400, content={"error": "value_too_short", "detail": "至少 10 个字符"})
         values = load_redact_values()
+        unreadable = _redact_values_unreadable()
+        if unreadable is not None:
+            return unreadable
         if value in values:
             return JSONResponse(status_code=409, content={"error": "duplicate", "detail": "该值已存在"})
         values.append(value)
@@ -1434,6 +1472,12 @@ def register_ui_routes(app: FastAPI) -> None:
         if conflict is not None:
             return conflict
         values = load_redact_values()
+        unreadable = _redact_values_unreadable()
+        if unreadable is not None:
+            # This one cannot lose data — an unreadable file loads as empty, so
+            # every index 404s — but "index out of range" describes the wrong
+            # problem to whoever is looking at a list that should not be empty.
+            return unreadable
         if index < 0 or index >= len(values):
             return JSONResponse(status_code=404, content={"error": "index_out_of_range"})
         values.pop(index)

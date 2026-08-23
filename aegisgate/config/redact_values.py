@@ -39,6 +39,11 @@ def _acceptable_value(value: object) -> bool:
 _lock = threading.Lock()
 _cached_values: list[str] | None = None
 _cached_mtime_ns: int = 0
+# True when the last load could not read the file's *contents*, as opposed to
+# reading it and finding nothing. The two look identical to every caller of
+# :func:`load_redact_values` — both are an empty list — and they must not, because
+# one of them means the configured values are still on disk and unreadable.
+_load_degraded: bool = False
 
 
 _cached_path: tuple[tuple[str, str], Path] | None = None
@@ -71,13 +76,16 @@ def _config_path() -> Path:
 
 def load_redact_values() -> list[str]:
     """Return the list of exact values to redact (mtime-cached, thread-safe)."""
-    global _cached_values, _cached_mtime_ns
+    global _cached_values, _cached_mtime_ns, _load_degraded
 
     path = _config_path()
     with _lock:
         if not path.is_file():
+            # Nothing configured yet is not a degraded read: there is no content
+            # being hidden from us, and writing here cannot discard anything.
             _cached_values = []
             _cached_mtime_ns = 0
+            _load_degraded = False
             return []
 
         # Serialize reloads so concurrent callers do not race to refresh the
@@ -89,6 +97,7 @@ def load_redact_values() -> list[str]:
         if _cached_values is not None and _cached_mtime_ns == mtime_ns:
             return list(_cached_values)
 
+        degraded = False
         try:
             encrypted = path.read_text(encoding="utf-8").strip()
             if not encrypted:
@@ -127,10 +136,32 @@ def load_redact_values() -> list[str]:
                 f"{type(exc).__name__}: {exc}",
             )
             values = []
+            degraded = True
 
         _cached_values = values
         _cached_mtime_ns = mtime_ns
+        # Set with the values it describes, under the same lock, so the flag and
+        # the list can never be read as belonging to two different loads.
+        _load_degraded = degraded
         return list(values)
+
+
+def redact_values_degraded() -> bool:
+    """True when the last load could not read the file's contents.
+
+    Distinct from "nothing is configured": a missing or empty file is an honest
+    empty list, but a file this key cannot open — or whose payload is not a list
+    — leaves real values on disk that this process cannot see. Anything that
+    would rewrite the file has to refuse while that is true, because the
+    load-append-save the console does would replace those values with whatever
+    is being added, and the originals are not recoverable.
+
+    Reflects the most recent :func:`load_redact_values`, so callers that care
+    should load first — the loader is mtime-cached and will re-read a file that
+    changed underneath them.
+    """
+    with _lock:
+        return _load_degraded
 
 
 def save_redact_values(values: Iterable[object]) -> None:
@@ -163,10 +194,12 @@ def save_redact_values(values: Iterable[object]) -> None:
         tmp_path = Path(tmp.name)
     tmp_path.replace(path)
 
-    global _cached_values, _cached_mtime_ns
+    global _cached_values, _cached_mtime_ns, _load_degraded
     with _lock:
         _cached_values = clean
         _cached_mtime_ns = path.stat().st_mtime_ns
+        # Whatever was unreadable before, the bytes now on disk are ours.
+        _load_degraded = False
 
     logger.info("redact_values: saved %d values to %s", len(clean), path)
 

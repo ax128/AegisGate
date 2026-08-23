@@ -1599,6 +1599,17 @@ async function loadRedactValues() {
   try {
     const data = await fetchJson("/__ui__/api/redact_values", { resource: "redact_values" });
     const items = Array.isArray(data.items) ? data.items : [];
+    // An unreadable file arrives as an empty list too. Showing it as "nothing
+    // configured yet" — with an add button — is what invited the overwrite: the
+    // save behind that button replaces the values still sitting on disk.
+    if (data.degraded) {
+      if (countEl) countEl.textContent = "不可用";
+      tbody.innerHTML =
+        `<tr><td colspan="4" class="token-table-empty error-state">` +
+        `${escapeHtml(data.degraded_detail || "精确值文件当前无法读取，已停止生效。")}` +
+        `</td></tr>`;
+      return;
+    }
     if (countEl) countEl.textContent = `共 ${items.length} 条`;
     if (!items.length) {
       tbody.innerHTML = emptyStateRow(4, "还没有配置精确值脱敏。", {
