@@ -325,6 +325,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.error("init_config on startup failed: %s", exc)
         raise
 
+    # The files exist; do they parse? Reported, not fatal — bypass traffic never
+    # reads these rules, and /ready carries the answer either way.
+    from aegisgate.config.security_rules import prime_security_rules_cache
+
+    prime_security_rules_cache()
+
     _initialize_observability()
     _ensure_gateway_key()
     _ensure_proxy_token()

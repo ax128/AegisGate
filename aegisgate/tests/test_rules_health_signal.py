@@ -183,3 +183,69 @@ class TestReadyReportsItWithoutFailingReadiness:
         assert body["status"] == "degraded"
         assert body["checks"]["storage"].startswith("error: ")
         assert "storage" in body["degraded_checks"]
+
+
+class TestStartupPrimesTheAnswer:
+    """``/ready`` could not answer for a file that was broken before boot.
+
+    ``security_rules_load_error`` describes the last load, and on a freshly
+    started process there has not been one — the filters are built lazily, per
+    thread, on first use. So a gateway booted on an unparseable file reported
+    ``security_rules: ok`` right up until traffic arrived, then began failing
+    requests. Priming the cache during startup is what makes the probe's answer
+    true from the moment it can be asked.
+    """
+
+    def test_a_readable_file_primes_cleanly(self, rules_file: Path) -> None:
+        assert security_rules.prime_security_rules_cache() is None
+        assert security_rules_load_error() is None
+
+    def test_a_file_broken_before_boot_is_reported_by_ready(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "security_filters.yaml"
+        path.write_text(_BROKEN, encoding="utf-8")
+        monkeypatch.setattr(
+            security_rules.settings, "security_rules_path", str(path), raising=False
+        )
+        invalidate_security_rules_cache()
+        try:
+            reason = security_rules.prime_security_rules_cache()
+
+            # Returned, not raised: startup carries on.
+            assert reason is not None and "Error" in reason
+
+            body = _ready_body(monkeypatch)
+            assert body["checks"]["security_rules"].startswith("stale: ")
+            assert "security_rules" in body["degraded_checks"]
+        finally:
+            invalidate_security_rules_cache()
+
+    def test_priming_never_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Startup must survive it.
+
+        Requests that bypass the filter pipeline — passthrough, whitelist —
+        return before it is ever built, so they are served without reading these
+        rules at all. Refusing to boot would take those down over a file they do
+        not touch.
+        """
+        path = tmp_path / "security_filters.yaml"
+        path.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+        monkeypatch.setattr(
+            security_rules.settings, "security_rules_path", str(path), raising=False
+        )
+        invalidate_security_rules_cache()
+        try:
+            assert security_rules.prime_security_rules_cache() is not None
+        finally:
+            invalidate_security_rules_cache()
+
+    def test_the_lifespan_actually_calls_it(self) -> None:
+        # The gap this closes is only closed if startup runs it; a helper nobody
+        # calls would leave /ready answering "ok" for a broken file again.
+        import inspect
+
+        source = inspect.getsource(gateway.lifespan)
+        assert "prime_security_rules_cache()" in source
