@@ -347,6 +347,93 @@ class TestServerSideProbe:
         assert response.json()["error"] == "regex_probe_timeout"
         assert rules_file.read_bytes() == before
 
+    @pytest.mark.parametrize(
+        ("regex", "why"),
+        [
+            (r"\d*", "the star makes every position a match"),
+            (r"x*", "same, and it is what a typo for x+ looks like"),
+            (r"(?:)", "matches nothing, everywhere"),
+            (r"\b", "zero-width by construction — only shows up in context"),
+        ],
+    )
+    def test_a_regex_that_matches_without_consuming_is_refused(
+        self, client, rules_file: Path, regex: str, why: str
+    ) -> None:
+        """Valid, fast, and it inflates every request that passes through.
+
+        ``sub`` fires at every position an empty match occurs, so a 200-character
+        message came back at ~2600 with a placeholder wedged between each
+        character. Neither of the existing checks sees it: it compiles, and it
+        finishes instantly.
+
+        Not exhaustive, by construction: a pattern that is zero-width only where
+        some literal appears — ``(?=secret)`` — matches nothing in the fixed
+        samples and is not caught. These are the shapes a typo produces.
+        """
+        before = rules_file.read_bytes()
+
+        response = client.post(
+            "/__ui__/api/rules/pii_patterns", json={"id": "EMPTYISH", "regex": regex}
+        )
+
+        assert response.status_code == 400, why
+        assert response.json()["error"] == "regex_matches_empty"
+        assert rules_file.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "regex",
+        [
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            r"\bAKIA[0-9A-Z]{16}\b",
+            r"(?<!\d)1[3-9]\d{9}(?!\d)",
+            r"\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b",
+        ],
+    )
+    def test_patterns_that_consume_what_they_match_are_untouched(
+        self, client, rules_file: Path, regex: str
+    ) -> None:
+        # Zero-width assertions are fine as long as the match itself has width;
+        # rejecting these would take most of the shipped rule set with it.
+        assert client.post(
+            "/__ui__/api/rules/pii_patterns", json={"id": "REAL", "regex": regex}
+        ).status_code == 201
+
+    def test_no_shipped_regex_would_be_rejected(self) -> None:
+        """The check has to be quiet on the rules this project ships.
+
+        It only runs on regexes a write introduces or changes, so a shipped
+        pattern tripping it would surface later as "I cannot re-save this rule" —
+        far from the change that caused it.
+        """
+        import re as _re
+
+        from aegisgate.core.rules_write import (
+            _ADVERSARIAL_PROBE_SAMPLES,
+            regex_inventory,
+        )
+
+        inventory = regex_inventory(
+            yaml.safe_load(_REAL_RULES.read_text(encoding="utf-8"))
+        )
+        assert len(inventory) > 200, "inventory looks wrong, not a real check"
+
+        offenders = []
+        for key, regex in inventory.items():
+            try:
+                compiled = _re.compile(regex)
+            except _re.error:
+                continue
+            if compiled.match("") is not None:
+                offenders.append(key)
+                continue
+            if any(
+                match.start() == match.end()
+                for sample in _ADVERSARIAL_PROBE_SAMPLES
+                for match in compiled.finditer(sample)
+            ):
+                offenders.append(key)
+        assert not offenders, offenders
+
     def test_a_regex_over_the_length_cap_is_refused(self, client, rules_file: Path) -> None:
         response = client.post(
             "/__ui__/api/rules/pii_patterns",

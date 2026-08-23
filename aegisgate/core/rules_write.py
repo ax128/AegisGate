@@ -471,6 +471,54 @@ def _reject_new_malformed_entries(before: dict[str, Any], after: dict[str, Any])
         )
 
 
+def _reject_zero_width(key: str, regex: str, outcome: dict[str, Any]) -> None:
+    r"""Refuse a pattern that can match without consuming anything.
+
+    ``\d*`` compiles, finishes instantly on every adversarial sample, and then
+    matches the empty string at every position of real traffic — so ``sub``
+    inserts a placeholder between each character. A 200-character message came
+    back at ~2600. The mapping does not grow with it (every empty match reuses
+    one placeholder), so nothing runs out of memory; what happens is that the
+    request forwarded upstream is an order of magnitude larger than the one that
+    arrived, silently.
+
+    Neither existing check sees it: it is valid, and it is fast.
+
+    Two probes because neither alone is enough. ``match("")`` catches the pure
+    forms (``x*``, ``(?:)``) that a sample might never exercise; a zero-width
+    span among the adversarial results catches the ones that only degenerate in
+    context, like a bare ``\b``. Both are quiet on every pattern that consumes
+    what it matches — verified against all 238 regexes in the shipped rules file.
+
+    Not exhaustive, and not meant to be: a pattern that is zero-width only where
+    some literal occurs, such as ``(?=secret)``, matches nothing in the fixed
+    samples and gets through. What this catches is the shape a typo produces —
+    ``x*`` where ``x+`` was meant — and the cost of a miss is an inflated request
+    body, not a weakened filter.
+    """
+    try:
+        if re.compile(regex).match("") is not None:
+            raise RulesWriteError(
+                "regex_matches_empty",
+                f"规则 {key} 的正则能匹配空字符串，会在文本的每个位置插入占位符，"
+                "把转发给上游的请求体撑大一个数量级，已拒绝保存",
+                status=400,
+            )
+    except re.error:
+        # Compilation failures are reported by the probe below, which names the
+        # layer they would break.
+        return
+    for result in outcome.get("results") or []:
+        for span in result.get("spans") or []:
+            if len(span) == 2 and span[0] == span[1]:
+                raise RulesWriteError(
+                    "regex_matches_empty",
+                    f"规则 {key} 的正则在服务端对抗样本上产生了零宽命中，"
+                    "这类正则会在文本中反复插入占位符，把请求体撑大，已拒绝保存",
+                    status=400,
+                )
+
+
 def _probe_changed_regexes(changed: list[tuple[str, str]]) -> None:
     for key, regex in changed:
         if len(regex) > MAX_REGEX_LEN:
@@ -495,6 +543,7 @@ def _probe_changed_regexes(changed: list[tuple[str, str]]) -> None:
                 ),
                 status=400,
             )
+        _reject_zero_width(key, regex, outcome)
 
 
 # ---------------------------------------------------------------------------
