@@ -18,6 +18,12 @@ rotated — and each of those had a distinct way of going wrong:
 The contract these pin down: a file this module cannot trust degrades to *no
 exact-value redaction*, loudly logged, never to mangled text and never to an
 exception on the request path.
+
+Degrading quietly has its own cost, though, and the console is where it lands: an
+unreadable file and an empty one both arrive as ``[]``, so the panel rendered
+"nothing configured yet" over values that were still on disk, and the add button
+it offered would have saved a one-entry list straight over them. Hence
+``redact_values_degraded()`` and the write guard that reads it.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from aegisgate.config import redact_values
 from aegisgate.config.redact_values import (
     _MIN_VALUE_LENGTH,
     load_redact_values,
+    redact_values_degraded,
     replace_exact_values,
     save_redact_values,
 )
@@ -71,6 +78,7 @@ def values_file(
     monkeypatch.setattr(redact_values, "_cached_path", None, raising=False)
     monkeypatch.setattr(redact_values, "_cached_values", None, raising=False)
     monkeypatch.setattr(redact_values, "_cached_mtime_ns", 0, raising=False)
+    monkeypatch.setattr(redact_values, "_load_degraded", False, raising=False)
     return tmp_path / "redact_values.enc.json", fernet, recorder
 
 
@@ -158,3 +166,152 @@ def test_garbage_that_is_not_ciphertext_at_all_degrades_too(values_file) -> None
 
     assert load_redact_values() == []
     assert "treating as empty" in log.text
+
+
+def test_degraded_distinguishes_unreadable_from_simply_empty(values_file) -> None:
+    path, fernet, _log = values_file
+
+    # Never written: nothing is being hidden, and a write here discards nothing.
+    assert load_redact_values() == []
+    assert redact_values_degraded() is False
+
+    # Written and empty: same answer, for the same reason.
+    save_redact_values([])
+    assert load_redact_values() == []
+    assert redact_values_degraded() is False
+
+    # Readable, with entries this build refuses: the file was understood, the
+    # surviving values are loaded, and a save would keep them.
+    _write(path, fernet, {"values": ["short", _GOOD_VALUE]})
+    assert load_redact_values() == [_GOOD_VALUE]
+    assert redact_values_degraded() is False
+
+    # Contents unreadable — the only case where an empty list is a lie.
+    path.write_text("not a fernet token", encoding="utf-8")
+    redact_values._cached_values = None
+    redact_values._cached_mtime_ns = 0
+    assert load_redact_values() == []
+    assert redact_values_degraded() is True
+
+
+def test_a_successful_save_clears_the_flag(values_file) -> None:
+    path, _fernet, _log = values_file
+    path.write_text("not a fernet token", encoding="utf-8")
+    redact_values._cached_values = None
+    redact_values._cached_mtime_ns = 0
+    load_redact_values()
+    assert redact_values_degraded() is True
+
+    save_redact_values([_GOOD_VALUE])
+
+    # Whatever was unreadable, the bytes now on disk are ours.
+    assert redact_values_degraded() is False
+    assert load_redact_values() == [_GOOD_VALUE]
+
+
+class TestConsoleRefusesToOverwriteAnUnreadableFile:
+    """The console edits this list read-modify-write.
+
+    ``load`` returning ``[]`` for a file it could not decrypt meant the next save
+    wrote a one-entry list over values that were still there — not recoverable,
+    and nothing in the UI had said anything was wrong. The panel now renders the
+    degraded state instead of an invitation to add, and both write endpoints
+    refuse while it holds.
+    """
+
+    @pytest.fixture()
+    def client(self, values_file, monkeypatch: pytest.MonkeyPatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from aegisgate.core import gateway_ui_routes
+
+        monkeypatch.setattr(gateway_ui_routes, "write_audit", lambda payload: None)
+        app = FastAPI()
+        gateway_ui_routes.register_ui_routes(app)
+        with TestClient(app) as c:
+            c.values_file = values_file  # type: ignore[attr-defined]
+            yield c
+
+    @staticmethod
+    def _break(path: Path) -> None:
+        """Leave bytes on disk that this key cannot open."""
+        stranger = Fernet(Fernet.generate_key())
+        blob = json.dumps({"values": [_GOOD_VALUE, "SECOND-SECRET-VALUE"]}).encode("utf-8")
+        path.write_text(stranger.encrypt(blob).decode("utf-8"), encoding="utf-8")
+        redact_values._cached_values = None
+        redact_values._cached_mtime_ns = 0
+
+    def test_list_reports_degraded_instead_of_looking_empty(self, client) -> None:
+        path, _fernet, _log = client.values_file
+        self._break(path)
+
+        body = client.get("/__ui__/api/redact_values").json()
+
+        assert body["count"] == 0
+        assert body["degraded"] is True
+        assert body["degraded_detail"]
+
+    def test_add_is_refused_and_the_file_is_left_alone(self, client) -> None:
+        path, _fernet, _log = client.values_file
+        self._break(path)
+        before = path.read_bytes()
+
+        response = client.post(
+            "/__ui__/api/redact_values", json={"value": "NEW-SECRET-VALUE-123"}
+        )
+
+        # Asserted first because it is the consequence that matters: the two
+        # values nobody can currently read are still on disk, so restoring the
+        # key restores them. Without the guard this save returned 200 and
+        # replaced them with a one-entry list.
+        assert path.read_bytes() == before
+        assert response.status_code == 409
+        assert response.json()["error"] == "values_file_unreadable"
+
+    def test_delete_is_refused_with_the_real_reason(self, client) -> None:
+        path, _fernet, _log = client.values_file
+        self._break(path)
+        before = path.read_bytes()
+
+        response = client.request("DELETE", "/__ui__/api/redact_values/0")
+
+        # Not "index out of range", which describes the wrong problem to someone
+        # staring at a list that should not be empty.
+        assert response.status_code == 409
+        assert response.json()["error"] == "values_file_unreadable"
+        assert path.read_bytes() == before
+
+    def test_a_genuinely_empty_list_still_accepts_writes(self, client) -> None:
+        # The guard must not fire on the ordinary first-use path, which is the
+        # other reading of an empty list.
+        assert client.get("/__ui__/api/redact_values").json()["degraded"] is False
+
+        assert client.post(
+            "/__ui__/api/redact_values", json={"value": "FIRST-SECRET-VALUE"}
+        ).status_code == 200
+
+        body = client.get("/__ui__/api/redact_values").json()
+        assert body["count"] == 1
+        assert body["degraded"] is False
+
+    def test_restoring_the_key_restores_both_the_values_and_writes(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path, fernet, _log = client.values_file
+        blob = json.dumps({"values": [_GOOD_VALUE]}).encode("utf-8")
+        readable = fernet.encrypt(blob).decode("utf-8")
+
+        self._break(path)
+        assert client.get("/__ui__/api/redact_values").json()["degraded"] is True
+
+        path.write_text(readable, encoding="utf-8")
+        redact_values._cached_values = None
+        redact_values._cached_mtime_ns = 0
+
+        body = client.get("/__ui__/api/redact_values").json()
+        assert body["degraded"] is False
+        assert body["count"] == 1
+        assert client.post(
+            "/__ui__/api/redact_values", json={"value": "SECOND-SECRET-VALUE"}
+        ).status_code == 200
