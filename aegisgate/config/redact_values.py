@@ -14,11 +14,27 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
+from cryptography.fernet import InvalidToken
+
 from aegisgate.storage.crypto import _get_fernet
 from aegisgate.util.logger import logger
 
 _PLACEHOLDER = "[REDACTED:EXACT_VALUE]"
 _MIN_VALUE_LENGTH = 10
+
+
+def _acceptable_value(value: object) -> bool:
+    """The contract :func:`save_redact_values` enforces, re-checked on read.
+
+    That validator is the only *writer*, but it is not the only way bytes reach
+    the file: a hand-edited copy, a restored backup or one written by an older
+    build can hold a short or non-string entry. The empty string is the one that
+    matters — ``"" in text`` is always true and ``text.replace("", ...)`` fires
+    between every character, so a single empty entry turns each message into a
+    wall of placeholders while raising nothing at all.
+    """
+    return isinstance(value, str) and len(value) >= _MIN_VALUE_LENGTH
+
 
 _lock = threading.Lock()
 _cached_values: list[str] | None = None
@@ -81,12 +97,34 @@ def load_redact_values() -> list[str]:
                 fernet = _get_fernet()
                 raw = fernet.decrypt(encrypted.encode("utf-8"))
                 data = json.loads(raw.decode("utf-8"))
-                values = list(data.get("values", []))
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raw_values = data.get("values") if isinstance(data, dict) else None
+                if not isinstance(raw_values, list):
+                    # A mapping here used to be accepted by ``list(...)``, which
+                    # silently promotes its *keys* into redaction values.
+                    raise ValueError(
+                        f"'values' must be a list, got {type(raw_values).__name__}"
+                    )
+                values = [item for item in raw_values if _acceptable_value(item)]
+                dropped = len(raw_values) - len(values)
+                if dropped:
+                    # Counts only: the entries themselves are the secrets this
+                    # module exists to keep out of logs.
+                    logger.warning(
+                        "redact_values: dropped %d invalid entries from %s "
+                        "(each value must be a string of at least %d characters)",
+                        dropped,
+                        path,
+                        _MIN_VALUE_LENGTH,
+                    )
+        except (OSError, ValueError, InvalidToken, json.JSONDecodeError) as exc:
+            # InvalidToken is not a ValueError, so ciphertext this key cannot
+            # open used to escape into the request pipeline, where it reads as a
+            # filter crash and blocks every request until the file is rebuilt.
+            # Rotating the Fernet key is enough to trigger it.
             logger.warning(
                 "redact_values: failed to load %s error=%s, treating as empty",
                 path,
-                exc,
+                f"{type(exc).__name__}: {exc}",
             )
             values = []
 
