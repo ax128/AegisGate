@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any
 
 from aegisgate.config.security_rules import (
+    is_low_false_positive_route,
     load_security_rules,
     rule_enabled,
     select_relaxed_pii_patterns,
@@ -31,9 +32,6 @@ _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
         "tool_output",
         "computer_call_output",
     }
-)
-_RESPONSES_RELAXED_REDACTION_ROLES = frozenset(
-    {"system", "developer", "assistant", "user", "tool"}
 )
 _NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
@@ -273,14 +271,19 @@ def _sanitize_text_for_upstream_with_hits(
     path: str,
     field: str,
     whitelist_keys: set[str] | None = None,
-    relaxed_patterns: bool | None = None,
+    relaxed_patterns: bool,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Redact one string leaf.
 
-    ``relaxed_patterns`` overrides the role-derived choice between the relaxed
-    (credential-only by default) id set and the full one.  Callers that know the
-    route must pass it explicitly so the forward path uses the same set the
-    pipeline's RedactionFilter used for that route.
+    ``relaxed_patterns`` says whether to use the relaxed (credential-only by
+    default) id set or the full one, and it is **required**: it used to default
+    to a role check, and every role a real request carries is in the relaxed-role
+    set — so "derive from role" meant "always relaxed", regardless of route. The
+    pipeline picks by route, so on any route that is not on the
+    low-false-positive list the two layers disagreed: the scoring pass saw the
+    full set while the pass that actually rewrote the outbound body saw the
+    relaxed one. Making this a required argument is what stops that from
+    reappearing by omission.
     """
     if not text:
         return "", []
@@ -291,11 +294,7 @@ def _sanitize_text_for_upstream_with_hits(
     if not cleaned:
         return "", []
 
-    use_relaxed = (
-        role in _RESPONSES_RELAXED_REDACTION_ROLES
-        if relaxed_patterns is None
-        else relaxed_patterns
-    )
+    use_relaxed = relaxed_patterns
     patterns = (
         _responses_relaxed_redaction_patterns()
         if use_relaxed
@@ -403,7 +402,7 @@ def _sanitize_structured_node(
     whitelist_keys: set[str] | None = None,
     media_block_type: str | None = None,
     skip_field: Callable[[str | None], bool] = _skip_non_content_field,
-    relaxed_patterns: bool | None = None,
+    relaxed_patterns: bool,
     depth: int = 0,
 ) -> Any:
     """Walk a JSON-like node and redact every string leaf, preserving the shape.
@@ -501,6 +500,7 @@ def _sanitize_function_output_value(value: Any) -> Any:
             role="tool",
             path="input[*].output",
             field="output",
+            relaxed_patterns=True,
         )
         return cleaned
     if isinstance(value, list):
@@ -515,9 +515,17 @@ def _sanitize_function_output_value(value: Any) -> Any:
 def _sanitize_chat_messages_for_upstream_with_hits(
     messages: list[Any],
     *,
+    route: str,
     whitelist_keys: set[str] | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
-    """Sanitize structured chat message content without flattening payload shape."""
+    """Sanitize structured chat message content without flattening payload shape.
+
+    ``route`` rather than a bool: the mapping from route to pattern set is the
+    pipeline's rule, and duplicating it at each call site is how the two layers
+    drifted apart in the first place. Callers pass where the request came in;
+    this decides what that means.
+    """
+    relaxed = is_low_false_positive_route(route)
     hits: list[dict[str, Any]] = []
 
     sanitized_messages: list[Any] = []
@@ -538,6 +546,7 @@ def _sanitize_chat_messages_for_upstream_with_hits(
                     field=key,
                     hits=hits,
                     whitelist_keys=whitelist_keys,
+                    relaxed_patterns=relaxed,
                 )
         sanitized_messages.append(copied_message)
 
@@ -547,8 +556,10 @@ def _sanitize_chat_messages_for_upstream_with_hits(
 def _sanitize_messages_system_for_upstream_with_hits(
     value: Any,
     *,
+    route: str,
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
+    relaxed = is_low_false_positive_route(route)
     hits: list[dict[str, Any]] = []
     sanitized = _sanitize_structured_node(
         value,
@@ -558,6 +569,7 @@ def _sanitize_messages_system_for_upstream_with_hits(
         hits=hits,
         whitelist_keys=whitelist_keys,
         skip_field=_never_skip_field,
+        relaxed_patterns=relaxed,
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -565,6 +577,7 @@ def _sanitize_messages_system_for_upstream_with_hits(
 def _sanitize_instructions_for_upstream_with_hits(
     value: Any,
     *,
+    route: str,
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Redact the Responses-API ``instructions`` field before forwarding.
@@ -573,6 +586,7 @@ def _sanitize_instructions_for_upstream_with_hits(
     where coding clients put environment details, absolute paths and internal
     service URLs — it has to go through the same redaction as ``input``.
     """
+    relaxed = is_low_false_positive_route(route)
     hits: list[dict[str, Any]] = []
     sanitized = _sanitize_structured_node(
         value,
@@ -581,6 +595,7 @@ def _sanitize_instructions_for_upstream_with_hits(
         field="instructions",
         hits=hits,
         whitelist_keys=whitelist_keys,
+        relaxed_patterns=relaxed,
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -588,6 +603,7 @@ def _sanitize_instructions_for_upstream_with_hits(
 def _sanitize_tool_definitions_for_upstream_with_hits(
     tools: Any,
     *,
+    route: str,
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Redact tool/function definitions before forwarding.
@@ -596,6 +612,7 @@ def _sanitize_tool_definitions_for_upstream_with_hits(
     credentials and internal hostnames. Tool names stay verbatim (they are in
     the non-content key set) so the upstream tool-call linkage is unaffected.
     """
+    relaxed = is_low_false_positive_route(route)
     hits: list[dict[str, Any]] = []
     sanitized = _sanitize_structured_node(
         tools,
@@ -604,6 +621,7 @@ def _sanitize_tool_definitions_for_upstream_with_hits(
         field="tools",
         hits=hits,
         whitelist_keys=whitelist_keys,
+        relaxed_patterns=relaxed,
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -666,9 +684,11 @@ def _should_skip_responses_field_redaction(field: str | None) -> bool:
 def _sanitize_responses_input_for_upstream_with_hits(
     value: Any,
     *,
+    route: str,
     whitelist_keys: set[str] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Sanitize structured responses history before forwarding upstream."""
+    relaxed = is_low_false_positive_route(route)
     hits: list[dict[str, Any]] = []
     seen: set[int] = set()
 
@@ -698,6 +718,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     path=path,
                     field=field or "text",
                     whitelist_keys=whitelist_keys,
+                    relaxed_patterns=relaxed,
                 )
                 hits.extend(node_hits)
                 return node
@@ -709,6 +730,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 path=path,
                 field=field or "text",
                 whitelist_keys=whitelist_keys,
+                relaxed_patterns=relaxed,
             )
             hits.extend(node_hits)
             return cleaned

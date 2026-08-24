@@ -102,8 +102,7 @@ class TestBlobHeuristicDoesNotHideCredentials:
     def test_credential_is_redacted_end_to_end(self) -> None:
         for value, marker in ((_PEM_KEY, "PRIVATE_KEY_PEM"), (_JWT, "JWT")):
             cleaned, hits = _sanitize_text_for_upstream_with_hits(
-                value, role="user", path="messages[0].content", field="content"
-            )
+                value, role="user", path="messages[0].content", field="content", relaxed_patterns=True)
             assert f"[REDACTED:{marker}]" in cleaned
             assert [hit["pattern"] for hit in hits] == [marker]
 
@@ -113,7 +112,8 @@ class TestBlobHeuristicDoesNotHideCredentials:
             role="user",
             path="messages[0].content",
             field="content",
-        )
+                relaxed_patterns=True,
+            )
         assert cleaned == "here you go:\n[REDACTED:PRIVATE_KEY_PEM]\nthanks"
 
     def test_truncated_pem_header_still_redacted(self) -> None:
@@ -122,7 +122,8 @@ class TestBlobHeuristicDoesNotHideCredentials:
             role="user",
             path="messages[0].content",
             field="content",
-        )
+                relaxed_patterns=True,
+            )
         assert cleaned.startswith("[REDACTED:PRIVATE_KEY_PEM]")
 
 
@@ -557,8 +558,7 @@ class TestBlobProbeCoversTheWholeString:
             text = "A" * pad + "\n" + credential
             assert looks_like_base64_blob(text) is False
             cleaned, hits = _sanitize_text_for_upstream_with_hits(
-                text, role="user", path="messages[0].content", field="content"
-            )
+                text, role="user", path="messages[0].content", field="content", relaxed_patterns=True)
             assert credential.splitlines()[0] not in cleaned
             assert hits
 
@@ -583,8 +583,7 @@ class TestRedactionCostStaysLinear:
         flood = "-----BEGIN RSA PRIVATE KEY-----\n" * 32_000
         started = time.perf_counter()
         _sanitize_text_for_upstream_with_hits(
-            flood, role="user", path="messages[0].content", field="content"
-        )
+            flood, role="user", path="messages[0].content", field="content", relaxed_patterns=True)
         assert time.perf_counter() - started < 2.0
 
     def test_whole_pem_block_still_redacted_including_encrypted_headers(self) -> None:
@@ -606,6 +605,7 @@ class TestRedactionCostStaysLinear:
                 role="user",
                 path="messages[0].content",
                 field="content",
+                relaxed_patterns=True,
             )
             assert cleaned == "pre [REDACTED:PRIVATE_KEY_PEM] post", label
 

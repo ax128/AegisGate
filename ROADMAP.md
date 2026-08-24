@@ -100,9 +100,10 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
    （`AUTH_BEARER` / `FIELD_SECRET` 属 `field_value_patterns` 层，两侧本就恒跑），因此把
    `COOKIE_SESSION` 并入共享默认集即可完成收敛，**两侧都不丢覆盖**。守护见
    `aegisgate/tests/test_relaxed_pii_convergence.py`。
-2. **转发层判据从按角色改为按路由**。管道层（执行面 1–2）按路由决定用哪套集合，转发层
-   （执行面 3–4）按消息角色推导。同一请求两层判据不同，是「打分用全量、改写用 relaxed」这个
-   反直觉行为的根源。改成统一按路由推导属运行语义变更。
+2. ~~**转发层判据从按角色改为按路由**~~ **已完成**。原先的角色推导集合含全部真实角色，
+   等价于「永远 relaxed」；multipart 因此出现「全量集打分、relaxed 集改写」的分歧。
+   现在五个转发入口都接收 `route` 并内部推导，`relaxed_patterns` 改为必填参数，
+   角色集合已删除。守护见 `aegisgate/tests/test_forward_redaction_route_derived.py`。
 3. **field 规则语义跨 V1/V2 统一**：默认列表与显式列表的关系、`field_value_min_len` 各层下限不同；
    顺带把精确值脱敏的覆盖面扩到 V1 结构化内容、通用 JSON 与 multipart（目前只覆盖扁平消息文本）。
 4. **按执行层 / 规则 ID 的命中统计**。控制台现在的统计卡是去重后的唯一值数且含 field 规则，

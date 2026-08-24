@@ -144,7 +144,7 @@ def test_build_chat_upstream_payload_rejects_shape_violation(
     monkeypatch.setattr(
         openai_router,
         "_sanitize_chat_messages_for_upstream_with_hits",
-        lambda messages, whitelist_keys=None: ([], []),
+        lambda messages, route="-", whitelist_keys=None: ([], []),
     )
 
     with pytest.raises(ValueError, match="chat_input_shape_violation"):
@@ -164,7 +164,7 @@ async def test_chat_route_shape_violation_returns_400(
     monkeypatch.setattr(
         openai_router,
         "_sanitize_chat_messages_for_upstream_with_hits",
-        lambda messages, whitelist_keys=None: ([], []),
+        lambda messages, route="-", whitelist_keys=None: ([], []),
     )
 
     result = await openai_router._execute_chat_once(
@@ -196,7 +196,7 @@ async def test_responses_route_shape_violation_returns_400(
     monkeypatch.setattr(
         openai_router,
         "_sanitize_responses_input_for_upstream_with_hits",
-        lambda value, whitelist_keys=None: ({}, []),
+        lambda value, route="-", whitelist_keys=None: ({}, []),
     )
 
     result = await openai_router._execute_responses_once(
@@ -233,7 +233,7 @@ async def test_messages_route_shape_violation_returns_400(
     monkeypatch.setattr(
         openai_router,
         "_sanitize_messages_system_for_upstream_with_hits",
-        lambda value, whitelist_keys=None: ({}, []),
+        lambda value, route="-", whitelist_keys=None: ({}, []),
     )
     monkeypatch.setattr(openai_router, "_effective_gateway_headers", lambda request: {})
 

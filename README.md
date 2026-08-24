@@ -551,14 +551,15 @@ use the same set:
 | Pipeline, conversation routes | `/v1/chat/completions`, `/v1/responses`, `/v1/messages` | relaxed (configurable) |
 | Pipeline, other routes | multipart and generic JSON included | full |
 | Forward, conversation body / `system` / `instructions` / tool definitions | same three routes | relaxed (configurable) |
-| Forward, multipart form fields | `/v1/files`, `/v1/images/*` | relaxed (configurable) |
+| Forward, multipart form fields | `/v1/files`, `/v1/images/*` | full |
 | Forward, generic `/v1/<subpath>` JSON | embeddings, rerank, … | full |
 | v2 request body | `/v2/__gw__/t/<token>/...` | relaxed (configurable) |
 
-One consequence worth knowing before you size your exposure: on the
-conversation routes, the scoring pass sees the full set while the pass that
-rewrites what leaves the gateway uses the relaxed one. Reading only
-"conversation routes use the relaxed set" understates what is forwarded.
+Every surface picks its set from the **route**, and both the scoring pass and
+the pass that rewrites the outbound body use the same rule, so the two cannot
+disagree. The forward path used to derive it from the message role instead —
+which, because every real role was in the "relaxed" set, meant "always relaxed"
+regardless of route.
 
 `field_value_patterns` are a separate layer and are **not** gated by
 `relaxed_pii_ids` — they run on every surface that runs redaction at all.

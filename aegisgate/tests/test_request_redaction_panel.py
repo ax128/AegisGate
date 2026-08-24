@@ -232,6 +232,7 @@ class TestMasterSwitchOverlay:
                 role="user",
                 path="messages[0].content",
                 field="content",
+                relaxed_patterns=True,
             )
         finally:
             sanitize._responses_function_output_redaction_patterns.cache_clear()

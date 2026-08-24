@@ -177,14 +177,14 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 | 管道层 · 对话路由 | `/v1/chat/completions`、`/v1/responses`、`/v1/messages` | relaxed（可配） |
 | 管道层 · 其他路由 | 含 multipart、通用 JSON | 全量 |
 | 转发层 · 对话消息 / `system` / `instructions` / 工具定义 | 同上三条路由 | relaxed（可配） |
-| 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | relaxed（可配） |
+| 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | 全量 |
 | 转发层 · 通用 `/v1/<子路径>` JSON | embeddings、rerank 等 | 全量 |
 | v2 请求体 | `/v2/__gw__/t/<token>/...` | relaxed（可配，与对话路由同一套） |
 
 两点需要在评估暴露面时特别注意：
 
-- 对话路由上，**打分**跑全量集、**转发层**跑 relaxed 集。只看"对话路由用 relaxed"会低估实际外发内容。
-- `field_value_patterns` 是**另一层**，不受 `relaxed_pii_ids` 过滤：只要该执行面跑脱敏，field 规则就跑。
+- 每个执行面都**按路由**决定用哪套集合，打分与改写用同一条判据，因此两层不会分歧。此前转发层是按消息**角色**推导的，而所有真实角色都在"relaxed 角色集"里——等价于"永远 relaxed"，与路由无关。
+- `field_value_patterns` 是**另一层**，V1 管道层与 V2 恒跑；但 V1 **转发层**会把它和 PII 规则合并后一起过 relaxed 集，默认集不含这两个 ID，因此在转发层默认不生效。这处不对称记录在 [ROADMAP.md](ROADMAP.md) R8 第 3 条。
 - multipart 的**文件内容**在任何执行面上都不参与请求侧脱敏，只有同请求里的表单字段参与。
 
 控制台会按规则逐条渲染这六个执行面（服务端计算后下发），见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) §4.3。

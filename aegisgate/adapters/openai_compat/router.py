@@ -884,6 +884,7 @@ _TOOL_DEFINITION_KEYS: tuple[str, ...] = ("tools", "functions")
 def _apply_tool_definition_redaction(
     upstream_payload: dict[str, Any],
     *,
+    route: str,
     whitelist_keys: set[str] | None,
     violation_reason: str,
 ) -> list[dict[str, Any]]:
@@ -903,6 +904,7 @@ def _apply_tool_definition_redaction(
             continue
         sanitized, key_hits = _sanitize_tool_definitions_for_upstream_with_hits(
             definitions,
+            route=route,
             whitelist_keys=whitelist_keys,
         )
         if not _preserves_json_shape(definitions, sanitized):
@@ -929,6 +931,7 @@ def _build_chat_upstream_payload(
         _sanitize_chat_messages_for_upstream_with_hits(
             original_messages,
             whitelist_keys=whitelist_keys,
+            route=route,
         )
     )
     if not _preserves_json_shape(original_messages, sanitized_original_messages):
@@ -962,6 +965,7 @@ def _build_chat_upstream_payload(
             upstream_payload,
             whitelist_keys=whitelist_keys,
             violation_reason="chat_tools_shape_violation",
+            route=route,
         )
     )
     if redaction_hits:
@@ -1000,6 +1004,7 @@ def _build_responses_upstream_payload(
                 _sanitize_responses_input_for_upstream_with_hits(
                     original_input,
                     whitelist_keys=whitelist_keys,
+                    route=route,
                 )
             )
             if not _preserves_json_shape(original_input, sanitized_input):
@@ -1017,6 +1022,7 @@ def _build_responses_upstream_payload(
             _sanitize_instructions_for_upstream_with_hits(
                 original_instructions,
                 whitelist_keys=whitelist_keys,
+                route=route,
             )
         )
         if not _preserves_json_shape(original_instructions, sanitized_instructions):
@@ -1080,6 +1086,7 @@ def _build_responses_upstream_payload(
             upstream_payload,
             whitelist_keys=whitelist_keys,
             violation_reason="responses_tools_shape_violation",
+            route=route,
         )
     )
 
@@ -1125,6 +1132,7 @@ def _build_messages_upstream_payload(
                 _sanitize_messages_system_for_upstream_with_hits(
                     system_value,
                     whitelist_keys=whitelist_keys,
+                    route=route,
                 )
             )
             if not _preserves_json_shape(system_value, sanitized_system):
@@ -1141,6 +1149,7 @@ def _build_messages_upstream_payload(
         _sanitize_chat_messages_for_upstream_with_hits(
             original_messages,
             whitelist_keys=whitelist_keys,
+            route=route,
         )
     )
     if not _preserves_json_shape(original_messages, sanitized_original_messages):
@@ -1171,6 +1180,7 @@ def _build_messages_upstream_payload(
             upstream_payload,
             whitelist_keys=whitelist_keys,
             violation_reason="messages_tools_shape_violation",
+            route=route,
         )
     )
     if redaction_hits:
@@ -6287,6 +6297,14 @@ async def _execute_multipart_once(
                 path=f"multipart.{key}",
                 field=str(key),
                 whitelist_keys=whitelist_keys,
+                # Derived from the route, like every other forward-path call.
+                # This used to fall through to the role-derived default, and
+                # role="user" is in the relaxed-roles set — so the multipart
+                # forward path rewrote with the relaxed set while the pipeline
+                # scored the very same fields with the full one. The multipart
+                # routes are not on the low-false-positive list, so the answer
+                # here is the full set.
+                relaxed_patterns=is_low_false_positive_route(request_path),
             )
             redaction_hits.extend(node_hits)
             # Preserve media locator fields as-is (e.g. signed image URLs).
