@@ -164,7 +164,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert sanitized == [
             {
@@ -209,7 +209,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert sanitized == messages
         assert hits == [
@@ -237,7 +237,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert (
             sanitized[0]["content"][0]["source"]["url"]
@@ -269,7 +269,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert sanitized == messages
         assert hits == [
@@ -297,7 +297,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert sanitized == messages
         assert hits == []
@@ -318,7 +318,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+        sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
         assert sanitized[0]["id"] == "msg_1"
         assert sanitized[0]["name"] == "alice"
@@ -343,7 +343,7 @@ def test_responses_internal_history_keeps_original_structure() -> None:
         }
     ]
 
-    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload)
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload, route="/v1/responses")
 
     assert len(sanitized) == 1
     assert sanitized[0]["role"] == "assistant"
@@ -372,7 +372,7 @@ def test_shape_guard_reports_preserved_shape_after_sanitize() -> None:
         }
     ]
 
-    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload)
+    sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(payload, route="/v1/responses")
     assert _preserves_json_shape(payload, sanitized) is True
 
 
@@ -389,7 +389,7 @@ def test_responses_image_url_preserved_but_hits_recorded() -> None:
         }
     ]
 
-    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload)
+    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload, route="/v1/responses")
 
     assert sanitized == payload
     assert hits == [
@@ -421,16 +421,16 @@ def test_benign_examples_preserve_supported_route_helpers() -> None:
 
     chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
         [{"role": "user", "content": [{"type": "text", "text": benign_text}]}]
-    )
+    , route="/v1/chat/completions")
     responses_sanitized, responses_hits = (
         _sanitize_responses_input_for_upstream_with_hits(
             [{"role": "user", "content": [{"type": "input_text", "text": benign_text}]}]
-        )
+        , route="/v1/responses")
     )
     messages_sanitized, messages_hits = (
         _sanitize_messages_system_for_upstream_with_hits(
             [{"type": "text", "text": benign_text}]
-        )
+        , route="/v1/messages")
     )
 
     assert chat_sanitized == [
@@ -450,16 +450,16 @@ def test_explicit_secret_still_redacts() -> None:
 
     chat_sanitized, chat_hits = _sanitize_chat_messages_for_upstream_with_hits(
         [{"role": "user", "content": [{"type": "text", "text": secret_text}]}]
-    )
+    , route="/v1/chat/completions")
     responses_sanitized, responses_hits = (
         _sanitize_responses_input_for_upstream_with_hits(
             [{"role": "user", "content": [{"type": "input_text", "text": secret_text}]}]
-        )
+        , route="/v1/responses")
     )
     messages_sanitized, messages_hits = (
         _sanitize_messages_system_for_upstream_with_hits(
             [{"type": "text", "text": secret_text}]
-        )
+        , route="/v1/messages")
     )
 
     assert chat_sanitized == [
@@ -518,7 +518,8 @@ def test_marker_prefix_does_not_skip_secret_redaction() -> None:
         role="user",
         path="messages[0].content[0].text",
         field="text",
-    )
+        relaxed_patterns=True,
+)
 
     assert "sk-live-" not in sanitized
     assert "[REDACTED:FAKE]" in sanitized
@@ -538,7 +539,7 @@ def test_responses_input_marker_prefix_still_redacts_secret() -> None:
         }
     ]
 
-    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload)
+    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload, route="/v1/responses")
     text = sanitized[0]["content"][0]["text"]
 
     assert "sk-live-" not in text
@@ -557,7 +558,8 @@ def test_marker_and_whitelist_spans_coexist_safely() -> None:
         path="messages[0].content[0].text",
         field="text",
         whitelist_keys={"tenant"},
-    )
+        relaxed_patterns=True,
+)
 
     assert whitelisted in sanitized
     assert unprotected not in sanitized
@@ -585,7 +587,7 @@ def test_chat_sanitize_preserves_tool_call_linkage_fields() -> None:
         {"role": "tool", "tool_call_id": secret_like, "content": "ok"},
     ]
 
-    sanitized, _hits = _sanitize_chat_messages_for_upstream_with_hits(messages)
+    sanitized, _hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
     assert sanitized[0]["tool_calls"][0]["id"] == secret_like
     assert sanitized[0]["tool_calls"][0]["function"]["name"] == secret_like

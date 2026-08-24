@@ -73,17 +73,18 @@ SURFACES: tuple[dict[str, Any], ...] = (
         "code": "E3",
         "label": "V1 转发层 · 对话消息 / system / instructions / tools",
         "pattern_set": "relaxed",
-        "detail": "按消息角色判定",
-        "note": "常规角色 relaxed；非常规角色（如 legacy role: function）回退全量",
+        "detail": "按路由判定，与 E1 同一条判据",
+        "note": "此前按消息角色推导；角色集含全部真实角色，等价于恒用 relaxed",
         "master_switch": None,
     },
     {
         "id": "v1_forward_multipart",
         "code": "E4",
         "label": "V1 转发层 · multipart 表单字段",
-        "pattern_set": "relaxed",
+        "pattern_set": "full",
         "detail": "/v1/files、/v1/images/edits、/v1/images/variations",
-        "note": "硬编码 role=user，因此受 relaxed 集支配；与 E2 的全量集打分不同",
+        "note": "这三条不在低误报路由表内，故用全量集——与 E2 的打分集合一致。"
+                "此前硬编码 role=user 而受 relaxed 集支配，与打分层不一致",
         "master_switch": None,
     },
     {
@@ -110,7 +111,6 @@ SURFACES: tuple[dict[str, Any], ...] = (
 RELAXED_GOVERNED_SURFACES = (
     "v1_pipeline_chat",
     "v1_forward_chat",
-    "v1_forward_multipart",
     "v2_request",
 )
 
@@ -185,7 +185,9 @@ def _effective_surfaces(
         "v1_pipeline_chat": runtime_enabled and in_relaxed,
         "v1_pipeline_other": runtime_enabled,
         "v1_forward_chat": runtime_enabled and in_relaxed,
-        "v1_forward_multipart": runtime_enabled and in_relaxed,
+        # Full set since the forward layer started deriving from the route:
+        # the multipart routes are not on the low-false-positive list.
+        "v1_forward_multipart": runtime_enabled,
         "v1_forward_generic": runtime_enabled,
         # V2 now resolves through the same relaxed set as V1 rather than a
         # hard-coded id list, so this row is the same predicate as the V1

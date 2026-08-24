@@ -241,11 +241,11 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
 | E1 管道层 · 对话路由 | `/v1/chat/completions`、`/v1/responses`、`/v1/messages` | relaxed（可配） |
 | E2 管道层 · 其他路由 | 含 multipart、通用 JSON | 全量 |
 | E3 转发层 · 对话消息 / `system` / `instructions` / 工具定义 | 同 E1 三条路由 | relaxed（可配） |
-| E4 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | relaxed（可配） |
+| E4 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | 全量 |
 | E5 转发层 · 通用 `/v1/<子路径>` JSON | embeddings、rerank 等 | 全量 |
 | E6 v2 请求体 | `/v2/__gw__/t/<token>/...` | relaxed（可配，与 E1/E3/E4 同一套） |
 
-需要特别注意 **E3/E4**：`/v1/chat/completions` 这类路由在**打分**时跑全量集，但真正改写外发内容的**转发层**跑的是 relaxed 集。只看"对话路由用 relaxed"这一句会低估实际外发的内容。
+六个执行面都**按路由**取集合，打分与改写用同一条判据。此前转发层按消息**角色**推导，而所有真实角色都在 relaxed 角色集里——等价于"永远 relaxed"，于是 multipart（非低误报路由）出现了"用全量集打分、用 relaxed 集改写"的分歧。
 
 `field_value_patterns` 是独立于 relaxed 集的一层：只要该执行面跑脱敏，field 规则就跑，不受 `relaxed_pii_ids` 增删影响。
 

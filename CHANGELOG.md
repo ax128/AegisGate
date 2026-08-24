@@ -9,6 +9,25 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（行为变更：转发层脱敏判据改为按路由）
+
+- **请求转发层不再按消息角色决定用哪套 PII 集合，改为按路由**。
+  `_sanitize_text_for_upstream_with_hits` 此前在调用方省略 `relaxed_patterns` 时回退到
+  `role in _RESPONSES_RELAXED_REDACTION_ROLES`，而那个集合含**全部**真实角色
+  （system/developer/assistant/user/tool）——所谓"按角色推导"实际等价于"永远用 relaxed 集"，
+  与路由无关。管道层是按路由取集合的，于是在任何非低误报路由上两层判据不同：
+  **打分看到全量 56 项，真正改写外发内容的那一遍只看到 relaxed 集**。
+  - **默认行为变化**：multipart 路由（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`）
+    的表单字段转发前改用**全量集**脱敏，与它们本就在用的打分集合一致。这是**增加**脱敏。
+    文件内容仍不参与请求侧脱敏，只有同请求的表单字段参与。
+  - 其余转发入口（chat messages、Anthropic `system`、Responses `instructions`、工具定义、
+    Responses `input`）只走对话路由，判据结果不变，但不再依赖角色。
+  - 五个入口签名改为接收 `route: str` 而非布尔：路由→集合的映射只有一份实现，调用方无法把
+    映射关系写错。`relaxed_patterns` 在底层两个函数上改为**必填**，遗漏即 `TypeError`，
+    不再静默取 relaxed。
+  - 删除 `_RESPONSES_RELAXED_REDACTION_ROLES`。
+  - 新增 `aegisgate/tests/test_forward_redaction_route_derived.py`（18 条）。
+
 ### Changed（行为变更：请求侧脱敏规则集收敛）
 
 - **V2 请求脱敏改为读取 `redaction.relaxed_pii_ids`**，不再使用硬编码的 `V2_RELAXED_PII_IDS`。
