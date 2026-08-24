@@ -49,6 +49,13 @@ class OutputSanitizer(BaseFilter):
         self._encoded_payload_patterns = self._compile_patterns(sanitizer_rules.get("encoded_payload_patterns", []))
         self._system_leak_patterns = self._compile_patterns(sanitizer_rules.get("system_leak_patterns", []))
         self._unsafe_markup_patterns = self._compile_patterns(sanitizer_rules.get("unsafe_markup_patterns", []))
+        # Same list with ids kept. An egress rule can live here rather than in
+        # command_patterns (a markdown image with a key in its query is removed,
+        # not scored), and without this the audit record would carry the chain
+        # dimension while systematically missing the egress one.
+        self._unsafe_markup_patterns_by_id = self._compile_id_patterns(
+            sanitizer_rules.get("unsafe_markup_patterns", [])
+        )
         self._unsafe_uri_patterns = self._compile_patterns(sanitizer_rules.get("unsafe_uri_patterns", []))
         # Spam noise patterns: reuse from injection_detector rules or sanitizer's own.
         inj_rules = rules.get("injection_detector", {})
@@ -124,7 +131,12 @@ class OutputSanitizer(BaseFilter):
         return spans
 
     def _record_exfil_spans(
-        self, scan_text: str, ctx: RequestContext, *, text_len: int
+        self,
+        scan_text: str,
+        ctx: RequestContext,
+        *,
+        text_len: int,
+        patterns: list[tuple[str, re.Pattern[str]]] | None = None,
     ) -> None:
         """Name the exfiltration rules that fired, with spans but no fragments.
 
@@ -140,7 +152,7 @@ class OutputSanitizer(BaseFilter):
         the body is rebased onto the tool-call payload and named as such.
         """
         haystacks = build_haystacks(scan_text)
-        for rule_id, pattern in self._command_patterns_by_id:
+        for rule_id, pattern in patterns or self._command_patterns_by_id:
             match = None
             form = "raw"
             for index, haystack in enumerate(haystacks):
@@ -272,6 +284,13 @@ class OutputSanitizer(BaseFilter):
         has_command_payload = self._matches_any(scan_text, self._command_patterns)
         if has_command_payload:
             self._record_exfil_spans(scan_text, ctx, text_len=len(text))
+        if has_unsafe_markup:
+            self._record_exfil_spans(
+                scan_text,
+                ctx,
+                text_len=len(text),
+                patterns=self._unsafe_markup_patterns_by_id,
+            )
         has_encoded_payload = self._matches_any(scan_text, self._encoded_payload_patterns)
         has_spam = self._matches_any(scan_text, self._spam_noise_patterns)
 

