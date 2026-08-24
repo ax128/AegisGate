@@ -412,7 +412,11 @@ These decide on *capability pairs*, not wording: a credential artefact (file, di
 browser secret store, whole-environment dump) **and** an outbound transfer (`curl -F`, `-T`,
 `--data-binary @`, a pipe into `nc`, `Invoke-RestMethod -Method Post`) in the same command.
 Either half alone is an everyday developer action and is deliberately not listed — only the
-pair is unambiguous. They live in three groups whose dispositions differ:
+pair is unambiguous. Three boundaries are deliberate: a credential file must be dot-prefixed
+(`.env`, not a `/env` URL path segment) and `.env.example`-style templates are excluded;
+`scp` / `rsync` are out of scope, because their `-F` / `-T` mean "ssh config" and "temp dir"
+rather than "upload"; and the harvest rule requires an actual secret token, not merely a
+recursive-looking flag. They live in three groups whose dispositions differ:
 
 | Group | Count | What a hit does |
 | --- | --- | --- |

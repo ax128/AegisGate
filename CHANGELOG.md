@@ -36,9 +36,23 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
     读取，而后者**不受** `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` 把关。因此即使开关关着，命中这两条的工具
     调用在自动遮挡路径上也会被替换为占位符——与该组既有条目的行为一致。
   - 规则组数不变（仍 31 组），条数 172 → 185；`security_filters.yaml` 实际 32 组 / 228 → 241 条。
-  - 新增 `aegisgate/tests/test_exfil_chain_rules.py`（56 条）：17 条攻击语料必须命中，**30 条日常开发语料
+  - **判据收窄了三处**，都是评审时用日常语料实测出来的误判：
+    - 凭据**文件**必须带点前缀（`\.env`，不是 `[/\.]env`）。松写法把任何 `/env` 路径段都算成读 `.env`，
+      于是 `curl -X POST .../actuator/env`、`--upload-file env.json` 都成了外泄；`.env.example` /
+      `.env.template` 一并排除——模板里没有密钥。
+    - `scp` / `rsync` 从命令表里去掉。它们的 `-F` 是「用这个 ssh config」、`-T` 是「用这个临时目录」，
+      不是上传标志，照旧写法 `scp -F ~/.ssh/config … id_ed25519.pub host:` 会命中。它们本身就是传输命令，
+      基于标志的规则对它们说不出真话，因此本阶段不覆盖 `scp`/`rsync`（管道类规则仍然覆盖 `tar … | curl`）。
+    - `exfil_chain_recursive_secret_harvest` 改为**要求出现密钥关键字**（`sk-`/`AKIA`/`api_key`/`secret`/
+      `*.env` 等）。原先只要求「含 `r` 的短选项」，而 `--color` 就满足，`grep --color=always TODO src/ | curl`
+      被判成凭据收割。
+  - **性能**：两条 upload 规则前置一个廉价 lookahead 预筛（严格超集，不改变判定）。8 KB 重复 `curl -F `
+    上，`upload_credential_store` 从 188 ms 降到 10 ms、`upload_credential_file` 从 37 ms 降到 14 ms。
+    这条路径要紧是因为流式每 `_STREAM_FILTER_CHECK_INTERVAL` 个 chunk 就重跑一次完整 response pipeline。
+  - 新增 `aegisgate/tests/test_exfil_chain_rules.py`（69 条）：17 条攻击语料必须命中，**40 条日常开发语料
     必须一条都不命中**。后者更重要——它决定这套规则能不能一直开着。每条正则另过
-    `regex_probe` 沙箱与 `test_redos_guard` 的静态预算。
+    `regex_probe` 沙箱与 `test_redos_guard` 的静态预算，并新增一条**锚词重复**的放大预算断言
+    （`test_redos_guard` 的 `_LARGE_INPUT` 里没有 `curl`/`grep`，测不到这类规则的真实代价）。
   - 回滚：删掉 YAML 里的 `exfil_chain_*` 条目，走热加载，无需重启。
 
 

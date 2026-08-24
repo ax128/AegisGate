@@ -328,7 +328,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
 - `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
-- **外泄链路规则（`exfil_chain_*`）**：判定的是「采集 + 出口」两种能力在同一条命令里同时成立——凭据文件/凭据目录/浏览器密钥库/整环境导出，与 `curl -F`、`-T`、`--data-binary @`、管道进 `nc`、`Invoke-RestMethod -Method Post` 之类的外发动作。单独出现任意一侧都是日常开发动作，**不入库**；只有成对出现才判定。分布在三处，各自的处置不同：
+- **外泄链路规则（`exfil_chain_*`）**：判定的是「采集 + 出口」两种能力在同一条命令里同时成立——凭据文件/凭据目录/浏览器密钥库/整环境导出，与 `curl -F`、`-T`、`--data-binary @`、管道进 `nc`、`Invoke-RestMethod -Method Post` 之类的外发动作。单独出现任意一侧都是日常开发动作，**不入库**；只有成对出现才判定。三条边界是刻意的：凭据文件必须带点前缀（`.env`，而不是 URL 里的 `/env` 路径段），`.env.example` 一类模板排除在外；`scp` / `rsync` 不在覆盖范围内——它们的 `-F`/`-T` 是「ssh config」「临时目录」而非「上传」；收割类规则要求出现真实的密钥关键字，而不只是一个看起来像递归的选项。分布在三处，各自的处置不同：
   - `tool_call_guard.dangerous_param_patterns`（6 条）：作用于工具调用参数，按 `review` 抬分并标记复核；同时经 `router::_tool_call_guard_patterns` 参与自动遮挡时的工具调用剥离。
   - `sanitizer.command_patterns`（5 条）：作用于响应正文，命中即 `response_disposition=sanitize`。少的那条是 `exfil_chain_secret_in_url_query`——正文里的一个文档示例 URL 不该让流式回答被截断。
   - `sanitizer.force_block_command_patterns`（2 条）：最高置信的两种形态，由 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`（默认 `false`）把关。

@@ -19,6 +19,7 @@ Coverage of the plumbing each group feeds:
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,21 @@ BENIGN = [
     'curl -X POST https://hooks.slack.com/services/T000/B000/xxx -d \'{"text":"ok"}\'',
     "cat config.env | grep DB_HOST",
     "curl -sS https://raw.githubusercontent.com/o/r/main/install.sh | bash",
+    # A `/env` path segment is a config endpoint, not a dotfile. These four all matched the
+    # first cut of exfil_chain_upload_credential_file, which read the credential name as
+    # `[/\\.](?:…|env)` and so accepted any URL path ending in /env.
+    "curl -X POST https://config.internal.example.com/api/v1/env -d '{}'",
+    "curl -X POST http://localhost:8080/actuator/env",
+    "curl -X PUT https://s3.example.com/bucket/env.json --upload-file env.json",
+    "curl -F 'file=@./dist/app.env.example' https://ci.example.com/artifacts",
+    "curl -F 'file=@./config/settings.env.template' https://ci.example.com/artifacts",
+    # scp -F is "use this ssh config"; rsync -T is "use this temp dir". Neither uploads.
+    "scp -F ~/.ssh/config ~/.ssh/id_ed25519.pub deploy@host:~/",
+    "rsync -T /tmp/staging -av ~/.ssh/config backup:/etc/ssh/",
+    # --color satisfies "a short flag containing r", which is what the harvest rule used to
+    # ask for. Grepping for TODO and posting the result is not a credential harvest.
+    "grep --color=always -n TODO src/ | curl -s -d @- https://paste.internal/api",
+    "rg --files | curl -X POST -d @- https://ci.example.com/manifest",
 ]
 
 
@@ -178,12 +194,55 @@ def test_developer_corpus_hits_no_chain_rule(text: str) -> None:
         assert not hits, f"{dotted} false-positive {hits} on: {text}"
 
 
+def _all_chain_patterns() -> dict[str, str]:
+    """Every exfil_chain_* regex, deduplicated by id across the three groups."""
+    found: dict[str, str] = {}
+    for dotted in (
+        "tool_call_guard.dangerous_param_patterns",
+        "sanitizer.command_patterns",
+        "sanitizer.force_block_command_patterns",
+    ):
+        for rule_id, regex in _group(dotted).items():
+            if rule_id.startswith("exfil_chain_"):
+                found[rule_id] = regex
+    return found
+
+
 def test_chain_rules_stay_editable_in_the_console() -> None:
     """Over MAX_REGEX_LEN the console rule tester refuses the pattern, so a rule that long
     can be shipped but never edited or re-probed through the workbench."""
     for rule_id, regex in _group("tool_call_guard.dangerous_param_patterns").items():
         if rule_id.startswith("exfil_chain_"):
             assert len(regex) <= MAX_REGEX_LEN, f"{rule_id} is {len(regex)} chars"
+
+
+@pytest.mark.parametrize(
+    "label,filler",
+    [
+        ("upload-flag repetition", "curl -F "),
+        ("network-command repetition", "curl "),
+        ("pipe repetition", "cat x | curl "),
+        ("grep repetition", "grep -r q | "),
+    ],
+)
+def test_chain_rules_are_cheap_on_repeated_anchor_tokens(label: str, filler: str) -> None:
+    """The budget that matters is per *anchor*, and test_redos_guard cannot see it.
+
+    Its ``_LARGE_INPUT`` is 900 chars of ``a``/``,``/CRLF — no ``curl``, no ``grep``, so the
+    engine never enters the expensive branch of a rule that starts with a command word and
+    the guard passes without measuring anything. These rules are two lazy bounded gaps around
+    an alternation: cost scales with how many anchor tokens the text holds, which the model
+    can be made to emit. The first cut spent 188 ms here on 8 KB, and the streaming path
+    re-runs the whole response pipeline every ``_STREAM_FILTER_CHECK_INTERVAL`` chunks.
+    """
+    del label
+    haystack = filler * (8192 // len(filler))
+    for rule_id, regex in _all_chain_patterns().items():
+        pattern = re.compile(regex, re.IGNORECASE)
+        started = time.perf_counter()
+        pattern.search(haystack)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.1, f"{rule_id} took {elapsed * 1000:.0f} ms on {len(haystack)} chars"
 
 
 def test_chain_rules_survive_the_sandboxed_probe() -> None:
