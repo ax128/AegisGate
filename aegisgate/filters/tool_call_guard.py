@@ -58,6 +58,43 @@ _READ_ONLY_CONTENT_TOOLS = frozenset(
     }
 )
 
+# The read-only tools that are also the two ends of an exfiltration chain: reading a file is
+# how data is collected, fetching a URL is how it leaves. Exempting exactly these from parameter
+# checks exempted the two most worth checking. They are checked now — but under their own
+# action key (``readonly_param``, shipped as ``observe``), never the ``review`` the executing
+# tools get: ``review`` sets requires_human_review, which makes _needs_confirmation auto-sanitize
+# the whole response and replace the tool call with a placeholder. Reading ~/.ssh/config or
+# grepping /etc/passwd is a daily operations action, and routing it through ``review`` would
+# rewrite those answers from the day this ships.
+#
+# The remaining members of _READ_ONLY_CONTENT_TOOLS (todowrite, task, submit,
+# multi_tool_use.parallel, notebook_edit) stay fully exempt: they neither read the filesystem
+# nor reach the network, so there is nothing in their arguments for these patterns to say.
+_EXFIL_COLLECTION_READ_ONLY_TOOLS = frozenset(
+    {"read", "read_file", "glob", "grep"}
+)
+
+# The egress half. These reach the network and never touch the filesystem, so the
+# path-reference rules (sensitive_file_access, path_traversal, ssh_key_access) have
+# nothing true to say about their arguments — a web_search for "how do I read
+# /etc/passwd" is a question, not a file read. They check the same subset the
+# file-writing tools do, which keeps the audit trail about egress rather than
+# filling it with noise, and keeps the per-call cost off the heaviest patterns.
+_EXFIL_EGRESS_READ_ONLY_TOOLS = frozenset(
+    {"web_search", "webfetch", "web_fetch", "browser", "search"}
+)
+
+_EXFIL_SENSITIVE_READ_ONLY_TOOLS = (
+    _EXFIL_COLLECTION_READ_ONLY_TOOLS | _EXFIL_EGRESS_READ_ONLY_TOOLS
+)
+
+# What a read-only exfiltration endpoint's hit maps to when security_filters.yaml
+# has no ``readonly_param`` key — a mounted config file that predates it, which is
+# a real upgrade path under Docker. Defined once; security_filters.yaml and
+# security_rules._DEFAULT_RULES carry the same value, and
+# test_exfil_mechanism_fixes pins all three together.
+READONLY_PARAM_FALLBACK_ACTION = "observe"
+
 # File-writing tools: their content is code or documentation, which may reference a sensitive path
 # without being an actual attack. For these tools only the injection-chain patterns (shell_injection
 # and friends) are checked; the path-reference patterns (sensitive_file_access, ssh_key_access,
@@ -137,8 +174,19 @@ class ToolCallGuard(BaseFilter):
             if item.get("regex")
         ]
 
-    def _apply_action(self, ctx: RequestContext, key: str) -> str:
-        action = self._action_map.get(key, self._default_action)
+    def _apply_action(
+        self, ctx: RequestContext, key: str, default: str | None = None
+    ) -> str:
+        """Apply the configured action for *key*.
+
+        *default* overrides ``default_action`` for keys that must not inherit it.
+        ``readonly_param`` is the case: a deployment whose security_filters.yaml
+        predates that key would otherwise fall through to ``default_action:
+        review`` and start rewriting ordinary ``read`` / ``grep`` answers on
+        upgrade — the exemption and its action key have to arrive together, and a
+        mounted config file is a way for only one of them to.
+        """
+        action = self._action_map.get(key, default or self._default_action)
         ctx.enforcement_actions.append(f"{self.name}:{key}:{action}")
 
         if action == "block":
@@ -147,6 +195,11 @@ class ToolCallGuard(BaseFilter):
         elif action == "review":
             ctx.risk_score = max(ctx.risk_score, 0.86)
             ctx.requires_human_review = True
+        # ``observe`` records and nothing else — no score, and above all no
+        # requires_human_review. Setting that flag is what turns an observation
+        # into an auto-sanitize on the non-streaming path and into a terminated
+        # stream on the streaming one, so an "observe" that set it would not be
+        # one.
 
         return action
 
@@ -304,15 +357,31 @@ class ToolCallGuard(BaseFilter):
                         tool_name,
                         action,
                     )
-            if lowered_name not in _READ_ONLY_CONTENT_TOOLS and tool_norm not in _READ_ONLY_CONTENT_TOOLS:
+            is_read_only = (
+                lowered_name in _READ_ONLY_CONTENT_TOOLS
+                or tool_norm in _READ_ONLY_CONTENT_TOOLS
+            )
+            is_exfil_endpoint = (
+                lowered_name in _EXFIL_SENSITIVE_READ_ONLY_TOOLS
+                or tool_norm in _EXFIL_SENSITIVE_READ_ONLY_TOOLS
+            )
+            # Read-only tools that are neither end of an exfiltration chain keep the
+            # blanket exemption; the two that are get checked under ``observe``.
+            if not is_read_only or is_exfil_endpoint:
                 # File-writing tools check only injection-chain rules and skip path-reference
                 # rules, which lowers false blocks
+                skips_path_rules = (
+                    lowered_name in _FILE_WRITE_CONTENT_TOOLS
+                    or tool_norm in _FILE_WRITE_CONTENT_TOOLS
+                    or lowered_name in _EXFIL_EGRESS_READ_ONLY_TOOLS
+                    or tool_norm in _EXFIL_EGRESS_READ_ONLY_TOOLS
+                )
                 patterns = (
                     self._dangerous_param_patterns_exec_only
-                    if lowered_name in _FILE_WRITE_CONTENT_TOOLS
-                    or tool_norm in _FILE_WRITE_CONTENT_TOOLS
+                    if skips_path_rules
                     else self._dangerous_param_patterns
                 )
+                param_key = "readonly_param" if is_read_only else "dangerous_param"
                 args_haystacks = build_haystacks(args_text)
                 for rule_id, pattern in patterns:
                     if not pattern_hits_in(pattern, args_haystacks):
@@ -320,7 +389,7 @@ class ToolCallGuard(BaseFilter):
                     raw_match = pattern.search(args_text)
                     match = raw_match or pattern.search(args_norm)
                     matched_text = (match.group(0) if match else args_norm)[:120]
-                    violations.append(f"dangerous_param:{tool_name or 'unknown'}")
+                    violations.append(f"{param_key}:{tool_name or 'unknown'}")
                     # The rule identity is otherwise dropped here; the audit record
                     # needs it to say *which* link of the exfiltration chain fired.
                     # Only a raw-text match has an offset into the arguments an
@@ -335,10 +404,15 @@ class ToolCallGuard(BaseFilter):
                         length=len(raw_match.group(0)) if raw_match else None,
                         form="raw" if raw_match else "normalized",
                     )
-                    action = self._apply_action(ctx, "dangerous_param")
+                    action = self._apply_action(
+                        ctx,
+                        param_key,
+                        default=READONLY_PARAM_FALLBACK_ACTION if is_read_only else None,
+                    )
                     blocked = blocked or action == "block"
                     logger.debug(
-                        "dangerous_param hit request_id=%s tool=%s pattern=%s matched=%s",
+                        "%s hit request_id=%s tool=%s pattern=%s matched=%s",
+                        param_key,
                         ctx.request_id,
                         tool_name,
                         pattern.pattern[:60],

@@ -174,6 +174,65 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   - **`sanitizer.unsafe_markup_patterns` 补上 S1 的 evidence 记录点**。A3 的执行点在这一组，而 S1 只在
     `command_patterns` 与 `tool_call_guard` 上记录——审计块会一直报 `chain` 而系统性地缺 `egress`，
     而维度拆分正是这条记录存在的理由：照它做校准会得出「出口侧从不命中」的结论。
+### Fixed（外泄链路加固 S2：三条机制缺陷）
+
+补规则解决不了这三条——它们是机制问题，不先修的话新增的任何规则都会落进同一个空转路径。
+
+- **R2 · `request_sanitizer` 命中窃密意图后不再走空转分支。** `_apply_action` 只往
+  `enforcement_actions` 追加一行字符串，而 `action_map` 里 `secret_exfiltration` /
+  `privilege_escalation` / `rule_bypass` 都配成 `review`——于是命中这三类的请求只产生一行日志，
+  别的什么都没有。同一文件上方的 `leak_check` 分支是同一个形状的正确写法（review 档也抬 risk
+  并打标）；两个分支不对称是遗漏，不是设计。
+  - 抬到 **0.6，与 `leak_check` 相同**。`review` 在 `action_map` 的词汇表里是一件事，想让这几类
+    更重可以配 `block`；在这里私自发明一套严重度阶梯，只会让控制台统一的 block/review/sanitize
+    措辞去描述一件运行时不做的事——那正是这个分支原本的缺陷。
+  - 0.6 在所有处置闸门之下（响应侧拦截需要 medium 档的 0.85，流式终止需要 0.9），
+    `security_filters.yaml` 里「review = 只记录、不拦截」那句注释仍然成立。标签是 `request_`
+    前缀，碰不到 `_needs_confirmation` 与 `_stream_block_reason` 的 `response_` 前缀判定。
+  - 新增标签：`request_secret_exfiltration` / `request_privilege_abuse` / `request_rule_bypass` /
+    `request_strong_intent_attack`。
+
+- **R3 · 只读工具豁免收窄，并同时给它专用的 `observe` 动作。** `_READ_ONLY_CONTENT_TOOLS` 整类
+  跳过 `dangerous_param_patterns`，而被豁免的恰是外泄链的两端：`read` / `read_file` / `glob` /
+  `grep` 是采集，`webfetch` / `web_fetch` / `web_search` / `browser` / `search` 是出口。
+  - **收窄与配套动作在同一个 commit**——这是原子性问题不是排期问题。沿用现有的
+    `dangerous_param`（`review`）会设 `requires_human_review`，非流式下 `_needs_confirmation`
+    据此走自动遮挡，整个工具调用被替换为 `[CRITICAL-DANGER]` 占位符。而 `read ~/.ssh/config`、
+    `grep -r /etc/passwd` 是日常运维动作，那样改会在上线当天开始改写这类回答。
+  - 因此命中走独立的 `action_map.tool_call_guard.readonly_param`，两处规则源
+    （`security_filters.yaml` 与 `security_rules._DEFAULT_RULES`）都发 `observe`：只记录，
+    **不抬分、不设 `requires_human_review`**。
+  - `_apply_action` 新增显式 `default` 参数：挂载的旧 `security_filters.yaml` 缺这个键时兜底到
+    `observe`，而不是掉进 `default_action: review`——否则「升级」本身就是那个误拦。
+  - `todowrite` / `task` / `submit` / `multi_tool_use.parallel` / `notebook_edit` 既不读文件也不
+    上网，仍整类豁免。
+
+- **R1 · 已由 [#62](https://github.com/ax128/AegisGate/pull/62) 修复，本阶段只补回归钉。**
+  `threshold_multiplier` 的 medium 档已是 1.00，不再重复修。新增的钉子覆盖 `#62` 未覆盖的
+  **两处消费点**——它们在策略阈值之上又加了一层地板：
+    - `filters/sanitizer.py` 的 `max(ctx.risk_threshold, self._block_threshold)`：两半都随档位缩放；
+    - `adapters/openai_compat/stream_utils.py` 的 `max(ctx.risk_threshold, 0.9)`：**0.9 是硬编码、
+      不随档位缩放**，因此在所有把阈值调低的档位上由它说了算。这正是 R1 最初分析漏掉的那一处。
+
+- 新增 `aegisgate/tests/test_exfil_mechanism_fixes.py`（36 条）。
+
+- **评审修复（同一阶段内）**：
+  - **R2 的抬分值不再是 0.6，改为从响应侧的 sanitize 闸门推导（medium 档 = 0.30）。** 原判断只核到两个
+    闸门——响应拦截要 `max(risk_threshold, sanitizer block)`、流式终止要 `max(risk_threshold, 0.9)`，
+    0.6 都够不到，所以看起来安全。真正卡住的是第三个：`OutputSanitizer` 在它的 **sanitize** 阈值
+    （medium 档 0.35）就置 `risk_triggered`，而 `should_sanitize` 一旦成立，**即使一个字都没改写**也会设
+    `response_disposition="sanitize"` 与 `tool_calls_disabled_by_policy`，`_stream_block_reason` 把这个
+    disposition 读作终止信号。于是「run a bash script that builds the image」（`privilege_escalation_en`
+    命中）会让一段毫无危险内容的回答在流式下被截断、工具调用被剥离——而 `strong_intent_patterns` 是一张
+    自然语言动词表，这类请求是 agent 网关最高频的那一批。
+    `leak_check` 保留 0.6：它命中的是请求里真实的密钥形态（`sk-`/`AKIA`/JWT/PEM 头），不是普通英语。
+    新增 7 条端到端断言，直接钉「日常请求 + 干净回答 ⇒ 不 sanitize、不截流」。
+  - R2 的 `_report["action"]` 改为记实际动作，不再硬写 `"review"`——运营方可以把这几类配成别的动作。
+  - **出口侧只读工具（`webfetch`/`web_fetch`/`web_search`/`browser`/`search`）改用 exec-only 模式子集**，
+    跳过 `sensitive_file_access` / `path_traversal` / `ssh_key_access`：它们只上网、不碰文件系统，
+    「怎么读 /etc/passwd」是一个关于文件读的问题而不是一次文件读。与写文件类工具沿用同一条理由。
+  - `readonly_param` 的兜底动作提为 `tool_call_guard.READONLY_PARAM_FALLBACK_ACTION`，并新增一条断言
+    把代码兜底、`security_filters.yaml`、`_DEFAULT_RULES` 三处钉在一起——回滚说明本身就点明了三者走散的代价。
 
 
 ### Changed（行为变更：安全级别三档恢复为三档）
