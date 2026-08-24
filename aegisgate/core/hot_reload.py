@@ -378,15 +378,21 @@ def _clear_openai_lru_caches() -> None:
 
 
 def _clear_v2_lru_caches() -> None:
-    from aegisgate.adapters.v2_proxy.router import (
-        _v2_redaction_patterns,
-        _v2_relaxed_redaction_patterns,
-        _v2_dangerous_command_patterns,
-    )
+    """Drop every rules-derived cache in the v2 adapter.
 
-    _v2_redaction_patterns.cache_clear()
-    _v2_relaxed_redaction_patterns.cache_clear()
-    _v2_dangerous_command_patterns.cache_clear()
+    Missing one here is silent: the adapter keeps serving a pattern set built
+    from the previous rules file, and only that one layer is stale.
+    ``test_hot_reload_unit`` pins this list against the module.
+    """
+    from aegisgate.adapters.v2_proxy import router as v2_router
+
+    for name in (
+        "_v2_redaction_patterns",
+        "_v2_relaxed_redaction_patterns",
+        "_v2_dangerous_command_patterns",
+        "_pii_pattern_ids",
+    ):
+        getattr(v2_router, name).cache_clear()
 
 
 def _reset_filter_pipeline() -> None:

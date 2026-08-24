@@ -99,15 +99,20 @@ SURFACES: tuple[dict[str, Any], ...] = (
         "id": "v2_request",
         "code": "E6",
         "label": "V2 请求体",
-        "pattern_set": "v2_fixed",
-        "detail": "硬编码的 15 项集合",
-        "note": "与 relaxed_pii_ids 完全解耦；修改 relaxed 集不改变任何 V2 行为",
+        "pattern_set": "relaxed",
+        "detail": "与 V1 对话路由同一套 relaxed_pii_ids",
+        "note": "此前为硬编码 15 项、与 relaxed 集完全解耦；现已收敛，改一处 YAML 两侧一致生效",
         "master_switch": "v2_enable_request_redaction",
     },
 )
 
 # Surfaces the relaxed set governs, in the order they appear above.
-RELAXED_GOVERNED_SURFACES = ("v1_pipeline_chat", "v1_forward_chat", "v1_forward_multipart")
+RELAXED_GOVERNED_SURFACES = (
+    "v1_pipeline_chat",
+    "v1_forward_chat",
+    "v1_forward_multipart",
+    "v2_request",
+)
 
 # V1 transport-layer redaction has no off switch. Saying so explicitly is part of
 # the panel's contract: it is a mandatory security baseline, not a missing toggle.
@@ -175,8 +180,6 @@ def _regex_status(regex: Any) -> str:
 def _effective_surfaces(
     *, runtime_enabled: bool, relaxed_member: bool, relaxed_all: bool, pattern_id: str
 ) -> dict[str, bool]:
-    from aegisgate.adapters.v2_proxy.router import V2_RELAXED_PII_IDS
-
     in_relaxed = relaxed_all or relaxed_member
     return {
         "v1_pipeline_chat": runtime_enabled and in_relaxed,
@@ -184,7 +187,10 @@ def _effective_surfaces(
         "v1_forward_chat": runtime_enabled and in_relaxed,
         "v1_forward_multipart": runtime_enabled and in_relaxed,
         "v1_forward_generic": runtime_enabled,
-        "v2_request": runtime_enabled and _normalize_id(pattern_id) in V2_RELAXED_PII_IDS,
+        # V2 now resolves through the same relaxed set as V1 rather than a
+        # hard-coded id list, so this row is the same predicate as the V1
+        # relaxed surfaces instead of a second, independently drifting one.
+        "v2_request": runtime_enabled and in_relaxed,
     }
 
 
@@ -279,7 +285,7 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 "explicit_default_id": "FIELD_SECRET_{idx}",
                 "legacy_string_id": "FIELD_SECRET_{idx}",
                 "relaxed_filtered": True,
-                "note": "与 PII 规则合并后整体被 relaxed 过滤；默认 12 项不含这两个 ID，因此默认不生效",
+                "note": "与 PII 规则合并后整体被 relaxed 过滤；默认集不含这两个 ID，因此默认不生效——与 V1 管道层和 V2 都不一致，收敛记录在 ROADMAP R8",
             },
             {
                 "id": "v2_request",
@@ -292,9 +298,9 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 # FIELD_SECRET one. Only the legacy bare-string form is numbered.
                 "explicit_default_id": "rule",
                 "legacy_string_id": "field_secret_{idx}",
-                "relaxed_filtered": True,
+                "relaxed_filtered": False,
                 "note": "两条 fallback 与显式列表**同时**编译（V1 只在列表为空时才用 fallback）；"
-                        "15 项集合含 FIELD_SECRET 与 AUTH_BEARER，故它们恒生效",
+                        "field 层不经 relaxed 过滤，与 V1 管道层一致恒生效",
             },
         ],
     }
@@ -435,7 +441,7 @@ def _resolver_report() -> dict[str, Any]:
 
 def build_settings_payload() -> dict[str, Any]:
     """The whole read-only panel, computed from the rules the runtime loaded."""
-    from aegisgate.adapters.v2_proxy.router import V2_RELAXED_PII_IDS
+    from aegisgate.adapters.v2_proxy.router import v2_effective_pii_ids
     from aegisgate.core.gateway_ui_config import _ENV_PATH
     from aegisgate.core.rules_write import last_applied_write
     from aegisgate.core.ui_etag import etag_for_file
@@ -533,8 +539,12 @@ def build_settings_payload() -> dict[str, Any]:
         "malformed_pii_entries": malformed,
         "enabled_semantics_active": ENABLED_SEMANTICS_ACTIVE,
         "pending_enabled_false_ids": pending_enabled_false,
-        "v2_effective_ids": sorted(V2_RELAXED_PII_IDS),
-        "v2_field_ids_in_set": sorted(V2_RELAXED_PII_IDS & {"FIELD_SECRET", "AUTH_BEARER"}),
+        # Resolved from the live rules, not declared: follows relaxed_pii_ids and
+        # each rule's `enabled` flag, so it cannot disagree with the request path.
+        "v2_effective_ids": sorted(v2_effective_pii_ids()),
+        "v2_field_ids_in_set": sorted(
+            v2_effective_pii_ids() & {"FIELD_SECRET", "AUTH_BEARER"}
+        ),
         "normalize_nfkc": bool(rules.get("normalize_nfkc", True)),
         "strip_invisible_chars": bool(rules.get("strip_invisible_chars", True)),
         "request_prefix_max_len": rules.get("request_prefix_max_len", 12),

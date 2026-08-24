@@ -243,9 +243,11 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
 | E3 转发层 · 对话消息 / `system` / `instructions` / 工具定义 | 同 E1 三条路由 | relaxed（可配） |
 | E4 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | relaxed（可配） |
 | E5 转发层 · 通用 `/v1/<子路径>` JSON | embeddings、rerank 等 | 全量 |
-| E6 v2 请求体 | `/v2/__gw__/t/<token>/...` | **另一套硬编码的 15 项**，不读 `relaxed_pii_ids` |
+| E6 v2 请求体 | `/v2/__gw__/t/<token>/...` | relaxed（可配，与 E1/E3/E4 同一套） |
 
-需要特别注意 **E3/E4**：`/v1/chat/completions` 这类路由在**打分**时跑全量集，但真正改写外发内容的**转发层**跑的是 relaxed 集。只看"对话路由用 relaxed"这一句会低估实际外发的内容。E6 的差异见 [README_zh.md §1.2](README_zh.md#12-脱敏覆盖范围当前)。
+需要特别注意 **E3/E4**：`/v1/chat/completions` 这类路由在**打分**时跑全量集，但真正改写外发内容的**转发层**跑的是 relaxed 集。只看"对话路由用 relaxed"这一句会低估实际外发的内容。
+
+`field_value_patterns` 是独立于 relaxed 集的一层：只要该执行面跑脱敏，field 规则就跑，不受 `relaxed_pii_ids` 增删影响。
 
 写接口是 `PATCH /__ui__/api/request_redaction/settings`，只接受具名的领域操作（`set_mode`、`set_membership`、`materialize_custom`、`remove_unresolved`）加三个标量值，不接受任意 key path；每个操作都在写事务内、对着锁下读到的那份文档重新校验。该端点**强制** `If-Match`，见 §3.2。
 

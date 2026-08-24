@@ -623,6 +623,11 @@ _DEFAULT_RELAXED_PII_IDS = frozenset(
         "TOKEN",
         "JWT",
         "URL_TOKEN_QUERY",
+        # Added when V2 stopped carrying its own hard-coded id set. V2's set was
+        # this one plus COOKIE_SESSION, so folding it in here is what let the two
+        # converge without either side losing a pattern. It is credential-class
+        # like the rest of this set — a session cookie is a bearer credential.
+        "COOKIE_SESSION",
         "PRIVATE_KEY_PEM",
         "AWS_ACCESS_KEY",
         "AWS_SECRET_ACCESS_KEY",

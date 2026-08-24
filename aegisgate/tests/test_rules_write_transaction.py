@@ -749,11 +749,19 @@ class TestV2LegacyFieldEntry:
         assert compiled["field_secret_1"] == "legacy-[0-9]{4}"
         assert compiled["email"] == "a@b"
 
-    def test_the_public_constant_mirrors_the_private_one(self) -> None:
+    def test_the_field_layer_stays_unconditional_on_v2(self) -> None:
+        """Field patterns must not be gated by the PII relaxed set on V2.
+
+        They were, via FIELD_SECRET/AUTH_BEARER membership in a hard-coded id
+        list. That read as a pattern allow-list but acted as an always-on flag
+        for a different layer, so shrinking the "PII" set would have silently
+        turned off field redaction too.
+        """
         from aegisgate.adapters.v2_proxy import router as v2_router
 
-        assert v2_router.V2_RELAXED_PII_IDS is v2_router._V2_RELAXED_PII_IDS
-        assert {"FIELD_SECRET", "AUTH_BEARER"} <= v2_router.V2_RELAXED_PII_IDS
+        assert not hasattr(v2_router, "V2_RELAXED_PII_IDS")
+        assert not hasattr(v2_router, "_V2_RELAXED_PII_IDS")
+        assert {"FIELD_SECRET", "AUTH_BEARER"} <= v2_router.v2_effective_pii_ids()
 
 
 class TestRealRulesFileStillPatches:

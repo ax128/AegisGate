@@ -9,6 +9,23 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（行为变更：请求侧脱敏规则集收敛）
+
+- **V2 请求脱敏改为读取 `redaction.relaxed_pii_ids`**，不再使用硬编码的 `V2_RELAXED_PII_IDS`。
+  此前编辑该 YAML 键只影响 V1，V2 岿然不动，且配置面上没有任何迹象能让人发现这一点——
+  文档"其余路由跑完整规则集"对 V2 也因此长期失真。
+  - 实测两侧在 `pii_patterns` 口径上**只差 `COOKIE_SESSION` 一项**：V2 是 V1 的超集。
+    另外两项 `AUTH_BEARER` / `FIELD_SECRET` 属 `field_value_patterns` 层，两侧本就无条件运行——
+    V2 只是把它们塞进了一个名为"PII id 集"的常量来表达"恒开"。
+  - 因此把 `COOKIE_SESSION` 并入共享默认集（12 → 13 项）完成收敛，**V1 与 V2 都不丢覆盖**。
+  - **默认行为变化**：V1 的三条对话路由（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`）
+    现在也会脱敏 `COOKIE_SESSION`（形如 `sid=…` / `session_id: …` / `set-cookie: …`）。
+    这是**增加**脱敏。若你的对话内容里有形似 session id 的字符串且不希望被替换，
+    可在 `security_filters.yaml` 的 `relaxed_pii_ids` 中显式列出不含该 id 的集合。
+  - V2 的 field 层改为无条件运行（与 V1 管道层一致），不再受 PII 集合增删影响。
+  - 新增 `aegisgate/tests/test_relaxed_pii_convergence.py`：钉住"V2 跟随 YAML"、"field 层不被 PII 集
+    门控"、"没有一侧丢覆盖"，以及"每个规则派生的 lru_cache 都挂进了热重载失效链"。
+
 ### Fixed（文档对齐审计）
 
 - **`AEGIS_CONFIG_DIR` 布局下密钥轮换静默失效**：控制台密钥页用 `Path.cwd()/"config"` 定位密钥文件，

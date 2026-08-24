@@ -109,7 +109,7 @@ Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/r
 
 **What data does AegisGate redact?**
 Over 50 PII pattern categories including: API keys and tokens (OpenAI, AWS, GitHub, Slack), credit card numbers, SSNs, email addresses, phone numbers, crypto wallet addresses and seed phrases, medical record numbers, IP addresses, internal URLs, and infrastructure identifiers. Custom exact-value redaction is also supported for arbitrary secrets.
-Which of them run depends on the route. `/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured conversation payloads, so by default only the credential-only `redaction.relaxed_pii_ids` subset runs there (12 of the 56 shipped patterns — tokens, tokens in URL query strings, JWT, PEM private keys, AWS/GitHub/Slack keys, exchange secrets, crypto WIF/xprv/seed phrases). Other `/v1/` routes run the full set. **`/v2/` is different again**: it runs its own hard-coded 15-pattern set and does not read `relaxed_pii_ids` at all. Set `redaction.relaxed_pii_ids: ["*"]` in `security_filters.yaml` to run all patterns on the three `/v1/` conversation routes — that setting has no effect on `/v2/`. Full breakdown in [PII Redaction Coverage](#pii-redaction-coverage-50-categories).
+Which of them run depends on the route. `/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured conversation payloads, so by default only the credential-only `redaction.relaxed_pii_ids` subset runs there (13 of the 56 shipped patterns — tokens, tokens in URL query strings, JWT, session cookies, PEM private keys, AWS/GitHub/Slack keys, exchange secrets, crypto WIF/xprv/seed phrases). Other `/v1/` routes run the full set, and `/v2/` runs the same relaxed set as the conversation routes. Set `redaction.relaxed_pii_ids: ["*"]` in `security_filters.yaml` to run all patterns everywhere the relaxed set applies. Full breakdown in [PII Redaction Coverage](#pii-redaction-coverage-50-categories).
 
 **Can I use AegisGate with AI coding agents like Cursor, Claude Code, or Codex?**
 Yes. AegisGate supports MCP (Model Context Protocol) and Agent SKILL integration. Point your agent's `baseUrl` to the gateway and it will transparently filter all LLM traffic. See [SKILL.md](SKILL.md) for agent-specific setup instructions.
@@ -553,17 +553,15 @@ use the same set:
 | Forward, conversation body / `system` / `instructions` / tool definitions | same three routes | relaxed (configurable) |
 | Forward, multipart form fields | `/v1/files`, `/v1/images/*` | relaxed (configurable) |
 | Forward, generic `/v1/<subpath>` JSON | embeddings, rerank, … | full |
-| v2 request body | `/v2/__gw__/t/<token>/...` | **hard-coded 15-pattern set**; ignores `relaxed_pii_ids` |
+| v2 request body | `/v2/__gw__/t/<token>/...` | relaxed (configurable) |
 
-Two consequences worth knowing before you size your exposure:
+One consequence worth knowing before you size your exposure: on the
+conversation routes, the scoring pass sees the full set while the pass that
+rewrites what leaves the gateway uses the relaxed one. Reading only
+"conversation routes use the relaxed set" understates what is forwarded.
 
-- On the conversation routes, the scoring pass sees the full set while the pass
-  that rewrites what leaves the gateway uses the relaxed one. Reading only
-  "conversation routes use the relaxed set" understates what is forwarded.
-- `/v2/` runs `V2_RELAXED_PII_IDS` (`aegisgate/adapters/v2_proxy/router.py`) —
-  the 12 credential patterns plus `AUTH_BEARER`, `COOKIE_SESSION` and
-  `FIELD_SECRET`. Editing `relaxed_pii_ids` does not change v2 behaviour.
-  Converging the two sets is tracked in [ROADMAP.md](ROADMAP.md).
+`field_value_patterns` are a separate layer and are **not** gated by
+`relaxed_pii_ids` — they run on every surface that runs redaction at all.
 
 The admin console renders all six surfaces per rule, computed server-side — see
 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) §4.3.

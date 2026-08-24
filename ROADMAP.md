@@ -95,10 +95,11 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 的 `SURFACES` 服务端算好并在控制台呈现，README / README_zh / config/README 也已按这个模型改写；
 剩下的是把模型分裂本身消掉。以下四条原先只记录在本地未入库的实施规格里，现在收进这里。
 
-1. **V2 的 relaxed 集配置化**（需先决策）。`adapters/v2_proxy/router.py` 的 `V2_RELAXED_PII_IDS`
-   是硬编码 15 项，不读 `redaction.relaxed_pii_ids`。收敛后「改一处 YAML、两条链路一致生效」才成立。
-   但 V1 默认 12 项、V2 默认 15 项（V2 多 `AUTH_BEARER` / `COOKIE_SESSION` / `FIELD_SECRET`），
-   合并必然改变其中一侧的默认行为，要么 V2 收窄、要么 V1 放宽——属行为变更，单独 PR、单独回归。
+1. ~~**V2 的 relaxed 集配置化**~~ **已完成**。V2 现在与 V1 读同一个 `redaction.relaxed_pii_ids`，
+   `V2_RELAXED_PII_IDS` 已删除。实测两侧在 `pii_patterns` 口径上只差 `COOKIE_SESSION` 一项
+   （`AUTH_BEARER` / `FIELD_SECRET` 属 `field_value_patterns` 层，两侧本就恒跑），因此把
+   `COOKIE_SESSION` 并入共享默认集即可完成收敛，**两侧都不丢覆盖**。守护见
+   `aegisgate/tests/test_relaxed_pii_convergence.py`。
 2. **转发层判据从按角色改为按路由**。管道层（执行面 1–2）按路由决定用哪套集合，转发层
    （执行面 3–4）按消息角色推导。同一请求两层判据不同，是「打分用全量、改写用 relaxed」这个
    反直觉行为的根源。改成统一按路由推导属运行语义变更。
