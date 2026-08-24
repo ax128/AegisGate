@@ -9,6 +9,52 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Added（外泄链路加固 S0：外泄链路规则，仅改 YAML）
+
+- **`security_filters.yaml` 新增 6 条 `exfil_chain_*` 规则**，判定「采集 + 出口」两种能力在同一条命令里
+  同时成立，堵住「扫盘 → 读凭据 → 发往第三方」这条链。请求侧脱敏本来就挡住了「密钥流向上游」，漏的是
+  反方向：模型指挥 agent 在本机采集数据并发往第三方。
+  - **只判组合，不判措辞**：`curl -F`/`-T`/`--data-binary @`/管道进 `nc`/`Invoke-RestMethod -Method Post`
+    这类外发动作，与 `~/.aws/credentials`、`~/.ssh/id_*`、`.env`、`.netrc`、`.npmrc`、`.git-credentials`、
+    `~/.config/gcloud`、`~/.kube/config`、浏览器 `Login Data` / `cookies.sqlite` / `key4.db` / Keychain、
+    整环境导出（`env` / `printenv` / `Get-ChildItem Env:`）成对出现才命中。
+    单侧命中一律放行——`cat .env`、`curl https://api.github.com` 都是日常动作。
+  - **管道是判据**：`cat .env | curl -d @-` 命中，`source .env && curl ...` 不命中——`&&` 不把数据交给
+    `curl`，两者的能力不同。
+  - **零新增代码**。三处落点复用既有处置通道，都不经风险分：
+
+    | 落点 | 条数 | 命中后 |
+    | --- | --- | --- |
+    | `tool_call_guard.dangerous_param_patterns` | 6 | 按 `review` 抬分并标记复核；并经 `router::_tool_call_guard_patterns` 参与自动遮挡时的工具调用剥离 |
+    | `sanitizer.command_patterns` | 5 | `response_disposition=sanitize`，渲染层据此把整个工具调用替换为占位 |
+    | `sanitizer.force_block_command_patterns` | 2 | 由 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`（默认 `false`）把关，作灰度开关 |
+
+  - `exfil_chain_secret_in_url_query` **只进第一处**：它命中正文会把流式回答截断，而一条文档示例 URL
+    不该有这个代价；作用在工具调用参数上则没有这个问题。它同时匹配真实密钥形态与 AegisGate 占位符
+    ——占位符出现在 URL query 位置，本身就是外泄企图。
+  - **`force_block_command_patterns` 的两条有额外影响面**：该组同时被 `router::_critical_danger_patterns()`
+    读取，而后者**不受** `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` 把关。因此即使开关关着，命中这两条的工具
+    调用在自动遮挡路径上也会被替换为占位符——与该组既有条目的行为一致。
+  - 规则组数不变（仍 31 组），条数 172 → 185；`security_filters.yaml` 实际 32 组 / 228 → 241 条。
+  - **判据收窄了三处**，都是评审时用日常语料实测出来的误判：
+    - 凭据**文件**必须带点前缀（`\.env`，不是 `[/\.]env`）。松写法把任何 `/env` 路径段都算成读 `.env`，
+      于是 `curl -X POST .../actuator/env`、`--upload-file env.json` 都成了外泄；`.env.example` /
+      `.env.template` 一并排除——模板里没有密钥。
+    - `scp` / `rsync` 从命令表里去掉。它们的 `-F` 是「用这个 ssh config」、`-T` 是「用这个临时目录」，
+      不是上传标志，照旧写法 `scp -F ~/.ssh/config … id_ed25519.pub host:` 会命中。它们本身就是传输命令，
+      基于标志的规则对它们说不出真话，因此本阶段不覆盖 `scp`/`rsync`（管道类规则仍然覆盖 `tar … | curl`）。
+    - `exfil_chain_recursive_secret_harvest` 改为**要求出现密钥关键字**（`sk-`/`AKIA`/`api_key`/`secret`/
+      `*.env` 等）。原先只要求「含 `r` 的短选项」，而 `--color` 就满足，`grep --color=always TODO src/ | curl`
+      被判成凭据收割。
+  - **性能**：两条 upload 规则前置一个廉价 lookahead 预筛（严格超集，不改变判定）。8 KB 重复 `curl -F `
+    上，`upload_credential_store` 从 188 ms 降到 10 ms、`upload_credential_file` 从 37 ms 降到 14 ms。
+    这条路径要紧是因为流式每 `_STREAM_FILTER_CHECK_INTERVAL` 个 chunk 就重跑一次完整 response pipeline。
+  - 新增 `aegisgate/tests/test_exfil_chain_rules.py`（69 条）：17 条攻击语料必须命中，**40 条日常开发语料
+    必须一条都不命中**。后者更重要——它决定这套规则能不能一直开着。每条正则另过
+    `regex_probe` 沙箱与 `test_redos_guard` 的静态预算，并新增一条**锚词重复**的放大预算断言
+    （`test_redos_guard` 的 `_LARGE_INPUT` 里没有 `curl`/`grep`，测不到这类规则的真实代价）。
+  - 回滚：删掉 YAML 里的 `exfil_chain_*` 条目，走热加载，无需重启。
+
 ### Added（外泄链路加固 S1：可观测与校准语料）
 
 - **审计记录新增 `exfil` 块**：命中外泄链路规则（`exfil_*` 前缀）时记录 `dimensions` /

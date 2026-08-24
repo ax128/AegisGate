@@ -417,6 +417,24 @@ Extend the list without touching code by adding names to `allowed_models` in `co
 > feature flag is on — except `redaction` / `exact_value_redaction`, which the policy engine force-enables
 > whenever their flags are on, even if the YAML omits them.
 
+#### Exfiltration-chain rules (`exfil_chain_*`)
+
+These decide on *capability pairs*, not wording: a credential artefact (file, directory,
+browser secret store, whole-environment dump) **and** an outbound transfer (`curl -F`, `-T`,
+`--data-binary @`, a pipe into `nc`, `Invoke-RestMethod -Method Post`) in the same command.
+Either half alone is an everyday developer action and is deliberately not listed — only the
+pair is unambiguous. Three boundaries are deliberate: a credential file must be dot-prefixed
+(`.env`, not a `/env` URL path segment) and `.env.example`-style templates are excluded;
+`scp` / `rsync` are out of scope, because their `-F` / `-T` mean "ssh config" and "temp dir"
+rather than "upload"; and the harvest rule requires an actual secret token, not merely a
+recursive-looking flag. They live in three groups whose dispositions differ:
+
+| Group | Count | What a hit does |
+| --- | --- | --- |
+| `tool_call_guard.dangerous_param_patterns` | 6 | `review` on tool-call arguments: raises the risk score and flags for review. Also feeds `router::_tool_call_guard_patterns`, the auto-sanitize tool-call stripper. |
+| `sanitizer.command_patterns` | 5 | `response_disposition = sanitize` on the response body. `exfil_chain_secret_in_url_query` is deliberately absent: a documented example URL in prose must not truncate a streaming answer. |
+| `sanitizer.force_block_command_patterns` | 2 | The two highest-confidence forms, behind `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` (default `false`). Note this group also feeds `router::_critical_danger_patterns()`, which that switch does **not** gate. |
+
 ### Error Response Format
 
 AegisGate does not use one single JSON error envelope for every route. Current behavior falls into three families:
