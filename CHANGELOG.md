@@ -2,9 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Section names follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), but the file does
+**not** yet follow the rest of the convention: there are no dated version sections, only
+`[Unreleased]` and a `[Previous]` archive, and the same section name recurs several times within
+each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
+
+### Fixed（文档对齐审计）
+
+- **`AEGIS_CONFIG_DIR` 布局下密钥轮换静默失效**：控制台密钥页用 `Path.cwd()/"config"` 定位密钥文件，
+  而 `storage/crypto` 读 `AEGIS_CONFIG_DIR`。两者不一致时，轮换把新 Fernet 密钥写到 `crypto` 从不读的
+  位置——界面报轮换成功，旧密钥继续生效。三处解析器（`crypto`、`config/redact_values`、控制台密钥页）
+  收敛到 `aegisgate/config/paths.config_dir()`。此前该缺陷只以 `strict=True` 的 xfail 标记存在于
+  `test_ui_key_rotate_honours_aegis_config_dir`，标记已移除。默认部署（compose 与裸机在仓库根启动）
+  两条路径本就重合，不受影响。
+- **Docker 下 `AEGIS_PORT` 不生效**：`Dockerfile` 的 `CMD` 硬编码 `--port 18080`，而 `settings.port`
+  只用于渲染客户端 Base URL。按 README_zh §4「改三处」操作会得到一个监听 18080、映射却指向新端口的容器。
+  启动命令改读 `${AEGIS_PORT:-18080}`；绑定地址仍固定 `0.0.0.0`（容器的网络边界是端口映射，且
+  `AEGIS_HOST` 默认 `127.0.0.1`，跟随它会让一份标准 `.env` 产出不可达的容器）。
+- **控制台文档页由黑名单改为白名单**：此前服务根目录下除少数具名排除项外的全部 `*.md`。`.gitignore`
+  里的本地报告 `OPTIMIZATION_PLAN.md`、`task_plan.md`、`notes.md`、`FINAL_REPORT.md` 从未在排除列表里，
+  开发机上存在这些文件时会被有会话的用户读到。黑名单只能列出已经想到的文件，改为白名单后新增文件默认不服务。
+
+### Added（文档对齐审计）
+
+- **单进程约束的运行时信号**（ROADMAP R4 第 1 层）：新增 `aegisgate/core/process_identity.py`。
+  启动日志与 `/health`、`/ready` 都带 `pid` 与 `instance`；检测到 `WEB_CONCURRENCY` /
+  `UVICORN_WORKERS` / `GUNICORN_WORKERS` / `GUNICORN_CMD_ARGS` / `--workers N` 大于 1 时打 ERROR，
+  并在探针 body 里带 `multiprocess_warning`。**只告警，不阻止启动**——worker 子进程通常看不到父进程
+  的启动参数，硬拦会同时制造漏检与误检两种反向故障。
+- 三条文档守护测试：规则工作台的组数/条数按 `_PANEL_OWNED_SECTIONS` 扣除后再比对（此前从 YAML 计数，
+  测试绿而文案错）；`request_redaction/settings` 的强制 `If-Match` 与文档描述绑定；控制台文档页白名单
+  与仓库根对齐。`ROADMAP.md` 纳入链接/锚点检查（但排除在配置项检查外——它需要指名已删除的字段）。
+
+### Changed（文档对齐审计）
+
+- `core/confirmation_flow.py` → `core/block_reasons.py`：yes/no 确认流程移除后，该模块只做
+  reason→文案映射，文件名是最后一处误导。
+- 请求侧脱敏在文档中由「V1/V2 两桶」改为**六执行面**模型（README、README_zh、WEBUI-QUICKSTART）。
+  两桶叙述表达不出两件事：对话路由的**打分**跑全量集而**转发层**跑 relaxed 集；`/v2/` 跑的是另一套
+  硬编码 15 项、完全不读 `relaxed_pii_ids`。原文档称「其余路由跑完整规则集」，对 v2 不成立。
+- `README_zh.md` 错误响应格式由「两类」更正为三类，补上安全边界拒绝包裹（无 `request_id`）。
+- `gw_tokens.json` 在 `README_zh.md` 与 `config/README.md` 中原写「重启后生效」，实际在热重载
+  watcher 内，即时生效；`config/README.md` 的表格与文末说明本就是对的，属同文件自相矛盾。
+- `README_zh.md §上游接入` 收敛为上游表 + 三场景判断依据，细节下沉到 `UPSTREAM-QUICKSTART.md`
+  （ROADMAP 单点待办中记录的重复项）。
+- `config/.env.example` 补齐 16 项此前无处可查的配置（含 `AEGIS_HOST`/`AEGIS_PORT`、
+  `AEGIS_PENDING_DATA_TTL_SECONDS`、`AEGIS_NONCE_CACHE_BACKEND` 等）。
+- `README.md` 架构图的过滤器顺序与 `_build_pipeline()` 对齐（此前与该文件自己的 Security Pipeline
+  章节矛盾），并补上运维端点表、`/__gw__/add|remove`、launcher 与改端口章节。
+- CHANGELOG 顶部不再声称遵循 Keep a Changelog——本文件目前没有带日期的版本节。
 
 ### Added
 

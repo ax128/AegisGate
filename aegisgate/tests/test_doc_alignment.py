@@ -42,13 +42,18 @@ _DOC_FILES = (
     "UPSTREAM-QUICKSTART.md",
     "OTHER_TERMINAL_CLIENTS_USAGE.md",
     "CHANGELOG.md",
+    "ROADMAP.md",
     "config/README.md",
 )
 
-# Subset that describes the *current* configuration surface. The changelog is
-# excluded because documenting a removed setting means naming it, which is the
-# whole point of a breaking-change entry.
-_CONFIG_DOC_FILES = tuple(name for name in _DOC_FILES if name != "CHANGELOG.md")
+# Subset that describes the *current* configuration surface. The changelog and
+# the roadmap are excluded because naming a removed setting is the whole point
+# of a breaking-change entry and of a "this was deleted" roadmap note — both
+# legitimately mention AEGIS_* names that no longer exist.
+_HISTORICAL_DOC_FILES = frozenset({"CHANGELOG.md", "ROADMAP.md"})
+_CONFIG_DOC_FILES = tuple(
+    name for name in _DOC_FILES if name not in _HISTORICAL_DOC_FILES
+)
 
 
 def _import_all_filter_modules() -> None:
@@ -501,13 +506,8 @@ def test_ui_section_count_matches_docs() -> None:
     )
 
 
-def test_rule_group_and_rule_counts_match_docs() -> None:
-    """WEBUI-QUICKSTART cites the rule-group and rule totals of the workbench.
-
-    Both numbers come from walking security_filters.yaml the same way
-    gateway_ui_routes._discover_rule_sections does, so adding a rule group or a
-    rule to the YAML makes the quickstart stale without this guard.
-    """
+def _discovered_rule_groups() -> dict[str, int]:
+    """Walk security_filters.yaml the way gateway_ui_routes._discover_rule_sections does."""
     from aegisgate.core.gateway_ui_routes import _RULE_SECTION_LABELS
 
     rules = yaml.safe_load(_RULES.read_text(encoding="utf-8"))
@@ -533,14 +533,111 @@ def test_rule_group_and_rule_counts_match_docs() -> None:
     walk(rules, [])
     for section_id in _RULE_SECTION_LABELS:
         found.setdefault(section_id, 0)
+    return found
+
+
+def test_rule_group_and_rule_counts_match_docs() -> None:
+    """WEBUI-QUICKSTART cites what the *workbench lists*, not what the YAML holds.
+
+    Those stopped being the same number when the request-redaction panel took
+    ownership of redaction.pii_patterns: the workbench hides panel-owned groups
+    (gateway_ui_routes._PANEL_OWNED_SECTIONS, honoured by app.js), so counting
+    the YAML alone let the quickstart claim "全部 32 个规则组（228 条规则）"
+    while the page showed 31 / 172 and this guard stayed green.
+    """
+    from aegisgate.core.gateway_ui_routes import _panel_owned_sections
+
+    found = _discovered_rule_groups()
+    hidden = _panel_owned_sections()
+    listed = {name: count for name, count in found.items() if name not in hidden}
 
     quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
-    cited = re.search(r"全部 (\d+) 个规则组\*\*（(\d+) 条规则）", quickstart)
+    cited = re.search(r"(\d+) 个规则组\*\*（(\d+) 条规则）", quickstart)
     assert cited, "WEBUI-QUICKSTART.md no longer states the rule group/rule totals"
-    assert (int(cited.group(1)), int(cited.group(2))) == (len(found), sum(found.values())), (
-        f"security_filters.yaml now has {len(found)} groups / {sum(found.values())} rules "
-        f"but WEBUI-QUICKSTART.md says {cited.group(1)} / {cited.group(2)}."
+    assert (int(cited.group(1)), int(cited.group(2))) == (
+        len(listed),
+        sum(listed.values()),
+    ), (
+        f"the rules workbench lists {len(listed)} groups / {sum(listed.values())} "
+        f"rules (of {len(found)} / {sum(found.values())} in security_filters.yaml, "
+        f"with {sorted(hidden)} owned by the request-redaction panel) but "
+        f"WEBUI-QUICKSTART.md says {cited.group(1)} / {cited.group(2)}."
     )
+
+
+def test_panel_owned_rule_groups_are_documented() -> None:
+    """A group hidden from the workbench must be named where it moved to.
+
+    Otherwise the only way to discover that PII rules are edited elsewhere is to
+    notice a group missing from a list you have no total for.
+    """
+    from aegisgate.core.gateway_ui_routes import _panel_owned_sections
+
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    for section_id in _panel_owned_sections():
+        assert f"`{section_id}`" in quickstart, (
+            f"{section_id} is hidden from the rules workbench but "
+            f"WEBUI-QUICKSTART.md never says where it went"
+        )
+
+
+def test_request_redaction_patch_requires_if_match() -> None:
+    """WEBUI §3.2 must not promise "If-Match optional" for the endpoint that requires it.
+
+    The blanket "有则校验、无则放行" was true until the request-redaction settings
+    endpoint shipped with require_if_match=True. A client following the doc gets
+    a 428/409 instead of the "unchanged behaviour" it was promised.
+    """
+    routes_src = (
+        _REPO_ROOT / "aegisgate" / "core" / "gateway_ui_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "require_if_match=True" in routes_src, (
+        "no endpoint requires a concrete If-Match any more; if that is "
+        "intentional, simplify the WEBUI-QUICKSTART §3.2 wording back."
+    )
+    quickstart = (_REPO_ROOT / "WEBUI-QUICKSTART.md").read_text(encoding="utf-8")
+    assert "/__ui__/api/request_redaction/settings" in quickstart, (
+        "WEBUI-QUICKSTART.md must name the endpoint that requires If-Match"
+    )
+    assert "强制" in quickstart, (
+        "WEBUI-QUICKSTART.md §3.2 no longer distinguishes the endpoints that "
+        "require If-Match from the ones that only validate it when present"
+    )
+
+
+def test_ui_docs_page_serves_only_allow_listed_docs() -> None:
+    """The console docs page is an allow-list, and every entry must exist.
+
+    It used to serve every root *.md minus a hand-maintained exclusion set, so
+    any Markdown that landed in the app root — including the local/internal
+    reports .gitignore keeps out of the repo — was readable from the console.
+    """
+    from aegisgate.core.gateway_ui_config import (
+        _DOC_ORDER,
+        _docs_catalog,
+        _resolve_doc_path,
+    )
+
+    for name in _DOC_ORDER:
+        assert (_REPO_ROOT / name).is_file(), (
+            f"{name} is offered on the console docs page but is not in the repo root"
+        )
+    assert [item["id"] for item in _docs_catalog()] == list(_DOC_ORDER)
+
+    for denied in (
+        "CHANGELOG.md",
+        "ROADMAP.md",
+        "AGENTS.md",
+        "notes.md",
+        "task_plan.md",
+        "FINAL_REPORT.md",
+        "OPTIMIZATION_PLAN.md",
+        "../pyproject.toml",
+        "config/README.md",
+    ):
+        assert _resolve_doc_path(denied) is None, (
+            f"the console docs page would serve {denied}"
+        )
 
 
 def test_every_setting_has_a_runtime_reader() -> None:

@@ -91,7 +91,7 @@ docker compose exec aegisgate cat config/aegis_gateway.key
 
 ### 3.2 乐观并发（If-Match / ETag）
 
-配置、安全规则、动作映射、compose 文件、精确值脱敏这五类资源都是整文件读改写。它们的 `GET` 会返回 `ETag`：
+以下六类资源都是整文件读改写，`GET` 都会返回 `ETag`：配置、安全规则、动作映射、compose 文件、精确值脱敏、请求侧脱敏设置（`/__ui__/api/request_redaction/settings`）。
 
 ```bash
 curl -sD - -o /dev/null http://127.0.0.1:18080/__ui__/api/rules/pii_patterns -b cookie.txt | grep -i etag
@@ -108,7 +108,14 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/rules/pii_patterns \
   -b cookie.txt -d '{"id":"MY_RULE","regex":"..."}'
 ```
 
-`If-Match` **有则校验、无则放行**：不带该头的既有脚本行为完全不变。Web UI 始终携带。
+`If-Match` 的要求**分两层**，Web UI 两层都始终携带：
+
+| 端点 | `If-Match` | 不带该头时 |
+| --- | --- | --- |
+| `/__ui__/api/config`、`/__ui__/api/rules/*`、`/__ui__/api/rules_action_map`、`/__ui__/api/compose/*`、`/__ui__/api/redact_values` | **有则校验、无则放行** | 行为与加该头之前完全一致，既有脚本无需改动 |
+| `PATCH /__ui__/api/request_redaction/settings` | **强制**，必须是具体的 ETag 值 | 直接拒绝 |
+
+这条端点强制要求是有意为之：它是新增端点，不存在早于该头的客户端；而它的每个操作都在重写调用方当时正看着的那份列表（relaxed 集成员、自定义规则物化、清理失效引用），"没带头就按当前内容写"在这里等同于盲写。
 
 示例流程：
 
@@ -143,12 +150,14 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 当前值与默认值不同的字段带 **已改** 徽章，旁边有「恢复默认」（只回填表单，仍需点保存）
   - 有未保存改动时保存按钮显示「（N 项待保存）」，离开页面前会提示
   - 未开放编辑的 4 项：`app_name`、`gateway_key`（走密钥管理页）、`require_confirmation_on_block`（已废弃）、`internal_forwarding_kernel_rollout`（内部灰度开关）
-- 安全过滤规则增删改查：覆盖 `security_filters.yaml` 中**全部 32 个规则组**（228 条规则）
-  - 规则组由 YAML 结构自动发现，往文件里新增一组规则即可在控制台看到，无需改代码
+- **请求侧脱敏**（独立面板，见 §4.3）：PII、字段级与精确值三类规则的总控、生效面与管理入口
+- 安全过滤规则增删改查：规则工作台列出 `security_filters.yaml` 中的 **31 个规则组**（172 条规则）
+  - 该文件实际有 32 组 / 228 条。差额是 `redaction.pii_patterns`（56 条 PII 规则），已由「请求侧脱敏」面板接管，工作台不再列出它，以免同一条规则有两个写入口
+  - `tool_call_guard.parameter_rules` 按 `tool`+`param` 而非 `id` 寻址，因此**只读**：可查看、不可增删改
+  - 其余规则组由 YAML 结构自动发现，往文件里新增一组规则即可在控制台看到，无需改代码
   - 左侧按过滤器分组的规则树带条数；规则组与规则各有独立搜索框
   - 编辑框内置**正则试验场**：粘一段文本，实时高亮这条正则命中的位置
   - 动作映射（block / review / sanitize / pass）
-- 精确值脱敏列表（exact-value redaction）增删改查
 - 请求统计仪表盘：总请求、脱敏替换、危险内容替换、拦截、穿透五个维度，按小时/按天查看
 - **审计日志检索**：查询网关逐请求写下的结构化审计记录
   - 筛选：时间区间、路由、处置（allow / block / sanitize / review / pass）、最低风险分、安全标签、全文关键词
@@ -161,6 +170,7 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 上游地址即时校验：缺 `http(s)://`、缺主机名、带查询参数或 `#` 片段会当场拦下，填成 `/chat/completions` 这类具体端点会提示改回 base URL
   - 「测试连通性」按钮，见 §4.2
 - 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
+  - 读写位置与运行时加载密钥的位置是同一个：设了 `AEGIS_CONFIG_DIR` 就用它，否则用 `<工作目录>/config`。轮换 `aegis_fernet.key` 时旧密钥会存到 `aegis_fernet_prev.key`，旧密文在过渡窗口内仍可解
 - Docker Compose 配置文件在线编辑
 - 一键重启网关（SIGTERM，配合 Docker `restart: unless-stopped` 自动恢复）
 - 阅读仓库内嵌 Markdown 文档（支持表格与链接渲染；默认打开本篇）
@@ -208,6 +218,36 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
   -d '{"upstream_base":"https://api.openai.com/v1"}'
 # {"ok":true,"reachable":true,"status_code":401,"elapsed_ms":214}
 ```
+
+### 4.3 请求侧脱敏面板
+
+请求侧脱敏散落在多个执行层，"这条规则到底在哪些请求上生效"过去只能靠读代码回答。这个面板把答案集中呈现，**且全部由服务端计算后下发**——浏览器不自行推导任何生效面，否则就会出现第二份判定逻辑，和请求路径用的那份各自漂移。
+
+面板分六块：
+
+| 区块 | 内容 |
+| --- | --- |
+| 总控与状态 | 四个总控开关各自真正控制哪一层执行面；规则文件路径解析结果与热重载状态 |
+| 生效面 | 六个执行面各自使用哪套 PII 集合（见下表） |
+| PII 规则 | 增删改查，外加两个正交控件：**启用**、**在 relaxed 集内** |
+| Field 规则 | 按实际行为**只读**展示；本期不提供逐条启停或范围控制 |
+| 豁免与绕过 | 字段级白名单（`whitelist_key`）与上游白名单各自的前置条件，按路由分别说明 |
+| 精确值 | 精确值脱敏列表的增删改查（原独立入口已并入此处，`#redact-values` 书签仍可用） |
+
+六个执行面与各自使用的规则集：
+
+| 执行面 | 范围 | 使用的 PII 集合 |
+| --- | --- | --- |
+| E1 管道层 · 对话路由 | `/v1/chat/completions`、`/v1/responses`、`/v1/messages` | relaxed（可配） |
+| E2 管道层 · 其他路由 | 含 multipart、通用 JSON | 全量 |
+| E3 转发层 · 对话消息 / `system` / `instructions` / 工具定义 | 同 E1 三条路由 | relaxed（可配） |
+| E4 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | relaxed（可配） |
+| E5 转发层 · 通用 `/v1/<子路径>` JSON | embeddings、rerank 等 | 全量 |
+| E6 v2 请求体 | `/v2/__gw__/t/<token>/...` | **另一套硬编码的 15 项**，不读 `relaxed_pii_ids` |
+
+需要特别注意 **E3/E4**：`/v1/chat/completions` 这类路由在**打分**时跑全量集，但真正改写外发内容的**转发层**跑的是 relaxed 集。只看"对话路由用 relaxed"这一句会低估实际外发的内容。E6 的差异见 [README_zh.md §1.2](README_zh.md#12-脱敏覆盖范围当前)。
+
+写接口是 `PATCH /__ui__/api/request_redaction/settings`，只接受具名的领域操作（`set_mode`、`set_membership`、`materialize_custom`、`remove_unresolved`）加三个标量值，不接受任意 key path；每个操作都在写事务内、对着锁下读到的那份文档重新校验。该端点**强制** `If-Match`，见 §3.2。
 
 ## 5. 安全说明
 

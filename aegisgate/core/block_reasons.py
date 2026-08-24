@@ -5,8 +5,9 @@ Every security block (request side or response side) goes through this module, w
 internal reason code into a consistent "problem reason + summary" text that auditing and response
 rendering both reuse.
 
-Note: the yes/no approval flow is gone. Dangerous content is always masked or split automatically,
-so this module no longer provides confirmation copy or its metadata structures.
+This was ``confirmation_flow`` until the yes/no approval flow was removed. Dangerous content is
+always masked or split automatically now, so nothing here produces confirmation copy or its
+metadata structures — the old name outlived the feature it was named after.
 """
 
 from __future__ import annotations

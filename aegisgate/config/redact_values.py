@@ -16,6 +16,7 @@ from pathlib import Path
 
 from cryptography.fernet import InvalidToken
 
+from aegisgate.config.paths import config_dir
 from aegisgate.storage.crypto import _get_fernet
 from aegisgate.util.logger import logger
 
@@ -68,8 +69,7 @@ def _config_path() -> Path:
     cached = _cached_path
     if cached is not None and cached[0] == key:
         return cached[1]
-    base = Path(env).resolve() if env else (Path.cwd() / "config").resolve()
-    path = base / "redact_values.enc.json"
+    path = config_dir() / "redact_values.enc.json"
     _cached_path = (key, path)
     return path
 

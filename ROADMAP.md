@@ -42,10 +42,12 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 
 分两层做，顺序不能反：
 
-1. **必做（S）**：启动时把 pid 与实例标识写进日志和 `/health`；能读到 `WEB_CONCURRENCY` 或 `--workers` 时打 ERROR 级告警；README 与部署文档写明「仅支持单进程」。
+1. ~~**必做（S）**：启动时把 pid 与实例标识写进日志和 `/health`；能读到 `WEB_CONCURRENCY` 或 `--workers` 时打 ERROR 级告警；README 与部署文档写明「仅支持单进程」。~~
+   **已完成** —— 见 `aegisgate/core/process_identity.py`：启动日志与 `/health`、`/ready` 都带 `pid` 与 `instance`；
+   命中 `WEB_CONCURRENCY` / `UVICORN_WORKERS` / `GUNICORN_WORKERS` / `GUNICORN_CMD_ARGS` / `--workers N` 时打 ERROR 并在探针 body 里带 `multiprocess_warning`。
 2. **视需求（XL）**：确有水平扩展需求时，再把进程内单例改造为跨进程安全（Redis 后端天然可用）。
 
-不要把「检测到多进程就拒绝启动」当成唯一防线：worker 子进程通常看不到父进程的启动参数，会同时制造「检测不到 → 静默破裂」和「误检测 → 无法启动」两种反向故障。可靠的那一层是告警与文档。
+不要把「检测到多进程就拒绝启动」当成唯一防线：worker 子进程通常看不到父进程的启动参数，会同时制造「检测不到 → 静默破裂」和「误检测 → 无法启动」两种反向故障。可靠的那一层是告警与文档，第 1 层就是按这个口径实现的——只告警，不阻止启动。
 
 ### R5 — 可部署性打磨（M）
 
@@ -87,16 +89,38 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 - `require_confirmation_on_block` 仍保留在 `Settings` 里做配置兼容（不在控制台开放）。确认没有
   部署依赖旧键之后可以删除。
 
+### R8 — 请求侧脱敏的六执行面收敛（M–L，**部分需先决策**）
+
+请求侧脱敏当前是**六个执行面**，不是「V1 / V2」两桶。生效面已由 `core/request_redaction_settings.py`
+的 `SURFACES` 服务端算好并在控制台呈现，README / README_zh / config/README 也已按这个模型改写；
+剩下的是把模型分裂本身消掉。以下四条原先只记录在本地未入库的实施规格里，现在收进这里。
+
+1. **V2 的 relaxed 集配置化**（需先决策）。`adapters/v2_proxy/router.py` 的 `V2_RELAXED_PII_IDS`
+   是硬编码 15 项，不读 `redaction.relaxed_pii_ids`。收敛后「改一处 YAML、两条链路一致生效」才成立。
+   但 V1 默认 12 项、V2 默认 15 项（V2 多 `AUTH_BEARER` / `COOKIE_SESSION` / `FIELD_SECRET`），
+   合并必然改变其中一侧的默认行为，要么 V2 收窄、要么 V1 放宽——属行为变更，单独 PR、单独回归。
+2. **转发层判据从按角色改为按路由**。管道层（执行面 1–2）按路由决定用哪套集合，转发层
+   （执行面 3–4）按消息角色推导。同一请求两层判据不同，是「打分用全量、改写用 relaxed」这个
+   反直觉行为的根源。改成统一按路由推导属运行语义变更。
+3. **field 规则语义跨 V1/V2 统一**：默认列表与显式列表的关系、`field_value_min_len` 各层下限不同；
+   顺带把精确值脱敏的覆盖面扩到 V1 结构化内容、通用 JSON 与 multipart（目前只覆盖扁平消息文本）。
+4. **按执行层 / 规则 ID 的命中统计**。控制台现在的统计卡是去重后的唯一值数且含 field 规则，
+   无法回答「哪条规则在哪一层命中了多少次」。
+
+另有两条与 R3 重叠、不重复展开：不可变规则快照 + 请求级 generation 绑定（V2 侧目前没有等价的请求
+上下文，需新建一套），以及带运行时超时保证的正则引擎。
+
 ## 单点待办
 
 - **messages / generic 的 EOF 恢复**：上游 EOF 且无 `[DONE]` 时，chat / responses 会补一条断开提示，messages / generic 没有该分支（见 CHANGELOG 中「EOF 无 `[DONE]`」条目，这是记录在案的当前行为）。补上属于**新增行为**而非缺陷修复，要单独评估客户端兼容性，不要混进 bug 修复 PR。
 - **TF-IDF 资产去留**：`aegisgate/models/tfidf/` 目前定位是「保留的离线实验资产」。这是产品决策 —— 要么接回主链路并给出评估口径，要么整体下架，不要长期挂在中间态。
-- **README 与 UPSTREAM-QUICKSTART 的上游章节仍有重复**：`README_zh.md §上游接入` 与
-  `UPSTREAM-QUICKSTART.md` 覆盖同一组事实（上游表、Base URL 表、`AEGIS_DOCKER_UPSTREAMS`、
-  Caddy 要点）。已加交叉链接，真正的收敛（README_zh 只留速查、细节全部下沉）还没做。
-- **CHANGELOG 结构**：`## [Unreleased]` 下 `### Added` / `### Changed` / `### Fixed` 各出现两次，
-  `### Breaking Changes` 被埋在中间；`## [Previous]` 更乱。文件顶部声明遵循 Keep a Changelog，
-  实际没有。合并同名小节是纯文本搬运，但 diff 很大，建议单独一个 PR 做。
+- ~~**README 与 UPSTREAM-QUICKSTART 的上游章节仍有重复**~~ **已完成**：`README_zh.md §上游接入`
+  只剩上游表 + 三场景判断依据 + 两条安全默认，Docker 服务名、网络连通性排查与 Caddy 要点全部
+  下沉到 `UPSTREAM-QUICKSTART.md`。
+- **CHANGELOG 结构**：`## [Unreleased]` 下同名小节反复出现 —— `### Added` ×5、`### Changed` ×6、
+  `### Fixed` ×3、`### Security` ×2，`### Breaking Changes` 被埋在中间；`## [Previous]` 更乱。
+  文件顶部原先声明遵循 Keep a Changelog 而实际没有版本节，该声明已改成如实描述当前结构。
+  真正的收敛（合并同名小节、切出带日期的版本节）是纯文本搬运，但 diff 很大，建议单独一个 PR 做。
 - **低优先级项**：日志脱敏粒度、权限窗口、局部性能与一致性问题，按需单独立项，不要顺手夹带进相邻 PR。
 
 ## 横切验收口径

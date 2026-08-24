@@ -123,7 +123,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _strip_system_exec_runtime_lines,
 )
 from aegisgate.core.audit import write_audit
-from aegisgate.core.confirmation_flow import (
+from aegisgate.core.block_reasons import (
     PHASE_REQUEST,
     PHASE_RESPONSE,
     get_reason_and_summary as _flow_reason_and_summary,
