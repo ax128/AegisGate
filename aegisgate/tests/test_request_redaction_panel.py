@@ -23,7 +23,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from aegisgate.adapters.v2_proxy.router import V2_RELAXED_PII_IDS
+from aegisgate.adapters.v2_proxy.router import v2_effective_pii_ids
 from aegisgate.config.settings import settings
 from aegisgate.core import gateway_ui_routes, gw_tokens, rules_write
 from aegisgate.core.request_redaction_settings import build_settings_payload
@@ -105,9 +105,15 @@ class TestEndpoint:
 
 
 class TestEffectiveSurfaces:
-    def test_the_relaxed_set_governs_exactly_e1_e3_e4(self, payload: dict) -> None:
+    def test_the_relaxed_set_governs_e1_e3_e4_and_e6(self, payload: dict) -> None:
+        """E6 joined the list when V2 stopped carrying its own hard-coded set."""
         governed = payload["relaxed_governed_surfaces"]
-        assert governed == ["v1_pipeline_chat", "v1_forward_chat", "v1_forward_multipart"]
+        assert governed == [
+            "v1_pipeline_chat",
+            "v1_forward_chat",
+            "v1_forward_multipart",
+            "v2_request",
+        ]
 
     def test_multipart_forward_is_governed_by_the_relaxed_set(self, payload: dict) -> None:
         """E4 is the surface v3 of this spec missed entirely.
@@ -136,9 +142,10 @@ class TestEffectiveSurfaces:
         assert surface["pattern_set"] == "full"
         assert _rule(payload, "EMAIL")["effective_surfaces"]["v1_forward_generic"] is True
 
-    def test_relaxed_membership_moves_e1_e3_e4_and_nothing_else(
+    def test_relaxed_membership_moves_every_relaxed_surface_including_v2(
         self, rules_file: Path
     ) -> None:
+        """V2 used to be absent from this set — that was the whole divergence."""
         before = build_settings_payload()
         rules_file.write_text(
             _RULES.replace("    - TOKEN\n", "    - TOKEN\n    - EMAIL\n"), encoding="utf-8"
@@ -151,18 +158,35 @@ class TestEffectiveSurfaces:
             if _rule(before, "EMAIL")["effective_surfaces"][key]
             != _rule(after, "EMAIL")["effective_surfaces"][key]
         }
-        assert moved == {"v1_pipeline_chat", "v1_forward_chat", "v1_forward_multipart"}
+        assert moved == {
+            "v1_pipeline_chat",
+            "v1_forward_chat",
+            "v1_forward_multipart",
+            "v2_request",
+        }
 
-    def test_v2_is_decoupled_from_the_relaxed_set(self, rules_file: Path) -> None:
+    def test_v2_now_follows_the_relaxed_set(self, rules_file: Path) -> None:
+        """Dropping an id from relaxed_pii_ids must take it off V2 too.
+
+        Before the convergence this asserted the opposite: V2 carried its own
+        hard-coded list, so editing the YAML changed V1 and left V2 running the
+        pattern, with nothing in the config surface to reveal it.
+        """
+        with_cookie = _RULES.replace(
+            "    - TOKEN\n", "    - TOKEN\n    - COOKIE_SESSION\n"
+        )
+        rules_file.write_text(with_cookie, encoding="utf-8")
         before = _rule(build_settings_payload(), "COOKIE_SESSION")["effective_surfaces"]
-        rules_file.write_text(_RULES.replace("    - TOKEN\n", ""), encoding="utf-8")
-        after = _rule(build_settings_payload(), "COOKIE_SESSION")["effective_surfaces"]
-        # COOKIE_SESSION is in the V2 set but never in the relaxed list.
         assert before["v2_request"] is True
-        assert after["v2_request"] is True
 
-    def test_the_v2_set_is_reported_verbatim_with_its_field_ids(self, payload: dict) -> None:
-        assert payload["v2_effective_ids"] == sorted(V2_RELAXED_PII_IDS)
+        rules_file.write_text(_RULES, encoding="utf-8")
+        after = _rule(build_settings_payload(), "COOKIE_SESSION")["effective_surfaces"]
+        assert after["v2_request"] is False
+        assert after["v1_pipeline_chat"] is False
+
+    def test_the_v2_set_is_resolved_from_the_live_rules(self, payload: dict) -> None:
+        assert payload["v2_effective_ids"] == sorted(v2_effective_pii_ids())
+        # The field layer is unconditional on V2, exactly as on the V1 pipeline.
         assert payload["v2_field_ids_in_set"] == ["AUTH_BEARER", "FIELD_SECRET"]
 
 

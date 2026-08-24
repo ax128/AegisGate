@@ -167,7 +167,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 具体启用哪些规则由路由决定，且打分流水线与转发路径使用同一判据（`is_low_false_positive_route`）：
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 的请求体是结构化会话内容，误报会破坏提示词，
-因此只跑**低误报 id 集**（`redaction.relaxed_pii_ids`，默认仅凭据类 12 项）；其余 `/v1/` 路由（含通用代理）跑完整 56 项。
+因此只跑**低误报 id 集**（`redaction.relaxed_pii_ids`，默认仅凭据类 13 项）；其余 `/v1/` 路由（含通用代理）跑完整 56 项。
 如需在这三条路由上也跑全量规则，可配置 `redaction.relaxed_pii_ids: ["*"]`。
 
 完整口径是**六个执行面**而非两桶——打分那一遍和真正改写外发内容那一遍用的集合并不总是同一套：
@@ -179,12 +179,12 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 | 转发层 · 对话消息 / `system` / `instructions` / 工具定义 | 同上三条路由 | relaxed（可配） |
 | 转发层 · multipart 表单字段 | `/v1/files`、`/v1/images/*` | relaxed（可配） |
 | 转发层 · 通用 `/v1/<子路径>` JSON | embeddings、rerank 等 | 全量 |
-| v2 请求体 | `/v2/__gw__/t/<token>/...` | **另一套硬编码 15 项**，不读 `relaxed_pii_ids` |
+| v2 请求体 | `/v2/__gw__/t/<token>/...` | relaxed（可配，与对话路由同一套） |
 
 两点需要在评估暴露面时特别注意：
 
 - 对话路由上，**打分**跑全量集、**转发层**跑 relaxed 集。只看"对话路由用 relaxed"会低估实际外发内容。
-- `/v2/` 用的是 `V2_RELAXED_PII_IDS`（`aegisgate/adapters/v2_proxy/router.py`）：在 12 项凭据类之外多了 `AUTH_BEARER`、`COOKIE_SESSION`、`FIELD_SECRET`。**改 `relaxed_pii_ids` 对 v2 没有任何影响。** 两套集合的收敛记录在 [ROADMAP.md](ROADMAP.md)。
+- `field_value_patterns` 是**另一层**，不受 `relaxed_pii_ids` 过滤：只要该执行面跑脱敏，field 规则就跑。
 - multipart 的**文件内容**在任何执行面上都不参与请求侧脱敏，只有同请求里的表单字段参与。
 
 控制台会按规则逐条渲染这六个执行面（服务端计算后下发），见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) §4.3。

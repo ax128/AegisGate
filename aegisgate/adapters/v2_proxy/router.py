@@ -19,7 +19,11 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from aegisgate.config.security_rules import load_security_rules, rule_enabled
+from aegisgate.config.security_rules import (
+    load_security_rules,
+    rule_enabled,
+    select_relaxed_pii_patterns,
+)
 from aegisgate.util.ip_safety import (
     resolve_public_ips,
     bound_connect_url,
@@ -76,29 +80,14 @@ _DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
         rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{_DEFAULT_FIELD_VALUE_MIN_LEN},}}",
     ),
 )
-# Public so the console can report the V2 request-redaction id set without
-# reaching into this adapter's private names. The underscore alias stays for the
-# existing in-module call sites.
-V2_RELAXED_PII_IDS = frozenset(
-    {
-        "TOKEN",
-        "JWT",
-        "URL_TOKEN_QUERY",
-        "COOKIE_SESSION",
-        "PRIVATE_KEY_PEM",
-        "AWS_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "GITHUB_TOKEN",
-        "SLACK_TOKEN",
-        "EXCHANGE_API_SECRET",
-        "CRYPTO_WIF_KEY",
-        "CRYPTO_XPRV",
-        "CRYPTO_SEED_PHRASE",
-        "FIELD_SECRET",
-        "AUTH_BEARER",
-    }
-)
-_V2_RELAXED_PII_IDS = V2_RELAXED_PII_IDS
+# The V2 PII id set is no longer declared here. It was a hard-coded frozenset of
+# 15 ids that shadowed ``redaction.relaxed_pii_ids``: editing the YAML changed
+# V1 and left V2 alone, with nothing in the config surface to reveal it. The
+# split turned out to be one id wide on the PII layer — V2 additionally ran
+# COOKIE_SESSION, and V1 ran nothing V2 did not — plus FIELD_SECRET/AUTH_BEARER,
+# which are ``field_value_patterns`` ids that both sides run unconditionally.
+# COOKIE_SESSION moved into the shared default so the convergence cost no
+# coverage on either side. See _v2_relaxed_redaction_patterns.
 _V2_NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
 )
@@ -483,11 +472,75 @@ def _normalize_pattern_id(pattern_id: str) -> str:
 
 @lru_cache(maxsize=1)
 def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
-    selected: list[tuple[str, re.Pattern[str]]] = []
+    """The patterns V2 request redaction actually runs.
+
+    Two layers, and they are gated differently — the same split V1 uses:
+
+    * ``pii_patterns`` go through ``redaction.relaxed_pii_ids``, the one
+      configurable set. This used to be a hard-coded 15-id frozenset that
+      ignored the YAML entirely, so editing ``relaxed_pii_ids`` silently did
+      nothing on V2 and the docs' "every other route runs the full set" was
+      wrong in a way an operator could not discover from configuration.
+    * ``field_value_patterns`` always run, matching ``RedactionFilter`` and
+      ``sanitize``. V2 expressed the same thing by parking ``FIELD_SECRET`` and
+      ``AUTH_BEARER`` inside its "pii id" set, which read as a pattern-id
+      allow-list but behaved as an always-on flag for a different layer.
+    """
+    pii_ids = _pii_pattern_ids()
+    pii_layer: list[tuple[str, re.Pattern[str]]] = []
+    field_layer: list[tuple[str, re.Pattern[str]]] = []
     for pattern_id, pattern in _v2_redaction_patterns():
-        if _normalize_pattern_id(pattern_id) in _V2_RELAXED_PII_IDS:
-            selected.append((pattern_id, pattern))
-    return selected
+        target = pii_layer if _normalize_pattern_id(pattern_id) in pii_ids else field_layer
+        target.append((pattern_id, pattern))
+
+    # ``_compile_patterns`` lowercases ids while ``relaxed_pii_ids`` is compared
+    # upper-cased, so the shared resolver has to see normalised ids or it selects
+    # nothing. Ask it which ids survive, then keep the original entries — that
+    # way the membership rule still has exactly one implementation.
+    allowed = {
+        pattern_id
+        for pattern_id, _ in select_relaxed_pii_patterns(
+            [(_normalize_pattern_id(pid), pat) for pid, pat in pii_layer]
+        )
+    }
+    selected_pii = [
+        (pattern_id, pattern)
+        for pattern_id, pattern in pii_layer
+        if _normalize_pattern_id(pattern_id) in allowed
+    ]
+    return selected_pii + field_layer
+
+
+@lru_cache(maxsize=1)
+def _pii_pattern_ids() -> frozenset[str]:
+    """Ids that came from ``redaction.pii_patterns``, normalised.
+
+    ``_v2_redaction_patterns`` concatenates the two layers into one list, so the
+    only way to tell them apart afterwards is to ask the rules which ids the PII
+    list declared.
+    """
+    rules = load_security_rules().get("redaction", {})
+    patterns = rules.get("pii_patterns")
+    if not isinstance(patterns, list):
+        return frozenset()
+    return frozenset(
+        _normalize_pattern_id(str(item.get("id", "")))
+        for item in patterns
+        if isinstance(item, dict) and item.get("id")
+    )
+
+
+def v2_effective_pii_ids() -> frozenset[str]:
+    """Ids V2 request redaction runs right now, for the console to render.
+
+    Resolved rather than declared: it follows ``relaxed_pii_ids`` and the
+    ``enabled`` flag on each rule, so the panel shows what the request path will
+    actually do instead of a constant that used to be able to disagree with it.
+    """
+    return frozenset(
+        _normalize_pattern_id(pattern_id)
+        for pattern_id, _ in _v2_relaxed_redaction_patterns()
+    )
 
 
 @lru_cache(maxsize=1)
