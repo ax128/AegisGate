@@ -7,9 +7,59 @@ import secrets
 import threading
 from pathlib import Path
 
+from aegisgate.config.paths import config_dir
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
+
+
+def _key_file(name: str) -> Path:
+    """Where a key file lives — the same resolver the console and crypto use.
+
+    These two keys used to resolve ``<cwd>/config`` unconditionally while
+    ``storage/crypto`` honoured ``AEGIS_CONFIG_DIR``. Leaving them behind while
+    the console moved onto the shared resolver would just relocate the split:
+    the console would read and rotate a gateway key that this module never
+    looks at.
+    """
+    return config_dir() / name
+
+
+def _legacy_key_file(name: str) -> Path:
+    """The pre-convergence location, still read so an upgrade cannot lock you out.
+
+    Under an ``AEGIS_CONFIG_DIR`` layout the file is where the old resolver put
+    it. Without this fallback, ``_ensure_gateway_key`` would find nothing at the
+    new path and cheerfully *generate a new key* — silently invalidating every
+    admin credential and the console password on upgrade.
+    """
+    return (Path.cwd() / "config" / name).resolve()
+
+
+def _read_key_file(name: str) -> tuple[str, Path] | None:
+    """First existing, non-empty copy of *name*, with its path."""
+    primary = _key_file(name)
+    legacy = _legacy_key_file(name)
+    for candidate in (primary, legacy) if primary != legacy else (primary,):
+        try:
+            if not candidate.is_file():
+                continue
+            stored = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not stored:
+            continue
+        if candidate != primary:
+            logger.warning(
+                "%s read from the legacy path %s; AEGIS_CONFIG_DIR now resolves it to "
+                "%s. Move the file so rotation from the console takes effect.",
+                name,
+                candidate,
+                primary,
+            )
+        return stored, candidate
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Gateway key  (file-based)
@@ -33,16 +83,18 @@ def _ensure_gateway_key() -> str:
         if _gateway_key_cached:
             return _gateway_key_cached
 
-        key_path = (Path.cwd() / "config" / _GATEWAY_KEY_FILE).resolve()
-        if key_path.is_file():
-            stored = key_path.read_text(encoding="utf-8").strip()
-            if stored:
-                settings.gateway_key = stored
-                _gateway_key_cached = stored
-                logger.info("gateway_key loaded from %s", key_path)
-                return stored
+        existing = _read_key_file(_GATEWAY_KEY_FILE)
+        if existing is not None:
+            stored, source = existing
+            settings.gateway_key = stored
+            _gateway_key_cached = stored
+            logger.info("gateway_key loaded from %s", source)
+            return stored
 
-        # Auto-generate and persist (first run)
+        # Auto-generate and persist (first run). Writes always go to the primary
+        # path, never the legacy one — a rotation must land where the console
+        # and this module both read.
+        key_path = _key_file(_GATEWAY_KEY_FILE)
         new_key = secrets.token_urlsafe(32)
         key_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -79,13 +131,13 @@ def _ensure_proxy_token() -> str:
     global _proxy_token_value
 
     with _proxy_token_lock:
-        key_path = (Path.cwd() / "config" / _PROXY_TOKEN_FILE).resolve()
-        if key_path.is_file():
-            stored = key_path.read_text(encoding="utf-8").strip()
-            if stored:
-                _proxy_token_value = stored
-                logger.info("proxy_token loaded from %s", key_path)
-                return stored
+        key_path = _key_file(_PROXY_TOKEN_FILE)
+        existing = _read_key_file(_PROXY_TOKEN_FILE)
+        if existing is not None:
+            stored, source = existing
+            _proxy_token_value = stored
+            logger.info("proxy_token loaded from %s", source)
+            return stored
 
         new_token = secrets.token_urlsafe(32)
         key_path.parent.mkdir(parents=True, exist_ok=True)
