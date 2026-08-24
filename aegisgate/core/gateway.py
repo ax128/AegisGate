@@ -1825,8 +1825,12 @@ def ready() -> JSONResponse:
         from aegisgate.adapters.openai_compat.router import policy_engine
         from aegisgate.config.security_level import score_block_unreachable_reason
 
+        # settings.default_policy, not the literal "default": a deployment that
+        # set AEGIS_DEFAULT_POLICY=strict would otherwise be told about a policy
+        # file it never resolves. A request may still name its own policy; this
+        # reports the one the deployment serves by default.
         gate_reason = score_block_unreachable_reason(
-            policy_engine.declared_risk_threshold("default")
+            policy_engine.declared_risk_threshold(settings.default_policy)
         )
         checks["risk_gate"] = "ok" if gate_reason is None else f"unreachable: {gate_reason}"
     except Exception:

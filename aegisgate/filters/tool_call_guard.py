@@ -317,18 +317,23 @@ class ToolCallGuard(BaseFilter):
                 for rule_id, pattern in patterns:
                     if not pattern_hits_in(pattern, args_haystacks):
                         continue
-                    match = pattern.search(args_text) or pattern.search(args_norm)
+                    raw_match = pattern.search(args_text)
+                    match = raw_match or pattern.search(args_norm)
                     matched_text = (match.group(0) if match else args_norm)[:120]
                     violations.append(f"dangerous_param:{tool_name or 'unknown'}")
                     # The rule identity is otherwise dropped here; the audit record
                     # needs it to say *which* link of the exfiltration chain fired.
+                    # Only a raw-text match has an offset into the arguments an
+                    # operator can read back: args_norm is NFKC-folded with the
+                    # invisible characters stripped, so its indices are its own.
                     record_exfil_hit(
                         ctx,
                         rule_id=rule_id,
                         filter_name=self.name,
                         channel="tool_call_arguments",
-                        offset=match.start() if match else 0,
-                        length=len(match.group(0)) if match else 0,
+                        offset=raw_match.start() if raw_match else None,
+                        length=len(raw_match.group(0)) if raw_match else None,
+                        form="raw" if raw_match else "normalized",
                     )
                     action = self._apply_action(ctx, "dangerous_param")
                     blocked = blocked or action == "block"

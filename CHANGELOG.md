@@ -44,6 +44,26 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 - 新增 `aegisgate/tests/test_exfil_observability.py`（30 条）。
 
+- **评审修复（同一阶段内）**：
+  - `dangerous_response_samples.jsonl` **此前恒为摘要**——`_prepare_event_payload` 默认把 `content` /
+    `dangerous_fragments` 换成 sha256+length，而没有任何生产调用方传 `include_raw_*`，也没有开关。
+    于是 `replay_calibrate.py` 在任何真实语料上都只能报「全是摘要」。新增
+    `AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW`（**默认 false**，且只在
+    `AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG` 已开时才被读到）：**两道开关**才存原文，因此「打开样本日志」
+    本身永远不会顺带开始持久化密钥；校准是一个显式、有边界的窗口。
+  - **evidence 的 offset 现在有明确参照系**。`scan_text` 是 `output_text` 与 `tool_call_content`
+    用空格拼起来的，而样本日志分开存两者——落在工具调用区段的命中此前记的偏移会越过正文末尾。现在按
+    `channel` 分别回基，`response_text` 与 `tool_call_arguments` 各自成立。
+  - **只在规范化形态上命中的不再静默漏记**。判定走 `build_haystacks` 的多个形态，而记录只搜原文，于是
+    混淆型命中（NFKC、零宽字符）会 `has_command_payload=True` 却一条 evidence 都不产生——恰好是这批规则
+    最该描述的流量。现在同样搜多形态，并新增 `form` 字段：只有 `raw` 才带 offset，`normalized` 记
+    `null`——「看到规则命中、但指不出位置」是真的，编一个索引不到任何东西的偏移不是。
+  - `/ready` 的 `risk_gate` 改问 `settings.default_policy` 而不是字面量 `"default"`：设了
+    `AEGIS_DEFAULT_POLICY=strict` 的部署此前被告知的是一份它根本不会解析的策略文件的阈值。
+  - `MAX_ACTION_MAP_RISK_SCORE` 的钉子改为读整个实参表达式：原先的 `([0-9.]+)` 正则对三元
+    （`0.58 if … else 0.85`）完全不匹配，那两支是没被钉住的；配置驱动的分值（如 `self._request_risk_floor`）
+    可以从 YAML 抬过常量——正是这个检查要防的静默漂移，现在会直接失败。
+
 
 ### Changed（行为变更：安全级别三档恢复为三档）
 

@@ -14,8 +14,15 @@ URLs with keys in them. Recording a fragment here would silently promote a
 default-on log to the sensitivity of a default-off one. So an entry is
 ``rule_id`` plus an offset and a length: enough to find the span again in a
 sample that was captured on purpose (``dangerous_response_samples.jsonl``, which
-is off by default and is where calibration corpora belong), and useless to
-anyone who only has the audit file.
+is off by default, needs ``AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW`` to hold
+text at all, and is where calibration corpora belong), and useless to anyone who
+only has the audit file.
+
+An offset is only meaningful against a named channel, so ``channel`` says which
+text it indexes — ``response_text`` is the response body, ``tool_call_arguments``
+is the tool-call payload, and the two are separate strings even though the
+filters scan them concatenated. ``form`` says whether the span survives into the
+raw text at all; see :func:`record_hit`.
 
 Dimensions come from the rule id prefix rather than a registry, so a rule added
 to ``security_filters.yaml`` through the console classifies itself with no code
@@ -66,13 +73,24 @@ def record_hit(
     rule_id: str,
     filter_name: str,
     channel: str,
-    offset: int,
-    length: int,
+    offset: int | None,
+    length: int | None,
+    form: str = "raw",
 ) -> None:
     """Record one exfiltration-rule match on *ctx*. No-op for other rules.
 
     Callers pass the span they already computed; nothing here re-scans, so an
     added call site costs one comparison on the non-matching path.
+
+    *form* names the text the span indexes. Matching runs against several
+    normalised variants of the same input (``build_haystacks``), and NFKC plus
+    invisible-character stripping do not preserve offsets — so a hit found only
+    on a normalised variant has no span in the text an operator holds. That case
+    records ``form="normalized"`` with ``offset``/``length`` of ``None`` rather
+    than a number that indexes nothing: "we saw this rule fire, we cannot point
+    at where" is true, and a fabricated offset is not. Obfuscated payloads are
+    exactly the traffic that lands here, so silently dropping the entry instead
+    would blind the audit record for the attacks it exists to describe.
     """
     dimension = dimension_for_rule(rule_id)
     if dimension is None:
@@ -88,8 +106,9 @@ def record_hit(
             "dimension": dimension,
             "filter": str(filter_name),
             "channel": str(channel),
-            "offset": int(offset),
-            "length": int(length),
+            "form": str(form),
+            "offset": None if offset is None else int(offset),
+            "length": None if length is None else int(length),
         }
     )
 

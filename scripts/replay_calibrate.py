@@ -15,10 +15,15 @@ so there is nothing in it for a regex to match. The corpus is
 
 That switch is also why a run can come back with nothing to replay: samples are
 only written when a response already tripped the sanitizer, and only while the
-log is enabled. And ``content``/``dangerous_fragments`` are themselves redacted to
-a digest unless the sample was captured with the raw variants — a corpus that is
-all digests replays as zero matchable text, which this reports rather than
-silently scoring 0%.
+log is enabled.
+
+**Two switches, not one.** ``content``/``dangerous_fragments`` are reduced to a
+sha256 + length unless ``AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW`` is also on,
+which is what actually makes a corpus replayable. That default is deliberate —
+turning the sample log on must not by itself begin persisting credential paths
+and URLs with keys in them — so calibration is an explicit, bounded window you
+open and close, not a side effect. A corpus that is all digests replays as zero
+matchable text, which this reports rather than silently scoring 0%.
 
 Usage:
     python scripts/replay_calibrate.py
@@ -126,7 +131,10 @@ def main() -> int:
             f"no sample log at {path}. It is written only while "
             f"AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG=true (currently "
             f"{str(settings.enable_dangerous_response_log).lower()}), and only for responses "
-            f"the sanitizer already flagged.",
+            f"the sanitizer already flagged. Replayable text additionally needs "
+            f"AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW=true (currently "
+            f"{str(settings.dangerous_response_log_include_raw).lower()}); without it every "
+            f"sample is a digest.",
             file=sys.stderr,
         )
         return 2
@@ -173,7 +181,11 @@ def main() -> int:
     print(f"corpus   {path}")
     print(f"samples  {total} total, {replayable} with matchable text, {total - replayable} redacted to a digest")
     if total and not replayable:
-        print("         (every sample is a digest — capture with the raw variants to calibrate on text)")
+        print(
+            "         (every sample is a digest — set "
+            "AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW=true for a calibration window, "
+            f"currently {str(settings.dangerous_response_log_include_raw).lower()})"
+        )
     print(f"rules    {summary['rules_replayed']} replayed" + (f" (prefix {args.prefix!r})" if args.prefix else ""))
     print(f"matched  {matched_samples} of {replayable} replayable samples")
     print()

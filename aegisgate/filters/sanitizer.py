@@ -123,23 +123,58 @@ class OutputSanitizer(BaseFilter):
                     spans.append((match.start(), match.end()))
         return spans
 
-    def _record_exfil_spans(self, scan_text: str, ctx: RequestContext) -> None:
+    def _record_exfil_spans(
+        self, scan_text: str, ctx: RequestContext, *, text_len: int
+    ) -> None:
         """Name the exfiltration rules that fired, with spans but no fragments.
 
         Only walked once the cheaper ``_matches_any`` already said something hit,
         so an ordinary no-hit response pays nothing for it.
+
+        Two things this has to get right or the span is a lie. It searches the
+        same haystacks ``_matches_any`` judged on — searching only the raw text
+        would record nothing for a hit that exists solely in a normalised form,
+        which is precisely the obfuscated traffic worth recording. And
+        ``scan_text`` is ``output_text`` and ``tool_call_content`` joined by a
+        space, while the sample log stores them separately, so an offset past
+        the body is rebased onto the tool-call payload and named as such.
         """
+        haystacks = build_haystacks(scan_text)
         for rule_id, pattern in self._command_patterns_by_id:
-            match = pattern.search(scan_text)
+            match = None
+            form = "raw"
+            for index, haystack in enumerate(haystacks):
+                match = pattern.search(haystack)
+                if match is not None:
+                    form = "raw" if index == 0 else "normalized"
+                    break
             if match is None:
                 continue
+            if form != "raw":
+                record_exfil_hit(
+                    ctx,
+                    rule_id=rule_id,
+                    filter_name=self.name,
+                    channel="response_text",
+                    offset=None,
+                    length=None,
+                    form=form,
+                )
+                continue
+            start = match.start()
+            if start < text_len:
+                channel, offset = "response_text", start
+            else:
+                # +1 for the space _scan_text joins the two channels with.
+                channel, offset = "tool_call_arguments", start - (text_len + 1)
             record_exfil_hit(
                 ctx,
                 rule_id=rule_id,
                 filter_name=self.name,
-                channel="response_text",
-                offset=match.start(),
+                channel=channel,
+                offset=offset,
                 length=len(match.group(0)),
+                form=form,
             )
 
     def _log_dangerous_sample(
@@ -236,7 +271,7 @@ class OutputSanitizer(BaseFilter):
         has_unsafe_uri = self._matches_any(scan_text, self._unsafe_uri_patterns)
         has_command_payload = self._matches_any(scan_text, self._command_patterns)
         if has_command_payload:
-            self._record_exfil_spans(scan_text, ctx)
+            self._record_exfil_spans(scan_text, ctx, text_len=len(text))
         has_encoded_payload = self._matches_any(scan_text, self._encoded_payload_patterns)
         has_spam = self._matches_any(scan_text, self._spam_noise_patterns)
 
