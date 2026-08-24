@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import re
 
-from aegisgate.config.security_level import apply_count, normalize_security_level
+from aegisgate.config.security_level import (
+    apply_count,
+    apply_threshold,
+    normalize_security_level,
+)
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
@@ -22,10 +26,14 @@ from aegisgate.util.text_normalize import (
 class RequestSanitizer(BaseFilter):
     name = "request_sanitizer"
 
-    # Risk a ``review`` strong-intent hit raises the request to. Deliberately the
-    # same value the leak_check branch uses: ``review`` is one thing, and it has to
-    # stay under every disposition gate for "record only, do not block" to be true.
-    _STRONG_INTENT_REVIEW_RISK = 0.6
+    # Ceiling for the risk a strong-intent ``review`` hit raises the request to —
+    # the value the leak_check branch uses, kept so ``review`` stays one thing in
+    # the action_map vocabulary. The effective value is the smaller of this and
+    # the response-side sanitize gate; see _strong_intent_review_risk below.
+    _STRONG_INTENT_REVIEW_RISK_CEILING = 0.6
+    # How far under that gate to land. At or above it, every hit becomes a
+    # sanitize disposition, so this margin is the whole safety property.
+    _STRONG_INTENT_GATE_MARGIN = 0.05
 
     def __init__(self) -> None:
         self._report = {
@@ -38,6 +46,41 @@ class RequestSanitizer(BaseFilter):
         rules = load_security_rules()
         sanitizer_rules = rules.get(self.name, {})
         action_map = rules.get("action_map", {}).get(self.name, {})
+
+        # The risk a strong-intent ``review`` hit lands on — derived, not written
+        # down, because the number that matters is not any of the gates this
+        # branch was first checked against.
+        #
+        # ``review`` has to stay "record only, do not block". The response block
+        # path needs max(risk_threshold, sanitizer block) and the stream
+        # terminator needs max(risk_threshold, 0.9); both sit far above 0.6, which
+        # is why 0.6 looked safe. The gate that actually binds is a third one:
+        # OutputSanitizer sets ``risk_triggered`` at its *sanitize* threshold
+        # (0.35 at medium), a true ``risk_triggered`` makes ``should_sanitize``
+        # true, and a true ``should_sanitize`` sets ``response_disposition =
+        # "sanitize"`` together with ``tool_calls_disabled_by_policy`` **even when
+        # it rewrote nothing**. _stream_block_reason reads that disposition as a
+        # terminator. So 0.6 turned "run a bash script that builds the image" —
+        # which privilege_escalation_en matches — into a truncated answer with its
+        # tool calls stripped, over a response containing nothing dangerous.
+        #
+        # leak_check keeps its 0.6 deliberately: it fires on an actual secret
+        # shape in the request (sk-…, AKIA…, a JWT, a PEM header), so scrubbing
+        # the answer that comes back is a defensible trade. These patterns are
+        # natural-language verb tables — "print the token", "read the /etc/hosts
+        # file", "bypass the CORS policy" — and the same number on that trigger
+        # surface is not the same decision.
+        sanitize_gate = apply_threshold(
+            float(rules.get("sanitizer", {}).get("thresholds", {}).get("sanitize", 0.35)),
+            level=normalize_security_level(),
+        )
+        self._strong_intent_review_risk = max(
+            0.0,
+            min(
+                self._STRONG_INTENT_REVIEW_RISK_CEILING,
+                sanitize_gate - self._STRONG_INTENT_GATE_MARGIN,
+            ),
+        )
 
         self._discussion_patterns = self._compile_patterns(
             sanitizer_rules.get("discussion_context_patterns", [])
@@ -292,7 +335,7 @@ class RequestSanitizer(BaseFilter):
                     "request blocked request_id=%s reason=%s", ctx.request_id, reason
                 )
                 return req
-            # review: elevate risk and flag, but allow the request through.
+            # Not a block: elevate risk, tag, and let the request through.
             #
             # Without this the branch was a no-op. ``_apply_action`` only appends a
             # string to ``enforcement_actions``, and every strong-intent category
@@ -301,30 +344,31 @@ class RequestSanitizer(BaseFilter):
             # else. The leak_check branch above is the same shape done right; the
             # two were asymmetric by omission, not by design.
             #
-            # Same 0.6 as leak_check on purpose. ``review`` is one thing in the
-            # action_map vocabulary, and an operator who wants these categories
-            # weighted harder has ``block`` to say so with. Inventing a private
-            # severity ladder here would make the console's uniform
-            # block/review/sanitize wording describe something the runtime does not
-            # do — which is the defect this branch already had.
-            #
-            # 0.6 stays under every disposition gate, so "review = record only, do
-            # not block" (the comment in security_filters.yaml) remains true: the
-            # response block path needs max(risk_threshold, sanitizer block) = 0.85
-            # at medium, and the stream terminator needs max(risk_threshold, 0.9).
-            # The tag is request-scoped, so it also cannot trip the ``response_``
-            # prefix check in _needs_confirmation or _stream_block_reason.
-            ctx.risk_score = max(ctx.risk_score, self._STRONG_INTENT_REVIEW_RISK)
+            # The tag is the durable signal and is request-scoped, so it cannot
+            # trip the ``response_`` prefix check in _needs_confirmation or
+            # _stream_block_reason. The risk is capped under the response-side
+            # sanitize gate — see _strong_intent_review_risk for why that is the
+            # gate that binds. An operator who wants these categories weighted
+            # harder has ``block`` to say so with; inventing a private severity
+            # ladder here would make the console's uniform block/review/sanitize
+            # wording describe something the runtime does not do, which is the
+            # defect this branch already had.
+            ctx.risk_score = max(ctx.risk_score, self._strong_intent_review_risk)
             ctx.security_tags.add(reason)
             self._report = {
                 "filter": self.name,
                 "hit": True,
                 "risk_score": ctx.risk_score,
-                "action": "review",
+                # The configured action, not a hardcoded "review": an operator can
+                # set these categories to something else, and a report that says
+                # review either way is the same class of lie this branch was fixed
+                # for.
+                "action": action,
                 "category": action_key,
             }
             logger.info(
-                "request strong_intent review request_id=%s reason=%s",
+                "request strong_intent %s request_id=%s reason=%s",
+                action,
                 ctx.request_id,
                 reason,
             )

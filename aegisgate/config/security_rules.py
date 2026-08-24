@@ -580,6 +580,9 @@ _DEFAULT_RULES: dict[str, Any] = {
             "dangerous_param": "review",
             # Read-only exfiltration-chain endpoints check the same patterns under
             # their own key, and it must stay non-blocking — see security_filters.yaml.
+            # Kept in sync with tool_call_guard.READONLY_PARAM_FALLBACK_ACTION and the
+            # YAML by test_exfil_mechanism_fixes; importing it here would make config
+            # depend on filters.
             "readonly_param": "observe",
             "invalid_param": "review",
             "semantic_review": "review",

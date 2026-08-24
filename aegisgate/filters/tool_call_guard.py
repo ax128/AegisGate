@@ -69,21 +69,30 @@ _READ_ONLY_CONTENT_TOOLS = frozenset(
 # The remaining members of _READ_ONLY_CONTENT_TOOLS (todowrite, task, submit,
 # multi_tool_use.parallel, notebook_edit) stay fully exempt: they neither read the filesystem
 # nor reach the network, so there is nothing in their arguments for these patterns to say.
-_EXFIL_SENSITIVE_READ_ONLY_TOOLS = frozenset(
-    {
-        # collection
-        "read",
-        "read_file",
-        "glob",
-        "grep",
-        # egress
-        "web_search",
-        "webfetch",
-        "web_fetch",
-        "browser",
-        "search",
-    }
+_EXFIL_COLLECTION_READ_ONLY_TOOLS = frozenset(
+    {"read", "read_file", "glob", "grep"}
 )
+
+# The egress half. These reach the network and never touch the filesystem, so the
+# path-reference rules (sensitive_file_access, path_traversal, ssh_key_access) have
+# nothing true to say about their arguments — a web_search for "how do I read
+# /etc/passwd" is a question, not a file read. They check the same subset the
+# file-writing tools do, which keeps the audit trail about egress rather than
+# filling it with noise, and keeps the per-call cost off the heaviest patterns.
+_EXFIL_EGRESS_READ_ONLY_TOOLS = frozenset(
+    {"web_search", "webfetch", "web_fetch", "browser", "search"}
+)
+
+_EXFIL_SENSITIVE_READ_ONLY_TOOLS = (
+    _EXFIL_COLLECTION_READ_ONLY_TOOLS | _EXFIL_EGRESS_READ_ONLY_TOOLS
+)
+
+# What a read-only exfiltration endpoint's hit maps to when security_filters.yaml
+# has no ``readonly_param`` key — a mounted config file that predates it, which is
+# a real upgrade path under Docker. Defined once; security_filters.yaml and
+# security_rules._DEFAULT_RULES carry the same value, and
+# test_exfil_mechanism_fixes pins all three together.
+READONLY_PARAM_FALLBACK_ACTION = "observe"
 
 # File-writing tools: their content is code or documentation, which may reference a sensitive path
 # without being an actual attack. For these tools only the injection-chain patterns (shell_injection
@@ -360,10 +369,15 @@ class ToolCallGuard(BaseFilter):
             if not is_read_only or is_exfil_endpoint:
                 # File-writing tools check only injection-chain rules and skip path-reference
                 # rules, which lowers false blocks
+                skips_path_rules = (
+                    lowered_name in _FILE_WRITE_CONTENT_TOOLS
+                    or tool_norm in _FILE_WRITE_CONTENT_TOOLS
+                    or lowered_name in _EXFIL_EGRESS_READ_ONLY_TOOLS
+                    or tool_norm in _EXFIL_EGRESS_READ_ONLY_TOOLS
+                )
                 patterns = (
                     self._dangerous_param_patterns_exec_only
-                    if lowered_name in _FILE_WRITE_CONTENT_TOOLS
-                    or tool_norm in _FILE_WRITE_CONTENT_TOOLS
+                    if skips_path_rules
                     else self._dangerous_param_patterns
                 )
                 param_key = "readonly_param" if is_read_only else "dangerous_param"
@@ -375,7 +389,9 @@ class ToolCallGuard(BaseFilter):
                     matched_text = (match.group(0) if match else args_norm)[:120]
                     violations.append(f"{param_key}:{tool_name or 'unknown'}")
                     action = self._apply_action(
-                        ctx, param_key, default="observe" if is_read_only else None
+                        ctx,
+                        param_key,
+                        default=READONLY_PARAM_FALLBACK_ACTION if is_read_only else None,
                     )
                     blocked = blocked or action == "block"
                     logger.debug(

@@ -51,6 +51,24 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 - 新增 `aegisgate/tests/test_exfil_mechanism_fixes.py`（36 条）。
 
+- **评审修复（同一阶段内）**：
+  - **R2 的抬分值不再是 0.6，改为从响应侧的 sanitize 闸门推导（medium 档 = 0.30）。** 原判断只核到两个
+    闸门——响应拦截要 `max(risk_threshold, sanitizer block)`、流式终止要 `max(risk_threshold, 0.9)`，
+    0.6 都够不到，所以看起来安全。真正卡住的是第三个：`OutputSanitizer` 在它的 **sanitize** 阈值
+    （medium 档 0.35）就置 `risk_triggered`，而 `should_sanitize` 一旦成立，**即使一个字都没改写**也会设
+    `response_disposition="sanitize"` 与 `tool_calls_disabled_by_policy`，`_stream_block_reason` 把这个
+    disposition 读作终止信号。于是「run a bash script that builds the image」（`privilege_escalation_en`
+    命中）会让一段毫无危险内容的回答在流式下被截断、工具调用被剥离——而 `strong_intent_patterns` 是一张
+    自然语言动词表，这类请求是 agent 网关最高频的那一批。
+    `leak_check` 保留 0.6：它命中的是请求里真实的密钥形态（`sk-`/`AKIA`/JWT/PEM 头），不是普通英语。
+    新增 7 条端到端断言，直接钉「日常请求 + 干净回答 ⇒ 不 sanitize、不截流」。
+  - R2 的 `_report["action"]` 改为记实际动作，不再硬写 `"review"`——运营方可以把这几类配成别的动作。
+  - **出口侧只读工具（`webfetch`/`web_fetch`/`web_search`/`browser`/`search`）改用 exec-only 模式子集**，
+    跳过 `sensitive_file_access` / `path_traversal` / `ssh_key_access`：它们只上网、不碰文件系统，
+    「怎么读 /etc/passwd」是一个关于文件读的问题而不是一次文件读。与写文件类工具沿用同一条理由。
+  - `readonly_param` 的兜底动作提为 `tool_call_guard.READONLY_PARAM_FALLBACK_ACTION`，并新增一条断言
+    把代码兜底、`security_filters.yaml`、`_DEFAULT_RULES` 三处钉在一起——回滚说明本身就点明了三者走散的代价。
+
 
 ### Changed（行为变更：安全级别三档恢复为三档）
 

