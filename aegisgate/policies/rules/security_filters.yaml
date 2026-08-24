@@ -908,6 +908,11 @@ action_map:
   tool_call_guard:
     disallowed_tool: review
     dangerous_param: review
+    # Read-only tools that are an exfiltration-chain end (read/glob/grep, webfetch/browser/search)
+    # check the same patterns but under this key. It must stay non-blocking: review sets
+    # requires_human_review, which auto-sanitizes the whole response and replaces the tool call
+    # with a placeholder — and reading ~/.ssh/config or grepping /etc/passwd is a daily action.
+    readonly_param: observe
     invalid_param: review
     semantic_review: review
   sanitizer:

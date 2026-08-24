@@ -578,6 +578,9 @@ _DEFAULT_RULES: dict[str, Any] = {
             # code/diff arguments, so a hit raises the score and flags review
             # instead, and the threshold decides.
             "dangerous_param": "review",
+            # Read-only exfiltration-chain endpoints check the same patterns under
+            # their own key, and it must stay non-blocking — see security_filters.yaml.
+            "readonly_param": "observe",
             "invalid_param": "review",
             "semantic_review": "review",
         },

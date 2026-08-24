@@ -328,6 +328,8 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
 - `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
+- `tool_call_guard` 的**只读工具豁免已收窄**：`read` / `read_file` / `glob` / `grep`（采集面）与 `webfetch` / `web_fetch` / `web_search` / `browser` / `search`（出口面）不再整类跳过 `dangerous_param_patterns`——它们恰是外泄链的两端。命中走**独立的 action key** `readonly_param`，默认 `observe`：**只记录，不抬分、不设 `requires_human_review`**。这一条是必须的：`review` 会设 `requires_human_review`，非流式下 `_needs_confirmation` 据此走自动遮挡，整个工具调用被替换为占位符——而 `read ~/.ssh/config`、`grep -r /etc/passwd` 是日常运维动作。`todowrite` / `task` / `submit` / `notebook_edit` 既不读文件也不上网，仍整类豁免。
+- `request_sanitizer` 命中 `secret_exfiltration` / `privilege_escalation` / `rule_bypass` 时，`review` 档会把风险分抬到 0.6 并打 `request_*` 标签（与 `leak_check` 一致），**不拦截**。此前该分支只有 `block` 会做事，而这三类默认都配成 `review`，等于纯日志。
 
 **分级变形策略**：
 

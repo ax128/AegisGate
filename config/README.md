@@ -38,6 +38,8 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 当前默认策略补充：
 - `default.yaml` 当前**未**包含 `untrusted_content_guard`。如需对 `retrieval/web/tool/document` 等不可信来源做边界包裹与风险抬升，需要在策略 YAML 中显式加入该 filter，并保持对应 feature flag 开启。
 - 已默认启用 `tool_call_guard`：未命中白名单的工具名与危险参数都按 `review` 处理（抬高风险分并标记复核，按阈值处置）；`tool_whitelist` 默认留空，避免误伤自定义工具。如需严格白名单，可再显式配置。
+  - 只读工具里属于外泄链两端的那几个（`read` / `read_file` / `glob` / `grep` / `webfetch` / `web_fetch` / `web_search` / `browser` / `search`）走 `action_map.tool_call_guard.readonly_param`，默认 `observe`——只记录。**改成 `review` 或 `block` 会立刻改写日常的读文件 / 搜索回答**，因为那两档都会设 `requires_human_review`。
+  - 挂载的旧 `security_filters.yaml` 里没有这个键时，代码按 `observe` 兜底，不会掉进 `default_action: review`。
 - `security_filters.yaml` 的唯一事实来源是 `aegisgate/policies/rules/security_filters.yaml`，**不入库**——此前本目录下也有一份被版本控制的副本，导致同一条安全修复只落到其中一份，Docker 与裸机部署加载了不同的规则。改规则请改包内那份（或通过 UI 编辑运行时那份，但要清楚它只影响本部署）。
   - Docker 部署：`./config` 被挂载覆盖到包内规则目录，本目录下的同名文件由 `init_config` 首次启动时从镜像内的 `/app/bootstrap/rules` 生成。**升级时必须重建镜像**（`docker compose build aegisgate`），否则补写进来的是旧镜像里的旧规则。
   - 裸机部署：直接读包内那份，本目录下不会生成同名文件。
