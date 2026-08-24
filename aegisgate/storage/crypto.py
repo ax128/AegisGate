@@ -18,6 +18,7 @@ from typing import Union
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
+from aegisgate.config.paths import config_dir
 from aegisgate.util.logger import logger
 
 import threading
@@ -30,11 +31,13 @@ _FERNET_PREV_KEY_FILE = "aegis_fernet_prev.key"
 
 
 def _config_dir() -> Path:
-    """Resolve config directory (same logic as init_config)."""
-    env = os.environ.get("AEGIS_CONFIG_DIR", "").strip()
-    if env:
-        return Path(env).resolve()
-    return (Path.cwd() / "config").resolve()
+    """Resolve the runtime config directory.
+
+    Shared with the console's key-management page, which writes the files this
+    module reads: a second copy of this rule is how a rotation once landed
+    somewhere ``crypto`` never looks.
+    """
+    return config_dir()
 
 
 def _load_or_generate_key() -> bytes:

@@ -12,16 +12,16 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 |------|------|:---:|:---:|:---:|
 | `default.yaml` / `strict.yaml` / `permissive.yaml` | 策略（启用哪些 filter、`risk_threshold`） | 否（首启生成） | 是 | 否 |
 | `security_filters.yaml` | 各 filter 规则与 `action_map` | 否（Docker 首启生成） | 是 | 否 |
-| `security_filters.yaml.bak-<UTC>` | 升级时定点迁移 regex 前的自动备份（见下方 §1） | 否 | — | 否 |
+| `security_filters.yaml.bak-<UTC>` | 规则文件写入前的自动备份，两个来源：升级时的定点 regex 迁移，以及**控制台每次写入**（见下方 §1） | 否 | — | 否 |
 | `.env` | 运行参数（见下方「运行参数」小节） | 否（从 `.env.example` 生成） | 部分 | 是 |
-| `.env.example` | 完整可调项清单与注释 | 是 | — | 否 |
+| `.env.example` | 全部面向用户的可调项清单与注释（内部灰度开关不列） | 是 | — | 否 |
 | `gw_tokens.json` | token → 上游映射 | 否 | 是 | 是 |
 | `gw_tokens.json.example` | token 映射模板 | 是 | — | 否 |
 | `model_map.json` | compat 模式的全局模型映射 + `allowed_models` 扩展 | 是 | **否，需重启** | 否 |
 | `stats.json` | 请求统计持久化（`core/stats.py` 运行时写入） | 否 | — | 否 |
 | `aegis_gateway.key` | 网关密钥 / UI 登录密码，首启生成 `0600` | 否 | 否 | **是** |
 | `aegis_fernet.key` | 脱敏映射加密密钥（Fernet），首启生成 `0600` | 否 | 否 | **是** |
-| `aegis_proxy_token.key` | 反向代理互信凭据（见 README §1.7），首启生成 `0600` | 否 | 否 | **是** |
+| `aegis_proxy_token.key` | 反向代理互信凭据（见 [README_zh.md §1.7](../README_zh.md#17-自定义-http-头)），首启生成 `0600` | 否 | 否 | **是** |
 
 以下按四类展开说明。
 
@@ -44,6 +44,10 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
   - **升级时的定点迁移**：`init_config.migrate_http_smuggling_regex()` 只替换本目录 `security_filters.yaml`
     里 id 为 `http_smuggling_*` / `web_http_smuggling_*` 的 regex，其余自定义规则原样保留；改写前另存
     `security_filters.yaml.bak-<UTC>`（`config/*.yaml.bak-*` 已在 `.gitignore` 中）。回滚 = 把备份拷回并回退镜像。
+  - **控制台写入也建备份**：`core/rules_write.py` 在每一次成功写入前都会存一份 `.bak-<时间戳>`，并按
+    `_MAX_BACKUPS` 保留最近若干份、自动清理更旧的。文档内容未变时不写、也不轮换备份。备份落在被编辑
+    的那个文件旁边——Docker 下是挂载的配置目录，裸机下是包内策略目录，因此 `.gitignore` 里的
+    `*.yaml.bak-*` 规则没有做路径限定。
 
 - **v2 的危险命令规则另有一份内置副本**：`aegisgate/adapters/v2_proxy/router.py` 的
   `_DEFAULT_DANGEROUS_COMMAND_PATTERNS` 会被**无条件编译**，然后再追加 YAML 里的
@@ -151,7 +155,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 
 ### 4. Token 映射表（gw_tokens.json）
 
-通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，可手动编辑该文件，**同一 upstream_base 建议只保留一条**，重启后生效。
+通过 `POST /__gw__/register` 注册的 token 与上游映射会写入 `gw_tokens.json`（路径可由 `AEGIS_GW_TOKENS_PATH` 覆盖）。启动时自动加载，也在热重载 watcher 的监听范围内——**手动编辑保存后即时生效，无需重启**。**同一 upstream_base 建议只保留一条**。
 
 - **Docker 部署（当前默认）**：Compose 设为 `AEGIS_GW_TOKENS_PATH=/app/aegisgate/policies/rules/gw_tokens.json`，并将 `./config` 挂载到该目录，因此会持久化到宿主机 `./config/gw_tokens.json`，重启后不丢失。
 - 若你改为 `/tmp/...` 等临时路径，容器重启后 token 可能丢失。

@@ -44,8 +44,12 @@ from aegisgate.adapters.v2_proxy.router import (
 from aegisgate.config.settings import settings
 from aegisgate.core.audit import shutdown_audit_worker
 from aegisgate.core.dangerous_response_log import shutdown_dangerous_response_log_worker
-from aegisgate.core.mapping_prune_task import MappingPruneTask
 from aegisgate.core.hot_reload import HotReloader, build_watcher
+from aegisgate.core.mapping_prune_task import MappingPruneTask
+from aegisgate.core.process_identity import (
+    log_process_identity,
+    process_identity_payload,
+)
 
 # --- Re-exports from sub-modules (backward compatibility) ---
 from aegisgate.core.gateway_keys import (  # noqa: F401
@@ -338,6 +342,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     # Rebuild runtime dependencies at startup so test lifespans and hot-reload
     # shutdowns never reuse a store backend that has already been closed.
     reload_runtime_dependencies()
+
+    # Before the config line: if this boot is one of several workers, everything
+    # logged after it is per-worker and needs that context to read correctly.
+    log_process_identity()
 
     upstream = (settings.upstream_base_url or "").strip()
     logger.info(
@@ -1763,8 +1771,13 @@ _BOOT_TIME = time.time()
 @app.get("/health")
 @app.head("/health")
 def health() -> dict:
-    """Liveness probe — lightweight, no logging."""
-    return {"status": "ok"}
+    """Liveness probe — lightweight, no logging.
+
+    Carries the process identity so two replicas behind one address are
+    distinguishable: the per-process singletons this gateway relies on only hold
+    when there is exactly one of them (see ``process_identity``).
+    """
+    return {"status": "ok", **process_identity_payload()}
 
 
 @app.get("/ready")
@@ -1832,6 +1845,7 @@ def ready() -> JSONResponse:
             # reading only the top of the body, not just to whoever diffs
             # ``checks`` against a list of expected values.
             "degraded_checks": degraded,
+            **process_identity_payload(),
         },
     )
 

@@ -55,7 +55,7 @@ Example:
 ```bash
 curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"claude-sonnet-4-6","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
 Notes:
@@ -79,7 +79,7 @@ Example:
 ```bash
 curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-version=2023-06-01' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"claude-sonnet-4-6","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ---
@@ -116,7 +116,7 @@ API key. No client needs a gateway-specific setting.
 provider: openai_compatible
 base_url: http://127.0.0.1:18080/v1/__gw__/t/<YOUR_TOKEN>
 api_key: <UPSTREAM_API_KEY>
-model: claude-3-5-sonnet-latest
+model: claude-sonnet-4-6
 ```
 
 ### Direct v1 Mode (Internal Only)
@@ -125,7 +125,7 @@ model: claude-3-5-sonnet-latest
 provider: openai_compatible
 base_url: http://127.0.0.1:18080/v1
 api_key: <UPSTREAM_API_KEY>
-model: claude-3-5-sonnet-latest
+model: claude-sonnet-4-6
 ```
 
 ## Troubleshooting

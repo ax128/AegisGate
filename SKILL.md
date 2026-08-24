@@ -155,7 +155,7 @@ AEGIS_UPSTREAM_BASE_URL=https://your-upstream.example.com/v1
 curl -X POST http://127.0.0.1:18080/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
-  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+  -d '{"model":"gpt-5.4-mini","input":"hello"}'
 ```
 
 ## 7) How to verify the gateway is working? 验证调用
@@ -166,7 +166,7 @@ curl -X POST http://127.0.0.1:18080/v1/responses \
 curl -X POST "http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/responses" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
-  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+  -d '{"model":"gpt-5.4-mini","input":"hello"}'
 ```
 
 ### 直连上游
@@ -175,7 +175,7 @@ curl -X POST "http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/responses" \
 curl -X POST "http://127.0.0.1:18080/v1/responses" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
-  -d '{"model":"gpt-4.1-mini","input":"hello"}'
+  -d '{"model":"gpt-5.4-mini","input":"hello"}'
 ```
 
 ## 8) How to configure AI agents and clients? 客户端配置模板
@@ -186,7 +186,7 @@ curl -X POST "http://127.0.0.1:18080/v1/responses" \
 provider: openai_compatible
 base_url: http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>
 api_key: <UPSTREAM_API_KEY>
-model: gpt-4.1-mini
+model: gpt-5.4-mini
 ```
 
 ### 直连上游
@@ -195,11 +195,12 @@ model: gpt-4.1-mini
 provider: openai_compatible
 base_url: http://127.0.0.1:18080/v1
 api_key: <UPSTREAM_API_KEY>
-model: gpt-4.1-mini
+model: gpt-5.4-mini
 ```
 
 说明：
-- 若客户端默认流式输出，网关会处理 `[DONE]` 断流恢复。
+- 若客户端默认流式输出，`/v1/chat/completions` 与 `/v1/responses` 在上游提前断流时会补终止信号；
+  `/v1/messages` 与通用 `/v1/<子路径>` **没有**这个分支，见 [README.md](README.md) 的 Troubleshooting。
 - 直连模式下不需要 `base_url` 携带 token 路径段。
 
 ## 9) How to manage tokens and the gateway? 常用管理命令

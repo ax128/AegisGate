@@ -569,9 +569,9 @@ def test_ui_login_and_rules_crud(
 def test_ui_key_rotate_rewrites_fernet_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Deliberately no AEGIS_CONFIG_DIR: gateway_ui_routes._key_path resolves against
-    # cwd, so setting the env var as well would only mask the divergence pinned by
-    # test_ui_key_rotate_honours_aegis_config_dir below.
+    # Deliberately no AEGIS_CONFIG_DIR: this case pins the cwd fallback, while
+    # test_ui_key_rotate_honours_aegis_config_dir below pins the env-var branch.
+    # Both resolve through aegisgate.config.paths.config_dir.
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AEGIS_CONFIG_DIR", raising=False)
     config_dir = tmp_path / "config"
@@ -592,34 +592,38 @@ def test_ui_key_rotate_rewrites_fernet_file(
     assert prev == old_key
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "gateway_ui_routes._key_path resolves against cwd while crypto._config_dir "
-        "honours AEGIS_CONFIG_DIR. When the two disagree, rotation writes the new key "
-        "where crypto never reads it and the old key stays in force. Drop this marker "
-        "together with the fix."
-    ),
-)
 def test_ui_key_rotate_honours_aegis_config_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Rotation must write where ``crypto`` reads, not where cwd happens to point.
+
+    A decoy ``<cwd>/config`` exists on purpose: the console used to resolve the
+    key path against cwd unconditionally, so it would rotate into the decoy
+    while ``crypto`` kept loading the real key from ``AEGIS_CONFIG_DIR``. The UI
+    reported success and the old key stayed in force.
+    """
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config").mkdir()
-    config_dir = tmp_path / "keys"
-    config_dir.mkdir()
-    monkeypatch.setenv("AEGIS_CONFIG_DIR", str(config_dir))
+    decoy = tmp_path / "config"
+    decoy.mkdir()
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    monkeypatch.setenv("AEGIS_CONFIG_DIR", str(key_dir))
 
     old_key = Fernet.generate_key().decode("utf-8")
-    (config_dir / "aegis_fernet.key").write_text(old_key, encoding="utf-8")
+    (key_dir / "aegis_fernet.key").write_text(old_key, encoding="utf-8")
 
     app = FastAPI()
     register_ui_routes(app)
     client = TestClient(app)
     assert client.post("/__ui__/api/keys/fernet/rotate").status_code == 200
 
-    new_key = (config_dir / "aegis_fernet.key").read_text(encoding="utf-8").strip()
+    new_key = (key_dir / "aegis_fernet.key").read_text(encoding="utf-8").strip()
     assert new_key != old_key
+    # crypto must agree about the location, or the rotation is cosmetic.
+    from aegisgate.storage.crypto import _config_dir
+
+    assert _config_dir() == key_dir.resolve()
+    assert not (decoy / "aegis_fernet.key").exists()
 
 
 # ── filter unit tests ──

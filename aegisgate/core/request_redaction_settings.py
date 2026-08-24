@@ -12,7 +12,12 @@ surfaces, the master-switch overlay, and the two bypass mechanisms' real
 preconditions from the same symbols the request path uses, and the browser
 renders the answer.
 
-Read-only: nothing here writes. The panel it feeds is read-only in this release.
+Writes go through :func:`apply_settings_patch`, which accepts named domain
+operations rather than arbitrary key paths and re-validates every one of them
+inside the write transaction, against the document read under the lock.
+:func:`guard_pii_rule_write` is the same check applied to the generic rules CRUD
+endpoints, so a PII rule cannot be created through the side door in a shape this
+panel would then have to render as broken.
 """
 
 from __future__ import annotations

@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
+from aegisgate.config.paths import config_dir
 from aegisgate.config.settings import settings
 from aegisgate.core.gateway_auth import (
     _create_ui_session_token,
@@ -87,6 +88,28 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # path. Discovery below picks up anything not listed here, so a new group in
 # the YAML shows up in the console without a code change; the seed exists so
 # a group whose last rule was deleted keeps its label and stays editable.
+# Groups whose items are keyed by something other than `id` (parameter_rules uses
+# tool+param), so the id-based CRUD cannot address them. Listed and viewable, not
+# editable.
+READONLY_RULE_SECTIONS: frozenset[str] = frozenset({"tool_call_guard.parameter_rules"})
+
+# Groups the request-redaction panel owns end to end. The CRUD endpoints stay
+# open — that panel drives them — but the generic rules workbench stops listing
+# them, so a PII rule has exactly one place to be edited from and the relaxed-set
+# consequences of a delete are always shown.
+#
+# Module-level rather than a local inside register_ui_routes: WEBUI-QUICKSTART
+# cites the group and rule totals the workbench *lists*, and the guard that pins
+# those numbers has to subtract exactly this set. When it could not import it,
+# the guard counted the YAML instead and stayed green while the doc went stale.
+PANEL_OWNED_RULE_SECTIONS: frozenset[str] = frozenset({"redaction.pii_patterns"})
+
+
+def _panel_owned_sections() -> frozenset[str]:
+    """Accessor for the guard in test_doc_alignment."""
+    return PANEL_OWNED_RULE_SECTIONS
+
+
 _RULE_SECTION_LABELS: dict[str, str] = {
     "redaction.pii_patterns": "PII 脱敏规则",
     "restoration.suspicious_context_patterns": "还原可疑上下文",
@@ -527,7 +550,15 @@ def register_ui_routes(app: FastAPI) -> None:
     }
 
     def _key_path(key_type: str) -> Path:
-        return (Path.cwd() / "config").resolve() / _KEY_FILES[key_type]
+        """Where the console reads and writes a key file.
+
+        Must be the same directory ``storage/crypto`` loads the Fernet key from,
+        or a rotation writes the new key somewhere nothing reads: the console
+        reports success and the old key stays in force. This resolved
+        ``<cwd>/config`` unconditionally while ``crypto`` honoured
+        ``AEGIS_CONFIG_DIR`` — both now go through one resolver.
+        """
+        return config_dir() / _KEY_FILES[key_type]
 
     def _key_fallback_path(key_type: str) -> Path:
         return Path("/tmp/aegisgate") / _KEY_FILES[key_type]
@@ -719,16 +750,8 @@ def register_ui_routes(app: FastAPI) -> None:
         "system_exfil_patterns": "injection_detector.system_exfil_patterns",
     }
 
-    # Groups whose items are keyed by something other than `id` (parameter_rules
-    # uses tool+param), so the id-based CRUD below cannot address them. Listed and
-    # viewable, not editable.
-    _READONLY_SECTIONS: frozenset[str] = frozenset({"tool_call_guard.parameter_rules"})
-
-    # Groups the request-redaction panel now owns end to end. The CRUD endpoints
-    # stay open — that panel drives them — but the generic rules workbench stops
-    # listing them, so a PII rule has exactly one place to be edited from and the
-    # relaxed-set consequences of a delete are always shown.
-    _PANEL_OWNED_SECTIONS: frozenset[str] = frozenset({"redaction.pii_patterns"})
+    _READONLY_SECTIONS = READONLY_RULE_SECTIONS
+    _PANEL_OWNED_SECTIONS = PANEL_OWNED_RULE_SECTIONS
 
     # Per-rule metadata the editor may write besides id/regex. Anything else in an
     # existing rule is preserved untouched on update.

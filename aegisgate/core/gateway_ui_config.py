@@ -11,77 +11,53 @@ from aegisgate.util.logger import logger
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = (Path.cwd() / "config" / ".env").resolve()
 
-# Root-level Markdown that must never be served through the UI docs page.
-# CHANGELOG.md and ROADMAP.md are maintainer-facing repo history/plans, not operator
-# guides — they stay on GitHub. The last three are gitignored local/internal reports:
-# they are absent from a clean checkout but may exist in a developer's working copy,
-# so keep excluding them by name.
-_EXCLUDED_ROOT_DOCS: frozenset[str] = frozenset(
-    {
-        "AGENTS.md",
-        "CHANGELOG.md",
-        "ROADMAP.md",
-        "PRODUCTION_READINESS_TEST_REPORT.md",
-        "OPEN_SOURCE_CHECKLIST.md",
-        "PR_DESCRIPTION_2026-02-26-security-hardening.md",
-    }
+# The operator guides the console may serve, in the order it lists them. This is
+# an allow-list, not a deny-list: it used to serve every root *.md except a few
+# named exclusions, so any Markdown that landed in the app root was published to
+# anyone with a console session. That included the local/internal reports
+# .gitignore keeps out of the repo — OPTIMIZATION_PLAN.md, task_plan.md,
+# notes.md, FINAL_REPORT.md were never on the exclusion list, and the deny-list
+# could only ever name files someone had already thought of.
+#
+# CHANGELOG.md and ROADMAP.md stay off deliberately: maintainer-facing history
+# and plans, not operator guides. Adding a doc here is the one step needed to
+# surface it, and test_doc_alignment pins this list against the repo root.
+_UI_DOCS: tuple[tuple[str, str], ...] = (
+    ("README.md", "README"),
+    ("README_zh.md", "README（中文）"),
+    ("WEBUI-QUICKSTART.md", "Web UI 快速上手"),
+    ("UPSTREAM-QUICKSTART.md", "上游接入快速上手"),
+    ("OTHER_TERMINAL_CLIENTS_USAGE.md", "其他终端客户端用法"),
+    ("SKILL.md", "Skill 功能说明"),
 )
 
-_DOC_FRIENDLY_TITLES: dict[str, str] = {
-    "README.md": "README",
-    "README_zh.md": "README（中文）",
-    "WEBUI-QUICKSTART.md": "Web UI 快速上手",
-    "UPSTREAM-QUICKSTART.md": "上游接入快速上手",
-    "OTHER_TERMINAL_CLIENTS_USAGE.md": "其他终端客户端用法",
-    "SKILL.md": "Skill 功能说明",
-}
-
-_DOC_ORDER: tuple[str, ...] = (
-    "README.md",
-    "README_zh.md",
-    "WEBUI-QUICKSTART.md",
-    "UPSTREAM-QUICKSTART.md",
-    "OTHER_TERMINAL_CLIENTS_USAGE.md",
-    "SKILL.md",
-)
+_DOC_FRIENDLY_TITLES: dict[str, str] = dict(_UI_DOCS)
+_DOC_ORDER: tuple[str, ...] = tuple(name for name, _ in _UI_DOCS)
 
 
 def _doc_title(name: str) -> str:
-    """Friendly title for *name*, falling back to a readable form of the file name."""
-    known = _DOC_FRIENDLY_TITLES.get(name)
-    if known:
-        return known
-    return name.removesuffix(".md").replace("-", " ").replace("_", " ")
+    """Friendly title for *name*. Every allow-listed doc has one by construction."""
+    return _DOC_FRIENDLY_TITLES.get(name, name.removesuffix(".md"))
 
 
 def _docs_catalog() -> list[dict[str, str]]:
-    """Return the UI document catalogue: sorted by _DOC_ORDER, including only files that exist."""
-    available: set[str] = {
-        p.name for p in _PROJECT_ROOT.glob("*.md") if p.name not in _EXCLUDED_ROOT_DOCS
-    }
-    docs: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for name in _DOC_ORDER:
-        if name in available:
-            docs.append({"id": name, "title": _doc_title(name), "path": name})
-            seen.add(name)
-    for name in sorted(available - seen):
-        docs.append({"id": name, "title": _doc_title(name), "path": name})
-    return docs
+    """The UI document catalogue: the allow-listed docs that exist, in order."""
+    return [
+        {"id": name, "title": _doc_title(name), "path": name}
+        for name in _DOC_ORDER
+        if (_PROJECT_ROOT / name).is_file()
+    ]
 
 
 def _resolve_doc_path(doc_id: str) -> Path | None:
-    safe_id = Path(doc_id).name
-    if safe_id != doc_id:
+    if doc_id not in _DOC_FRIENDLY_TITLES:
         return None
-    if safe_id in _EXCLUDED_ROOT_DOCS:
+    raw = _PROJECT_ROOT / doc_id
+    if raw.is_symlink():
+        logger.warning("ignoring symlinked doc path=%s", raw)
         return None
-    candidate = (_PROJECT_ROOT / safe_id).resolve()
-    if (
-        candidate.is_file()
-        and candidate.suffix == ".md"
-        and candidate.parent == _PROJECT_ROOT
-    ):
+    candidate = raw.resolve()
+    if candidate.is_file() and candidate.parent == _PROJECT_ROOT:
         return candidate
     return None
 
