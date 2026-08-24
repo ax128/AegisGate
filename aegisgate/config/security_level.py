@@ -70,6 +70,40 @@ def floor_multiplier(level: str | None = None) -> float:
     return 0.85        # medium: floor lowered
 
 
+# The highest risk score any ``action_map`` action assigns. ``block`` tops out at
+# 0.96 in ToolCallGuard._apply_action; the other filters' _apply_action bodies sit
+# at or below it. Pinned by test_risk_gate_observability so a new, higher score
+# cannot silently make this number wrong.
+MAX_ACTION_MAP_RISK_SCORE = 0.96
+
+
+def score_block_unreachable_reason(
+    raw_threshold: float, level: str | None = None
+) -> str | None:
+    """Why score-based blocking cannot fire at this threshold, or ``None``.
+
+    ``apply_threshold`` clamps at 1.0, so a large enough multiplier pushes the
+    effective threshold above every score an ``action_map`` action can assign —
+    at which point every "only raise the risk, set no disposition" ``block``
+    entry is a no-op. That is a real configuration (``low`` is defined to work
+    this way) and also exactly how a regression hides: the condition had no
+    outlet anywhere, so a tier collapse went unnoticed for a long time.
+
+    Filters that set ``disposition`` directly — injection_detector,
+    rag_poison_guard, request_sanitizer, and the force-block path — are
+    unaffected either way, which is why the failure is partial and easy to miss.
+    """
+    effective = apply_threshold(raw_threshold, level=level)
+    if effective <= MAX_ACTION_MAP_RISK_SCORE:
+        return None
+    return (
+        f"security_level={normalize_security_level(level)} "
+        f"declared_threshold={float(raw_threshold):.2f} "
+        f"effective_threshold={effective:.2f} "
+        f"max_action_map_score={MAX_ACTION_MAP_RISK_SCORE:.2f}"
+    )
+
+
 def apply_threshold(value: float, level: str | None = None) -> float:
     scaled = float(value) * threshold_multiplier(level)
     return min(1.0, max(0.01, scaled))

@@ -32,6 +32,10 @@ class RequestContext:
     redaction_whitelist_keys: set[str] = field(default_factory=set)
     report_items: list[dict] = field(default_factory=list)
     poison_traceback: list[dict] = field(default_factory=list)
+    # Exfiltration-chain observations: rule id + span offset/length, never a
+    # fragment — the audit sink these reach does not redact (see exfil_evidence).
+    exfil_evidence: list[dict] = field(default_factory=list)
+    exfil_hit_count: int = 0
 
     def add_report(self, item: dict) -> None:
         self.report_items.append(item)

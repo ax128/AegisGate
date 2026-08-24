@@ -123,6 +123,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _strip_system_exec_runtime_lines,
 )
 from aegisgate.core.audit import write_audit
+from aegisgate.core.exfil_evidence import summarize as summarize_exfil
 from aegisgate.core.block_reasons import (
     PHASE_REQUEST,
     PHASE_RESPONSE,
@@ -2728,6 +2729,10 @@ def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> Non
             "security_boundary": boundary or {},
             "poison_traceback": ctx.poison_traceback,
             "report": ctx.report_items,
+            # Omitted entirely when nothing matched, so the common line keeps its
+            # current shape. Carries rule ids and spans, never a fragment — this
+            # sink neither redacts nor truncates (see core/exfil_evidence).
+            **({"exfil": exfil} if (exfil := summarize_exfil(ctx)) else {}),
         }
     )
     from aegisgate.core.stats import record as stats_record

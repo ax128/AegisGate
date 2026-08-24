@@ -55,6 +55,61 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
     （`test_redos_guard` 的 `_LARGE_INPUT` 里没有 `curl`/`grep`，测不到这类规则的真实代价）。
   - 回滚：删掉 YAML 里的 `exfil_chain_*` 条目，走热加载，无需重启。
 
+### Added（外泄链路加固 S1：可观测与校准语料）
+
+- **审计记录新增 `exfil` 块**：命中外泄链路规则（`exfil_*` 前缀）时记录 `dimensions` /
+  `chain_complete` / `decision` / `evidence`。此前 `dangerous_param:<tool>` 这个字符串把规则身份
+  丢掉了，下游分不出「读了凭据」和「往外发」。没有命中时该字段整个不出现，普通审计行的形状不变。
+  - **evidence 只存 `rule_id` + 偏移 + 长度，不存原文**。`core/audit.py` 对事件**不做任何脱敏或
+    截断**，而 `audit_log_path` 默认开启；这批规则的证据恰恰是凭据路径和带密钥的 URL。写片段进去
+    等于把一个默认开启的日志悄悄升级成默认关闭那个日志的敏感度。要原文请开
+    `AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG`（默认关），那才是校准语料该走的通道。
+  - **维度由规则 ID 前缀判定**（`exfil_chain_` / `exfil_collect_` / `exfil_egress_` /
+    `exfil_persist_`），不查表——从控制台加一条规则即可自行归类，无需改代码。
+  - `decision` 读的是 `RequestContext` 已经声明的处置，不自行判定；标注的是**非流式**的实现形态
+    （`strip_tool_calls` 没有流式形态，流式下同一份上下文是终止流）。
+  - evidence 上限 20 条，超出时 `evidence_truncated=true` 且 `hit_count` 记真实次数——截断过的
+    列表绝不能读作「只有这么多次」。
+
+- **`/ready` 新增 `risk_gate` 检查**：有效风险阈值被 clamp 到高于 `action_map` 能给出的任何分数
+  （上限 0.96）时上报 `unreachable: security_level=… effective_threshold=…`。
+  - **只上报、不参与就绪判定**：`low` 档的定义就是把阈值推过 clamp，那是有意配置不是故障，在这里
+    让就绪失败等于拒绝服务一个明确要求了这个行为的部署。上报是因为**另一条到达同一状态的路径是
+    回归**——medium 档曾经因为 ×1.30 落到这个状态，而这个条件在任何地方都没有出口，所以长期隐身。
+  - `MAX_ACTION_MAP_RISK_SCORE = 0.96` 是手工维护的副本，由测试扫描各过滤器 `_apply_action` 方法体
+    钉住；新增更高的分数会让这个检查漏报，测试会先失败。
+
+- **新增 `scripts/replay_calibrate.py`**：把录下来的危险响应样本回放到当前规则文件上，回答「这条新
+  规则在本部署真实看到过的流量上会命中什么」。
+  - **不能用 `logs/audit.jsonl` 回放**：审计事件只写 request_id / route / risk / tags / reasons /
+    enforcement_actions / report，**不含任何请求或响应正文**，没有可供正则匹配的文本。语料走
+    `logs/dangerous_response_samples.jsonl`。
+  - 只读，不写；报告只有计数与规则 ID，不打印任何样本文本，可以直接贴进评审。
+  - 语料缺失时明确说明是哪个开关没开，而不是只报一个失败；样本被摘成摘要时单独计数，避免整份
+    摘要语料静默地跑出 0% 命中。
+
+- 新增 `aegisgate/tests/test_exfil_observability.py`（30 条）。
+
+- **评审修复（同一阶段内）**：
+  - `dangerous_response_samples.jsonl` **此前恒为摘要**——`_prepare_event_payload` 默认把 `content` /
+    `dangerous_fragments` 换成 sha256+length，而没有任何生产调用方传 `include_raw_*`，也没有开关。
+    于是 `replay_calibrate.py` 在任何真实语料上都只能报「全是摘要」。新增
+    `AEGIS_DANGEROUS_RESPONSE_LOG_INCLUDE_RAW`（**默认 false**，且只在
+    `AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG` 已开时才被读到）：**两道开关**才存原文，因此「打开样本日志」
+    本身永远不会顺带开始持久化密钥；校准是一个显式、有边界的窗口。
+  - **evidence 的 offset 现在有明确参照系**。`scan_text` 是 `output_text` 与 `tool_call_content`
+    用空格拼起来的，而样本日志分开存两者——落在工具调用区段的命中此前记的偏移会越过正文末尾。现在按
+    `channel` 分别回基，`response_text` 与 `tool_call_arguments` 各自成立。
+  - **只在规范化形态上命中的不再静默漏记**。判定走 `build_haystacks` 的多个形态，而记录只搜原文，于是
+    混淆型命中（NFKC、零宽字符）会 `has_command_payload=True` 却一条 evidence 都不产生——恰好是这批规则
+    最该描述的流量。现在同样搜多形态，并新增 `form` 字段：只有 `raw` 才带 offset，`normalized` 记
+    `null`——「看到规则命中、但指不出位置」是真的，编一个索引不到任何东西的偏移不是。
+  - `/ready` 的 `risk_gate` 改问 `settings.default_policy` 而不是字面量 `"default"`：设了
+    `AEGIS_DEFAULT_POLICY=strict` 的部署此前被告知的是一份它根本不会解析的策略文件的阈值。
+  - `MAX_ACTION_MAP_RISK_SCORE` 的钉子改为读整个实参表达式：原先的 `([0-9.]+)` 正则对三元
+    （`0.58 if … else 0.85`）完全不匹配，那两支是没被钉住的；配置驱动的分值（如 `self._request_risk_floor`）
+    可以从 YAML 抬过常量——正是这个检查要防的静默漂移，现在会直接失败。
+
 
 ### Changed（行为变更：安全级别三档恢复为三档）
 

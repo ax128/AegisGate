@@ -614,11 +614,19 @@ curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/ready
 ```
 
-响应体里有 `checks` 映射和 `degraded_checks` 列表。其中一项**只上报、不影响就绪判定**：
-规则文件在磁盘上解析不了时，`security_rules` 会显示 `stale: <错误>`。此时网关仍在执行
-最后一次成功加载的那份规则，因此依然可以服务；而所有副本读的是同一个文件，在这里让就绪
-失败会把它们同时摘掉，把一个配置笔误变成一次故障。**请对 `degraded_checks` 告警，而不是
-只看状态码。**
+响应体里有 `checks` 映射和 `degraded_checks` 列表。其中两项**只上报、不影响就绪判定**：
+
+- 规则文件在磁盘上解析不了时，`security_rules` 会显示 `stale: <错误>`。此时网关仍在执行
+  最后一次成功加载的那份规则，因此依然可以服务；而所有副本读的是同一个文件，在这里让就绪
+  失败会把它们同时摘掉，把一个配置笔误变成一次故障。
+- 有效风险阈值被 clamp 到高于 `action_map` 能给出的任何分数时，`risk_gate` 会显示
+  `unreachable: security_level=… effective_threshold=…`。此时所有「只抬 risk、不设
+  disposition」的 `block` 条目都是空转。在 `AEGIS_SECURITY_LEVEL=low` 下这就是该档位的
+  定义，不是故障，所以不参与就绪判定；上报是因为**另一条到达同一状态的路径是回归**——
+  而在此之前这个条件在任何地方都没有出口。直接设 `disposition` 的过滤器不受影响，这正是
+  这类失效只坏一半、很难被发现的原因。
+
+**请对 `degraded_checks` 告警，而不是只看状态码。**
 
 UI 检查：
 
