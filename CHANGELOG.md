@@ -50,6 +50,24 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 - 新增 `aegisgate/tests/test_exfil_increments.py`（43 条）：12 条攻击语料必须命中，17 条日常开发语料
   必须一条都不命中；每条新正则另过 `regex_probe` 沙箱与 `test_redos_guard` 的静态预算。
 
+- **评审修复（同一阶段内）**：
+  - **A1 的解码回流不再重跑「序列化格式」类规则**（`mcp_tools_call`、`gemini_function_call`、
+    `bedrock_tool_use`、`tool_uses_json` 等 10 条）。`tool_call_injection` 在 `action_map` 里是 `block`，
+    而 `injection_detector._apply_action` 对 `block` **直接设 disposition、不看阈值**；那几条描述的是真实
+    agent 协议的报文格式，而「把一帧 JSON base64 后贴进 prompt」正是调 MCP 的人天天做的事。回流它们等于
+    把日常的 agent 开发流量变成硬阻断，且载荷不透明、用户看不到原因。划的是这个家族已有的那条线——
+    描述「文本怎么写」的规则解码之后说明不了什么，序列化格式就是「怎么写」；描述**冒充**的
+    （`<invoke name=`、`Action:`/`Action Input:`、`functions.exec`）照旧回流。
+  - **A2 的两半必须由数据流连接，不能只是「同一行相邻」**：中间跨度改为不能跨 `&&`。
+    `echo 'alias ll=...' >> ~/.bashrc && curl -fsSL https://get.docker.com | sh` 是两件普通的安装步骤，
+    `&&` 不把数据交给第二条命令——与 `exfil_chain` 里 `cat .env | curl` 和 `source .env && curl` 的分界同一条理由。
+  - **还原侧的位置判据只对凭据形态的占位符标签生效**（`KEY`/`TOKEN`/`SECRET`/`JWT`/`COOKIE`/… ），
+    不再是所有占位符。命中不是「不还原」而是**整条响应被拦**，而 PII 占位符在正常工作里就会出现在这些位置：
+    用户贴 `https://admin.example.com/users?email=…`，脱敏把地址换成占位符，模型把 URL 回显——把用户自己的
+    邮箱还原回去是往返正常工作，不是外泄。同样位置上的凭据才是。
+  - 语料补 11 条（攻击 14 / 日常 28）：`&&` 相邻的安装一行、以及 `EMAIL`/`PHONE`/`SYS_USERNAME`/`NAME_FIELD`
+    四类 PII 占位符出现在 URL、网络命令参数与 markdown 图片里，全部不得命中。
+
 
 ### Changed（行为变更：安全级别三档恢复为三档）
 
