@@ -183,6 +183,12 @@ class Settings(BaseSettings):
         False  # Store dangerous response samples, split by date, auto-pruning files older than 10 days
     )
     dangerous_response_log_path: str = "logs/dangerous_response_samples.jsonl"  # Base path for the dangerous-response sample log; under Docker use /tmp/aegisgate/dangerous_response_samples.jsonl
+    # Keep the matched text in those samples instead of only a sha256 + length. Off by default
+    # and only consulted when enable_dangerous_response_log is already on, so turning the log on
+    # never silently starts storing secrets. Turn this on when you intend to calibrate rules
+    # against recorded traffic (scripts/replay_calibrate.py) — with it off the corpus is all
+    # digests and nothing can be replayed against it.
+    dangerous_response_log_include_raw: bool = False
 
     enable_redaction: bool = True
     enable_restoration: bool = True

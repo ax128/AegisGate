@@ -233,8 +233,13 @@ def _fragment_metadata(fragments: list[str]) -> list[dict[str, Any]]:
 
 def _prepare_event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = dict(event)
-    include_raw_content = bool(payload.pop("include_raw_content", False))
-    include_raw_fragments = bool(payload.pop("include_raw_fragments", False))
+    # No production caller passes these, so before the setting existed every sample this
+    # process wrote was a digest — which made the log useless as a calibration corpus while
+    # still reading like one. The default stays off: enabling the log must not, on its own,
+    # start persisting matched secrets.
+    keep_raw = bool(settings.dangerous_response_log_include_raw)
+    include_raw_content = bool(payload.pop("include_raw_content", keep_raw))
+    include_raw_fragments = bool(payload.pop("include_raw_fragments", keep_raw))
 
     raw_fragments = payload.get("dangerous_fragments")
     fragments = (
