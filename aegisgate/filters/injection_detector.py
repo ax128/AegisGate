@@ -188,6 +188,14 @@ class PromptInjectionDetector(BaseFilter):
         )
 
         self._spam_noise_patterns = self._compile_rule_patterns(detector_rules.get("spam_noise_patterns", []))
+        # Families re-run over decoded payloads, paired with the signal bucket a
+        # plaintext hit would have used. Built here so the scan loop does not
+        # rebuild it per candidate.
+        self._decoded_rescan_families: tuple[tuple[str, dict[str, re.Pattern[str]]], ...] = (
+            ("direct", self._direct_patterns),
+            ("system_exfil", self._system_exfil_patterns),
+            ("tool_call_injection", self._tool_call_injection_patterns),
+        )
         self._spam_noise_min_hits = max(1, int(detector_rules.get("spam_noise_min_distinct_hits", 2)))
         self._msg_script_diversity_threshold = max(2, int(detector_rules.get("message_script_diversity_threshold", 3)))
 
@@ -396,6 +404,26 @@ class PromptInjectionDetector(BaseFilter):
             norm_decoded = self._normalize_text(decoded)
             if any(keyword and keyword in norm_decoded for keyword in self._decoded_keywords):
                 signals["obfuscated"].add("encoded_payload")
+            # Re-run the instruction families over what came out of the decoder, not
+            # just the nine-entry keyword list. Everything above already scanned the
+            # outer text with these; a payload that decoded to the same instruction
+            # scored as if it had said nothing, so wrapping an injection in base64
+            # was enough to walk past every one of them. The hit lands in the bucket
+            # it would have landed in as plaintext, so an encoded instruction is
+            # weighed as the instruction it is.
+            #
+            # Surface-form families (html_markdown, remote_content, spam_noise) are
+            # deliberately not re-run: they describe how text is *written*, which
+            # says nothing once it has been through a decoder.
+            for bucket, patterns in self._decoded_rescan_families:
+                for label, pattern in patterns.items():
+                    if pattern.search(norm_decoded):
+                        signals[bucket].add(f"decoded:{label}")
+                        # Recorded separately from the keyword hit: "there was an
+                        # encoded payload, and it carried an instruction" is two
+                        # facts, and obfuscated sits in a different weight bucket
+                        # from the families above, so it is not double counting.
+                        signals["obfuscated"].add("encoded_payload_command")
 
         for word in self._word_re.findall(text_norm):
             for target in self._typoglycemia_targets:
