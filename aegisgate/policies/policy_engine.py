@@ -114,6 +114,15 @@ class PolicyEngine:
             )
             return loaded
 
+    def declared_risk_threshold(self, policy_name: str = "default") -> float:
+        """The policy's own ``risk_threshold``, before the security level scales it.
+
+        Same fallback order ``resolve`` uses. Exists so a health probe can ask what
+        the threshold *would* be without building a RequestContext to get it.
+        """
+        data = self._load_policy(policy_name)
+        return float(data.get("risk_threshold", settings.risk_score_threshold))
+
     def resolve(
         self, ctx: RequestContext, policy_name: str = "default"
     ) -> dict[str, Any]:

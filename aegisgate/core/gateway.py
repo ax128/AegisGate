@@ -1820,13 +1820,35 @@ def ready() -> JSONResponse:
     except Exception:
         checks["security_rules"] = "unknown"
 
+    # Risk-gate reachability — reported, deliberately not gating (see below).
+    try:
+        from aegisgate.adapters.openai_compat.router import policy_engine
+        from aegisgate.config.security_level import score_block_unreachable_reason
+
+        # settings.default_policy, not the literal "default": a deployment that
+        # set AEGIS_DEFAULT_POLICY=strict would otherwise be told about a policy
+        # file it never resolves. A request may still name its own policy; this
+        # reports the one the deployment serves by default.
+        gate_reason = score_block_unreachable_reason(
+            policy_engine.declared_risk_threshold(settings.default_policy)
+        )
+        checks["risk_gate"] = "ok" if gate_reason is None else f"unreachable: {gate_reason}"
+    except Exception:
+        checks["risk_gate"] = "unknown"
+
     # A rules file that does not parse leaves the process enforcing the last good
     # document rather than failing requests, which is the whole point of that
     # behaviour — so it must not also take the gateway out of rotation. Every
     # replica reads the same file, so gating here would drop all of them together
     # and turn one config typo into a full outage. It is reported instead: the
     # check is in the body for monitoring, and there is an ERROR in the log.
-    _NON_GATING_CHECKS = frozenset({"security_rules"})
+    # ``risk_gate`` joins security_rules for the same reason and one of its own:
+    # ``low`` is *defined* to push the threshold past the clamp, so an unreachable
+    # gate is a deliberate configuration on that tier, not a fault. Gating on it
+    # would refuse to serve a deployment that asked for exactly this. It is
+    # reported because the opposite case — a tier that was meant to block and
+    # quietly cannot — is invisible from outside without it.
+    _NON_GATING_CHECKS = frozenset({"security_rules", "risk_gate"})
     all_ok = all(
         value in ("ok", "disabled")
         for name, value in checks.items()
