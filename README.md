@@ -642,16 +642,20 @@ per-filter score floors (`aegisgate/config/security_level.py`):
 | Level | Threshold multiplier | Floor multiplier | Effective threshold with the `default` policy (`0.85`) |
 |-------|----------------------|------------------|--------------------------------------------------------|
 | `high` | ×0.90 | ×1.05 | `0.765` |
-| `medium` (default) | ×1.30 | ×0.85 | `1.0` (clamped) |
+| `medium` (default) | ×1.00 | ×0.85 | `0.85` |
 | `low` | ×1.60 | ×0.70 | `1.0` (clamped) |
 
-The scaled value is clamped to `1.0`, so with the stock `default` policy at `medium` or `low` the
-**score-based** block path in `OutputSanitizer` never fires — the highest score an `action_map`
-`block` assigns is `0.95`. Protection at those levels comes from the hard-disposition paths instead:
+`medium` is the neutral tier: it uses the policy YAML's declared `risk_threshold` unchanged, and the
+other two adjust around it. The scaled value is clamped to `1.0`, which is why `low` on the stock
+policies effectively disables **score-based** blocking — the highest score an `action_map` `block`
+assigns is `0.95`. Protection at `low` comes from the hard-disposition paths instead:
 `injection_detector` and `rag_poison_guard` set a `block` disposition directly, independent of the
-threshold, as does `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`. Use `high`, or a policy YAML with a lower
-`risk_threshold` (`strict` uses `0.50`), if you want score-based blocking. Whether `medium` should
-scale at all is an open question tracked in [ROADMAP.md](ROADMAP.md).
+threshold, as does `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`.
+
+At `medium` and `high` an `action_map` `block` does reach the threshold, so the score-based path in
+`OutputSanitizer` and `RestorationFilter` fires as the console has always shown it doing. `medium`
+used to be ×1.30, which clamped to `1.0` on every shipped policy and made `medium` and `low`
+identical — see [CHANGELOG.md](CHANGELOG.md) for the before/after numbers.
 
 These categories are force-blocked at every level and are not reduced by research/quotation context
 (`action_map.injection_detector` + `non_reducible_categories` in `security_filters.yaml`):

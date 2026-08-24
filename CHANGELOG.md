@@ -9,6 +9,38 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（行为变更：安全级别三档恢复为三档）
+
+- **`AEGIS_SECURITY_LEVEL=medium` 的阈值系数由 ×1.30 改为 ×1.00**，成为中性档：直接使用策略
+  YAML 声明的 `risk_threshold`，`high`（×0.90）与 `low`（×1.60）围绕它调整。
+  - **原缺陷**：`apply_threshold` 把结果 clamp 到 1.0。三个自带策略里 `default` 与 `permissive`
+    的 `risk_threshold` 都是 0.85，`0.85 × 1.30` 与 `0.85 × 1.60` **都** clamp 成 1.0，
+    于是 `medium` 与 `low` **完全等价**；而 `action_map` 的 `block` 最高只把风险分抬到 0.95，
+    所以 `OutputSanitizer` / `RestorationFilter` 里基于分数的拦截分支**永不触发**。
+  - **前后对比**（有效阈值）：
+
+    | 策略 | 档位 | 改前 | 改后 |
+    | --- | --- | --- | --- |
+    | `default` (0.85) | high / medium / low | 0.765 / **1.0** / **1.0** | 0.765 / **0.85** / 1.0 |
+    | `strict` (0.50) | high / medium / low | 0.45 / 0.65 / 0.80 | 0.45 / **0.50** / 0.80 |
+    | `permissive` (0.85) | high / medium / low | 0.765 / **1.0** / **1.0** | 0.765 / **0.85** / 1.0 |
+
+  - **默认部署会提高拦截率**。新增拦截的是两类：
+    1. `restoration` 的 `exfiltration` / `too_many_placeholders` / `stale_mapping` 与
+       `sanitizer` 的 `system_leak`——这四条配的就是 `block`（分数 0.95），控制台一直把它们
+       显示为"拦截"，现在名实相符；
+    2. 有机风险分 ≥ 0.85 的响应。实测有机分上限是 0.889（`weighted_nonlinear_score` 在
+       `k=2.2`、raw=1.0 时），达到 0.85 需要 raw ≥ 0.862，即几乎全部加权信号同时打满，
+       属极少数情形。
+  - `low` 档不变（仍 clamp 到 1.0，基于分数的拦截不触发），符合"极宽松、基本只脱敏"的定位。
+  - **未改** `count_threshold_multiplier`（medium 仍 ×1.30）与 `floor_multiplier`（medium 仍 ×0.85）：
+    两者都不受上限 clamp，没有造成档位坍缩，各自是独立的调节项——一并改会让拦截率变化无法归因。
+  - **选择改系数而非改 `default.yaml`**：改 YAML 只能修 `default` 一个策略，`permissive`
+    仍会 medium≡low；改系数一次修好三个。
+  - 需要回到旧行为：把 `AEGIS_SECURITY_LEVEL` 设为 `low`，或在策略 YAML 里调高 `risk_threshold`。
+  - 新增 `aegisgate/tests/test_security_level_tiers.py`（16 条）。**此前全量测试没有任何一条钉住
+    这些系数**——改动默认拦截率可以零失败地溜过去。
+
 ### Changed（行为变更：转发层脱敏判据改为按路由）
 
 - **请求转发层不再按消息角色决定用哪套 PII 集合，改为按路由**。
