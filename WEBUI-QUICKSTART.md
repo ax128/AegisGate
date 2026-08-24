@@ -151,8 +151,8 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 有未保存改动时保存按钮显示「（N 项待保存）」，离开页面前会提示
   - 未开放编辑的 4 项：`app_name`、`gateway_key`（走密钥管理页）、`require_confirmation_on_block`（已废弃）、`internal_forwarding_kernel_rollout`（内部灰度开关）
 - **请求侧脱敏**（独立面板，见 §4.3）：PII、字段级与精确值三类规则的总控、生效面与管理入口
-- 安全过滤规则增删改查：规则工作台列出 `security_filters.yaml` 中的 **31 个规则组**（180 条规则）
-  - 该文件实际有 32 组 / 236 条。差额是 `redaction.pii_patterns`（56 条 PII 规则），已由「请求侧脱敏」面板接管，工作台不再列出它，以免同一条规则有两个写入口
+- 安全过滤规则增删改查：规则工作台列出 `security_filters.yaml` 中的 **31 个规则组**（193 条规则）
+  - 该文件实际有 32 组 / 249 条。差额是 `redaction.pii_patterns`（56 条 PII 规则），已由「请求侧脱敏」面板接管，工作台不再列出它，以免同一条规则有两个写入口
   - `tool_call_guard.parameter_rules` 按 `tool`+`param` 而非 `id` 寻址，因此**只读**：可查看、不可增删改
   - 其余规则组由 YAML 结构自动发现，往文件里新增一组规则即可在控制台看到，无需改代码
   - 左侧按过滤器分组的规则树带条数；规则组与规则各有独立搜索框

