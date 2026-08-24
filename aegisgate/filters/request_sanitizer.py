@@ -22,6 +22,11 @@ from aegisgate.util.text_normalize import (
 class RequestSanitizer(BaseFilter):
     name = "request_sanitizer"
 
+    # Risk a ``review`` strong-intent hit raises the request to. Deliberately the
+    # same value the leak_check branch uses: ``review`` is one thing, and it has to
+    # stay under every disposition gate for "record only, do not block" to be true.
+    _STRONG_INTENT_REVIEW_RISK = 0.6
+
     def __init__(self) -> None:
         self._report = {
             "filter": self.name,
@@ -287,6 +292,42 @@ class RequestSanitizer(BaseFilter):
                     "request blocked request_id=%s reason=%s", ctx.request_id, reason
                 )
                 return req
+            # review: elevate risk and flag, but allow the request through.
+            #
+            # Without this the branch was a no-op. ``_apply_action`` only appends a
+            # string to ``enforcement_actions``, and every strong-intent category
+            # ships as ``review`` — so a request matching secret_exfiltration /
+            # privilege_escalation / rule_bypass produced a log line and nothing
+            # else. The leak_check branch above is the same shape done right; the
+            # two were asymmetric by omission, not by design.
+            #
+            # Same 0.6 as leak_check on purpose. ``review`` is one thing in the
+            # action_map vocabulary, and an operator who wants these categories
+            # weighted harder has ``block`` to say so with. Inventing a private
+            # severity ladder here would make the console's uniform
+            # block/review/sanitize wording describe something the runtime does not
+            # do — which is the defect this branch already had.
+            #
+            # 0.6 stays under every disposition gate, so "review = record only, do
+            # not block" (the comment in security_filters.yaml) remains true: the
+            # response block path needs max(risk_threshold, sanitizer block) = 0.85
+            # at medium, and the stream terminator needs max(risk_threshold, 0.9).
+            # The tag is request-scoped, so it also cannot trip the ``response_``
+            # prefix check in _needs_confirmation or _stream_block_reason.
+            ctx.risk_score = max(ctx.risk_score, self._STRONG_INTENT_REVIEW_RISK)
+            ctx.security_tags.add(reason)
+            self._report = {
+                "filter": self.name,
+                "hit": True,
+                "risk_score": ctx.risk_score,
+                "action": "review",
+                "category": action_key,
+            }
+            logger.info(
+                "request strong_intent review request_id=%s reason=%s",
+                ctx.request_id,
+                reason,
+            )
 
         if shape_hits:
             action = self._apply_action(ctx, "shape_anomaly", "sanitize")
