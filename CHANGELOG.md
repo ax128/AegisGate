@@ -9,6 +9,39 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Added（外泄链路加固 S0：外泄链路规则，仅改 YAML）
+
+- **`security_filters.yaml` 新增 6 条 `exfil_chain_*` 规则**，判定「采集 + 出口」两种能力在同一条命令里
+  同时成立，堵住「扫盘 → 读凭据 → 发往第三方」这条链。请求侧脱敏本来就挡住了「密钥流向上游」，漏的是
+  反方向：模型指挥 agent 在本机采集数据并发往第三方。
+  - **只判组合，不判措辞**：`curl -F`/`-T`/`--data-binary @`/管道进 `nc`/`Invoke-RestMethod -Method Post`
+    这类外发动作，与 `~/.aws/credentials`、`~/.ssh/id_*`、`.env`、`.netrc`、`.npmrc`、`.git-credentials`、
+    `~/.config/gcloud`、`~/.kube/config`、浏览器 `Login Data` / `cookies.sqlite` / `key4.db` / Keychain、
+    整环境导出（`env` / `printenv` / `Get-ChildItem Env:`）成对出现才命中。
+    单侧命中一律放行——`cat .env`、`curl https://api.github.com` 都是日常动作。
+  - **管道是判据**：`cat .env | curl -d @-` 命中，`source .env && curl ...` 不命中——`&&` 不把数据交给
+    `curl`，两者的能力不同。
+  - **零新增代码**。三处落点复用既有处置通道，都不经风险分：
+
+    | 落点 | 条数 | 命中后 |
+    | --- | --- | --- |
+    | `tool_call_guard.dangerous_param_patterns` | 6 | 按 `review` 抬分并标记复核；并经 `router::_tool_call_guard_patterns` 参与自动遮挡时的工具调用剥离 |
+    | `sanitizer.command_patterns` | 5 | `response_disposition=sanitize`，渲染层据此把整个工具调用替换为占位 |
+    | `sanitizer.force_block_command_patterns` | 2 | 由 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`（默认 `false`）把关，作灰度开关 |
+
+  - `exfil_chain_secret_in_url_query` **只进第一处**：它命中正文会把流式回答截断，而一条文档示例 URL
+    不该有这个代价；作用在工具调用参数上则没有这个问题。它同时匹配真实密钥形态与 AegisGate 占位符
+    ——占位符出现在 URL query 位置，本身就是外泄企图。
+  - **`force_block_command_patterns` 的两条有额外影响面**：该组同时被 `router::_critical_danger_patterns()`
+    读取，而后者**不受** `AEGIS_STRICT_COMMAND_BLOCK_ENABLED` 把关。因此即使开关关着，命中这两条的工具
+    调用在自动遮挡路径上也会被替换为占位符——与该组既有条目的行为一致。
+  - 规则组数不变（仍 31 组），条数 172 → 185；`security_filters.yaml` 实际 32 组 / 228 → 241 条。
+  - 新增 `aegisgate/tests/test_exfil_chain_rules.py`（56 条）：17 条攻击语料必须命中，**30 条日常开发语料
+    必须一条都不命中**。后者更重要——它决定这套规则能不能一直开着。每条正则另过
+    `regex_probe` 沙箱与 `test_redos_guard` 的静态预算。
+  - 回滚：删掉 YAML 里的 `exfil_chain_*` 条目，走热加载，无需重启。
+
+
 ### Changed（行为变更：安全级别三档恢复为三档）
 
 - **`AEGIS_SECURITY_LEVEL=medium` 的阈值系数由 ×1.30 改为 ×1.00**，成为中性档：直接使用策略

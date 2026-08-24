@@ -764,12 +764,34 @@ sanitizer:
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)\s*http/1\.[01]\s+\d{3}\b'
     - id: web_http_obs_fold_header
       regex: '(?is)(?:%0d%0a|\\r\\n|\r\n)[ \t]+(?:content-length|transfer-encoding|host|x-forwarded-[a-z-]+)\s*:'
+    # Exfiltration chain seen in the response body. Same rules as tool_call_guard, minus
+    # exfil_chain_secret_in_url_query: a hit here sets response_disposition=sanitize, which on the
+    # streaming path truncates the answer, and a documented example URL must not cost the user
+    # the rest of the reply.
+    - id: exfil_chain_upload_credential_file
+      regex: '\b(?:curl|wget|ncat|nc|scp|rsync|invoke-restmethod|invoke-webrequest|requests\.(?:post|put))\b[^\n]{0,160}?(?:-T\b|--upload-file|--post-file|-F\b|--form|-d\s*@|--data(?:-binary|-raw|-urlencode)?\s*@|-X\s*P(?:OST|UT)|-Method\s+P(?:ost|ut)|-InFile)[^\n]{0,120}?[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b'
+    - id: exfil_chain_upload_credential_store
+      regex: '\b(?:curl|wget|ncat|nc|scp|rsync|invoke-restmethod|invoke-webrequest|requests\.(?:post|put))\b[^\n]{0,160}?(?:-T\b|--upload-file|--post-file|-F\b|--form|-d\s*@|--data(?:-binary|-raw|-urlencode)?\s*@|-X\s*P(?:OST|UT)|-Method\s+P(?:ost|ut)|-InFile)[^\n]{0,120}?(?:[/\\]\.(?:aws|ssh|gnupg|kube|azure)\b|[/\\]gcloud\b|\blogin[\s\\]{0,2}data\b|\bcookies\.sqlite\b|\bkey4\.db\b|\blogins\.json\b|\blogin\.keychain\b)'
+    - id: exfil_chain_credential_piped_out
+      regex: '(?:[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b|(?:[/\\]\.(?:aws|ssh|gnupg|kube|azure)\b|[/\\]gcloud\b|\blogin[\s\\]{0,2}data\b|\bcookies\.sqlite\b|\bkey4\.db\b|\blogins\.json\b|\blogin\.keychain\b))[^\n|]{0,160}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
+    - id: exfil_chain_env_dump_piped_out
+      regex: '(?:(?<![.\w/\\])(?:env|printenv)\b|get-childitem\s+env:|\bdir\s+env:)[^\n|]{0,120}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
+    - id: exfil_chain_recursive_secret_harvest
+      regex: '(?:grep|findstr|select-string|rg)\b[^\n|]{0,100}?-[a-z]{0,4}r[a-z]{0,4}\b[^\n|]{0,100}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
   # Controlled by its own switch: with AEGIS_STRICT_COMMAND_BLOCK_ENABLED=true a match blocks
   # outright (independent of security_level).
   # Keep only protocol-level attack signatures; Docker ops commands (stop/restart/down/exec) are
   # normal discussion in coding-assistant scenarios and are not force-blocked. To block Docker
   # commands, add an explicit action_map entry.
   force_block_command_patterns:
+    # Highest-confidence exfiltration forms only: credential data is the payload of an outbound
+    # transfer. Also feeds router._critical_danger_patterns(), which is *not* gated by
+    # AEGIS_STRICT_COMMAND_BLOCK_ENABLED — so these two additionally make a matching tool call be
+    # replaced by the placeholder on the auto-sanitize path, as the other entries here already do.
+    - id: exfil_chain_upload_credential_file
+      regex: '\b(?:curl|wget|ncat|nc|scp|rsync|invoke-restmethod|invoke-webrequest|requests\.(?:post|put))\b[^\n]{0,160}?(?:-T\b|--upload-file|--post-file|-F\b|--form|-d\s*@|--data(?:-binary|-raw|-urlencode)?\s*@|-X\s*P(?:OST|UT)|-Method\s+P(?:ost|ut)|-InFile)[^\n]{0,120}?[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b'
+    - id: exfil_chain_credential_piped_out
+      regex: '(?:[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b|(?:[/\\]\.(?:aws|ssh|gnupg|kube|azure)\b|[/\\]gcloud\b|\blogin[\s\\]{0,2}data\b|\bcookies\.sqlite\b|\bkey4\.db\b|\blogins\.json\b|\blogin\.keychain\b))[^\n|]{0,160}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
     - id: web_http_smuggling_cl_te
       regex: '(?is)\bcontent-length\s*:\s*\d+[ \t]*(?:\\r\\n|\r\n|\n)+[ \t]*transfer-encoding\s*:\s*chunked\b'
     - id: web_http_smuggling_te_cl
@@ -841,6 +863,30 @@ tool_call_guard:
       regex: '~/.ssh/(?:id_|authorized_keys|known_hosts|config)'
     - id: zh_sensitive
       regex: '(提权|读取本地密钥|导出.*(?:密钥|口令|凭据))'
+    # Exfiltration chain: collection (credential artefact) and egress (network transfer)
+    # both present in one command. Either side alone is an everyday developer action and is
+    # deliberately not listed here — only the pair is unambiguous.
+    # curl/wget/Invoke-RestMethod with an upload flag whose payload is a credential file.
+    - id: exfil_chain_upload_credential_file
+      regex: '\b(?:curl|wget|ncat|nc|scp|rsync|invoke-restmethod|invoke-webrequest|requests\.(?:post|put))\b[^\n]{0,160}?(?:-T\b|--upload-file|--post-file|-F\b|--form|-d\s*@|--data(?:-binary|-raw|-urlencode)?\s*@|-X\s*P(?:OST|UT)|-Method\s+P(?:ost|ut)|-InFile)[^\n]{0,120}?[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b'
+    # Same shape, but the payload is a credential directory or a browser secret store.
+    - id: exfil_chain_upload_credential_store
+      regex: '\b(?:curl|wget|ncat|nc|scp|rsync|invoke-restmethod|invoke-webrequest|requests\.(?:post|put))\b[^\n]{0,160}?(?:-T\b|--upload-file|--post-file|-F\b|--form|-d\s*@|--data(?:-binary|-raw|-urlencode)?\s*@|-X\s*P(?:OST|UT)|-Method\s+P(?:ost|ut)|-InFile)[^\n]{0,120}?(?:[/\\]\.(?:aws|ssh|gnupg|kube|azure)\b|[/\\]gcloud\b|\blogin[\s\\]{0,2}data\b|\bcookies\.sqlite\b|\bkey4\.db\b|\blogins\.json\b|\blogin\.keychain\b)'
+    # Credential artefact piped (|) into a network command — the pipe is what makes it
+    # exfiltration: `source .env && curl ...` passes no data to curl and does not match.
+    - id: exfil_chain_credential_piped_out
+      regex: '(?:[/\\.](?:aws[/\\]credentials|ssh[/\\]id_[a-z0-9_]{2,12}|docker[/\\]config\.json|kube[/\\]config|netrc|npmrc|pypirc|git-credentials|pgpass|env)\b|(?:[/\\]\.(?:aws|ssh|gnupg|kube|azure)\b|[/\\]gcloud\b|\blogin[\s\\]{0,2}data\b|\bcookies\.sqlite\b|\bkey4\.db\b|\blogins\.json\b|\blogin\.keychain\b))[^\n|]{0,160}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
+    # Whole-environment dump piped into a network command.
+    - id: exfil_chain_env_dump_piped_out
+      regex: '(?:(?<![.\w/\\])(?:env|printenv)\b|get-childitem\s+env:|\bdir\s+env:)[^\n|]{0,120}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
+    # Recursive search piped into a network command.
+    - id: exfil_chain_recursive_secret_harvest
+      regex: '(?:grep|findstr|select-string|rg)\b[^\n|]{0,100}?-[a-z]{0,4}r[a-z]{0,4}\b[^\n|]{0,100}?\|\s*(?:[a-z0-9_./-]{0,24}\s+)?(?:curl|wget|ncat|nc|invoke-restmethod|invoke-webrequest)\b'
+    # Secret carried in a URL query parameter — a real key shape or an AegisGate placeholder.
+    # Kept out of sanitizer.command_patterns: a documentation example in prose would otherwise
+    # truncate a streaming answer. Here it only sees actual tool-call arguments.
+    - id: exfil_chain_secret_in_url_query
+      regex: '[?&][a-z0-9_.-]{1,24}=(?:\{\{AG_[A-Z0-9]+_[A-Z0-9_]+_\d+\}\}|(?:sk|rk|pk|ghp|gho|ghu|ghs|glpat|xoxb|xoxp)[-_][A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)'
   semantic_approval_patterns:
     - id: approval_en
       regex: '\b(exfiltrate|leak\s+(?:secret|key|token|credential))\b'
