@@ -9,6 +9,49 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（外泄链路加固 S2：三条机制缺陷）
+
+补规则解决不了这三条——它们是机制问题，不先修的话新增的任何规则都会落进同一个空转路径。
+
+- **R2 · `request_sanitizer` 命中窃密意图后不再走空转分支。** `_apply_action` 只往
+  `enforcement_actions` 追加一行字符串，而 `action_map` 里 `secret_exfiltration` /
+  `privilege_escalation` / `rule_bypass` 都配成 `review`——于是命中这三类的请求只产生一行日志，
+  别的什么都没有。同一文件上方的 `leak_check` 分支是同一个形状的正确写法（review 档也抬 risk
+  并打标）；两个分支不对称是遗漏，不是设计。
+  - 抬到 **0.6，与 `leak_check` 相同**。`review` 在 `action_map` 的词汇表里是一件事，想让这几类
+    更重可以配 `block`；在这里私自发明一套严重度阶梯，只会让控制台统一的 block/review/sanitize
+    措辞去描述一件运行时不做的事——那正是这个分支原本的缺陷。
+  - 0.6 在所有处置闸门之下（响应侧拦截需要 medium 档的 0.85，流式终止需要 0.9），
+    `security_filters.yaml` 里「review = 只记录、不拦截」那句注释仍然成立。标签是 `request_`
+    前缀，碰不到 `_needs_confirmation` 与 `_stream_block_reason` 的 `response_` 前缀判定。
+  - 新增标签：`request_secret_exfiltration` / `request_privilege_abuse` / `request_rule_bypass` /
+    `request_strong_intent_attack`。
+
+- **R3 · 只读工具豁免收窄，并同时给它专用的 `observe` 动作。** `_READ_ONLY_CONTENT_TOOLS` 整类
+  跳过 `dangerous_param_patterns`，而被豁免的恰是外泄链的两端：`read` / `read_file` / `glob` /
+  `grep` 是采集，`webfetch` / `web_fetch` / `web_search` / `browser` / `search` 是出口。
+  - **收窄与配套动作在同一个 commit**——这是原子性问题不是排期问题。沿用现有的
+    `dangerous_param`（`review`）会设 `requires_human_review`，非流式下 `_needs_confirmation`
+    据此走自动遮挡，整个工具调用被替换为 `[CRITICAL-DANGER]` 占位符。而 `read ~/.ssh/config`、
+    `grep -r /etc/passwd` 是日常运维动作，那样改会在上线当天开始改写这类回答。
+  - 因此命中走独立的 `action_map.tool_call_guard.readonly_param`，两处规则源
+    （`security_filters.yaml` 与 `security_rules._DEFAULT_RULES`）都发 `observe`：只记录，
+    **不抬分、不设 `requires_human_review`**。
+  - `_apply_action` 新增显式 `default` 参数：挂载的旧 `security_filters.yaml` 缺这个键时兜底到
+    `observe`，而不是掉进 `default_action: review`——否则「升级」本身就是那个误拦。
+  - `todowrite` / `task` / `submit` / `multi_tool_use.parallel` / `notebook_edit` 既不读文件也不
+    上网，仍整类豁免。
+
+- **R1 · 已由 [#62](https://github.com/ax128/AegisGate/pull/62) 修复，本阶段只补回归钉。**
+  `threshold_multiplier` 的 medium 档已是 1.00，不再重复修。新增的钉子覆盖 `#62` 未覆盖的
+  **两处消费点**——它们在策略阈值之上又加了一层地板：
+    - `filters/sanitizer.py` 的 `max(ctx.risk_threshold, self._block_threshold)`：两半都随档位缩放；
+    - `adapters/openai_compat/stream_utils.py` 的 `max(ctx.risk_threshold, 0.9)`：**0.9 是硬编码、
+      不随档位缩放**，因此在所有把阈值调低的档位上由它说了算。这正是 R1 最初分析漏掉的那一处。
+
+- 新增 `aegisgate/tests/test_exfil_mechanism_fixes.py`（36 条）。
+
+
 ### Changed（行为变更：安全级别三档恢复为三档）
 
 - **`AEGIS_SECURITY_LEVEL=medium` 的阈值系数由 ×1.30 改为 ×1.00**，成为中性档：直接使用策略
