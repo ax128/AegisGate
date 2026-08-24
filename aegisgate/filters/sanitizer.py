@@ -9,6 +9,7 @@ from aegisgate.config.security_rules import load_security_rules
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.dangerous_response_log import mark_text_with_spans, write_dangerous_response_sample
+from aegisgate.core.exfil_evidence import record_hit as record_exfil_hit
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
@@ -37,6 +38,11 @@ class OutputSanitizer(BaseFilter):
 
         self._discussion_patterns = self._compile_patterns(sanitizer_rules.get("discussion_context_patterns", []))
         self._command_patterns = self._compile_patterns(sanitizer_rules.get("command_patterns", []))
+        # Same patterns, ids kept. The list above is consumed by the rewrite helpers,
+        # which take bare patterns; evidence needs to name the rule that fired.
+        self._command_patterns_by_id = self._compile_id_patterns(
+            sanitizer_rules.get("command_patterns", [])
+        )
         self._force_block_command_patterns = self._compile_id_patterns(
             sanitizer_rules.get("force_block_command_patterns", [])
         )
@@ -116,6 +122,25 @@ class OutputSanitizer(BaseFilter):
                 if match.start() != match.end():
                     spans.append((match.start(), match.end()))
         return spans
+
+    def _record_exfil_spans(self, scan_text: str, ctx: RequestContext) -> None:
+        """Name the exfiltration rules that fired, with spans but no fragments.
+
+        Only walked once the cheaper ``_matches_any`` already said something hit,
+        so an ordinary no-hit response pays nothing for it.
+        """
+        for rule_id, pattern in self._command_patterns_by_id:
+            match = pattern.search(scan_text)
+            if match is None:
+                continue
+            record_exfil_hit(
+                ctx,
+                rule_id=rule_id,
+                filter_name=self.name,
+                channel="response_text",
+                offset=match.start(),
+                length=len(match.group(0)),
+            )
 
     def _log_dangerous_sample(
         self,
@@ -210,6 +235,8 @@ class OutputSanitizer(BaseFilter):
         has_unsafe_markup = self._matches_any(scan_text, self._unsafe_markup_patterns)
         has_unsafe_uri = self._matches_any(scan_text, self._unsafe_uri_patterns)
         has_command_payload = self._matches_any(scan_text, self._command_patterns)
+        if has_command_payload:
+            self._record_exfil_spans(scan_text, ctx)
         has_encoded_payload = self._matches_any(scan_text, self._encoded_payload_patterns)
         has_spam = self._matches_any(scan_text, self._spam_noise_patterns)
 

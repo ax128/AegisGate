@@ -7,6 +7,7 @@ import re
 
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
+from aegisgate.core.exfil_evidence import record_hit as record_exfil_hit
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
@@ -313,12 +314,22 @@ class ToolCallGuard(BaseFilter):
                     else self._dangerous_param_patterns
                 )
                 args_haystacks = build_haystacks(args_text)
-                for _rule_id, pattern in patterns:
+                for rule_id, pattern in patterns:
                     if not pattern_hits_in(pattern, args_haystacks):
                         continue
                     match = pattern.search(args_text) or pattern.search(args_norm)
                     matched_text = (match.group(0) if match else args_norm)[:120]
                     violations.append(f"dangerous_param:{tool_name or 'unknown'}")
+                    # The rule identity is otherwise dropped here; the audit record
+                    # needs it to say *which* link of the exfiltration chain fired.
+                    record_exfil_hit(
+                        ctx,
+                        rule_id=rule_id,
+                        filter_name=self.name,
+                        channel="tool_call_arguments",
+                        offset=match.start() if match else 0,
+                        length=len(match.group(0)) if match else 0,
+                    )
                     action = self._apply_action(ctx, "dangerous_param")
                     blocked = blocked or action == "block"
                     logger.debug(

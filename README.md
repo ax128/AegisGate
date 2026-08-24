@@ -142,12 +142,23 @@ Health check: `curl http://127.0.0.1:18080/health`
 
 Readiness check: `curl http://127.0.0.1:18080/ready`
 
-The response body carries a `checks` map and a `degraded_checks` list. One check is
-reported without failing readiness: `security_rules` reads `stale: <error>` when the
-rules file on disk stops parsing. The gateway keeps enforcing the last document it
-loaded successfully, so it is still ready to serve — and since every replica reads
-the same file, failing readiness there would drop them all at once and turn a config
-typo into an outage. Alert on `degraded_checks` rather than on the status code alone.
+The response body carries a `checks` map and a `degraded_checks` list. Two checks are
+reported without failing readiness:
+
+- `security_rules` reads `stale: <error>` when the rules file on disk stops parsing.
+  The gateway keeps enforcing the last document it loaded successfully, so it is still
+  ready to serve — and since every replica reads the same file, failing readiness there
+  would drop them all at once and turn a config typo into an outage.
+- `risk_gate` reads `unreachable: security_level=… effective_threshold=…` when the
+  effective risk threshold has been clamped above every score an `action_map` action
+  can assign, which makes every "raise the risk, set no disposition" `block` entry a
+  no-op. On `AEGIS_SECURITY_LEVEL=low` that is the definition of the tier, not a fault
+  — hence non-gating. It is reported because the *other* way to reach this state is a
+  regression, and until now the condition had no outlet anywhere. Filters that set a
+  disposition directly are unaffected either way, which is what makes the failure
+  partial and easy to miss.
+
+Alert on `degraded_checks` rather than on the status code alone.
 
 Admin UI login: `http://localhost:18080/__ui__/login`
 
