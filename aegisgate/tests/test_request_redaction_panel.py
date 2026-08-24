@@ -105,37 +105,40 @@ class TestEndpoint:
 
 
 class TestEffectiveSurfaces:
-    def test_the_relaxed_set_governs_e1_e3_e4_and_e6(self, payload: dict) -> None:
-        """E6 joined the list when V2 stopped carrying its own hard-coded set."""
+    def test_the_relaxed_set_governs_e1_e3_and_e6(self, payload: dict) -> None:
+        """E6 joined when V2 dropped its hard-coded set; E4 left when the forward
+        layer started deriving from the route instead of the message role."""
         governed = payload["relaxed_governed_surfaces"]
-        assert governed == [
-            "v1_pipeline_chat",
-            "v1_forward_chat",
-            "v1_forward_multipart",
-            "v2_request",
-        ]
+        assert governed == ["v1_pipeline_chat", "v1_forward_chat", "v2_request"]
 
-    def test_multipart_forward_is_governed_by_the_relaxed_set(self, payload: dict) -> None:
-        """E4 is the surface v3 of this spec missed entirely.
+    def test_multipart_forward_uses_the_full_set(self, payload: dict) -> None:
+        """E4 now matches the set E2 scores it with.
 
         The multipart routes are not on the low-false-positive allowlist, so E2
-        scores them with the *full* set — but the forward path hard-codes
-        ``role="user"``, so what actually gets rewritten uses the relaxed set.
-        Dropping an id from ``relaxed_pii_ids`` silently turns off its redaction
-        on uploaded form fields.
+        scores them with the full set. The forward path used to hard-code
+        ``role="user"`` and therefore rewrite with the relaxed one — dropping an
+        id from ``relaxed_pii_ids`` silently turned off its redaction on
+        uploaded form fields while scoring still looked for it.
         """
         surface = next(s for s in payload["surfaces"] if s["code"] == "E4")
         assert surface["id"] == "v1_forward_multipart"
-        assert surface["pattern_set"] == "relaxed"
-
-        email = _rule(payload, "EMAIL")  # not in the custom relaxed list
-        assert email["effective_surfaces"]["v1_forward_multipart"] is False
+        assert surface["pattern_set"] == "full"
+        # Every enabled rule is live there, relaxed membership notwithstanding.
+        for rule in payload["pii_rules"]:
+            assert (
+                rule["effective_surfaces"]["v1_forward_multipart"] is rule["enabled"]
+            )
+        # EMAIL is absent from the custom relaxed list, and that no longer
+        # matters here — the scoring surface and the forward surface agree.
+        email = _rule(payload, "EMAIL")
+        assert email["effective_surfaces"]["v1_forward_multipart"] is True
         assert email["effective_surfaces"]["v1_pipeline_other"] is True
 
-    def test_chat_forward_notes_the_role_fallback(self, payload: dict) -> None:
+    def test_chat_forward_is_route_derived(self, payload: dict) -> None:
+        """E3 used to say "按消息角色判定" — it derives from the route now."""
         surface = next(s for s in payload["surfaces"] if s["code"] == "E3")
-        assert "常规角色 relaxed" in surface["note"]
-        assert "非常规角色" in surface["note"]
+        assert surface["detail"] == "按路由判定，与 E1 同一条判据"
+        assert "角色" in surface["note"]  # the history is still explained
 
     def test_generic_json_uses_the_full_set(self, payload: dict) -> None:
         surface = next(s for s in payload["surfaces"] if s["code"] == "E5")
@@ -158,12 +161,7 @@ class TestEffectiveSurfaces:
             if _rule(before, "EMAIL")["effective_surfaces"][key]
             != _rule(after, "EMAIL")["effective_surfaces"][key]
         }
-        assert moved == {
-            "v1_pipeline_chat",
-            "v1_forward_chat",
-            "v1_forward_multipart",
-            "v2_request",
-        }
+        assert moved == {"v1_pipeline_chat", "v1_forward_chat", "v2_request"}
 
     def test_v2_now_follows_the_relaxed_set(self, rules_file: Path) -> None:
         """Dropping an id from relaxed_pii_ids must take it off V2 too.
