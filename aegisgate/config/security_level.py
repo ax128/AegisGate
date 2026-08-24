@@ -1,11 +1,14 @@
 """Security level helpers for global sensitivity tuning.
 
-Three levels:
-- high: full detection; prefer a false block over a miss
-- medium (default): relaxed; most "possibly dangerous" instructions pass, only high-risk hits plus
-  redaction
-- low: very relaxed; essentially redaction only, plus extreme risks (system-prompt leaks, encoding
-  attacks, credential leaks) that disposition=block still forces a block on
+Three levels, with ``medium`` as the neutral middle:
+
+- high: full detection; thresholds tightened, score floors raised — prefer a false block over a miss
+- medium (default): the policy YAML's declared ``risk_threshold``, unscaled
+- low: very relaxed; the threshold is pushed past the clamp, so risk-based blocking effectively
+  never fires and protection comes from the disposition-setting filters plus redaction
+
+The levels never change *which* filters run — only how the resolved thresholds
+and per-filter score floors are scaled.
 """
 
 from __future__ import annotations
@@ -24,13 +27,27 @@ def normalize_security_level(raw: str | None = None) -> str:
 
 
 def threshold_multiplier(level: str | None = None) -> float:
-    """A larger multiplier raises the risk threshold, so fewer requests are blocked."""
+    """A larger multiplier raises the risk threshold, so fewer requests are blocked.
+
+    ``medium`` is neutral: it uses the policy YAML's declared ``risk_threshold``
+    unchanged, and the other two tiers adjust around it. It used to be 1.30,
+    which collapsed the three tiers into two on every shipped policy —
+    ``apply_threshold`` clamps to 1.0, and 0.85 × 1.30 and 0.85 × 1.60 both land
+    there. ``low`` and ``medium`` were therefore identical, and since the highest
+    score an ``action_map`` ``block`` assigns is 0.95, the score-based block path
+    could never fire at either tier.
+
+    Only this multiplier changed. ``count_threshold_multiplier`` and
+    ``floor_multiplier`` keep their shape: neither is clamped at a ceiling, so
+    neither produced the tier collapse, and each is a separate knob worth
+    assessing on its own evidence.
+    """
     current = normalize_security_level(level)
     if current == "high":
         return 0.90
     if current == "low":
         return 1.60   # threshold pushed very high, so risk-based blocking almost never fires
-    return 1.30        # medium: most suspicious instructions are not blocked
+    return 1.00        # medium: the policy's declared threshold, as declared
 
 
 def count_threshold_multiplier(level: str | None = None) -> float:

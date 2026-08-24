@@ -55,26 +55,23 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 - compose 与 Dockerfile 都缺 `healthcheck` / `HEALTHCHECK`，容器挂死时编排层看不出来。
 - Dockerfile 先 `COPY` 源码、后 `pip install`，任何源码改动都会击穿依赖层缓存；镜像里还带着 `aegisgate/tests`。调整 COPY 顺序并排除测试即可，属纯收益改动。
 
-### R6 — 风险阈值与 `block` 语义的一致性（M，**需先决策**）
+### R6 — 风险阈值与 `block` 语义的一致性（M）
 
-两处实测行为与文档/控制台呈现出的语义不一致。都属于「行为变更」，要单独 PR、单独回归，不要混进文档 PR。
+1. ~~**`medium` 也参与阈值缩放**~~ **已完成**：`medium` 的阈值系数改为 `1.00`（中性档，
+   原样使用策略 YAML 声明值）。此前 ×1.30 在三个自带策略上都 clamp 到 1.0，与 `low` 完全等价，
+   且基于分数的拦截分支永不触发。选择改系数而非改 `default.yaml`，是因为前者一次修好三个策略
+   （改 YAML 只修 `default`，`permissive` 仍会 medium≡low）。
+   `count_threshold_multiplier` 与 `floor_multiplier` **未改**：两者都不受上限 clamp，
+   没有造成档位坍缩，各自是独立的调节项。守护见 `aegisgate/tests/test_security_level_tiers.py`。
 
-1. **`medium` 也参与阈值缩放**。`policy_engine.resolve()` 对所有档位都调 `apply_threshold()`，
-   `medium` 的系数是 `1.30`。配 `default` 策略（`risk_threshold: 0.85`）时
-   `0.85 × 1.30 = 1.105`，clamp 后是 **1.0**；`low`（×1.60）同样是 1.0。于是：
-
-   - `low` 与 `medium` 在默认策略下**完全等价**，与「三档分层」的产品语义不符；
-   - `action_map` 的 `block` 最高把风险分抬到 `0.95`，所以 `OutputSanitizer` 里
-     `risk_score >= max(ctx.risk_threshold, self._block_threshold)` 这条**基于分数**的拦截分支
-     在默认配置下永不触发。
-
-   要么把 `medium` 的系数改回 `1.0`，要么把 `default.yaml` 的 `risk_threshold` 降到缩放后仍
-   `< 1.0` 的值。改哪个都会**提高**默认部署的拦截率，需要评估误拦。
-
-2. **`block` 在不同 filter 里语义不同**。`injection_detector` 与 `rag_poison_guard` 的 `block`
-   直接设置 `request_disposition` / `response_disposition`（不依赖阈值）；`restoration` 与
-   `sanitizer` 的 `block` 只做 `risk_score = max(..., 0.95)`，仍受阈值约束——叠加上面第 1 点，
-   在默认配置下不会拦截。控制台「动作映射」页把这四种动作呈现为统一语义，用户无从看出差别。
+2. **`block` 在不同 filter 里语义仍不统一**（未解决）。`injection_detector` 与
+   `rag_poison_guard` 的 `block` 直接设置 `request_disposition` / `response_disposition`，
+   **任何档位都强制拦截**；`restoration` 与 `sanitizer` 的 `block` 只做
+   `risk_score = max(..., 0.95)`，**仍受阈值约束**。
+   第 1 点修好之后，后者在 `medium` / `high` 下会真正拦截，在 `low` + `default`/`permissive`
+   下不会——差别从「永远不拦」变成「按档位」，但两类 `block` 的语义差异本身依然存在。
+   控制台「动作映射」页把它们呈现为统一语义，用户无从看出差别。收敛方式有两条路：
+   把后者也改为设置 disposition，或在控制台按「强制」/「按阈值」分开呈现。
 
 ### R7 — 无消费者的配置项（S）
 

@@ -120,13 +120,14 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
    | 级别 | 阈值系数 | 地板系数 | `default` 策略（0.85）的有效阈值 |
    |------|:---:|:---:|:---:|
    | `high` | ×0.90 | ×1.05 | 0.765 |
-   | `medium`（默认） | ×1.30 | ×0.85 | **1.0**（clamp） |
+   | `medium`（默认） | ×1.00 | ×0.85 | **0.85**（按策略声明值） |
    | `low` | ×1.60 | ×0.70 | **1.0**（clamp） |
 
-   注意 `medium` **也**会缩放——它不是「原样使用 YAML 声明值」。因此 `medium` / `low` 配
-   `default` 策略时，基于分数的拦截分支不会触发（`action_map` 的 `block` 最高只抬到 0.95）；
-   这两档的防护来自 `injection_detector` / `rag_poison_guard` 的硬处置与
-   `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。详见 README_zh §5.2 与 [ROADMAP.md](../ROADMAP.md)。
+   `medium` 是**中性档**：原样使用策略 YAML 声明的值，另外两档围绕它调整。因此在 `default`
+   策略下 `medium` 的有效阈值是 0.85，`action_map` 的 `block`（最高 0.95）能够达到阈值，
+   基于分数的拦截会真正触发。`low` 缩放后 clamp 到 1.0，基于分数的拦截不触发，防护来自
+   `injection_detector` / `rag_poison_guard` 的硬处置与 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。
+   `medium` 此前是 ×1.30，与 `low` 一样 clamp 到 1.0，两档完全等价——详见 README_zh §5.2。
 
    `AEGIS_RISK_SCORE_THRESHOLD` 是**全局兜底值**：策略 YAML 声明了 `risk_threshold` 就按策略
    覆盖它，而仓库自带的三个策略都声明了，所以它只对未声明该键的自定义策略 YAML 生效。

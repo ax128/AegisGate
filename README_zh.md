@@ -811,23 +811,28 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 | 级别               | 定位           | 行为                                            |
 | ---------------- | ------------ | --------------------------------------------- |
 | `high`           | 全量检测，宁可误拦不放过 | 阈值缩小（×0.90），地板抬高（×1.05），更容易触发拦截               |
-| **`medium`（默认）** | 宽松，仅高危 + 脱敏  | 阈值放大（×1.30），地板降低（×0.85），大部分"可能危险"指令不拦截        |
+| **`medium`（默认）** | 中性档，按策略声明值 | 阈值**不缩放**（×1.00），地板降低（×0.85）                       |
 | `low`            | 极宽松，基本只脱敏    | 阈值放大（×1.60），地板大幅降低（×0.70），几乎不触发 risk-based 拦截 |
 
 
-**缩放后的阈值会被 clamp 到 `1.0`**。因此在仓库自带的 `default` 策略下，`medium` 与 `low` 的有效阈值都是 `1.0`：
+`medium` 是**中性档**：直接用策略 YAML 声明的 `risk_threshold`，另外两档围绕它调整。
+缩放后的阈值会被 clamp 到 `1.0`：
 
-| 级别 | `default`（0.85） | `strict`（0.50） |
-| --- | --- | --- |
-| `high` | 0.765 | 0.45 |
-| `medium`（默认） | **1.0** | 0.65 |
-| `low` | **1.0** | 0.80 |
+| 级别 | `default`（0.85） | `strict`（0.50） | `permissive`（0.85） |
+| --- | --- | --- | --- |
+| `high` | 0.765 | 0.45 | 0.765 |
+| `medium`（默认） | **0.85** | 0.50 | **0.85** |
+| `low` | **1.0**（clamp） | 0.80 | **1.0**（clamp） |
 
-`action_map` 的 `block` 最高把风险分抬到 `0.95`，所以 `medium` / `low` + `default` 策略下，
-`OutputSanitizer` 里**基于分数**的拦截分支不会触发。这两档的防护来自不依赖阈值的硬处置路径
-（见下），以及 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。需要基于分数的拦截请用 `high`，
-或改用 `risk_threshold` 更低的策略 YAML（`strict` 为 0.50）。
-`medium` 是否应该参与缩放属于未决问题，记录在 [ROADMAP.md](ROADMAP.md)。
+`action_map` 的 `block` 最高把风险分抬到 `0.95`。因此：
+
+- **`medium` / `high`**：`block` 能够达到阈值，`OutputSanitizer` 与 `RestorationFilter` 里
+  **基于分数**的拦截分支会真正触发——与控制台一直呈现的语义一致。
+- **`low` + `default`/`permissive`**：阈值 clamp 到 1.0，基于分数的拦截不触发。这一档的防护来自
+  不依赖阈值的硬处置路径（见下）与 `AEGIS_STRICT_COMMAND_BLOCK_ENABLED`。这符合"极宽松、基本只脱敏"的定位。
+
+`medium` 此前是 ×1.30，在三个自带策略上都 clamp 到 1.0，导致 `medium` 与 `low` 完全等价、
+且基于分数的拦截永不触发。前后对比见 [CHANGELOG.md](CHANGELOG.md)。
 
 **不依赖阈值的硬处置**：`injection_detector` 与 `rag_poison_guard` 的 `block` 会直接设置
 `request_disposition` / `response_disposition`，任何级别下都强制拦截：
@@ -839,8 +844,10 @@ AEGIS_DOCKER_UPSTREAMS=8317:cli-proxy-api,8080:sub2api,3000:aiclient2api
 
 > **注意 `block` 语义并不统一**：`restoration`（`exfiltration` / `too_many_placeholders` /
 > `stale_mapping`）与 `sanitizer`（`system_leak`）配的 `block` **只把风险分抬到 0.95**，不设置
-> disposition，因此仍然受上表的阈值约束——在 `medium` / `low` + `default` 策略下不会真正拦截。
-> 控制台「动作映射」页把这四种动作呈现为统一语义，与此处的实现差异一并记录在 [ROADMAP.md](ROADMAP.md)。
+> disposition，因此仍然受上表的阈值约束——在 `medium` / `high` 下会真正拦截，在
+> `low` + `default`/`permissive` 下不会。这与 `injection_detector` / `rag_poison_guard` 的
+> `block`（任何档位都强制拦截）仍有差别，控制台「动作映射」页把两者呈现为统一语义，
+> 该表述差异记录在 [ROADMAP.md](ROADMAP.md) R6 第 2 条。
 
 > 如果你的场景确实需要放宽 `tool_call_injection`（例如上游会正常回传工具调用的文本表示），可在 `security_filters.yaml` 中把 `action_map.injection_detector.tool_call_injection` 改为 `review`，并把它从 `non_reducible_categories` 中移除。默认保持强拦截。
 
