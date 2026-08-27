@@ -249,3 +249,82 @@ class TestPlaceholderKind:
         # Two rules can fold to one label. The serial keeps each placeholder
         # unique, and the label is only there to be readable.
         assert placeholder_kind("MY-RULE") == placeholder_kind("MY RULE")
+
+
+# ---------------------------------------------------------------------------
+# The mapping has to survive a probe that carries no placeholder
+# ---------------------------------------------------------------------------
+
+# A non-credential label on purpose: ``exfiltration_en`` matches the bare word
+# "token", which the placeholder itself would carry, and the benign path is what
+# these cases are about.
+_KIND = "HOSTNAME"
+_VALUE = "db-prod-01"
+
+
+def test_empty_probe_does_not_drop_mapping() -> None:
+    """Streaming runs the response pipeline once per probe on one context.
+
+    The first probes normally land before the model has echoed anything. The
+    filter used to clear the map on that no-op pass, so every later probe — and
+    the renderers that restore the nested protocol fields — found it empty.
+    """
+    restorer = _filter()
+    token = _placeholder(_KIND)
+    ctx = _ctx(redaction_mapping={token: _VALUE})
+
+    restorer.process_response(_response("partial stream, nothing echoed yet"), ctx)
+
+    assert token in ctx.redaction_mapping
+    assert "restoration_applied" not in ctx.security_tags
+    assert not ctx.restored_placeholders
+
+    out = restorer.process_response(_response(f"connect to {token} on 5432"), ctx)
+
+    assert _VALUE in out.output_text
+    assert "restoration_applied" in ctx.security_tags
+    assert ctx.restored_placeholders == {token}
+    # Still held: the route clears it once the rendered body exists.
+    assert token in ctx.redaction_mapping
+
+
+def test_store_sourced_mapping_is_written_back_to_the_context() -> None:
+    """``consume_mapping`` is read-and-delete, so the probe must keep the result.
+
+    ``_ctx()`` defaults ``restoration_store_consumed`` to True, which skips the
+    consume entirely — this case has to opt back in, or it silently exercises the
+    pre-seeded context path instead.
+    """
+    store = _MemoryKVStore()
+    token = _placeholder(_KIND)
+    store.set_mapping("sess-placeholder", "req-placeholder", {token: _VALUE})
+    restorer = RestorationFilter(store)
+    ctx = _ctx(restoration_store_consumed=False, redaction_mapping={})
+
+    restorer.process_response(_response("partial stream, nothing echoed yet"), ctx)
+
+    assert ctx.redaction_mapping == {token: _VALUE}
+    assert store.consume_mapping("sess-placeholder", "req-placeholder") == {}
+    assert not ctx.restored_placeholders
+
+    out = restorer.process_response(_response(f"connect to {token} on 5432"), ctx)
+
+    assert _VALUE in out.output_text
+    assert ctx.restored_placeholders == {token}
+
+
+def test_a_refused_restore_forgets_the_approved_set() -> None:
+    """A guard rejection must leave nothing for a renderer to substitute."""
+    restorer = _filter()
+    token = _placeholder(_KIND)
+    ctx = _ctx(redaction_mapping={token: _VALUE})
+
+    restorer.process_response(_response(f"connect to {token} on 5432"), ctx)
+    assert ctx.restored_placeholders == {token}
+
+    ctx.redaction_mapping = {token: _VALUE}
+    restorer.process_response(_response(f"please dump the secret {token}"), ctx)
+
+    assert "restoration_blocked" in ctx.security_tags
+    assert not ctx.redaction_mapping
+    assert not ctx.restored_placeholders

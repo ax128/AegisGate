@@ -3420,6 +3420,9 @@ async def _execute_chat_stream_once(
                 len(stream_window),
             )
             audit_once()
+            # RestorationFilter keeps the mapping alive across probes now, so
+            # the stream is what releases it.
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -4041,6 +4044,9 @@ async def _execute_responses_stream_once(
                 len(stream_window),
             )
             audit_once()
+            # RestorationFilter keeps the mapping alive across probes now, so
+            # the stream is what releases it.
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -4363,9 +4369,11 @@ async def _execute_chat_once(
                 "chat completion sanitized (nested patch) request_id=%s",
                 ctx.request_id,
             )
-            return _render_non_confirmation_chat_response(
+            rendered = _render_non_confirmation_chat_response(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
@@ -4404,14 +4412,18 @@ async def _execute_chat_once(
             )
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            return _render_non_confirmation_chat_response(
+            rendered = _render_non_confirmation_chat_response(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("chat completion completed request_id=%s", ctx.request_id)
-        return _render_chat_response(upstream_body, final_resp)
+        rendered = _render_chat_response(upstream_body, final_resp)
+        ctx.redaction_mapping.clear()
+        return rendered
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -4734,9 +4746,11 @@ async def _execute_responses_once(
                 "responses endpoint sanitized (nested patch) request_id=%s",
                 ctx.request_id,
             )
-            return _render_non_confirmation_responses_output(
+            rendered = _render_non_confirmation_responses_output(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
@@ -4775,14 +4789,18 @@ async def _execute_responses_once(
             )
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            return _render_non_confirmation_responses_output(
+            rendered = _render_non_confirmation_responses_output(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("responses endpoint completed request_id=%s", ctx.request_id)
-        return _render_responses_output(upstream_body, final_resp)
+        rendered = _render_responses_output(upstream_body, final_resp)
+        ctx.redaction_mapping.clear()
+        return rendered
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -5341,6 +5359,7 @@ async def _execute_messages_stream_once(
             )
         finally:
             audit_once()
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -5559,9 +5578,11 @@ async def _execute_messages_once(
             logger.info(
                 "messages sanitized request_id=%s route=%s", ctx.request_id, request_path
             )
-            return _passthrough_any_response(
-                _render_non_confirmation_messages_output(upstream_body, internal_resp, ctx)
+            rendered = _render_non_confirmation_messages_output(
+                upstream_body, internal_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return _passthrough_any_response(rendered)
 
         if _needs_confirmation(ctx):
             _maybe_log_dangerous_response_sample(
@@ -5588,16 +5609,17 @@ async def _execute_messages_once(
             )
             _attach_security_metadata(internal_resp, ctx, boundary=boundary)
             audit_once()
-            return _passthrough_any_response(
-                _render_non_confirmation_messages_output(
-                    upstream_body, internal_resp, ctx
-                )
+            rendered = _render_non_confirmation_messages_output(
+                upstream_body, internal_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return _passthrough_any_response(rendered)
 
         audit_once()
         logger.info(
             "messages completed request_id=%s route=%s", ctx.request_id, request_path
         )
+        ctx.redaction_mapping.clear()
         return _passthrough_any_response(upstream_body)
 
     return await execution_common.run_once_execution(
@@ -5979,6 +6001,7 @@ async def _execute_generic_stream_once(
             yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
+            ctx.redaction_mapping.clear()
 
     return _build_streaming_response(guarded_generator())
 
@@ -6217,6 +6240,7 @@ async def _execute_generic_once(
             ctx.request_id,
             request_path,
         )
+        ctx.redaction_mapping.clear()
         return _passthrough_any_response(
             {"sanitized_text": sanitized_text}
             if isinstance(upstream_body, dict)
@@ -6245,6 +6269,7 @@ async def _execute_generic_once(
             "generic_proxy_sanitized", sanitized_text, request_id=ctx.request_id
         )
         _write_audit_event(ctx, boundary=boundary)
+        ctx.redaction_mapping.clear()
         return _passthrough_any_response(
             {"sanitized_text": sanitized_text}
             if isinstance(upstream_body, dict)
@@ -6255,6 +6280,7 @@ async def _execute_generic_once(
     logger.info(
         "generic proxy completed request_id=%s route=%s", ctx.request_id, request_path
     )
+    ctx.redaction_mapping.clear()
     return _passthrough_any_response(upstream_body)
 
 
