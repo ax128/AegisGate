@@ -4350,6 +4350,23 @@ async def _execute_chat_once(
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
 
+        if ctx.response_disposition == "sanitize":
+            # A surgical OutputSanitizer / PostRestoreGuard rewrite does not have
+            # to raise review or add a response_ tag, and the shallow renderer
+            # only replaces message.content — tool_calls kept the original text.
+            # Deliberately *only* sanitize: block keeps the auto-obfuscation
+            # branch below, which is where the whole-answer safe response, the
+            # dangerous-sample log and the disposition normalisation live.
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            audit_once()
+            logger.info(
+                "chat completion sanitized (nested patch) request_id=%s",
+                ctx.request_id,
+            )
+            return _render_non_confirmation_chat_response(
+                upstream_body, final_resp, ctx
+            )
+
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
                 ctx.disposition_reasons[0]
@@ -4706,6 +4723,20 @@ async def _execute_responses_once(
             ctx.enforcement_actions.append("confirmation:confirmed_release")
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
+
+        if ctx.response_disposition == "sanitize":
+            # Same reason as the chat route: a surgical rewrite must reach
+            # output[] and the function_call arguments, not only the convenience
+            # output_text field. block still goes through the branch below.
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            audit_once()
+            logger.info(
+                "responses endpoint sanitized (nested patch) request_id=%s",
+                ctx.request_id,
+            )
+            return _render_non_confirmation_responses_output(
+                upstream_body, final_resp, ctx
+            )
 
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
