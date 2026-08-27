@@ -1338,15 +1338,30 @@ def _extract_generic_analysis_text(value: Any) -> str:
 
 
 def _render_chat_response(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
-    return renderers.render_chat_response(upstream_body, final_resp)
+    return renderers.render_chat_response(upstream_body, final_resp, ctx)
 
 
 def _render_responses_output(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
-    return renderers.render_responses_output(upstream_body, final_resp)
+    return renderers.render_responses_output(upstream_body, final_resp, ctx)
+
+
+def _apply_pipeline_text_to_body(
+    route: str,
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
+) -> dict[str, Any] | str:
+    return renderers.apply_pipeline_text_to_body(
+        route, upstream_body, final_resp, ctx
+    )
 
 
 def _cap_response_text(text: str, ctx: RequestContext) -> str:
@@ -4421,7 +4436,7 @@ async def _execute_chat_once(
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("chat completion completed request_id=%s", ctx.request_id)
-        rendered = _render_chat_response(upstream_body, final_resp)
+        rendered = _render_chat_response(upstream_body, final_resp, ctx)
         ctx.redaction_mapping.clear()
         return rendered
 
@@ -4798,7 +4813,7 @@ async def _execute_responses_once(
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("responses endpoint completed request_id=%s", ctx.request_id)
-        rendered = _render_responses_output(upstream_body, final_resp)
+        rendered = _render_responses_output(upstream_body, final_resp, ctx)
         ctx.redaction_mapping.clear()
         return rendered
 
@@ -5619,8 +5634,13 @@ async def _execute_messages_once(
         logger.info(
             "messages completed request_id=%s route=%s", ctx.request_id, request_path
         )
+        # Returning upstream_body verbatim here discarded every pipeline rewrite
+        # this route had just made.
+        rendered = _apply_pipeline_text_to_body(
+            "/v1/messages", upstream_body, internal_resp, ctx
+        )
         ctx.redaction_mapping.clear()
-        return _passthrough_any_response(upstream_body)
+        return _passthrough_any_response(rendered)
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -6232,21 +6252,9 @@ async def _execute_generic_once(
         ctx.response_disposition,
         ctx.disposition_reasons,
     )
-    if ctx.response_disposition == "sanitize":
-        sanitized_text = internal_resp.output_text
-        _write_audit_event(ctx, boundary=boundary)
-        logger.info(
-            "generic proxy sanitized request_id=%s route=%s",
-            ctx.request_id,
-            request_path,
-        )
-        ctx.redaction_mapping.clear()
-        return _passthrough_any_response(
-            {"sanitized_text": sanitized_text}
-            if isinstance(upstream_body, dict)
-            else sanitized_text
-        )
-
+    # Three exits, in this order. The auto-obfuscation branch has to come first:
+    # a response that needs confirmation must not go back near-verbatim just
+    # because a surgical rewrite also set the sanitize disposition.
     if _needs_confirmation(ctx):
         _maybe_log_dangerous_response_sample(
             ctx,
@@ -6270,18 +6278,47 @@ async def _execute_generic_once(
         )
         _write_audit_event(ctx, boundary=boundary)
         ctx.redaction_mapping.clear()
+        # Whole-body replacement, shape deliberately not preserved: a blocked
+        # answer should not come back wearing the provider's own schema.
         return _passthrough_any_response(
             {"sanitized_text": sanitized_text}
             if isinstance(upstream_body, dict)
             else sanitized_text
         )
 
+    if ctx.response_disposition == "sanitize":
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info(
+            "generic proxy sanitized request_id=%s route=%s",
+            ctx.request_id,
+            request_path,
+        )
+        # Surgical rewrite: obfuscate the hit fragments inside every string leaf
+        # and keep the schema. Collapsing a dict body to a single
+        # ``sanitized_text`` key destroyed the shape embeddings / rerank clients
+        # parse.
+        rendered = (
+            renderers.sanitize_nested_text_value(
+                upstream_body, ctx, ops=_NON_STREAM_RENDER_OPS
+            )
+            if isinstance(upstream_body, dict)
+            else _sanitize_hit_fragments(str(upstream_body), ctx)
+        )
+        ctx.redaction_mapping.clear()
+        return _passthrough_any_response(rendered)
+
     _write_audit_event(ctx, boundary=boundary)
     logger.info(
         "generic proxy completed request_id=%s route=%s", ctx.request_id, request_path
     )
+    # Explicitly generic: a provider body has no known schema, so it must never
+    # be written back as if it were chat/responses/messages even if the subpath
+    # happens to look like one of them.
+    rendered = _apply_pipeline_text_to_body(
+        "generic", upstream_body, internal_resp, ctx
+    )
     ctx.redaction_mapping.clear()
-    return _passthrough_any_response(upstream_body)
+    return _passthrough_any_response(rendered)
 
 
 def _strip_content_type_header(headers: Mapping[str, str]) -> dict[str, str]:
