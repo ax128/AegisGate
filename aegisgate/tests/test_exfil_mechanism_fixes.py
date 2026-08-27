@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from aegisgate.adapters.openai_compat.stream_utils import RESPONSE_CONFIRMATION_TAGS
 from aegisgate.config.security_level import apply_threshold
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
@@ -147,9 +148,9 @@ def test_request_sanitizer_review_stays_under_every_disposition_gate() -> None:
     assert ctx.risk_score < max(apply_threshold(0.85), apply_threshold(_SANITIZER_BLOCK_FLOOR))
     assert ctx.risk_score < _STREAM_BLOCK_FLOOR
     assert ctx.requires_human_review is False
-    assert not any(tag.startswith("response_") for tag in ctx.security_tags), (
-        "a response_-prefixed tag would make _needs_confirmation auto-sanitize and "
-        "_stream_block_reason terminate the stream — neither is 'review'"
+    assert not (ctx.security_tags & RESPONSE_CONFIRMATION_TAGS), (
+        "a tag in the confirmation set would make _needs_confirmation auto-sanitize "
+        "and _stream_block_reason terminate the stream — neither is 'review'"
     )
 
 
@@ -294,7 +295,9 @@ def test_narrowed_exemption_observes_and_does_not_enforce(tool: str, args: dict)
     assert ctx.risk_score == 0.0
     assert ctx.requires_human_review is False
     assert "tool_call_guard:readonly_param:observe" in ctx.enforcement_actions
-    assert not any(tag.startswith("response_") for tag in ctx.security_tags)
+    # The bare ``response_`` prefix stopped being the gate; asserting on it would
+    # now guard nothing. The confirmation set is what auto-sanitizes.
+    assert not (ctx.security_tags & RESPONSE_CONFIRMATION_TAGS)
 
 
 def test_observe_does_not_terminate_a_stream() -> None:

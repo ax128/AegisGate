@@ -101,6 +101,29 @@ def _extract_stream_event_type(data_payload: str) -> str:
     return event_type.strip().lower()
 
 
+# The only response tags that gate on their own. Read by both
+# ``_stream_block_reason`` here and ``router._needs_confirmation``: a tag that
+# stops the stream but lets the non-stream answer through (or the reverse) is a
+# split decision on the same response.
+#
+# ``response_anomaly_high_risk_command`` is in the set because
+# ``_stream_block_reason`` treats it as an unconditional early return, outside
+# its own ``high_risk_tags`` literal, while ``AnomalyDetector`` only raises
+# ``requires_human_review`` once ``risk_score`` reaches the review threshold.
+# Copying just the literal would make the same high-risk-command answer
+# "stream terminated, non-stream allowed".
+RESPONSE_CONFIRMATION_TAGS: frozenset[str] = frozenset(
+    {
+        "response_privilege_abuse",
+        "response_injection_system_exfil",
+        "response_injection_unicode_bidi",
+        "response_semantic_leak",
+        "response_semantic_privilege",
+        "response_anomaly_high_risk_command",
+    }
+)
+
+
 def _stream_block_reason(ctx: RequestContext) -> str | None:
     # Command-like high risk output should always require confirmation in stream mode.
     if "response_anomaly_high_risk_command" in ctx.security_tags:
@@ -120,19 +143,12 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         )
         if has_block_action:
             return "response_tool_call_violation"
-    if ctx.requires_human_review and any(
-        tag.startswith("response_") for tag in ctx.security_tags
-    ):
-        return "response_human_review_required"
 
-    high_risk_tags = {
-        "response_privilege_abuse",
-        "response_injection_system_exfil",
-        "response_injection_unicode_bidi",
-        "response_semantic_leak",
-        "response_semantic_privilege",
-    }
-    for tag in high_risk_tags:
+    # "review plus any response_-prefixed tag" used to end the stream here. It
+    # caught audit-only tags — ``response_truncated`` from the length cap is the
+    # plain case — so a long but harmless answer was cut off. The explicit set
+    # below is the gate now.
+    for tag in RESPONSE_CONFIRMATION_TAGS:
         if tag in ctx.security_tags:
             return tag
     if ctx.risk_score >= max(ctx.risk_threshold, 0.9):

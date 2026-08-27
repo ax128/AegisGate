@@ -487,6 +487,11 @@ async def test_messages_json_auto_sanitize_preserves_anthropic_shape(monkeypatch
     safe_suffix = " Safe suffix text should also survive auto sanitize."
 
     async def auto_sanitize_pipeline(pipeline, resp: InternalResponse, ctx):
+        # ``requires_human_review`` is what an action_map ``review`` sets, and it
+        # is the gate that reaches the auto-obfuscation branch. This used to
+        # ride on the bare ``response_`` prefix instead, which also swept in
+        # audit-only tags such as the length cap's ``response_truncated``.
+        ctx.requires_human_review = True
         ctx.disposition_reasons.append("response_high_risk")
         ctx.security_tags.add("response_high_risk_fragment")
         ctx.report_items = [_dangerous_report_item(dangerous_fragment)]
