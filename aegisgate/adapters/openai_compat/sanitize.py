@@ -24,6 +24,11 @@ from aegisgate.util.redaction_whitelist import (
     protected_spans_for_text,
     range_overlaps_protected,
 )
+from aegisgate.util.text_normalize import (
+    build_haystacks,
+    pattern_hits_in,
+    strip_invisibles,
+)
 
 _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
     {
@@ -264,6 +269,127 @@ def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]]
     return tuple(select_relaxed_pii_patterns(_responses_function_output_redaction_patterns()))
 
 
+def _redact_leaf_with_patterns(
+    text: str,
+    patterns: tuple[tuple[str, re.Pattern[str]], ...]
+    | list[tuple[str, re.Pattern[str]]],
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one string leaf against *patterns*, detecting on the normalized form.
+
+    Two matching passes per rule, in this order:
+
+    1. ``sub`` on the original text — a plaintext hit is replaced surgically and
+       the rest of the leaf is forwarded byte for byte.
+    2. only if that missed, the rule is searched against the normalized copies
+       (``build_haystacks``). A hit there means the credential is only visible
+       once homoglyphs are folded or zero-width characters are dropped, and
+       there is no span in the original to substitute — so the whole leaf is
+       replaced with the marker.
+
+    The normalized text is never written back. NFKC folds full-width ``，（）：``
+    to ASCII and NBSP to a plain space, which would be a client-visible rewrite
+    of *every* forwarded string, not just the ones carrying a credential. This
+    is the contract ``util/text_normalize`` states and ``OutputSanitizer``
+    already follows.
+    """
+    if not text:
+        return "", []
+    # Detect on a copy with the invisibles removed: without this, a zero-width
+    # character inserted into a credential makes the leaf look base64-ish enough
+    # for the blob heuristic to wave the whole thing through.
+    if looks_like_base64_blob(strip_invisibles(text)):
+        return text, []
+
+    cleaned = _strip_system_exec_runtime_lines(text)
+    if not cleaned:
+        return "", []
+
+    hits: list[dict[str, Any]] = []
+    whitelist = set(normalize_whitelist_keys(whitelist_keys))
+    normalized_field = str(field or "").strip().lower()
+    if normalized_field and normalized_field in whitelist:
+        return cleaned, []
+
+    def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
+        marker_spans = [
+            (match.start(), match.end())
+            for match in _REDACTED_MARKER_RE.finditer(text)
+        ]
+        return _merge_spans(protected_spans_for_text(text, whitelist) + marker_spans)
+
+    # Spans only move when a substitution actually rewrites `cleaned`, so compute
+    # them once and refresh after a pattern that changed the text. Recomputing per
+    # pattern re-scanned the same string once for every PII pattern (11+ by default)
+    # on every string node of every message.
+    protected_spans = _compute_protected_spans(cleaned)
+    # Built on the first raw miss and reused across rules, because normalizing is
+    # the expensive half. Plain ASCII normalizes back to itself, so the tuple
+    # comes out empty and no rule pays for a second search.
+    normalized_forms: tuple[str, ...] | None = None
+    for pattern_id, pattern in patterns:
+        match_count = 0
+        first_raw = ""
+
+        def _repl(match: re.Match[str]) -> str:
+            nonlocal match_count, first_raw
+            if protected_spans and range_overlaps_protected(
+                protected_spans,
+                start=match.start(),
+                end=match.end(),
+            ):
+                return match.group(0)
+            if not first_raw:
+                first_raw = match.group(0)
+            match_count += 1
+            return f"[REDACTED:{pattern_id}]"
+
+        cleaned = pattern.sub(_repl, cleaned)
+        if match_count > 0:
+            protected_spans = _compute_protected_spans(cleaned)
+            normalized_forms = None  # the text moved; the old forms are stale
+            hits.append(
+                {
+                    "path": path,
+                    "field": field,
+                    "role": role or "unknown",
+                    "pattern": pattern_id,
+                    "count": match_count,
+                    "masked_value": mask_for_log(first_raw),
+                }
+            )
+            continue
+
+        if normalized_forms is None:
+            normalized_forms = tuple(
+                form for form in build_haystacks(cleaned) if form != cleaned
+            )
+        if not normalized_forms:
+            continue
+        if not pattern_hits_in(pattern, normalized_forms):
+            continue
+        hits.append(
+            {
+                "path": path,
+                "field": field,
+                "role": role or "unknown",
+                "pattern": pattern_id,
+                "count": 1,
+                "masked_value": mask_for_log(cleaned),
+            }
+        )
+        # Whole-leaf replacement, deliberately coarser than a surgical one: the
+        # match exists only in the normalized copy, so there is no span in the
+        # original text that can be substituted without emitting NFKC output.
+        return f"[REDACTED:{pattern_id}]", hits
+
+    return cleaned, hits
+
+
 def _sanitize_text_for_upstream_with_hits(
     text: str,
     *,
@@ -285,70 +411,19 @@ def _sanitize_text_for_upstream_with_hits(
     relaxed one. Making this a required argument is what stops that from
     reappearing by omission.
     """
-    if not text:
-        return "", []
-    if looks_like_base64_blob(text):
-        return text, []
-
-    cleaned = _strip_system_exec_runtime_lines(text)
-    if not cleaned:
-        return "", []
-
-    use_relaxed = relaxed_patterns
     patterns = (
         _responses_relaxed_redaction_patterns()
-        if use_relaxed
+        if relaxed_patterns
         else _responses_function_output_redaction_patterns()
     )
-    hits: list[dict[str, Any]] = []
-    whitelist = set(normalize_whitelist_keys(whitelist_keys))
-    normalized_field = str(field or "").strip().lower()
-    if normalized_field and normalized_field in whitelist:
-        return cleaned, []
-    def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
-        marker_spans = [
-            (match.start(), match.end())
-            for match in _REDACTED_MARKER_RE.finditer(text)
-        ]
-        return _merge_spans(protected_spans_for_text(text, whitelist) + marker_spans)
-
-    # Spans only move when a substitution actually rewrites `cleaned`, so compute
-    # them once and refresh after a pattern that changed the text. Recomputing per
-    # pattern re-scanned the same string once for every PII pattern (11+ by default)
-    # on every string node of every message.
-    protected_spans = _compute_protected_spans(cleaned)
-    for pattern_id, pattern in patterns:
-        match_count = 0
-        first_raw = ""
-
-        def _repl(match: re.Match[str]) -> str:
-            nonlocal match_count, first_raw
-            if protected_spans and range_overlaps_protected(
-                protected_spans,
-                start=match.start(),
-                end=match.end(),
-            ):
-                return match.group(0)
-            if not first_raw:
-                first_raw = match.group(0)
-            match_count += 1
-            return f"[REDACTED:{pattern_id}]"
-
-        cleaned = pattern.sub(_repl, cleaned)
-        if match_count <= 0:
-            continue
-        protected_spans = _compute_protected_spans(cleaned)
-        hits.append(
-            {
-                "path": path,
-                "field": field,
-                "role": role or "unknown",
-                "pattern": pattern_id,
-                "count": match_count,
-                "masked_value": mask_for_log(first_raw),
-            }
-        )
-    return cleaned, hits
+    return _redact_leaf_with_patterns(
+        text,
+        patterns,
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+    )
 
 
 def _skip_non_content_field(field: str | None) -> bool:
