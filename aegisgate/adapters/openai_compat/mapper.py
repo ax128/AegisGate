@@ -7,10 +7,16 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from aegisgate.config.settings import settings
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
 from aegisgate.util.logger import logger
+
+# Marks an InternalMessage the mapper derived from a payload field that the
+# forward-path builders rebuild from the original payload. Such a message is for
+# the request scanning surface only and must never be forwarded.
+AEGIS_SOURCE_FIELD_KEY = "aegis_source_field"
 
 
 _BINARY_PLACEHOLDER = "[BINARY_CONTENT]"
@@ -287,6 +293,33 @@ def to_internal_responses(payload: dict) -> InternalRequest:
     if not messages:
         messages.append(InternalMessage(role="user", content="", source="user"))
 
+    # ``instructions`` carries the system prompt on this route, which is where
+    # coding clients put environment details, absolute paths and internal
+    # service URLs. The forward path already redacted it (E3); the pipeline
+    # never saw it, so leak_check / shape / RAG scored the request without it.
+    #
+    # The derived message is tagged with ``aegis_source_field`` and exists only
+    # for the scanning surface: the upstream payload builder skips tagged
+    # messages, so nothing written here can reach the wire in place of the
+    # client's own ``input``.
+    instructions = payload.get("instructions")
+    if isinstance(instructions, (str, list, dict)):
+        instructions_text = _flatten_content(instructions)
+        instructions_text = _strip_system_exec_runtime_lines(instructions_text)
+        instructions_text = _cap_text(
+            instructions_text, settings.max_content_length_per_message
+        )
+        if instructions_text:
+            messages.insert(
+                0,
+                InternalMessage(
+                    role="system",
+                    content=instructions_text,
+                    source="system",
+                    metadata={AEGIS_SOURCE_FIELD_KEY: "instructions"},
+                ),
+            )
+
     return InternalRequest(
         request_id=request_id,
         session_id=session_id,
@@ -295,6 +328,25 @@ def to_internal_responses(payload: dict) -> InternalRequest:
         messages=messages,
         metadata={"raw": payload},
     )
+
+
+def is_derived_scan_message(message: Any) -> bool:
+    """True for a message that exists only to widen the request scanning surface.
+
+    Derived messages are built from fields the forward path rebuilds from the
+    original payload (``instructions`` today). Feeding one back into an upstream
+    payload would put the system prompt where the user's own input belongs.
+    """
+    metadata = getattr(message, "metadata", None)
+    return bool(isinstance(metadata, dict) and metadata.get(AEGIS_SOURCE_FIELD_KEY))
+
+
+def first_forwardable_message(messages: list) -> Any | None:
+    """The first message that is not a derived scan-only message."""
+    for message in messages or []:
+        if not is_derived_scan_message(message):
+            return message
+    return None
 
 
 def to_responses_output(resp: InternalResponse) -> dict:

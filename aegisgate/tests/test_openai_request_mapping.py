@@ -11,6 +11,7 @@ from aegisgate.adapters.openai_compat.mapper import (
     responses_response_to_messages_response,
     to_internal_chat,
     to_internal_messages,
+    to_internal_responses,
 )
 
 
@@ -543,3 +544,132 @@ def test_sanitize_for_chat_keeps_parallel_tool_calls_and_reasoning() -> None:
     )
     assert "reasoning" not in dropped
 
+
+
+# ---------------------------------------------------------------------------
+# Responses `instructions` reaches the request pipeline, and only the pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_to_internal_responses_includes_instructions_as_system() -> None:
+    """The system prompt on this route lives in ``instructions``.
+
+    The forward path already redacted it; the pipeline never converted it, so
+    leak_check / shape / RAG scored the request without the field where coding
+    clients put environment details, absolute paths and internal service URLs.
+    """
+    req = to_internal_responses(
+        {
+            "model": "gpt-5.4",
+            "instructions": "internal service url should be scanned",
+            "input": "hello",
+        }
+    )
+
+    assert req.messages[0].role == "system"
+    assert req.messages[0].source == "system"
+    assert req.messages[0].metadata.get("aegis_source_field") == "instructions"
+    assert "internal service url should be scanned" in req.messages[0].content
+    assert req.messages[-1].content == "hello"
+
+
+def test_structured_instructions_are_flattened_for_scanning() -> None:
+    req = to_internal_responses(
+        {
+            "model": "gpt-5.4",
+            "instructions": [{"type": "text", "text": "rule one"}],
+            "input": "hello",
+        }
+    )
+    assert "rule one" in req.messages[0].content
+
+
+def test_no_instructions_means_no_derived_message() -> None:
+    req = to_internal_responses({"model": "gpt-5.4", "input": "hello"})
+    assert len(req.messages) == 1
+    assert req.messages[0].role == "user"
+    assert req.messages[0].content == "hello"
+
+
+def test_empty_instructions_do_not_add_a_blank_message() -> None:
+    req = to_internal_responses(
+        {"model": "gpt-5.4", "instructions": "   ", "input": "hello"}
+    )
+    assert all(
+        not mapper.is_derived_scan_message(message) for message in req.messages
+    )
+
+
+def test_instructions_do_not_replace_the_forwarded_input() -> None:
+    """Without this the user's actual question is dropped on the wire.
+
+    ``_build_responses_upstream_payload`` used to take ``messages[0]`` for a
+    plain-string ``input``, and the derived message now sits at index 0.
+    """
+    from aegisgate.adapters.openai_compat.router import (
+        _build_responses_upstream_payload,
+    )
+
+    payload = {"model": "gpt-5.4", "instructions": "SYSTEM RULES", "input": "hello"}
+    req = to_internal_responses(payload)
+
+    upstream = _build_responses_upstream_payload(
+        payload,
+        req.messages,
+        request_id="req-instr-1",
+        session_id="sess-instr-1",
+        route="/v1/responses",
+        tenant_id="default",
+        request_headers={},
+    )
+
+    assert upstream["input"] == "hello"
+    # ``instructions`` is still forwarded, and still redacted by the forward
+    # pass — this change only widened the scanning surface.
+    assert upstream["instructions"] == "SYSTEM RULES"
+
+
+def test_a_pipeline_rewrite_of_instructions_never_reaches_the_wire() -> None:
+    """Shape / strong-intent actions rewrite message content in place.
+
+    The derived message is scan-only, so a rewrite of it must not turn into an
+    outbound change.
+    """
+    from aegisgate.adapters.openai_compat.router import (
+        _build_responses_upstream_payload,
+    )
+
+    payload = {"model": "gpt-5.4", "instructions": "SYSTEM RULES", "input": "hello"}
+    req = to_internal_responses(payload)
+    req.messages[0].content = "[REWRITTEN BY A FILTER]"
+
+    upstream = _build_responses_upstream_payload(
+        payload,
+        req.messages,
+        request_id="req-instr-2",
+        session_id="sess-instr-2",
+        route="/v1/responses",
+        tenant_id="default",
+        request_headers={},
+    )
+
+    assert upstream["input"] == "hello"
+    assert "[REWRITTEN BY A FILTER]" not in json.dumps(upstream, ensure_ascii=False)
+
+
+def test_derived_messages_are_identifiable_and_skipped() -> None:
+    from aegisgate.core.models import InternalMessage
+
+    derived = InternalMessage(
+        role="system",
+        content="rules",
+        source="system",
+        metadata={"aegis_source_field": "instructions"},
+    )
+    plain = InternalMessage(role="user", content="hello")
+
+    assert mapper.is_derived_scan_message(derived) is True
+    assert mapper.is_derived_scan_message(plain) is False
+    assert mapper.first_forwardable_message([derived, plain]) is plain
+    assert mapper.first_forwardable_message([derived]) is None
+    assert mapper.first_forwardable_message([]) is None
