@@ -10,8 +10,10 @@ import re
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
+from urllib.parse import SplitResult, urlsplit
 
 from aegisgate.config.security_rules import (
+    DEFAULT_RELAXED_PII_IDS,
     is_low_false_positive_route,
     load_security_rules,
     rule_enabled,
@@ -96,6 +98,9 @@ _MEDIA_SOURCE_URL_BLOCK_TYPES = frozenset(
         "input_file",
     }
 )
+# The id the whole-value fallback reports when a redacted media locator stops
+# being a usable URL.
+_URL_QUERY_PATTERN_ID = "URL_TOKEN_QUERY"
 _CONTENT_BLOCK_PATH_RE = re.compile(r"(?:^|\.)content\[\d+\]$")
 _SYSTEM_BLOCK_PATH_RE = re.compile(r"^system\[\d+\]$")
 
@@ -267,6 +272,239 @@ def _responses_function_output_redaction_patterns() -> tuple[
 @lru_cache(maxsize=1)
 def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
     return tuple(select_relaxed_pii_patterns(_responses_function_output_redaction_patterns()))
+
+
+@lru_cache(maxsize=1)
+def _field_value_pattern_ids() -> frozenset[str]:
+    """Ids contributed by the ``field_value_patterns`` layer.
+
+    ``_responses_function_output_redaction_patterns`` concatenates the two
+    layers into one tuple, so afterwards the only way to tell them apart is to
+    ask the rules which ids the PII list declared. Everything else came from the
+    field layer, built-in defaults included.
+    """
+    rules = load_security_rules().get("redaction", {})
+    patterns = rules.get("pii_patterns")
+    pii_ids = (
+        {
+            str(item.get("id", "")).upper()
+            for item in patterns
+            if isinstance(item, dict) and item.get("id")
+        }
+        if isinstance(patterns, list)
+        else set()
+    )
+    return frozenset(
+        pattern_id
+        for pattern_id, _ in _responses_function_output_redaction_patterns()
+        if pattern_id not in pii_ids
+    )
+
+
+@lru_cache(maxsize=1)
+def _credential_only_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The fixed credential-class rule set for surfaces that must not lose paths.
+
+    Deliberately **not** ``relaxed_patterns=True``: the relaxed set resolves
+    through ``redaction.relaxed_pii_ids``, which accepts ``"*"`` and is
+    deployment-configurable, so a site that widened it would start rewriting
+    file paths inside historical tool calls — which is the exact corruption the
+    ``function_call.arguments`` skip existed to prevent (a coding agent can no
+    longer reference its own prior calls).
+
+    The membership rule here is a hard constraint instead: the built-in
+    ``DEFAULT_RELAXED_PII_IDS`` constant plus the whole ``field_value_patterns``
+    layer. Path-class rules such as ``SYS_HOME_PATH`` never run, under any
+    configuration.
+    """
+    allowed = set(DEFAULT_RELAXED_PII_IDS) | set(_field_value_pattern_ids())
+    return tuple(
+        (pattern_id, pattern)
+        for pattern_id, pattern in _responses_function_output_redaction_patterns()
+        if pattern_id in allowed
+    )
+
+
+def _sanitize_credentials_for_upstream_with_hits(
+    text: str,
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one leaf against the credential-only set. See :func:`_credential_only_patterns`."""
+    return _redact_leaf_with_patterns(
+        text,
+        _credential_only_patterns(),
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+    )
+
+
+def _absolute_url(text: str) -> SplitResult | None:
+    """The parsed form when *text* is an absolute URL, else None.
+
+    A bare ``file_id`` or a relative reference has no shape to protect and comes
+    back as None.
+    """
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None
+    if parsed.scheme and parsed.netloc:
+        return parsed
+    return None
+
+
+@lru_cache(maxsize=1)
+def _url_token_query_pattern() -> re.Pattern[str] | None:
+    """The shipped ``URL_TOKEN_QUERY`` rule, reused rather than re-declared.
+
+    The query-parameter names that count as credential-bearing live inside that
+    one regex. Copying the list here is how the two would drift.
+    """
+    for pattern_id, pattern in _responses_function_output_redaction_patterns():
+        if pattern_id == _URL_QUERY_PATTERN_ID:
+            return pattern
+    return None
+
+
+def _query_pair_is_credential(key: str, value: str) -> bool:
+    """Would the shipped URL rule call this ``key=value`` pair a credential?
+
+    Probed through a synthetic locator so the rule itself decides, including
+    which parameter names and which value shapes qualify.
+    """
+    pattern = _url_token_query_pattern()
+    if pattern is None:
+        return False
+    return bool(pattern.search(f"https://probe.invalid/?{key}={value}"))
+
+
+def _redact_url_query_credentials(
+    parsed: SplitResult,
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact credential-bearing query values, one parameter at a time.
+
+    Running ``URL_TOKEN_QUERY`` against the whole locator and substituting would
+    delete the scheme and host with it — the rule matches from ``https://``
+    through the credential — leaving nothing the upstream can fetch. Working per
+    parameter keeps everything outside the value byte-identical.
+    """
+    hits: list[dict[str, Any]] = []
+    rebuilt: list[str] = []
+    changed = False
+    for pair in parsed.query.split("&"):
+        key, sep, value = pair.partition("=")
+        if not sep or not value:
+            rebuilt.append(pair)
+            continue
+        if _query_pair_is_credential(key, value):
+            changed = True
+            hits.append(
+                {
+                    "path": path,
+                    "field": field,
+                    "role": role or "unknown",
+                    "pattern": _URL_QUERY_PATTERN_ID,
+                    "count": 1,
+                    "masked_value": mask_for_log(value),
+                }
+            )
+            rebuilt.append(f"{key}=[REDACTED:{_URL_QUERY_PATTERN_ID}]")
+            continue
+        cleaned_value, value_hits = _sanitize_credentials_for_upstream_with_hits(
+            value,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+        )
+        if value_hits:
+            changed = True
+            hits.extend(value_hits)
+            rebuilt.append(f"{key}={cleaned_value}")
+            continue
+        rebuilt.append(pair)
+    if not changed:
+        return parsed.geturl(), hits
+    return parsed._replace(query="&".join(rebuilt)).geturl(), hits
+
+
+def _redact_media_locator(
+    text: str,
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact credentials out of an ``image_url`` / ``file_id`` / block ``url``.
+
+    These used to be scanned for the audit log and then forwarded verbatim, so a
+    presigned link carrying ``?api_key=…`` left the gateway intact.
+
+    Two passes, because a locator that stops being fetchable is its own kind of
+    breakage: the query is rewritten per parameter (shape kept by
+    construction), then the rest of the value goes through the credential-only
+    set for a credential sitting in the host or the path. If *that* rewrite
+    leaves something no longer parseable as the same URL, the whole value is
+    replaced rather than shipping a broken link.
+    """
+    parsed = _absolute_url(text)
+    if parsed is None:
+        return _sanitize_credentials_for_upstream_with_hits(
+            text,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+        )
+
+    hits: list[dict[str, Any]] = []
+    candidate = text
+    if parsed.query:
+        candidate, query_hits = _redact_url_query_credentials(
+            parsed,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+        )
+        hits.extend(query_hits)
+
+    cleaned, rest_hits = _sanitize_credentials_for_upstream_with_hits(
+        candidate,
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+    )
+    if not rest_hits:
+        return candidate, hits
+    hits.extend(rest_hits)
+    if _preserves_url_shape(text, cleaned):
+        return cleaned, hits
+    return f"[REDACTED:{_URL_QUERY_PATTERN_ID}]", hits
+
+
+def _preserves_url_shape(original: str, rewritten: str) -> bool:
+    """True when *rewritten* is still an absolute URL with the same scheme and host."""
+    before = _absolute_url(original)
+    if before is None:
+        return True
+    after = _absolute_url(rewritten)
+    if after is None:
+        return False
+    return after.scheme == before.scheme and after.netloc == before.netloc
 
 
 def _redact_leaf_with_patterns(
@@ -495,23 +733,23 @@ def _sanitize_structured_node(
     if isinstance(node, str):
         if skip_field(field):
             return node
-        # Media locator fields (image_url/file_id) must be forwarded as-is.
-        # We still scan and record redaction hits for audit visibility.
+        # Media locator fields (image_url/file_id) run the credential-only set:
+        # a presigned link's query is exactly where a token rides out, and the
+        # full set would rewrite the path segments the upstream needs.
         if _is_media_locator_field(
             path=path,
             field=field,
             media_block_type=media_block_type,
         ):
-            _, node_hits = _sanitize_text_for_upstream_with_hits(
+            cleaned, node_hits = _redact_media_locator(
                 node,
                 role=role,
                 path=path,
                 field=field,
                 whitelist_keys=whitelist_keys,
-                relaxed_patterns=relaxed_patterns,
             )
             _record_hits(hits, node_hits)
-            return node
+            return cleaned
 
         cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
             node,
@@ -756,6 +994,53 @@ def _should_skip_responses_field_redaction(field: str | None) -> bool:
     )
 
 
+def _sanitize_credential_only_value(
+    value: Any,
+    *,
+    path: str,
+    role: str,
+    field: str,
+    whitelist_keys: set[str] | None,
+    hits: list[dict[str, Any]],
+) -> Any:
+    """Walk *value* applying the credential-only set to every string leaf."""
+    if isinstance(value, str):
+        cleaned, node_hits = _sanitize_credentials_for_upstream_with_hits(
+            value,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+        )
+        hits.extend(node_hits)
+        return cleaned
+    if isinstance(value, list):
+        return [
+            _sanitize_credential_only_value(
+                item,
+                path=f"{path}[{idx}]",
+                role=role,
+                field=field,
+                whitelist_keys=whitelist_keys,
+                hits=hits,
+            )
+            for idx, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_credential_only_value(
+                item,
+                path=f"{path}.{key}",
+                role=role,
+                field=key,
+                whitelist_keys=whitelist_keys,
+                hits=hits,
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 def _sanitize_responses_input_for_upstream_with_hits(
     value: Any,
     *,
@@ -787,16 +1072,15 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 field=field,
                 media_block_type=media_block_type,
             ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
+                cleaned, node_hits = _redact_media_locator(
                     node,
                     role=role,
                     path=path,
                     field=field or "text",
                     whitelist_keys=whitelist_keys,
-                    relaxed_patterns=relaxed,
                 )
                 hits.extend(node_hits)
-                return node
+                return cleaned
             if _should_skip_responses_field_redaction(field):
                 return node
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
@@ -840,13 +1124,25 @@ def _sanitize_responses_input_for_upstream_with_hits(
             for key, item in node.items():
                 child_path = f"{path}.{key}" if path else key
 
-                # Skip redaction of function_call arguments — these are
-                # model-generated tool invocations in conversation history.
-                # Redacting file paths in them (e.g. SYS_HOME_PATH) corrupts
-                # the context and prevents coding agents from referencing
-                # their own prior tool calls.
+                # function_call arguments are model-generated tool invocations
+                # from conversation history. Redacting file paths in them (e.g.
+                # SYS_HOME_PATH) corrupts the context and stops coding agents
+                # referencing their own prior calls — so the path-class rules
+                # still never run here. What used to be skipped along with them
+                # was the credential class, and a token pasted into a tool
+                # argument left the gateway in cleartext. The fixed
+                # credential-only set is what runs now; it does not follow
+                # ``relaxed_pii_ids``, so no configuration can drag the path
+                # rules back in.
                 if node_type == "function_call" and key == "arguments":
-                    copied[key] = item
+                    copied[key] = _sanitize_credential_only_value(
+                        item,
+                        path=child_path,
+                        role=node_role,
+                        field=key,
+                        whitelist_keys=whitelist_keys,
+                        hits=hits,
+                    )
                     continue
 
                 if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {
