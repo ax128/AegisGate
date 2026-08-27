@@ -315,3 +315,185 @@ class TestConsoleRefusesToOverwriteAnUnreadableFile:
         assert client.post(
             "/__ui__/api/redact_values", json={"value": "SECOND-SECRET-VALUE"}
         ).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The forward path is where structured payloads actually leave
+# ---------------------------------------------------------------------------
+#
+# ``ExactValueRedactionFilter`` only ever rewrote the flattened
+# ``InternalRequest`` text. Chat / Responses payloads forward their own
+# structured ``content`` blocks, which that copy never becomes — so on exactly
+# the routes that carry structured content a configured value went upstream in
+# cleartext while the pipeline reported it as redacted.
+
+
+def _chat_payload(text: str) -> dict:
+    return {
+        "model": "gpt-5.4",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "text", "text": "trailing block"},
+                ],
+            }
+        ],
+    }
+
+
+def _build_chat_upstream(payload: dict) -> dict:
+    from aegisgate.adapters.openai_compat.router import _build_chat_upstream_payload
+    from aegisgate.core.models import InternalMessage
+
+    return _build_chat_upstream_payload(
+        payload,
+        [InternalMessage(role="user", content="flattened copy")],
+        request_id="req-exact-1",
+        session_id="sess-exact-1",
+        route="/v1/chat/completions",
+    )
+
+
+def test_structured_chat_content_loses_the_configured_value(values_file) -> None:
+    save_redact_values([_GOOD_VALUE])
+
+    upstream = _build_chat_upstream(_chat_payload(f"my key is {_GOOD_VALUE} ok"))
+    blocks = upstream["messages"][0]["content"]
+
+    assert _GOOD_VALUE not in json.dumps(upstream, ensure_ascii=False)
+    assert blocks[0]["text"] == "my key is [REDACTED:EXACT_VALUE] ok"
+    # Shape intact and untouched blocks byte-identical.
+    assert blocks[1]["text"] == "trailing block"
+
+
+def test_structured_responses_input_loses_the_configured_value(values_file) -> None:
+    from aegisgate.adapters.openai_compat.sanitize import (
+        _sanitize_responses_input_for_upstream_with_hits,
+    )
+
+    save_redact_values([_GOOD_VALUE])
+
+    sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"key {_GOOD_VALUE} here"}],
+            }
+        ],
+        route="/v1/responses",
+    )
+
+    assert _GOOD_VALUE not in json.dumps(sanitized, ensure_ascii=False)
+    assert "[REDACTED:EXACT_VALUE]" in sanitized[0]["content"][0]["text"]
+    assert any(hit["pattern"] == "EXACT_VALUE" for hit in hits)
+
+
+def test_generic_provider_payloads_are_covered_too(values_file) -> None:
+    from aegisgate.adapters.openai_compat.sanitize import (
+        _sanitize_generic_payload_for_upstream_with_hits,
+    )
+
+    save_redact_values([_GOOD_VALUE])
+
+    sanitized, _ = _sanitize_generic_payload_for_upstream_with_hits(
+        {"input": [f"embed {_GOOD_VALUE}"], "model": "text-embedding-3-small"}
+    )
+
+    assert sanitized["input"][0] == "embed [REDACTED:EXACT_VALUE]"
+    assert sanitized["model"] == "text-embedding-3-small"
+
+
+def test_an_empty_table_leaves_the_payload_byte_identical(values_file) -> None:
+    """Performance clause: no configured values means no per-leaf work."""
+    import copy
+
+    payload = _chat_payload(f"my key is {_GOOD_VALUE} ok")
+    expected = copy.deepcopy(payload["messages"])
+
+    assert load_redact_values() == []
+    upstream = _build_chat_upstream(payload)
+
+    assert upstream["messages"] == expected
+
+
+def test_the_snapshot_is_taken_once_per_walk(
+    values_file, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forward path walks every string leaf; the list is read once.
+
+    ``load_redact_values`` is mtime-cached but still stats the file per call, and
+    a coding agent's payload has a lot of leaves.
+    """
+    import aegisgate.adapters.openai_compat.sanitize as sanitize_module
+
+    save_redact_values([_GOOD_VALUE])
+    calls = {"n": 0}
+    real = sanitize_module.load_redact_values
+
+    def _counting_load() -> list[str]:
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(sanitize_module, "load_redact_values", _counting_load)
+
+    payload = {
+        "model": "gpt-5.4",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"leaf {idx} {_GOOD_VALUE}"}
+                    for idx in range(24)
+                ],
+            }
+        ],
+    }
+    upstream = _build_chat_upstream(payload)
+
+    assert _GOOD_VALUE not in json.dumps(upstream, ensure_ascii=False)
+    assert calls["n"] == 1, (
+        f"resolved the exact-value list {calls['n']} times for one payload walk"
+    )
+
+
+def test_the_filter_report_reflects_what_it_replaced(values_file) -> None:
+    """``report()`` used to be a constant ``hit: False``.
+
+    An audit event could not tell a request that tripped the exact-value list
+    from one that never had a match.
+    """
+    from aegisgate.core.context import RequestContext
+    from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
+    from aegisgate.filters.exact_value_redaction import ExactValueRedactionFilter
+
+    save_redact_values([_GOOD_VALUE])
+    filt = ExactValueRedactionFilter()
+    ctx = RequestContext(request_id="r", session_id="s", route="/v1/chat/completions")
+
+    filt.process_request(
+        InternalRequest(
+            request_id="r",
+            session_id="s",
+            route="/v1/chat/completions",
+            model="gpt-5.4",
+            messages=[InternalMessage(role="user", content=f"a {_GOOD_VALUE} b")],
+        ),
+        ctx,
+    )
+    assert filt.report() == {
+        "filter": "exact_value_redaction",
+        "hit": True,
+        "risk_score": 0.0,
+        "replacements": 1,
+    }
+
+    filt.process_response(
+        InternalResponse(
+            request_id="r", session_id="s", model="gpt-5.4", output_text="nothing here"
+        ),
+        ctx,
+    )
+    assert filt.report()["hit"] is False
+    assert filt.report()["replacements"] == 0

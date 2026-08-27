@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from cryptography.fernet import InvalidToken
@@ -204,14 +204,15 @@ def save_redact_values(values: Iterable[object]) -> None:
     logger.info("redact_values: saved %d values to %s", len(clean), path)
 
 
-def replace_exact_values(text: str) -> tuple[str, int]:
-    """Replace all configured exact values in *text*.
+def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, int]:
+    """Replace every entry of *values* in *text*.
 
-    Returns ``(replaced_text, replacement_count)``.  Values are matched
-    longest-first to avoid partial replacements.
+    Split out from :func:`replace_exact_values` so a caller walking thousands of
+    string leaves can resolve the list **once** instead of re-reading it (and
+    re-``stat``-ing the file behind it) per leaf. An empty list returns the text
+    unchanged and untouched.
     """
-    values = load_redact_values()
-    if not values:
+    if not values or not text:
         return text, 0
 
     # Sort by length descending so longer values match first.
@@ -223,3 +224,12 @@ def replace_exact_values(text: str) -> tuple[str, int]:
             text = text.replace(val, _PLACEHOLDER)
             count += n
     return text, count
+
+
+def replace_exact_values(text: str) -> tuple[str, int]:
+    """Replace all configured exact values in *text*.
+
+    Returns ``(replaced_text, replacement_count)``.  Values are matched
+    longest-first to avoid partial replacements.
+    """
+    return replace_exact_values_from(text, load_redact_values())

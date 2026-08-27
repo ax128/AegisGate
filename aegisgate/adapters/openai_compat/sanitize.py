@@ -7,16 +7,18 @@ function output sanitization, and request payload log sanitization.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Any
 
+from aegisgate.config.redact_values import load_redact_values, replace_exact_values_from
 from aegisgate.config.security_rules import (
     is_low_false_positive_route,
     load_security_rules,
     rule_enabled,
     select_relaxed_pii_patterns,
 )
+from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -185,6 +187,37 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def active_exact_values() -> tuple[str, ...]:
+    """The configured exact values, snapshotted once for one payload walk.
+
+    ``load_redact_values`` is mtime-cached but still stats the file on every
+    call, and the forward path walks every string leaf of a request — a coding
+    agent's payload has a lot of them. Entry points resolve this once and thread
+    it down; an empty tuple makes the per-leaf step a single truth test.
+    """
+    if not settings.enable_exact_value_redaction:
+        return ()
+    return tuple(load_redact_values())
+
+
+def _apply_exact_values(
+    text: str, values: Sequence[str] | None
+) -> tuple[str, list[dict[str, Any]]]:
+    """Exact-value replacement for one leaf, plus the hit row it produces.
+
+    ``None`` means the caller did not snapshot the list, so resolve it here —
+    that keeps entry points that do not thread it working rather than silently
+    skipping exact values.
+    """
+    resolved = active_exact_values() if values is None else values
+    if not resolved:
+        return text, []
+    replaced, count = replace_exact_values_from(text, resolved)
+    if count <= 0:
+        return text, []
+    return replaced, [{"count": count}]
+
+
 def _sanitize_payload_for_log(value: Any) -> Any:
     """Remove verbose fields (for example tool schema parameters) from request debug logs."""
     if isinstance(value, dict):
@@ -272,6 +305,7 @@ def _sanitize_text_for_upstream_with_hits(
     field: str,
     whitelist_keys: set[str] | None = None,
     relaxed_patterns: bool,
+    exact_values: Sequence[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Redact one string leaf.
 
@@ -294,17 +328,38 @@ def _sanitize_text_for_upstream_with_hits(
     if not cleaned:
         return "", []
 
+    # Exact values run before the PII regexes, matching the pipeline's own order
+    # (ExactValueRedactionFilter sits ahead of RedactionFilter). The filter only
+    # ever rewrote flattened InternalRequest text, which structured chat /
+    # responses payloads do not forward — so a configured value went upstream in
+    # cleartext on exactly the routes that carry structured content.
+    cleaned, exact_hits = _apply_exact_values(cleaned, exact_values)
+
     use_relaxed = relaxed_patterns
     patterns = (
         _responses_relaxed_redaction_patterns()
         if use_relaxed
         else _responses_function_output_redaction_patterns()
     )
-    hits: list[dict[str, Any]] = []
+    # Note the order: the exact-value pass above runs even for a whitelisted
+    # field. That matches the pipeline layer — ExactValueRedactionFilter does not
+    # consult the per-request whitelist either — so the operator's "never let
+    # these strings out" list means the same thing on both layers.
+    hits: list[dict[str, Any]] = [
+        {
+            "path": path,
+            "field": field,
+            "role": role or "unknown",
+            "pattern": "EXACT_VALUE",
+            "count": hit["count"],
+            "masked_value": "[configured]",
+        }
+        for hit in exact_hits
+    ]
     whitelist = set(normalize_whitelist_keys(whitelist_keys))
     normalized_field = str(field or "").strip().lower()
     if normalized_field and normalized_field in whitelist:
-        return cleaned, []
+        return cleaned, hits
     def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
         marker_spans = [
             (match.start(), match.end())
@@ -403,6 +458,7 @@ def _sanitize_structured_node(
     media_block_type: str | None = None,
     skip_field: Callable[[str | None], bool] = _skip_non_content_field,
     relaxed_patterns: bool,
+    exact_values: Sequence[str] | None = None,
     depth: int = 0,
 ) -> Any:
     """Walk a JSON-like node and redact every string leaf, preserving the shape.
@@ -434,6 +490,7 @@ def _sanitize_structured_node(
                 field=field,
                 whitelist_keys=whitelist_keys,
                 relaxed_patterns=relaxed_patterns,
+                exact_values=exact_values,
             )
             _record_hits(hits, node_hits)
             return node
@@ -445,6 +502,7 @@ def _sanitize_structured_node(
             field=field,
             whitelist_keys=whitelist_keys,
             relaxed_patterns=relaxed_patterns,
+            exact_values=exact_values,
         )
         _record_hits(hits, node_hits)
         return cleaned
@@ -461,6 +519,7 @@ def _sanitize_structured_node(
                 media_block_type=media_block_type,
                 skip_field=skip_field,
                 relaxed_patterns=relaxed_patterns,
+                exact_values=exact_values,
                 depth=depth + 1,
             )
             for idx, item in enumerate(node)
@@ -488,12 +547,16 @@ def _sanitize_structured_node(
                 media_block_type=next_media_block_type,
                 skip_field=skip_field,
                 relaxed_patterns=relaxed_patterns,
+                exact_values=exact_values,
                 depth=depth + 1,
             )
     return copied
 
 
-def _sanitize_function_output_value(value: Any) -> Any:
+def _sanitize_function_output_value(
+    value: Any, exact_values: Sequence[str] | None = None
+) -> Any:
+    resolved = active_exact_values() if exact_values is None else exact_values
     if isinstance(value, str):
         cleaned, _ = _sanitize_text_for_upstream_with_hits(
             value,
@@ -501,13 +564,15 @@ def _sanitize_function_output_value(value: Any) -> Any:
             path="input[*].output",
             field="output",
             relaxed_patterns=True,
+            exact_values=resolved,
         )
         return cleaned
     if isinstance(value, list):
-        return [_sanitize_function_output_value(item) for item in value]
+        return [_sanitize_function_output_value(item, resolved) for item in value]
     if isinstance(value, dict):
         return {
-            key: _sanitize_function_output_value(item) for key, item in value.items()
+            key: _sanitize_function_output_value(item, resolved)
+            for key, item in value.items()
         }
     return value
 
@@ -526,6 +591,7 @@ def _sanitize_chat_messages_for_upstream_with_hits(
     this decides what that means.
     """
     relaxed = is_low_false_positive_route(route)
+    exact_values = active_exact_values()
     hits: list[dict[str, Any]] = []
 
     sanitized_messages: list[Any] = []
@@ -547,6 +613,7 @@ def _sanitize_chat_messages_for_upstream_with_hits(
                     hits=hits,
                     whitelist_keys=whitelist_keys,
                     relaxed_patterns=relaxed,
+                    exact_values=exact_values,
                 )
         sanitized_messages.append(copied_message)
 
@@ -570,6 +637,7 @@ def _sanitize_messages_system_for_upstream_with_hits(
         whitelist_keys=whitelist_keys,
         skip_field=_never_skip_field,
         relaxed_patterns=relaxed,
+        exact_values=active_exact_values(),
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -596,6 +664,7 @@ def _sanitize_instructions_for_upstream_with_hits(
         hits=hits,
         whitelist_keys=whitelist_keys,
         relaxed_patterns=relaxed,
+        exact_values=active_exact_values(),
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -622,6 +691,7 @@ def _sanitize_tool_definitions_for_upstream_with_hits(
         hits=hits,
         whitelist_keys=whitelist_keys,
         relaxed_patterns=relaxed,
+        exact_values=active_exact_values(),
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -655,6 +725,7 @@ def _sanitize_generic_payload_for_upstream_with_hits(
         whitelist_keys=whitelist_keys,
         skip_field=_should_skip_responses_field_redaction,
         relaxed_patterns=relaxed_patterns,
+        exact_values=active_exact_values(),
     )
     return sanitized, _merge_redaction_hits(hits)
 
@@ -689,6 +760,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Sanitize structured responses history before forwarding upstream."""
     relaxed = is_low_false_positive_route(route)
+    exact_values = active_exact_values()
     hits: list[dict[str, Any]] = []
     seen: set[int] = set()
 
@@ -719,6 +791,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
                     field=field or "text",
                     whitelist_keys=whitelist_keys,
                     relaxed_patterns=relaxed,
+                    exact_values=exact_values,
                 )
                 hits.extend(node_hits)
                 return node
@@ -731,6 +804,7 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 field=field or "text",
                 whitelist_keys=whitelist_keys,
                 relaxed_patterns=relaxed,
+                exact_values=exact_values,
             )
             hits.extend(node_hits)
             return cleaned
