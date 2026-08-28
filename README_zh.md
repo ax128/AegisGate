@@ -112,8 +112,9 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
   - `stream=true` 流式透传
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
   - 默认仍沿用 v1 请求/响应安全管道；若使用 `__passthrough` 或命中上游白名单绕过，才会跳过过滤
-- 请求侧（默认策略）：`exact_value_redaction`、`redaction`、`request_sanitizer`、`rag_poison_guard`
+- 请求侧（默认策略，按 `_build_pipeline()` 实际构造）：`exact_value_redaction`、`redaction`、`request_sanitizer`、`rag_poison_guard`
 - 响应侧（默认策略）：`exact_value_redaction`、`anomaly_detector`、`injection_detector`、`rag_poison_guard`、`privilege_guard`、`tool_call_guard`、`restoration`、`post_restore_guard`、`output_sanitizer`
+- 注意 `enabled_filters` 是**跨相位**名单：`anomaly_detector` / `injection_detector` / `privilege_guard` 只在响应相位构造，请求相位不跑
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）
 - `responses` 结构化 `input` 预转发脱敏：覆盖 `user/developer/system/assistant` 与 `function_call_output/tool_output` 等节点
 - 高风险自动处理：命中高风险时自动遮挡/分割危险片段后返回，无需人工确认
@@ -216,6 +217,8 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 说明：
 
 - 上述顺序表示默认流水线构造顺序；实际是否执行仍取决于策略 `enabled_filters` 与全局开关。
+- **`enabled_filters` 是跨相位名单**：同一个过滤器名字在请求相位和响应相位可能只在其中一边被构造。`anomaly_detector`、`injection_detector`、`privilege_guard` 虽然写在 `default.yaml` 的 `enabled_filters` 里，但 `pipeline_runtime._build_pipeline()` 只把它们挂在**响应相位**，请求相位没有它们的实例——名单里出现不等于两侧都跑。
+- 请求相位要挂 `anomaly_detector`，前置条件是先把请求侧分数从响应门控共用的 `ctx.risk_score` 里隔离出来（独立字段，或封顶到 `OutputSanitizer` 的 sanitize 门以下）。共享分数会让一个干净回答被打上 `response_disposition=sanitize`、流式被掐断。`privilege_guard` 的请求相位需要先接上 `action_map`（请求侧现在是硬 `block`，不读阈值），否则声明「可执行 shell 命令」的编码 Agent 系统提示词会每次必被拦。两项都不在当前计划内，见 ROADMAP 单点待办。
 - 当前默认策略包含 `tool_call_guard`，但 **不包含** `system_prompt_guard` 与 `untrusted_content_guard`：
   - 若需要对 `retrieval/web/tool/document` 等不可信来源做包裹与风险抬升，需在策略 YAML 中显式加入 `untrusted_content_guard`，并保持对应 feature flag 开启。
   - `tool_call_guard` 默认对未命中白名单的工具名和危险参数都按 `review` 处理（抬高风险分并标记复核，按阈值处置，而非无条件拦截）；文件写入类工具（`apply_patch`/`write`/`edit` 等约 12 个）仅跳过“路径引用类”规则（`sensitive_file_access`/`path_traversal`/`ssh_key_access`），仍执行执行类危险参数扫描，避免代码 diff 内容误触发路径类规则；`bash`/`shell` 等执行类工具名列入危险工具名单（命中即标记，默认动作 `review`，可配为 `block`），且仍走完整危险参数扫描。工具名白名单默认留空，避免误伤不同上游的自定义工具。若显式配置白名单，未命中的工具名默认按 `review` 处理。

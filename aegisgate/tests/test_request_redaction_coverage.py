@@ -8,6 +8,7 @@ definitions, and generic ``/v1/<subpath>`` provider payloads.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 
@@ -647,3 +648,243 @@ class TestStructuredWalkerGuards:
     )
     def test_shape_comparison(self, original, sanitized, expected) -> None:
         assert _preserves_json_shape(original, sanitized) is expected
+
+
+# ---------------------------------------------------------------------------
+# Media locators and historical tool arguments run a fixed credential-only set
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialOnlySurfaces:
+    """Two surfaces the forward path used to hand over verbatim.
+
+    ``image_url`` / ``file_id`` were scanned for the audit log and then
+    forwarded unchanged, so a presigned link carrying a token left the gateway
+    intact. ``function_call.arguments`` skipped the pass entirely.
+
+    Both now run ``_credential_only_patterns()`` — the built-in
+    ``DEFAULT_RELAXED_PII_IDS`` constant plus the ``field_value_patterns``
+    layer, resolved once and **not** through ``relaxed_pii_ids``. That is the
+    point: the arguments skip exists because redacting file paths in a coding
+    agent's own tool history corrupts its context, and a deployment must not be
+    able to switch the path rules back on here by widening its config.
+    """
+
+    def test_the_set_carries_credentials_and_never_paths(self) -> None:
+        from aegisgate.adapters.openai_compat.sanitize import _credential_only_patterns
+
+        ids = {pattern_id for pattern_id, _ in _credential_only_patterns()}
+        assert {"TOKEN", "JWT", "URL_TOKEN_QUERY", "GITHUB_TOKEN"} <= ids
+        # Path / host / environment classes stay out under every configuration.
+        assert not ids & {
+            "SYS_HOME_PATH",
+            "SYS_HOSTNAME",
+            "SYS_USERNAME",
+            "SYS_ENV_VAR",
+            "SYS_INTERNAL_URL",
+            "EMAIL",
+        }
+
+    def test_image_url_query_credentials_are_redacted(self) -> None:
+        upstream = _build_chat_upstream_payload(
+            {
+                "model": "gpt-5.4",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is this"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"https://cdn.example.com/a.png?api_key={_SK_TOKEN}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            },
+            [InternalMessage(role="user", content="what is this")],
+            request_id="req-media-1",
+            session_id="sess-media-1",
+            route="/v1/chat/completions",
+        )
+        url = upstream["messages"][0]["content"][1]["image_url"]["url"]
+
+        assert _SK_TOKEN not in url
+        assert "[REDACTED:" in url
+        # Still a usable locator: scheme and host survived.
+        assert url.startswith("https://cdn.example.com/a.png")
+
+    def test_a_clean_image_url_is_forwarded_verbatim(self) -> None:
+        clean = "https://cdn.example.com/a.png?w=320&h=240"
+        upstream = _build_chat_upstream_payload(
+            {
+                "model": "gpt-5.4",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": clean}}
+                        ],
+                    }
+                ],
+            },
+            [InternalMessage(role="user", content="hi")],
+            request_id="req-media-2",
+            session_id="sess-media-2",
+            route="/v1/chat/completions",
+        )
+        assert upstream["messages"][0]["content"][0]["image_url"]["url"] == clean
+
+    def test_function_call_arguments_lose_credentials(self) -> None:
+        upstream = _build_responses_upstream_payload(
+            {
+                "model": "gpt-5.4",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "name": "deploy",
+                        "call_id": "c1",
+                        "arguments": json.dumps({"token": _SK_TOKEN}),
+                    }
+                ],
+            },
+            [InternalMessage(role="user", content="hi")],
+            request_id="req-args-1",
+            session_id="sess-args-1",
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )
+        arguments = upstream["input"][0]["arguments"]
+
+        assert _SK_TOKEN not in arguments
+        assert "[REDACTED:TOKEN]" in arguments
+        assert json.loads(arguments)["token"] == "[REDACTED:TOKEN]"
+        # The linkage fields are untouched, or the upstream loses the call.
+        assert upstream["input"][0]["call_id"] == "c1"
+        assert upstream["input"][0]["name"] == "deploy"
+
+    def test_function_call_arguments_keep_file_paths(self) -> None:
+        """The reason the skip existed. Paths stay, credentials go."""
+        arguments = json.dumps(
+            {"path": "/home/alice/project/src/main.py", "token": _SK_TOKEN}
+        )
+        upstream = _build_responses_upstream_payload(
+            {
+                "model": "gpt-5.4",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "c2",
+                        "arguments": arguments,
+                    }
+                ],
+            },
+            [InternalMessage(role="user", content="hi")],
+            request_id="req-args-2",
+            session_id="sess-args-2",
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )
+        forwarded = json.loads(upstream["input"][0]["arguments"])
+
+        assert forwarded["path"] == "/home/alice/project/src/main.py"
+        assert forwarded["token"] == "[REDACTED:TOKEN]"
+
+    def test_relaxed_pii_ids_wildcard_cannot_drag_path_rules_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``relaxed_pii_ids: "*"`` is deployment config; this set is not."""
+        import aegisgate.adapters.openai_compat.sanitize as sanitize_module
+        from aegisgate.config import security_rules as rules_module
+
+        base_rules = rules_module.load_security_rules()
+        widened = dict(base_rules)
+        widened["redaction"] = {**base_rules.get("redaction", {}), "relaxed_pii_ids": ["*"]}
+        monkeypatch.setattr(
+            rules_module, "load_security_rules", lambda *a, **k: widened
+        )
+        monkeypatch.setattr(
+            sanitize_module, "load_security_rules", lambda *a, **k: widened
+        )
+        for cached in (
+            sanitize_module._responses_function_output_redaction_patterns,
+            sanitize_module._responses_relaxed_redaction_patterns,
+            sanitize_module._field_value_pattern_ids,
+            sanitize_module._credential_only_patterns,
+        ):
+            cached.cache_clear()
+        try:
+            ids = {
+                pattern_id
+                for pattern_id, _ in sanitize_module._credential_only_patterns()
+            }
+            assert "SYS_HOME_PATH" not in ids
+            assert "EMAIL" not in ids
+            assert "TOKEN" in ids
+        finally:
+            for cached in (
+                sanitize_module._responses_function_output_redaction_patterns,
+                sanitize_module._responses_relaxed_redaction_patterns,
+                sanitize_module._field_value_pattern_ids,
+                sanitize_module._credential_only_patterns,
+            ):
+                cached.cache_clear()
+
+    def test_a_locator_that_stops_being_a_url_is_replaced_whole(self) -> None:
+        from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+        # A credential occupying the host: any surgical rewrite leaves something
+        # the upstream cannot fetch, so the whole value goes.
+        cleaned, hits = _redact_media_locator(
+            f"https://{_SK_TOKEN}.example.com/a.png",
+            role="user",
+            path="messages[0].content[0].image_url",
+            field="url",
+        )
+        assert hits
+        assert cleaned == "[REDACTED:URL_TOKEN_QUERY]"
+
+
+class TestMediaLocatorByteFidelity:
+    """A locator with nothing to redact has to leave exactly as it arrived."""
+
+    def test_an_uppercase_scheme_survives_the_query_pass(self) -> None:
+        """``urlsplit(...).geturl()`` lowercases the scheme.
+
+        The query is rewritten parameter by parameter, so the round trip only
+        happens for locators that *have* a query — and it happened even when no
+        parameter was a credential, rewriting a locator the gateway had decided
+        to leave alone.
+        """
+        from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+        original = "HTTPS://Example.COM/img.png?w=320&h=240"
+        cleaned, hits = _redact_media_locator(
+            original,
+            role="user",
+            path="messages[0].content[0].image_url",
+            field="url",
+        )
+
+        assert cleaned == original
+        assert not hits
+
+    def test_a_credential_in_the_query_is_still_removed(self) -> None:
+        """Guards the premise: the pass is running, it just kept its hands off."""
+        from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+        cleaned, hits = _redact_media_locator(
+            f"HTTPS://Example.COM/img.png?api_key={_SK_TOKEN}&w=320",
+            role="user",
+            path="messages[0].content[0].image_url",
+            field="url",
+        )
+
+        assert _SK_TOKEN not in cleaned
+        assert "w=320" in cleaned
+        assert hits

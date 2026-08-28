@@ -408,6 +408,21 @@ Extend the list without touching code by adding names to `allowed_models` in `co
 
 **Response side** (default policy): exact-value redaction → anomaly detector → injection detector → RAG poison guard → privilege guard → tool call guard → restoration → post-restore guard → output sanitizer
 
+> **`enabled_filters` is a cross-phase list.** A name in it can be constructed on
+> one phase only. `anomaly_detector`, `injection_detector` and `privilege_guard`
+> are listed in `default.yaml` but `_build_pipeline()` constructs them on the
+> **response phase alone** — being on the list does not mean a filter runs on
+> both sides.
+
+> Hanging `anomaly_detector` on the request phase first requires isolating the
+> request-side score from the `ctx.risk_score` the response gates read (a
+> separate field, or a cap below `OutputSanitizer`'s sanitize threshold): the
+> shared score would mark a clean answer `response_disposition=sanitize` and cut
+> the stream. `privilege_guard` on the request phase first needs an `action_map`
+> there — the request side blocks outright today, so a coding agent's system
+> prompt that declares "you can run shell commands" would be blocked every time.
+> Both are tracked in ROADMAP, not done here.
+
 > `untrusted content guard` and `system prompt guard` are constructed into the pipeline but not part of the default policy's `enabled_filters`; enable them via policy YAML plus the matching feature flag.
 
 > Execution **order** is fixed by `_build_pipeline()` in

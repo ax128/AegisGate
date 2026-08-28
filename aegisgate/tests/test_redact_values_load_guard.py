@@ -423,20 +423,20 @@ def test_the_snapshot_is_taken_once_per_walk(
 ) -> None:
     """The forward path walks every string leaf; the list is read once.
 
-    ``load_redact_values`` is mtime-cached but still stats the file per call, and
-    a coding agent's payload has a lot of leaves.
+    ``load_redact_values`` is mtime-cached but still takes the lock and stats the
+    file per call, and a coding agent's payload has a lot of leaves. Patched at
+    the source rather than on the adapter, so the count holds wherever
+    ``active_exact_values`` is called from.
     """
-    import aegisgate.adapters.openai_compat.sanitize as sanitize_module
-
     save_redact_values([_GOOD_VALUE])
     calls = {"n": 0}
-    real = sanitize_module.load_redact_values
+    real = redact_values.load_redact_values
 
     def _counting_load() -> list[str]:
         calls["n"] += 1
         return real()
 
-    monkeypatch.setattr(sanitize_module, "load_redact_values", _counting_load)
+    monkeypatch.setattr(redact_values, "load_redact_values", _counting_load)
 
     payload = {
         "model": "gpt-5.4",
@@ -497,3 +497,125 @@ def test_the_filter_report_reflects_what_it_replaced(values_file) -> None:
     )
     assert filt.report()["hit"] is False
     assert filt.report()["replacements"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The two surfaces the credential-only set reaches
+# ---------------------------------------------------------------------------
+#
+# Media locators and historical ``function_call.arguments`` do not run the full
+# rule set — they run a fixed credential-class one, so that redacting file paths
+# in a coding agent's own tool history cannot corrupt its context. The
+# exact-value list is not a heuristic though: it is the operator saying "these
+# strings never leave", and skipping it on two forwarded surfaces would make
+# that promise route-dependent.
+
+
+def test_function_call_arguments_lose_the_configured_value(values_file) -> None:
+    from aegisgate.adapters.openai_compat.router import (
+        _build_responses_upstream_payload,
+    )
+    from aegisgate.core.models import InternalMessage
+
+    save_redact_values([_GOOD_VALUE])
+    arguments = json.dumps(
+        {"path": "/home/alice/project/src/main.py", "note": f"use {_GOOD_VALUE}"}
+    )
+
+    upstream = _build_responses_upstream_payload(
+        {
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "deploy",
+                    "call_id": "c1",
+                    "arguments": arguments,
+                }
+            ],
+        },
+        [InternalMessage(role="user", content="hi")],
+        request_id="req-exact-args",
+        session_id="sess-exact-args",
+        route="/v1/responses",
+        tenant_id="default",
+        request_headers={},
+    )
+    forwarded = json.loads(upstream["input"][0]["arguments"])
+
+    assert _GOOD_VALUE not in json.dumps(upstream, ensure_ascii=False)
+    assert forwarded["note"] == "use [REDACTED:EXACT_VALUE]"
+    # The reason the credential-only set exists in the first place.
+    assert forwarded["path"] == "/home/alice/project/src/main.py"
+
+
+def test_media_locators_lose_the_configured_value(values_file) -> None:
+    from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+    save_redact_values([_GOOD_VALUE])
+
+    cleaned, hits = _redact_media_locator(
+        f"https://cdn.example.com/{_GOOD_VALUE}/a.png?w=320",
+        role="user",
+        path="messages[0].content[0].image_url",
+        field="url",
+    )
+
+    assert _GOOD_VALUE not in cleaned
+    assert "[REDACTED:EXACT_VALUE]" in cleaned
+    # Still fetchable: scheme and host untouched.
+    assert cleaned.startswith("https://cdn.example.com/")
+    assert any(hit["pattern"] == "EXACT_VALUE" for hit in hits)
+
+
+def test_a_base64_looking_leaf_is_not_a_way_past_the_list(values_file) -> None:
+    """The blob skip is a false-positive guard for *regexes*.
+
+    ``looks_like_base64_blob`` waves a leaf through so that PII patterns cannot
+    match random bytes inside an image. The pipeline's own
+    ``ExactValueRedactionFilter`` has no such heuristic, so leaving the exact
+    values behind the skip put the two layers back into disagreement — the one
+    disagreement this change exists to close. A literal match on a configured
+    string carries none of the risk the skip is for.
+    """
+    from aegisgate.adapters.openai_compat.sanitize import (
+        _sanitize_text_for_upstream_with_hits,
+        looks_like_base64_blob,
+    )
+
+    save_redact_values([_GOOD_VALUE])
+    filler = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJz" * 6
+    leaf = f"{filler}{_GOOD_VALUE}{filler}"
+    assert looks_like_base64_blob(leaf), "premise: this leaf is waved through"
+
+    cleaned, hits = _sanitize_text_for_upstream_with_hits(
+        leaf,
+        role="user",
+        path="messages[0].content[0].text",
+        field="text",
+        relaxed_patterns=True,
+    )
+
+    assert _GOOD_VALUE not in cleaned
+    assert [hit["pattern"] for hit in hits] == ["EXACT_VALUE"]
+    # The rest of the blob is still forwarded byte for byte.
+    assert cleaned == f"{filler}[REDACTED:EXACT_VALUE]{filler}"
+
+
+def test_the_hit_row_never_carries_the_configured_value(values_file) -> None:
+    """These rows reach the redaction log line."""
+    from aegisgate.adapters.openai_compat.sanitize import (
+        _sanitize_text_for_upstream_with_hits,
+    )
+
+    save_redact_values([_GOOD_VALUE])
+    _cleaned, hits = _sanitize_text_for_upstream_with_hits(
+        f"key {_GOOD_VALUE} here",
+        role="user",
+        path="messages[0].content[0].text",
+        field="text",
+        relaxed_patterns=True,
+    )
+
+    assert hits[0]["masked_value"] == "[configured]"
+    assert _GOOD_VALUE not in json.dumps(hits, ensure_ascii=False)

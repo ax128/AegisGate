@@ -204,6 +204,24 @@ def save_redact_values(values: Iterable[object]) -> None:
     logger.info("redact_values: saved %d values to %s", len(clean), path)
 
 
+def active_exact_values() -> tuple[str, ...]:
+    """The configured values, snapshotted once for one payload/body walk.
+
+    :func:`load_redact_values` is mtime-cached but still takes the lock and
+    ``stat``s the file on every call, and the callers that matter walk every
+    string leaf of a request or a response. Resolve once and thread the tuple
+    down; an empty tuple turns the per-leaf step into a single truth test.
+
+    Returns an empty tuple when the feature is off, so callers do not have to
+    check the flag separately.
+    """
+    from aegisgate.config.settings import settings
+
+    if not settings.enable_exact_value_redaction:
+        return ()
+    return tuple(load_redact_values())
+
+
 def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, int]:
     """Replace every entry of *values* in *text*.
 

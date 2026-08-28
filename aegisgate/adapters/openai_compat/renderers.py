@@ -12,8 +12,16 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_messages_response,
     to_responses_output,
 )
+from aegisgate.config.redact_values import (
+    active_exact_values,
+    replace_exact_values_from,
+)
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
+
+ROUTE_CHAT = "/v1/chat/completions"
+ROUTE_RESPONSES = "/v1/responses"
+ROUTE_MESSAGES = "/v1/messages"
 
 
 @dataclass(frozen=True)
@@ -26,44 +34,294 @@ class NonStreamRenderOps:
 
 
 def render_chat_response(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
     if isinstance(upstream_body, dict):
-        out = copy.deepcopy(upstream_body)
-        choices = out.get("choices")
+        choices = upstream_body.get("choices")
         if isinstance(choices, list) and choices:
-            first = choices[0]
-            if not isinstance(first, dict):
-                first = {}
-            message = first.get("message")
-            if not isinstance(message, dict):
-                message = {"role": "assistant"}
-            message["content"] = final_resp.output_text
-            first["message"] = message
-            choices[0] = first
-            out["choices"] = choices
-            out.setdefault("id", final_resp.request_id)
-            out.setdefault("object", "chat.completion")
-            out.setdefault("model", final_resp.model)
-            if final_resp.metadata.get("aegisgate"):
-                out["aegisgate"] = final_resp.metadata["aegisgate"]
-            return out
+            out = apply_pipeline_text_to_body(
+                ROUTE_CHAT, upstream_body, final_resp, ctx
+            )
+            if isinstance(out, dict):
+                out.setdefault("id", final_resp.request_id)
+                out.setdefault("object", "chat.completion")
+                out.setdefault("model", final_resp.model)
+                if final_resp.metadata.get("aegisgate"):
+                    out["aegisgate"] = final_resp.metadata["aegisgate"]
+                return out
     return to_chat_response(final_resp)
 
 
 def render_responses_output(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
     if isinstance(upstream_body, dict):
-        out = copy.deepcopy(upstream_body)
-        out["output_text"] = final_resp.output_text
-        out.setdefault("id", final_resp.request_id)
-        out.setdefault("object", "response")
-        out.setdefault("model", final_resp.model)
-        if final_resp.metadata.get("aegisgate"):
-            out["aegisgate"] = final_resp.metadata["aegisgate"]
-        return out
+        out = apply_pipeline_text_to_body(
+            ROUTE_RESPONSES, upstream_body, final_resp, ctx
+        )
+        if isinstance(out, dict):
+            out.setdefault("id", final_resp.request_id)
+            out.setdefault("object", "response")
+            out.setdefault("model", final_resp.model)
+            if final_resp.metadata.get("aegisgate"):
+                out["aegisgate"] = final_resp.metadata["aegisgate"]
+            return out
     return to_responses_output(final_resp)
+
+
+# ---------------------------------------------------------------------------
+# allow disposition: write the pipeline's own text back into the protocol body
+# ---------------------------------------------------------------------------
+
+
+def approved_placeholder_mapping(ctx: RequestContext) -> dict[str, str]:
+    """The placeholder→plaintext pairs a renderer is allowed to substitute.
+
+    Restoration is not "whatever is still in ``ctx.redaction_mapping``". A token
+    may only be restored in a nested field when RestorationFilter restored that
+    same token in this round's ``output_text`` — that is the only text the
+    volume / partial / exfiltration guards and PostRestoreGuard ever scanned.
+
+    Two cases collapse the set to empty even though the mapping survives:
+
+    * ``restoration_applied`` missing — this round had no placeholder in
+      ``output_text``, or a guard refused, so nothing is approved.
+    * ``confirmed_release`` present — the skip-confirmation path already
+      replaced the body text with an obfuscated summary. Restoring the nested
+      tool calls there would hand back the plaintext the summary hides.
+    """
+    if "restoration_applied" not in ctx.security_tags:
+        return {}
+    if "confirmed_release" in ctx.security_tags:
+        return {}
+    mapping = ctx.redaction_mapping
+    return {
+        token: mapping[token] for token in ctx.restored_placeholders if token in mapping
+    }
+
+
+@dataclass(frozen=True)
+class _LeafOps:
+    """What one string leaf goes through, in response-pipeline order.
+
+    ``exact_values`` is a snapshot, not a flag: resolving the configured list
+    per leaf takes the module lock and ``stat``s the file behind it, and this
+    runs over every string in the body.
+    """
+
+    exact_values: tuple[str, ...]
+    placeholders: dict[str, str]
+
+    @property
+    def is_noop(self) -> bool:
+        """True when every leaf would come back exactly as it went in."""
+        return not self.exact_values and not self.placeholders
+
+    def apply(self, value: str) -> str:
+        if not value:
+            return value
+        out = value
+        if self.exact_values:
+            replaced, count = replace_exact_values_from(out, self.exact_values)
+            if count > 0:
+                out = replaced
+        for token, raw in self.placeholders.items():
+            if token in out:
+                out = out.replace(token, raw)
+        return out
+
+    def apply_nested(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.apply(value)
+        if isinstance(value, list):
+            return [self.apply_nested(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.apply_nested(item) for key, item in value.items()}
+        return value
+
+
+def _leaf_ops(ctx: RequestContext) -> _LeafOps:
+    return _LeafOps(
+        exact_values=active_exact_values(),
+        placeholders=approved_placeholder_mapping(ctx),
+    )
+
+
+def apply_exact_values_to_body(
+    upstream_body: dict[str, Any] | str,
+) -> dict[str, Any] | str:
+    """Redaction-only leaf pass, for the surgical-``sanitize`` renderers.
+
+    ``sanitize`` renders the *upstream* body plus fragment obfuscation, so the
+    response pipeline's own ``ExactValueRedactionFilter`` rewrite — which only
+    ever touched ``output_text`` — is not in what the client receives. Without
+    this the stricter disposition would hand back a body the ``allow``
+    disposition redacts.
+
+    Placeholder restoration is deliberately **not** part of this. Restoring is a
+    reveal, and a response the pipeline decided to sanitize is not where one
+    belongs; the approved-token substitution stays on the allow path.
+    """
+    ops = _LeafOps(exact_values=active_exact_values(), placeholders={})
+    if ops.is_noop:
+        return upstream_body
+    if isinstance(upstream_body, dict):
+        return ops.apply_nested(upstream_body)
+    return ops.apply(str(upstream_body))
+
+
+def _apply_chat_body(
+    out: dict[str, Any], final_resp: InternalResponse, ops: _LeafOps
+) -> dict[str, Any]:
+    choices = out.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return out
+    first = choices[0]
+    if not isinstance(first, dict):
+        first = {}
+    message = first.get("message")
+    if not isinstance(message, dict):
+        message = {"role": "assistant"}
+    # Unchanged behaviour: the body text is the pipeline's output_text, length
+    # cap included. Only the tool calls are new, and they are transformed leaf
+    # by leaf — writing output_text into them would duplicate the answer.
+    message["content"] = final_resp.output_text
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        message["tool_calls"] = [
+            _apply_chat_tool_call(item, ops) if isinstance(item, dict) else item
+            for item in tool_calls
+        ]
+    first["message"] = message
+    choices[0] = first
+    out["choices"] = choices
+    return out
+
+
+def _apply_chat_tool_call(tool_call: dict[str, Any], ops: _LeafOps) -> dict[str, Any]:
+    patched = dict(tool_call)
+    function = patched.get("function")
+    if isinstance(function, dict):
+        function = dict(function)
+        for key in ("name", "arguments"):
+            if isinstance(function.get(key), str):
+                function[key] = ops.apply(str(function[key]))
+        patched["function"] = function
+    return patched
+
+
+def _apply_responses_body(
+    out: dict[str, Any], final_resp: InternalResponse, ops: _LeafOps
+) -> dict[str, Any]:
+    out["output_text"] = final_resp.output_text
+    output = out.get("output")
+    if isinstance(output, list):
+        out["output"] = [
+            _apply_responses_output_item(item, ops) if isinstance(item, dict) else item
+            for item in output
+        ]
+    return out
+
+
+def _apply_responses_output_item(item: dict[str, Any], ops: _LeafOps) -> dict[str, Any]:
+    patched = dict(item)
+    item_type = str(patched.get("type", "")).strip().lower()
+    if item_type == "message":
+        content = patched.get("content")
+        if isinstance(content, list):
+            updated: list[Any] = []
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part = dict(part)
+                    part["text"] = ops.apply(str(part["text"]))
+                updated.append(part)
+            patched["content"] = updated
+        return patched
+    if item_type == "function_call":
+        for key in ("name", "arguments"):
+            if isinstance(patched.get(key), str):
+                patched[key] = ops.apply(str(patched[key]))
+    return patched
+
+
+def _apply_messages_body(out: dict[str, Any], ops: _LeafOps) -> dict[str, Any]:
+    content = out.get("content")
+    if isinstance(content, list):
+        out["content"] = [_apply_messages_block(block, ops) for block in content]
+    elif isinstance(content, str):
+        out["content"] = ops.apply(content)
+    return out
+
+
+def _apply_messages_block(block: Any, ops: _LeafOps) -> Any:
+    if isinstance(block, str):
+        return ops.apply(block)
+    if not isinstance(block, dict):
+        return block
+    patched = dict(block)
+    if patched.get("type") == "tool_use":
+        if "input" in patched:
+            patched["input"] = ops.apply_nested(patched["input"])
+        return patched
+    if isinstance(patched.get("text"), str):
+        patched["text"] = ops.apply(str(patched["text"]))
+    return patched
+
+
+def apply_pipeline_text_to_body(
+    route: str,
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
+) -> dict[str, Any] | str:
+    """Write what the response pipeline produced into the protocol-native body.
+
+    The allow disposition used to hand the client either the raw upstream body
+    (messages / generic) or a body whose convenience field alone had been
+    patched (responses), so exact-value redaction and placeholder restoration
+    were invisible wherever an SDK actually reads. This is the shared write-back.
+
+    It is deliberately *not* "assign ``output_text`` to every text leaf": on a
+    multi-part body that duplicates the whole answer into each part. Each string
+    leaf goes through the same two steps the pipeline ran, in the same order —
+    exact values first (``ExactValueRedactionFilter``), then the approved
+    placeholders (``RestorationFilter``).
+
+    With no exact values configured and nothing approved for restoration, every
+    leaf comes back unchanged, so a benign response is byte-identical to what
+    the gateway returned before.
+    """
+    ops = _leaf_ops(ctx)
+    if not isinstance(upstream_body, dict):
+        return ops.apply(str(upstream_body))
+
+    normalized_route = str(route or "").strip().lower()
+    # Chat and Responses assign ``output_text`` regardless of what the leaf ops
+    # do, so they always rebuild.
+    if normalized_route == ROUTE_CHAT:
+        return _apply_chat_body(copy.deepcopy(upstream_body), final_resp, ops)
+    if normalized_route == ROUTE_RESPONSES:
+        return _apply_responses_body(copy.deepcopy(upstream_body), final_resp, ops)
+
+    # The two routes below write nothing but leaves, so with no exact values
+    # configured and nothing approved for restoration there is nothing to do.
+    # Walking an embeddings body to rebuild a few thousand floats unchanged is
+    # what this avoids — those are the bodies the generic proxy carries, and
+    # returning the object untouched is what this path did before the
+    # write-back existed.
+    if ops.is_noop:
+        return upstream_body
+    if normalized_route == ROUTE_MESSAGES:
+        return _apply_messages_body(copy.deepcopy(upstream_body), ops)
+    # Generic provider bodies have no known schema, so there is no defined place
+    # to write output_text — only the leaves are transformed, shape intact.
+    # ``apply_nested`` already returns a new tree, so nothing needs copying
+    # first; every value it passes through unchanged is immutable.
+    return ops.apply_nested(upstream_body)
 
 
 def sanitize_nested_text_value(

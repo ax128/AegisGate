@@ -31,6 +31,31 @@ DEFAULT_BIDI_CHARS: frozenset[str] = frozenset(
 )
 
 
+_INVISIBLE_STRIP_CHARS = DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS
+_INVISIBLE_STRIP_TABLE = str.maketrans("", "", "".join(_INVISIBLE_STRIP_CHARS))
+# Escaped, and sorted so the class does not depend on set iteration order. None
+# of today's code points is a metacharacter, but the two sets above are meant to
+# be extended, and one ``-`` or ``^`` would silently turn this into a range.
+_INVISIBLE_RE = re.compile(
+    f"[{''.join(re.escape(char) for char in sorted(_INVISIBLE_STRIP_CHARS))}]"
+)
+
+
+def strip_invisibles(text: str) -> str:
+    """A copy with zero-width / bidi code points removed, or the original.
+
+    For *detection* copies that must not pay for a full NFKC pass — the
+    base64-blob heuristic is the case: a zero-width character inserted into a
+    credential makes the leaf look base64-ish enough to be waved through, and
+    the fix has to be cheap enough to run on every forwarded string leaf. The
+    membership scan is one pass and almost always misses, so ordinary text never
+    pays for the translate.
+    """
+    if not text or not _INVISIBLE_RE.search(text):
+        return text
+    return text.translate(_INVISIBLE_STRIP_TABLE)
+
+
 @lru_cache(maxsize=1)
 def default_confusable_map() -> dict[str, str]:
     """Lazy-load the YAML confusable map so filters share one translation table."""

@@ -5,11 +5,26 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+# Marks an InternalMessage a mapper derived from a payload field that the
+# forward-path builders rebuild from the original payload. Such a message exists
+# for the request scanning surface only: it is never forwarded, and filters that
+# gate on a score have to weigh it differently, because the client does not vary
+# it per turn — a system prompt that crosses a threshold crosses it on every
+# request for the life of that client configuration.
+AEGIS_SOURCE_FIELD_KEY = "aegis_source_field"
+
+
 class InternalMessage(BaseModel):
     role: str
     content: str
     source: str = "user"
     metadata: dict = Field(default_factory=dict)
+
+
+def is_derived_scan_message(message: object) -> bool:
+    """True for a message that exists only to widen the request scanning surface."""
+    metadata = getattr(message, "metadata", None)
+    return bool(isinstance(metadata, dict) and metadata.get(AEGIS_SOURCE_FIELD_KEY))
 
 
 class InternalRequest(BaseModel):

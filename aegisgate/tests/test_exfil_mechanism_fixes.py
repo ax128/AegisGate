@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from aegisgate.adapters.openai_compat.stream_utils import RESPONSE_CONFIRMATION_TAGS
 from aegisgate.config.security_level import apply_threshold
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
@@ -147,9 +148,9 @@ def test_request_sanitizer_review_stays_under_every_disposition_gate() -> None:
     assert ctx.risk_score < max(apply_threshold(0.85), apply_threshold(_SANITIZER_BLOCK_FLOOR))
     assert ctx.risk_score < _STREAM_BLOCK_FLOOR
     assert ctx.requires_human_review is False
-    assert not any(tag.startswith("response_") for tag in ctx.security_tags), (
-        "a response_-prefixed tag would make _needs_confirmation auto-sanitize and "
-        "_stream_block_reason terminate the stream — neither is 'review'"
+    assert not (ctx.security_tags & RESPONSE_CONFIRMATION_TAGS), (
+        "a tag in the confirmation set would make _needs_confirmation auto-sanitize "
+        "and _stream_block_reason terminate the stream — neither is 'review'"
     )
 
 
@@ -209,6 +210,64 @@ def test_strong_intent_risk_is_derived_from_the_sanitize_gate() -> None:
     effective = RequestSanitizer()._strong_intent_review_risk
     assert 0.0 < effective < OutputSanitizer()._sanitize_threshold
     assert effective <= RequestSanitizer._STRONG_INTENT_REVIEW_RISK_CEILING
+
+
+def _scan_only_request(text: str) -> InternalRequest:
+    """What ``to_internal_responses`` builds for a Responses ``instructions``."""
+    return InternalRequest(
+        request_id="s2-2", session_id="s1", model="m",
+        route="/v1/responses",
+        messages=[
+            InternalMessage(
+                role="system",
+                content=text,
+                source="system",
+                metadata={"aegis_source_field": "instructions"},
+            ),
+            InternalMessage(role="user", content="how do I read an env var in Python?"),
+        ],
+    )
+
+
+# The leak_check pattern that a coding agent's system prompt trips without any
+# of the redaction rules covering it first: ``api_key_generic`` accepts eight
+# characters and the bare word ``token``, while the built-in ``FIELD_SECRET``
+# needs twelve and does not list it.
+_SCAN_ONLY_LEAK_TEXT = "when calling the service send token: abcd1234 in the header"
+
+
+def test_leak_check_in_a_scan_only_field_does_not_open_the_score_channel() -> None:
+    """Widening the scan surface must not widen the response gates with it.
+
+    ``instructions`` reaches the pipeline so leak_check / shape / RAG can see
+    it, but the client resends it verbatim every turn. leak_check's 0.6 is over
+    ``OutputSanitizer``'s sanitize gate, which marks a clean answer
+    ``response_disposition=sanitize`` and makes ``_stream_block_reason`` cut the
+    stream — so one credential-shaped line in a system prompt would do that to
+    every response for the life of that client configuration. That is the score
+    channel D7 refused to open for the request-phase anomaly detector.
+    """
+    from aegisgate.filters.sanitizer import OutputSanitizer
+
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(_scan_only_request(_SCAN_ONLY_LEAK_TEXT), ctx)
+
+    # Observed, so the surface is genuinely being scanned...
+    assert "request_leak_check_scan_only" in ctx.security_tags
+    # ...but the score stays under every response-side gate.
+    assert ctx.risk_score < OutputSanitizer()._sanitize_threshold
+    assert ctx.requires_human_review is False
+    assert ctx.request_disposition != "block"
+
+
+def test_the_same_text_in_a_forwardable_message_still_raises_the_score() -> None:
+    """The narrowing is about the derived message, not about leak_check."""
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(_request(_SCAN_ONLY_LEAK_TEXT), ctx)
+
+    assert "request_leak_check" in ctx.security_tags
+    assert "request_leak_check_scan_only" not in ctx.security_tags
+    assert ctx.risk_score >= 0.6
 
 
 def test_request_sanitizer_leaves_ordinary_requests_alone() -> None:
@@ -294,7 +353,9 @@ def test_narrowed_exemption_observes_and_does_not_enforce(tool: str, args: dict)
     assert ctx.risk_score == 0.0
     assert ctx.requires_human_review is False
     assert "tool_call_guard:readonly_param:observe" in ctx.enforcement_actions
-    assert not any(tag.startswith("response_") for tag in ctx.security_tags)
+    # The bare ``response_`` prefix stopped being the gate; asserting on it would
+    # now guard nothing. The confirmation set is what auto-sanitizes.
+    assert not (ctx.security_tags & RESPONSE_CONFIRMATION_TAGS)
 
 
 def test_observe_does_not_terminate_a_stream() -> None:

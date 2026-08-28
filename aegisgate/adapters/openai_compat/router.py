@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.datastructures import UploadFile
 
 from aegisgate.adapters.openai_compat.mapper import (
+    first_forwardable_message,
     messages_payload_to_responses_payload,
     responses_response_to_messages_response,
     to_chat_response,
@@ -64,6 +65,7 @@ from aegisgate.adapters.openai_compat.security_view import (
     prepare_responses_security_view,
 )
 from aegisgate.adapters.openai_compat.stream_utils import (
+    RESPONSE_CONFIRMATION_TAGS,
     _build_streaming_response,
     _extract_sse_data_payload,
     _extract_sse_data_payload_from_chunk,
@@ -1013,8 +1015,20 @@ def _build_responses_upstream_payload(
             upstream_payload["input"] = sanitized_input
             redaction_hits.extend(input_hits)
         else:
+            # First *forwardable* message, not first message. The mapper puts a
+            # derived ``instructions`` message at the front so the pipeline can
+            # scan the system prompt; using index 0 here would forward that
+            # prompt as the user's input and drop the real question.
+            forwardable = first_forwardable_message(sanitized_req_messages)
+            if forwardable is None:
+                # Unreachable through the mapper, which always has a real
+                # message before it inserts a derived one. Leaving the key alone
+                # would not be a safe default if that ever changed: the payload
+                # copy still holds the caller's original ``input``, so the
+                # request would be forwarded without the pipeline's rewrites.
+                raise ValueError("responses_input_shape_violation")
             upstream_payload["input"] = _strip_system_exec_runtime_lines(
-                str(sanitized_req_messages[0].content)
+                str(forwardable.content)
             )
 
     original_instructions = upstream_payload.get("instructions")
@@ -1338,15 +1352,30 @@ def _extract_generic_analysis_text(value: Any) -> str:
 
 
 def _render_chat_response(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
-    return renderers.render_chat_response(upstream_body, final_resp)
+    return renderers.render_chat_response(upstream_body, final_resp, ctx)
 
 
 def _render_responses_output(
-    upstream_body: dict[str, Any] | str, final_resp: InternalResponse
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
 ) -> dict[str, Any]:
-    return renderers.render_responses_output(upstream_body, final_resp)
+    return renderers.render_responses_output(upstream_body, final_resp, ctx)
+
+
+def _apply_pipeline_text_to_body(
+    route: str,
+    upstream_body: dict[str, Any] | str,
+    final_resp: InternalResponse,
+    ctx: RequestContext,
+) -> dict[str, Any] | str:
+    return renderers.apply_pipeline_text_to_body(
+        route, upstream_body, final_resp, ctx
+    )
 
 
 def _cap_response_text(text: str, ctx: RequestContext) -> str:
@@ -1667,11 +1696,22 @@ def _request_target_path(request: Request, *, fallback_path: str | None = None) 
 
 
 def _needs_confirmation(ctx: RequestContext) -> bool:
+    """Whether this response gets replaced by an obfuscated summary.
+
+    The confirmation flow is gone; what "needs confirmation" now means is "the
+    whole answer is auto-obfuscated". Any ``response_``-prefixed tag used to be
+    enough, which swept in tags that only exist for the audit log — the length
+    cap's ``response_truncated`` turned a long but harmless answer into a
+    summary. The gate is the explicit set, shared with ``_stream_block_reason``
+    so the streaming and non-streaming sides agree on it.
+
+    ``requires_human_review`` still gates on its own, unconditionally.
+    """
     if ctx.response_disposition == "block":
         return True
     if ctx.requires_human_review:
         return True
-    return any(tag.startswith("response_") for tag in ctx.security_tags)
+    return bool(ctx.security_tags & RESPONSE_CONFIRMATION_TAGS)
 
 
 def _confirmation_reason_and_summary(
@@ -3420,6 +3460,9 @@ async def _execute_chat_stream_once(
                 len(stream_window),
             )
             audit_once()
+            # RestorationFilter keeps the mapping alive across probes now, so
+            # the stream is what releases it.
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -4041,6 +4084,9 @@ async def _execute_responses_stream_once(
                 len(stream_window),
             )
             audit_once()
+            # RestorationFilter keeps the mapping alive across probes now, so
+            # the stream is what releases it.
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -4350,6 +4396,30 @@ async def _execute_chat_once(
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
 
+        if ctx.response_disposition == "sanitize" and not _needs_confirmation(ctx):
+            # A surgical OutputSanitizer / PostRestoreGuard rewrite does not have
+            # to raise review or add a response_ tag, and the shallow renderer
+            # only replaces message.content — tool_calls kept the original text.
+            #
+            # Both halves of the condition matter. Only sanitize, so block keeps
+            # the auto-obfuscation branch below. And only when confirmation does
+            # *not* also fire: a response that is sanitize **and** review renders
+            # identically either way (both patch the upstream body), but the
+            # branch below is where the dangerous-sample log and
+            # ``auto_sanitize:hit_fragments_obfuscated`` are written, and losing
+            # those would be a silent hole in the audit trail.
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            audit_once()
+            logger.info(
+                "chat completion sanitized (nested patch) request_id=%s",
+                ctx.request_id,
+            )
+            rendered = _render_non_confirmation_chat_response(
+                upstream_body, final_resp, ctx
+            )
+            ctx.redaction_mapping.clear()
+            return rendered
+
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
                 ctx.disposition_reasons[0]
@@ -4387,14 +4457,18 @@ async def _execute_chat_once(
             )
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            return _render_non_confirmation_chat_response(
+            rendered = _render_non_confirmation_chat_response(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("chat completion completed request_id=%s", ctx.request_id)
-        return _render_chat_response(upstream_body, final_resp)
+        rendered = _render_chat_response(upstream_body, final_resp, ctx)
+        ctx.redaction_mapping.clear()
+        return rendered
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -4707,6 +4781,24 @@ async def _execute_responses_once(
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
 
+        if ctx.response_disposition == "sanitize" and not _needs_confirmation(ctx):
+            # Same reason as the chat route: a surgical rewrite must reach
+            # output[] and the function_call arguments, not only the convenience
+            # output_text field. block — and anything that also needs
+            # confirmation — still goes through the branch below, which owns the
+            # dangerous-sample log and the enforcement action.
+            _attach_security_metadata(final_resp, ctx, boundary=boundary)
+            audit_once()
+            logger.info(
+                "responses endpoint sanitized (nested patch) request_id=%s",
+                ctx.request_id,
+            )
+            rendered = _render_non_confirmation_responses_output(
+                upstream_body, final_resp, ctx
+            )
+            ctx.redaction_mapping.clear()
+            return rendered
+
         if not skip_confirmation and _needs_confirmation(ctx):
             resp_reason = (
                 ctx.disposition_reasons[0]
@@ -4744,14 +4836,18 @@ async def _execute_responses_once(
             )
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
-            return _render_non_confirmation_responses_output(
+            rendered = _render_non_confirmation_responses_output(
                 upstream_body, final_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return rendered
 
         _attach_security_metadata(final_resp, ctx, boundary=boundary)
         audit_once()
         logger.info("responses endpoint completed request_id=%s", ctx.request_id)
-        return _render_responses_output(upstream_body, final_resp)
+        rendered = _render_responses_output(upstream_body, final_resp, ctx)
+        ctx.redaction_mapping.clear()
+        return rendered
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -5310,6 +5406,7 @@ async def _execute_messages_stream_once(
             )
         finally:
             audit_once()
+            ctx.redaction_mapping.clear()
 
     return stream_transport.handoff_guarded_generator(
         guarded_generator(),
@@ -5528,9 +5625,11 @@ async def _execute_messages_once(
             logger.info(
                 "messages sanitized request_id=%s route=%s", ctx.request_id, request_path
             )
-            return _passthrough_any_response(
-                _render_non_confirmation_messages_output(upstream_body, internal_resp, ctx)
+            rendered = _render_non_confirmation_messages_output(
+                upstream_body, internal_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return _passthrough_any_response(rendered)
 
         if _needs_confirmation(ctx):
             _maybe_log_dangerous_response_sample(
@@ -5557,17 +5656,23 @@ async def _execute_messages_once(
             )
             _attach_security_metadata(internal_resp, ctx, boundary=boundary)
             audit_once()
-            return _passthrough_any_response(
-                _render_non_confirmation_messages_output(
-                    upstream_body, internal_resp, ctx
-                )
+            rendered = _render_non_confirmation_messages_output(
+                upstream_body, internal_resp, ctx
             )
+            ctx.redaction_mapping.clear()
+            return _passthrough_any_response(rendered)
 
         audit_once()
         logger.info(
             "messages completed request_id=%s route=%s", ctx.request_id, request_path
         )
-        return _passthrough_any_response(upstream_body)
+        # Returning upstream_body verbatim here discarded every pipeline rewrite
+        # this route had just made.
+        rendered = _apply_pipeline_text_to_body(
+            "/v1/messages", upstream_body, internal_resp, ctx
+        )
+        ctx.redaction_mapping.clear()
+        return _passthrough_any_response(rendered)
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,
@@ -5948,6 +6053,7 @@ async def _execute_generic_stream_once(
             yield _stream_done_sse_chunk()
         finally:
             _write_audit_event(ctx, boundary=boundary)
+            ctx.redaction_mapping.clear()
 
     return _build_streaming_response(guarded_generator())
 
@@ -6178,20 +6284,9 @@ async def _execute_generic_once(
         ctx.response_disposition,
         ctx.disposition_reasons,
     )
-    if ctx.response_disposition == "sanitize":
-        sanitized_text = internal_resp.output_text
-        _write_audit_event(ctx, boundary=boundary)
-        logger.info(
-            "generic proxy sanitized request_id=%s route=%s",
-            ctx.request_id,
-            request_path,
-        )
-        return _passthrough_any_response(
-            {"sanitized_text": sanitized_text}
-            if isinstance(upstream_body, dict)
-            else sanitized_text
-        )
-
+    # Three exits, in this order. The auto-obfuscation branch has to come first:
+    # a response that needs confirmation must not go back near-verbatim just
+    # because a surgical rewrite also set the sanitize disposition.
     if _needs_confirmation(ctx):
         _maybe_log_dangerous_response_sample(
             ctx,
@@ -6214,17 +6309,57 @@ async def _execute_generic_once(
             "generic_proxy_sanitized", sanitized_text, request_id=ctx.request_id
         )
         _write_audit_event(ctx, boundary=boundary)
+        ctx.redaction_mapping.clear()
+        # Whole-body replacement, shape deliberately not preserved: a blocked
+        # answer should not come back wearing the provider's own schema.
         return _passthrough_any_response(
             {"sanitized_text": sanitized_text}
             if isinstance(upstream_body, dict)
             else sanitized_text
         )
 
+    if ctx.response_disposition == "sanitize":
+        _write_audit_event(ctx, boundary=boundary)
+        logger.info(
+            "generic proxy sanitized request_id=%s route=%s",
+            ctx.request_id,
+            request_path,
+        )
+        # Surgical rewrite: obfuscate the hit fragments inside every string leaf
+        # and keep the schema. Collapsing a dict body to a single
+        # ``sanitized_text`` key destroyed the shape embeddings / rerank clients
+        # parse.
+        #
+        # The exact-value pass runs first because this branch used to return
+        # ``internal_resp.output_text``, which the response pipeline's
+        # ExactValueRedactionFilter had already rewritten. Fragment obfuscation
+        # only touches dangerous-command regions, so without this the sanitize
+        # disposition would hand back configured values that the allow
+        # disposition redacts — the stricter path returning the less redacted
+        # body. Restoration is not repeated here: that one is a reveal.
+        redacted = renderers.apply_exact_values_to_body(upstream_body)
+        rendered = (
+            renderers.sanitize_nested_text_value(
+                redacted, ctx, ops=_NON_STREAM_RENDER_OPS
+            )
+            if isinstance(redacted, dict)
+            else _sanitize_hit_fragments(str(redacted), ctx)
+        )
+        ctx.redaction_mapping.clear()
+        return _passthrough_any_response(rendered)
+
     _write_audit_event(ctx, boundary=boundary)
     logger.info(
         "generic proxy completed request_id=%s route=%s", ctx.request_id, request_path
     )
-    return _passthrough_any_response(upstream_body)
+    # Explicitly generic: a provider body has no known schema, so it must never
+    # be written back as if it were chat/responses/messages even if the subpath
+    # happens to look like one of them.
+    rendered = _apply_pipeline_text_to_body(
+        "generic", upstream_body, internal_resp, ctx
+    )
+    ctx.redaction_mapping.clear()
+    return _passthrough_any_response(rendered)
 
 
 def _strip_content_type_header(headers: Mapping[str, str]) -> dict[str, str]:

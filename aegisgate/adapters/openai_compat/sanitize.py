@@ -10,21 +10,30 @@ import re
 from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Any
+from urllib.parse import SplitResult, urlsplit
 
-from aegisgate.config.redact_values import load_redact_values, replace_exact_values_from
+from aegisgate.config.redact_values import (
+    active_exact_values,
+    replace_exact_values_from,
+)
 from aegisgate.config.security_rules import (
+    DEFAULT_RELAXED_PII_IDS,
     is_low_false_positive_route,
     load_security_rules,
     rule_enabled,
     select_relaxed_pii_patterns,
 )
-from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import mask_for_log
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
     protected_spans_for_text,
     range_overlaps_protected,
+)
+from aegisgate.util.text_normalize import (
+    build_haystacks,
+    pattern_hits_in,
+    strip_invisibles,
 )
 
 _RESPONSES_SENSITIVE_OUTPUT_TYPES = frozenset(
@@ -93,6 +102,14 @@ _MEDIA_SOURCE_URL_BLOCK_TYPES = frozenset(
         "input_file",
     }
 )
+# The id the whole-value fallback reports when a redacted media locator stops
+# being a usable URL.
+_URL_QUERY_PATTERN_ID = "URL_TOKEN_QUERY"
+# What a normalized-only hit reports instead of a masked fragment. There is no
+# fragment: the match exists only in the normalized copy. Masking the whole leaf
+# would put an unbounded string in the log line (and its first three characters
+# in cleartext) for a value nobody can point at.
+_NORMALIZED_MATCH_MASK = "[normalized-form match]"
 _CONTENT_BLOCK_PATH_RE = re.compile(r"(?:^|\.)content\[\d+\]$")
 _SYSTEM_BLOCK_PATH_RE = re.compile(r"^system\[\d+\]$")
 
@@ -187,26 +204,13 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def active_exact_values() -> tuple[str, ...]:
-    """The configured exact values, snapshotted once for one payload walk.
-
-    ``load_redact_values`` is mtime-cached but still stats the file on every
-    call, and the forward path walks every string leaf of a request — a coding
-    agent's payload has a lot of them. Entry points resolve this once and thread
-    it down; an empty tuple makes the per-leaf step a single truth test.
-    """
-    if not settings.enable_exact_value_redaction:
-        return ()
-    return tuple(load_redact_values())
-
-
 def _apply_exact_values(
     text: str, values: Sequence[str] | None
 ) -> tuple[str, list[dict[str, Any]]]:
     """Exact-value replacement for one leaf, plus the hit row it produces.
 
     ``None`` means the caller did not snapshot the list, so resolve it here —
-    that keeps entry points that do not thread it working rather than silently
+    that keeps entry points which do not thread it working rather than silently
     skipping exact values.
     """
     resolved = active_exact_values() if values is None else values
@@ -297,6 +301,417 @@ def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]]
     return tuple(select_relaxed_pii_patterns(_responses_function_output_redaction_patterns()))
 
 
+@lru_cache(maxsize=1)
+def _field_value_pattern_ids() -> frozenset[str]:
+    """Ids contributed by the ``field_value_patterns`` layer.
+
+    ``_responses_function_output_redaction_patterns`` concatenates the two
+    layers into one tuple, so afterwards the only way to tell them apart is to
+    ask the rules which ids the PII list declared. Everything else came from the
+    field layer, built-in defaults included.
+    """
+    rules = load_security_rules().get("redaction", {})
+    patterns = rules.get("pii_patterns")
+    pii_ids = (
+        {
+            str(item.get("id", "")).upper()
+            for item in patterns
+            if isinstance(item, dict) and item.get("id")
+        }
+        if isinstance(patterns, list)
+        else set()
+    )
+    return frozenset(
+        pattern_id
+        for pattern_id, _ in _responses_function_output_redaction_patterns()
+        if pattern_id not in pii_ids
+    )
+
+
+@lru_cache(maxsize=1)
+def _credential_only_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The fixed credential-class rule set for surfaces that must not lose paths.
+
+    Deliberately **not** ``relaxed_patterns=True``: the relaxed set resolves
+    through ``redaction.relaxed_pii_ids``, which accepts ``"*"`` and is
+    deployment-configurable, so a site that widened it would start rewriting
+    file paths inside historical tool calls — which is the exact corruption the
+    ``function_call.arguments`` skip existed to prevent (a coding agent can no
+    longer reference its own prior calls).
+
+    The membership rule here is a hard constraint instead: the built-in
+    ``DEFAULT_RELAXED_PII_IDS`` constant plus the whole ``field_value_patterns``
+    layer. Path-class rules such as ``SYS_HOME_PATH`` never run, under any
+    configuration.
+    """
+    allowed = set(DEFAULT_RELAXED_PII_IDS) | set(_field_value_pattern_ids())
+    return tuple(
+        (pattern_id, pattern)
+        for pattern_id, pattern in _responses_function_output_redaction_patterns()
+        if pattern_id in allowed
+    )
+
+
+def _sanitize_credentials_for_upstream_with_hits(
+    text: str,
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+    exact_values: Sequence[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one leaf against the credential-only set. See :func:`_credential_only_patterns`."""
+    return _redact_leaf_with_patterns(
+        text,
+        _credential_only_patterns(),
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+        exact_values=exact_values,
+    )
+
+
+def _absolute_url(text: str) -> SplitResult | None:
+    """The parsed form when *text* is an absolute URL, else None.
+
+    A bare ``file_id`` or a relative reference has no shape to protect and comes
+    back as None.
+    """
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None
+    if parsed.scheme and parsed.netloc:
+        return parsed
+    return None
+
+
+@lru_cache(maxsize=1)
+def _url_token_query_pattern() -> re.Pattern[str] | None:
+    """The shipped ``URL_TOKEN_QUERY`` rule, reused rather than re-declared.
+
+    The query-parameter names that count as credential-bearing live inside that
+    one regex. Copying the list here is how the two would drift.
+    """
+    for pattern_id, pattern in _responses_function_output_redaction_patterns():
+        if pattern_id == _URL_QUERY_PATTERN_ID:
+            return pattern
+    return None
+
+
+def _query_pair_is_credential(key: str, value: str) -> bool:
+    """Would the shipped URL rule call this ``key=value`` pair a credential?
+
+    Probed through a synthetic locator so the rule itself decides, including
+    which parameter names and which value shapes qualify.
+    """
+    pattern = _url_token_query_pattern()
+    if pattern is None:
+        return False
+    return bool(pattern.search(f"https://probe.invalid/?{key}={value}"))
+
+
+def _redact_url_query_credentials(
+    parsed: SplitResult,
+    *,
+    original: str,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None,
+    exact_values: Sequence[str] | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact credential-bearing query values, one parameter at a time.
+
+    Running ``URL_TOKEN_QUERY`` against the whole locator and substituting would
+    delete the scheme and host with it — the rule matches from ``https://``
+    through the credential — leaving nothing the upstream can fetch. Working per
+    parameter keeps everything outside the value byte-identical.
+    """
+    hits: list[dict[str, Any]] = []
+    rebuilt: list[str] = []
+    changed = False
+    for pair in parsed.query.split("&"):
+        key, sep, value = pair.partition("=")
+        if not sep or not value:
+            rebuilt.append(pair)
+            continue
+        if _query_pair_is_credential(key, value):
+            changed = True
+            hits.append(
+                {
+                    "path": path,
+                    "field": field,
+                    "role": role or "unknown",
+                    "pattern": _URL_QUERY_PATTERN_ID,
+                    "count": 1,
+                    "masked_value": mask_for_log(value),
+                }
+            )
+            rebuilt.append(f"{key}=[REDACTED:{_URL_QUERY_PATTERN_ID}]")
+            continue
+        cleaned_value, value_hits = _sanitize_credentials_for_upstream_with_hits(
+            value,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+            exact_values=exact_values,
+        )
+        if value_hits:
+            changed = True
+            hits.extend(value_hits)
+            rebuilt.append(f"{key}={cleaned_value}")
+            continue
+        rebuilt.append(pair)
+    if not changed:
+        # The caller's own bytes, not ``parsed.geturl()``: a round trip through
+        # urlsplit lowercases the scheme, so a locator with nothing to redact
+        # would still leave the gateway rewritten.
+        return original, hits
+    return parsed._replace(query="&".join(rebuilt)).geturl(), hits
+
+
+def _redact_media_locator(
+    text: str,
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+    exact_values: Sequence[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact credentials out of an ``image_url`` / ``file_id`` / block ``url``.
+
+    These used to be scanned for the audit log and then forwarded verbatim, so a
+    presigned link carrying ``?api_key=…`` left the gateway intact.
+
+    Two passes, because a locator that stops being fetchable is its own kind of
+    breakage: the query is rewritten per parameter (shape kept by
+    construction), then the rest of the value goes through the credential-only
+    set for a credential sitting in the host or the path. If *that* rewrite
+    leaves something no longer parseable as the same URL, the whole value is
+    replaced rather than shipping a broken link.
+    """
+    parsed = _absolute_url(text)
+    if parsed is None:
+        return _sanitize_credentials_for_upstream_with_hits(
+            text,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+            exact_values=exact_values,
+        )
+
+    hits: list[dict[str, Any]] = []
+    candidate = text
+    if parsed.query:
+        candidate, query_hits = _redact_url_query_credentials(
+            parsed,
+            original=text,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+            exact_values=exact_values,
+        )
+        hits.extend(query_hits)
+
+    cleaned, rest_hits = _sanitize_credentials_for_upstream_with_hits(
+        candidate,
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+        exact_values=exact_values,
+    )
+    if not rest_hits:
+        return candidate, hits
+    hits.extend(rest_hits)
+    if _preserves_url_shape(text, cleaned):
+        return cleaned, hits
+    return f"[REDACTED:{_URL_QUERY_PATTERN_ID}]", hits
+
+
+def _preserves_url_shape(original: str, rewritten: str) -> bool:
+    """True when *rewritten* is still an absolute URL with the same scheme and host."""
+    before = _absolute_url(original)
+    if before is None:
+        return True
+    after = _absolute_url(rewritten)
+    if after is None:
+        return False
+    return after.scheme == before.scheme and after.netloc == before.netloc
+
+
+def _redact_leaf_with_patterns(
+    text: str,
+    patterns: tuple[tuple[str, re.Pattern[str]], ...]
+    | list[tuple[str, re.Pattern[str]]],
+    *,
+    role: str,
+    path: str,
+    field: str,
+    whitelist_keys: set[str] | None = None,
+    exact_values: Sequence[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Redact one string leaf against *patterns*, detecting on the normalized form.
+
+    Two matching passes per rule, in this order:
+
+    1. ``sub`` on the original text — a plaintext hit is replaced surgically and
+       the rest of the leaf is forwarded byte for byte.
+    2. only if that missed, the rule is searched against the normalized copies
+       (``build_haystacks``). A hit there means the credential is only visible
+       once homoglyphs are folded or zero-width characters are dropped, and
+       there is no span in the original to substitute — so the whole leaf is
+       replaced with the marker.
+
+    The normalized text is never written back. NFKC folds full-width ``，（）：``
+    to ASCII and NBSP to a plain space, which would be a client-visible rewrite
+    of *every* forwarded string, not just the ones carrying a credential. This
+    is the contract ``util/text_normalize`` states and ``OutputSanitizer``
+    already follows.
+    """
+    if not text:
+        return "", []
+
+    # Exact values run first — before the PII regexes, matching the pipeline's
+    # own order (ExactValueRedactionFilter sits ahead of RedactionFilter), and
+    # before the blob skip below. That filter only ever rewrote flattened
+    # InternalRequest text, which structured chat / responses payloads do not
+    # forward, so a configured value went upstream in cleartext on exactly the
+    # routes that carry structured content.
+    #
+    # Ahead of the blob skip specifically because the pipeline layer has no blob
+    # heuristic: leaving it behind would put the two layers back into
+    # disagreement for base64-ish leaves. A literal match on an
+    # operator-configured string carries none of the false-positive risk the
+    # skip exists to avoid.
+    text, exact_hits = _apply_exact_values(text, exact_values)
+    hits: list[dict[str, Any]] = [
+        {
+            "path": path,
+            "field": field,
+            "role": role or "unknown",
+            "pattern": "EXACT_VALUE",
+            "count": hit["count"],
+            # Never the value: it is the operator's own secret, and this row
+            # reaches the redaction log line.
+            "masked_value": "[configured]",
+        }
+        for hit in exact_hits
+    ]
+
+    # Detect on a copy with the invisibles removed: without this, a zero-width
+    # character inserted into a credential makes the leaf look base64-ish enough
+    # for the blob heuristic to wave the whole thing through.
+    if looks_like_base64_blob(strip_invisibles(text)):
+        return text, hits
+
+    cleaned = _strip_system_exec_runtime_lines(text)
+    if not cleaned:
+        return "", hits
+
+    whitelist = set(normalize_whitelist_keys(whitelist_keys))
+    normalized_field = str(field or "").strip().lower()
+    if normalized_field and normalized_field in whitelist:
+        # The exact-value pass above already ran, whitelist or not. That matches
+        # the pipeline layer — ExactValueRedactionFilter does not consult the
+        # per-request whitelist either — so the operator's "never let these
+        # strings out" list means the same thing on both layers.
+        return cleaned, hits
+
+    def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
+        marker_spans = [
+            (match.start(), match.end())
+            for match in _REDACTED_MARKER_RE.finditer(text)
+        ]
+        return _merge_spans(protected_spans_for_text(text, whitelist) + marker_spans)
+
+    # Spans only move when a substitution actually rewrites `cleaned`, so compute
+    # them once and refresh after a pattern that changed the text. Recomputing per
+    # pattern re-scanned the same string once for every PII pattern (11+ by default)
+    # on every string node of every message.
+    protected_spans = _compute_protected_spans(cleaned)
+    # Built on the first raw miss and reused across rules, because normalizing is
+    # the expensive half. Plain ASCII normalizes back to itself, so the tuple
+    # comes out empty and no rule pays for a second search.
+    normalized_forms: tuple[str, ...] | None = None
+    for pattern_id, pattern in patterns:
+        match_count = 0
+        protected_count = 0
+        first_raw = ""
+
+        def _repl(match: re.Match[str]) -> str:
+            nonlocal match_count, protected_count, first_raw
+            if protected_spans and range_overlaps_protected(
+                protected_spans,
+                start=match.start(),
+                end=match.end(),
+            ):
+                protected_count += 1
+                return match.group(0)
+            if not first_raw:
+                first_raw = match.group(0)
+            match_count += 1
+            return f"[REDACTED:{pattern_id}]"
+
+        cleaned = pattern.sub(_repl, cleaned)
+        if match_count > 0:
+            protected_spans = _compute_protected_spans(cleaned)
+            normalized_forms = None  # the text moved; the old forms are stale
+            hits.append(
+                {
+                    "path": path,
+                    "field": field,
+                    "role": role or "unknown",
+                    "pattern": pattern_id,
+                    "count": match_count,
+                    "masked_value": mask_for_log(first_raw),
+                }
+            )
+            continue
+
+        if protected_count:
+            # The rule did match; every match sat inside a span the caller asked
+            # to keep — a redaction-whitelist key, or a ``[REDACTED:…]`` marker
+            # an earlier rule wrote. The normalized probe below would find the
+            # same protected text again and, having no span to substitute,
+            # replace the *whole leaf*: "protect this field" would become
+            # "delete this message" for any leaf that also happens to carry a
+            # full-width character.
+            continue
+
+        if normalized_forms is None:
+            normalized_forms = tuple(
+                form for form in build_haystacks(cleaned) if form != cleaned
+            )
+        if not normalized_forms:
+            continue
+        if not pattern_hits_in(pattern, normalized_forms):
+            continue
+        hits.append(
+            {
+                "path": path,
+                "field": field,
+                "role": role or "unknown",
+                "pattern": pattern_id,
+                "count": 1,
+                "masked_value": _NORMALIZED_MATCH_MASK,
+            }
+        )
+        # Whole-leaf replacement, deliberately coarser than a surgical one: the
+        # match exists only in the normalized copy, so there is no span in the
+        # original text that can be substituted without emitting NFKC output.
+        return f"[REDACTED:{pattern_id}]", hits
+
+    return cleaned, hits
+
+
 def _sanitize_text_for_upstream_with_hits(
     text: str,
     *,
@@ -319,91 +734,20 @@ def _sanitize_text_for_upstream_with_hits(
     relaxed one. Making this a required argument is what stops that from
     reappearing by omission.
     """
-    if not text:
-        return "", []
-    if looks_like_base64_blob(text):
-        return text, []
-
-    cleaned = _strip_system_exec_runtime_lines(text)
-    if not cleaned:
-        return "", []
-
-    # Exact values run before the PII regexes, matching the pipeline's own order
-    # (ExactValueRedactionFilter sits ahead of RedactionFilter). The filter only
-    # ever rewrote flattened InternalRequest text, which structured chat /
-    # responses payloads do not forward — so a configured value went upstream in
-    # cleartext on exactly the routes that carry structured content.
-    cleaned, exact_hits = _apply_exact_values(cleaned, exact_values)
-
-    use_relaxed = relaxed_patterns
     patterns = (
         _responses_relaxed_redaction_patterns()
-        if use_relaxed
+        if relaxed_patterns
         else _responses_function_output_redaction_patterns()
     )
-    # Note the order: the exact-value pass above runs even for a whitelisted
-    # field. That matches the pipeline layer — ExactValueRedactionFilter does not
-    # consult the per-request whitelist either — so the operator's "never let
-    # these strings out" list means the same thing on both layers.
-    hits: list[dict[str, Any]] = [
-        {
-            "path": path,
-            "field": field,
-            "role": role or "unknown",
-            "pattern": "EXACT_VALUE",
-            "count": hit["count"],
-            "masked_value": "[configured]",
-        }
-        for hit in exact_hits
-    ]
-    whitelist = set(normalize_whitelist_keys(whitelist_keys))
-    normalized_field = str(field or "").strip().lower()
-    if normalized_field and normalized_field in whitelist:
-        return cleaned, hits
-    def _compute_protected_spans(text: str) -> list[tuple[int, int]]:
-        marker_spans = [
-            (match.start(), match.end())
-            for match in _REDACTED_MARKER_RE.finditer(text)
-        ]
-        return _merge_spans(protected_spans_for_text(text, whitelist) + marker_spans)
-
-    # Spans only move when a substitution actually rewrites `cleaned`, so compute
-    # them once and refresh after a pattern that changed the text. Recomputing per
-    # pattern re-scanned the same string once for every PII pattern (11+ by default)
-    # on every string node of every message.
-    protected_spans = _compute_protected_spans(cleaned)
-    for pattern_id, pattern in patterns:
-        match_count = 0
-        first_raw = ""
-
-        def _repl(match: re.Match[str]) -> str:
-            nonlocal match_count, first_raw
-            if protected_spans and range_overlaps_protected(
-                protected_spans,
-                start=match.start(),
-                end=match.end(),
-            ):
-                return match.group(0)
-            if not first_raw:
-                first_raw = match.group(0)
-            match_count += 1
-            return f"[REDACTED:{pattern_id}]"
-
-        cleaned = pattern.sub(_repl, cleaned)
-        if match_count <= 0:
-            continue
-        protected_spans = _compute_protected_spans(cleaned)
-        hits.append(
-            {
-                "path": path,
-                "field": field,
-                "role": role or "unknown",
-                "pattern": pattern_id,
-                "count": match_count,
-                "masked_value": mask_for_log(first_raw),
-            }
-        )
-    return cleaned, hits
+    return _redact_leaf_with_patterns(
+        text,
+        patterns,
+        role=role,
+        path=path,
+        field=field,
+        whitelist_keys=whitelist_keys,
+        exact_values=exact_values,
+    )
 
 
 def _skip_non_content_field(field: str | None) -> bool:
@@ -476,24 +820,24 @@ def _sanitize_structured_node(
     if isinstance(node, str):
         if skip_field(field):
             return node
-        # Media locator fields (image_url/file_id) must be forwarded as-is.
-        # We still scan and record redaction hits for audit visibility.
+        # Media locator fields (image_url/file_id) run the credential-only set:
+        # a presigned link's query is exactly where a token rides out, and the
+        # full set would rewrite the path segments the upstream needs.
         if _is_media_locator_field(
             path=path,
             field=field,
             media_block_type=media_block_type,
         ):
-            _, node_hits = _sanitize_text_for_upstream_with_hits(
+            cleaned, node_hits = _redact_media_locator(
                 node,
                 role=role,
                 path=path,
                 field=field,
                 whitelist_keys=whitelist_keys,
-                relaxed_patterns=relaxed_patterns,
                 exact_values=exact_values,
             )
             _record_hits(hits, node_hits)
-            return node
+            return cleaned
 
         cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
             node,
@@ -752,6 +1096,57 @@ def _should_skip_responses_field_redaction(field: str | None) -> bool:
     )
 
 
+def _sanitize_credential_only_value(
+    value: Any,
+    *,
+    path: str,
+    role: str,
+    field: str,
+    whitelist_keys: set[str] | None,
+    hits: list[dict[str, Any]],
+    exact_values: Sequence[str] | None = None,
+) -> Any:
+    """Walk *value* applying the credential-only set to every string leaf."""
+    if isinstance(value, str):
+        cleaned, node_hits = _sanitize_credentials_for_upstream_with_hits(
+            value,
+            role=role,
+            path=path,
+            field=field,
+            whitelist_keys=whitelist_keys,
+            exact_values=exact_values,
+        )
+        hits.extend(node_hits)
+        return cleaned
+    if isinstance(value, list):
+        return [
+            _sanitize_credential_only_value(
+                item,
+                path=f"{path}[{idx}]",
+                role=role,
+                field=field,
+                whitelist_keys=whitelist_keys,
+                hits=hits,
+                exact_values=exact_values,
+            )
+            for idx, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_credential_only_value(
+                item,
+                path=f"{path}.{key}",
+                role=role,
+                field=key,
+                whitelist_keys=whitelist_keys,
+                hits=hits,
+                exact_values=exact_values,
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
 def _sanitize_responses_input_for_upstream_with_hits(
     value: Any,
     *,
@@ -784,17 +1179,16 @@ def _sanitize_responses_input_for_upstream_with_hits(
                 field=field,
                 media_block_type=media_block_type,
             ):
-                _, node_hits = _sanitize_text_for_upstream_with_hits(
+                cleaned, node_hits = _redact_media_locator(
                     node,
                     role=role,
                     path=path,
                     field=field or "text",
                     whitelist_keys=whitelist_keys,
-                    relaxed_patterns=relaxed,
                     exact_values=exact_values,
                 )
                 hits.extend(node_hits)
-                return node
+                return cleaned
             if _should_skip_responses_field_redaction(field):
                 return node
             cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
@@ -839,13 +1233,26 @@ def _sanitize_responses_input_for_upstream_with_hits(
             for key, item in node.items():
                 child_path = f"{path}.{key}" if path else key
 
-                # Skip redaction of function_call arguments — these are
-                # model-generated tool invocations in conversation history.
-                # Redacting file paths in them (e.g. SYS_HOME_PATH) corrupts
-                # the context and prevents coding agents from referencing
-                # their own prior tool calls.
+                # function_call arguments are model-generated tool invocations
+                # from conversation history. Redacting file paths in them (e.g.
+                # SYS_HOME_PATH) corrupts the context and stops coding agents
+                # referencing their own prior calls — so the path-class rules
+                # still never run here. What used to be skipped along with them
+                # was the credential class, and a token pasted into a tool
+                # argument left the gateway in cleartext. The fixed
+                # credential-only set is what runs now; it does not follow
+                # ``relaxed_pii_ids``, so no configuration can drag the path
+                # rules back in.
                 if node_type == "function_call" and key == "arguments":
-                    copied[key] = item
+                    copied[key] = _sanitize_credential_only_value(
+                        item,
+                        path=child_path,
+                        role=node_role,
+                        field=key,
+                        whitelist_keys=whitelist_keys,
+                        hits=hits,
+                        exact_values=exact_values,
+                    )
                     continue
 
                 if node_type in _RESPONSES_SENSITIVE_OUTPUT_TYPES and key in {

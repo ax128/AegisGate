@@ -101,6 +101,36 @@ def _extract_stream_event_type(data_payload: str) -> str:
     return event_type.strip().lower()
 
 
+# The only response tags that gate on their own. Read by both
+# ``_stream_block_reason`` here and ``router._needs_confirmation``: a tag that
+# stops the stream but lets the non-stream answer through (or the reverse) is a
+# split decision on the same response.
+#
+# ``response_anomaly_high_risk_command`` is in the set because
+# ``_stream_block_reason`` treats it as an unconditional early return, outside
+# its own ``high_risk_tags`` literal, while ``AnomalyDetector`` only raises
+# ``requires_human_review`` once ``risk_score`` reaches the review threshold.
+# Copying just the literal would make the same high-risk-command answer
+# "stream terminated, non-stream allowed".
+# Tags that exist for the audit log only: they record something about the
+# response without claiming it is dangerous, so neither gate may fire on them.
+# ``response_truncated`` is the length cap's, and turning a long but harmless
+# answer into an obfuscated summary is the bug that started this.
+RESPONSE_AUDIT_ONLY_TAGS: frozenset[str] = frozenset({"response_truncated"})
+
+
+RESPONSE_CONFIRMATION_TAGS: frozenset[str] = frozenset(
+    {
+        "response_privilege_abuse",
+        "response_injection_system_exfil",
+        "response_injection_unicode_bidi",
+        "response_semantic_leak",
+        "response_semantic_privilege",
+        "response_anomaly_high_risk_command",
+    }
+)
+
+
 def _stream_block_reason(ctx: RequestContext) -> str | None:
     # Command-like high risk output should always require confirmation in stream mode.
     if "response_anomaly_high_risk_command" in ctx.security_tags:
@@ -120,19 +150,23 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         )
         if has_block_action:
             return "response_tool_call_violation"
+
+    # "review plus any response_-prefixed tag" ends the stream, minus the
+    # audit-only tags — that exclusion is the whole of what was wrong with it.
+    #
+    # Deleting the rule outright would only have loosened this gate: the length
+    # cap runs on the four non-streaming response stages and nowhere else
+    # (``_cap_response_text`` has no streaming caller), so ``response_truncated``
+    # never reached it in the first place, while an injection or anomaly tag
+    # that raised review — the typoglycemia pair this plan explicitly does not
+    # fix — would have stopped the non-streaming answer and let the stream run.
     if ctx.requires_human_review and any(
-        tag.startswith("response_") for tag in ctx.security_tags
+        tag.startswith("response_") and tag not in RESPONSE_AUDIT_ONLY_TAGS
+        for tag in ctx.security_tags
     ):
         return "response_human_review_required"
 
-    high_risk_tags = {
-        "response_privilege_abuse",
-        "response_injection_system_exfil",
-        "response_injection_unicode_bidi",
-        "response_semantic_leak",
-        "response_semantic_privilege",
-    }
-    for tag in high_risk_tags:
+    for tag in RESPONSE_CONFIRMATION_TAGS:
         if tag in ctx.security_tags:
             return tag
     if ctx.risk_score >= max(ctx.risk_threshold, 0.9):
