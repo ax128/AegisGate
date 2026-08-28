@@ -702,3 +702,78 @@ def test_removed_dead_code_symbols_are_gone() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("aegisgate.core.registry")
 
+
+
+def test_pipeline_phases_match_the_documented_ones() -> None:
+    """`enabled_filters` is a cross-phase list; the docs have to say so.
+
+    `default.yaml` lists `anomaly_detector`, `injection_detector` and
+    `privilege_guard`, but `_build_pipeline()` constructs them on the response
+    phase only. Reading the policy file as "these run on both sides" is the
+    misreading this pins shut — and it is load-bearing: hanging the anomaly
+    detector on the request phase would feed `ctx.risk_score`, which
+    `OutputSanitizer` reads to decide `should_sanitize`, so a clean answer to a
+    request carrying a long base64 blob would come back sanitized and its stream
+    would be cut. Any change here means changing the interception surface, not
+    just the wiring.
+    """
+    from aegisgate.adapters.openai_compat.pipeline_runtime import _build_pipeline
+
+    pipeline = _build_pipeline()
+    request_names = [f.name for f in pipeline.request_filters]
+    response_names = [f.name for f in pipeline.response_filters]
+
+    # Both lists are pinned whole, on purpose. Adding or removing a filter here
+    # is a change to what the gateway intercepts, so it should require editing
+    # this test and the README paragraph it guards — not slip through because
+    # the assertion only checked the names someone happened to think of.
+    assert request_names == [
+        "exact_value_redaction",
+        "redaction",
+        "system_prompt_guard",
+        "untrusted_content_guard",
+        "request_sanitizer",
+        "rag_poison_guard",
+    ]
+    assert response_names == [
+        "exact_value_redaction",
+        "anomaly_detector",
+        "injection_detector",
+        "rag_poison_guard",
+        "privilege_guard",
+        "tool_call_guard",
+        "restoration",
+        "post_restore_guard",
+        "output_sanitizer",
+    ]
+
+    # The three names that are in default.yaml but response-phase only.
+    for name in ("anomaly_detector", "injection_detector", "privilege_guard"):
+        assert name not in request_names, (
+            f"{name} reached request_filters. That changes the request-side "
+            f"interception surface — see the ROADMAP entry before doing it."
+        )
+        assert name in response_names
+
+    default = yaml.safe_load(
+        (_REPO_ROOT / "aegisgate" / "policies" / "rules" / "default.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for name in ("anomaly_detector", "injection_detector", "privilege_guard"):
+        assert name in default["enabled_filters"], (
+            "the cross-phase claim in the READMEs assumes these are listed"
+        )
+
+
+def test_readmes_state_the_cross_phase_caveat() -> None:
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (_REPO_ROOT / "README_zh.md").read_text(encoding="utf-8")
+
+    assert "cross-phase" in readme
+    assert "response phase" in readme
+    assert "跨相位" in readme_zh
+    assert "响应相位" in readme_zh
+    for name in ("anomaly_detector", "injection_detector", "privilege_guard"):
+        assert name in readme
+        assert name in readme_zh

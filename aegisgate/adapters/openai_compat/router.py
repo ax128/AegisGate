@@ -4383,13 +4383,18 @@ async def _execute_chat_once(
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
 
-        if ctx.response_disposition == "sanitize":
+        if ctx.response_disposition == "sanitize" and not _needs_confirmation(ctx):
             # A surgical OutputSanitizer / PostRestoreGuard rewrite does not have
             # to raise review or add a response_ tag, and the shallow renderer
             # only replaces message.content — tool_calls kept the original text.
-            # Deliberately *only* sanitize: block keeps the auto-obfuscation
-            # branch below, which is where the whole-answer safe response, the
-            # dangerous-sample log and the disposition normalisation live.
+            #
+            # Both halves of the condition matter. Only sanitize, so block keeps
+            # the auto-obfuscation branch below. And only when confirmation does
+            # *not* also fire: a response that is sanitize **and** review renders
+            # identically either way (both patch the upstream body), but the
+            # branch below is where the dangerous-sample log and
+            # ``auto_sanitize:hit_fragments_obfuscated`` are written, and losing
+            # those would be a silent hole in the audit trail.
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
             logger.info(
@@ -4763,10 +4768,12 @@ async def _execute_responses_once(
             ctx.enforcement_actions.append("confirmed_sanitize:hit_fragments_obfuscated")
             ctx.security_tags.add("confirmed_release")
 
-        if ctx.response_disposition == "sanitize":
+        if ctx.response_disposition == "sanitize" and not _needs_confirmation(ctx):
             # Same reason as the chat route: a surgical rewrite must reach
             # output[] and the function_call arguments, not only the convenience
-            # output_text field. block still goes through the branch below.
+            # output_text field. block — and anything that also needs
+            # confirmation — still goes through the branch below, which owns the
+            # dangerous-sample log and the enforcement action.
             _attach_security_metadata(final_resp, ctx, boundary=boundary)
             audit_once()
             logger.info(
@@ -6309,12 +6316,21 @@ async def _execute_generic_once(
         # and keep the schema. Collapsing a dict body to a single
         # ``sanitized_text`` key destroyed the shape embeddings / rerank clients
         # parse.
+        #
+        # The exact-value pass runs first because this branch used to return
+        # ``internal_resp.output_text``, which the response pipeline's
+        # ExactValueRedactionFilter had already rewritten. Fragment obfuscation
+        # only touches dangerous-command regions, so without this the sanitize
+        # disposition would hand back configured values that the allow
+        # disposition redacts — the stricter path returning the less redacted
+        # body. Restoration is not repeated here: that one is a reveal.
+        redacted = renderers.apply_exact_values_to_body(upstream_body)
         rendered = (
             renderers.sanitize_nested_text_value(
-                upstream_body, ctx, ops=_NON_STREAM_RENDER_OPS
+                redacted, ctx, ops=_NON_STREAM_RENDER_OPS
             )
-            if isinstance(upstream_body, dict)
-            else _sanitize_hit_fragments(str(upstream_body), ctx)
+            if isinstance(redacted, dict)
+            else _sanitize_hit_fragments(str(redacted), ctx)
         )
         ctx.redaction_mapping.clear()
         return _passthrough_any_response(rendered)

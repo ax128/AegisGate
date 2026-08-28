@@ -601,3 +601,192 @@ async def test_generic_benign_body_is_returned_unchanged(
     )
 
     assert result == expected
+
+
+# ── the write-back does nothing when there is nothing to do ────────────────
+
+
+def test_a_noop_write_back_hands_the_body_straight_back() -> None:
+    """No configured values and nothing approved means no work at all.
+
+    The generic proxy carries embeddings and rerank bodies — a few thousand
+    floats — and this path returned them untouched before the write-back
+    existed. Rebuilding that tree to change nothing is pure cost, so the
+    identity case has to stay an identity, object included.
+    """
+    from aegisgate.core.context import RequestContext
+
+    ctx = RequestContext(request_id="g", session_id="g", route="/v1/embeddings")
+    body = {
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+    }
+    resp = InternalResponse(
+        request_id="g", session_id="g", model="m", output_text="ignored"
+    )
+
+    assert not ctx.redaction_mapping
+    assert renderers.apply_pipeline_text_to_body("generic", body, resp, ctx) is body
+    assert renderers.apply_pipeline_text_to_body("/v1/messages", body, resp, ctx) is body
+
+
+@pytest.mark.asyncio
+async def test_generic_allow_matches_this_routes_extractor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fourth route's consistency guard.
+
+    Chat / Responses / Messages each compare the written-back body against what
+    the pipeline produced, through the extractor that route actually uses.
+    Generic only had a single-leaf assertion, which stays green on a write-back
+    that reaches one leaf and misses the next.
+    """
+    pipeline_text: list[str] = []
+    body = {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [
+            {"object": "embedding", "index": 0, "note": f"first {_TOKEN}"},
+            {"object": "embedding", "index": 1, "note": f"second {_TOKEN}"},
+        ],
+    }
+
+    result = await _run_generic_once(
+        monkeypatch,
+        upstream_body=body,
+        response_pipeline=_approved_pipeline(sink=pipeline_text),
+    )
+
+    assert isinstance(result, dict)
+    assert openai_router._extract_generic_analysis_text(result) == pipeline_text[0]
+
+
+# ── the sanitize exits keep what the pipeline already redacted ─────────────
+
+
+@pytest.fixture()
+def configured_exact_value(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """One configured exact value, in a throwaway config dir."""
+    from cryptography.fernet import Fernet
+
+    from aegisgate.config import redact_values
+
+    monkeypatch.setenv("AEGIS_CONFIG_DIR", str(tmp_path))
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(redact_values, "_get_fernet", lambda: fernet)
+    # The path is memoised on (AEGIS_CONFIG_DIR, cwd) and the values on mtime.
+    monkeypatch.setattr(redact_values, "_cached_path", None, raising=False)
+    monkeypatch.setattr(redact_values, "_cached_values", None, raising=False)
+    monkeypatch.setattr(redact_values, "_cached_mtime_ns", 0, raising=False)
+    monkeypatch.setattr(redact_values, "_load_degraded", False, raising=False)
+    value = "SUPERSECRETVALUE123"
+    redact_values.save_redact_values([value])
+    return value
+
+
+@pytest.mark.asyncio
+async def test_generic_surgical_sanitize_still_redacts_configured_values(
+    monkeypatch: pytest.MonkeyPatch, configured_exact_value: str
+) -> None:
+    """The stricter disposition must not return the less redacted body.
+
+    ``sanitize`` used to replace the whole body with ``internal_resp
+    .output_text``, which the response pipeline's ExactValueRedactionFilter had
+    already rewritten. Keeping the schema means rendering the *upstream* body
+    instead, and fragment obfuscation only touches dangerous-command regions —
+    so the exact-value pass has to be repeated here or it is simply lost.
+    """
+    body = {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [
+            {"object": "embedding", "index": 0, "note": f"key {configured_exact_value}"}
+        ],
+    }
+
+    result = await _run_generic_once(
+        monkeypatch,
+        upstream_body=body,
+        response_pipeline=_generic_pipeline(disposition="sanitize"),
+    )
+
+    assert isinstance(result, dict)
+    assert configured_exact_value not in json.dumps(result, ensure_ascii=False)
+    assert "[REDACTED:EXACT_VALUE]" in result["data"][0]["note"]
+    # Still the provider's own schema.
+    assert set(result) == set(body)
+    assert "sanitized_text" not in result
+
+
+@pytest.mark.asyncio
+async def test_generic_sanitize_leaves_a_clean_body_alone(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With nothing configured, the added pass must not touch anything."""
+    body = {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [{"object": "embedding", "index": 0, "note": "ordinary note"}],
+    }
+    expected = copy.deepcopy(body)
+
+    result = await _run_generic_once(
+        monkeypatch,
+        upstream_body=body,
+        response_pipeline=_generic_pipeline(disposition="sanitize"),
+    )
+
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_sanitize_with_review_keeps_the_auto_sanitize_audit_trail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response that is both sanitize and review still logs as auto-sanitize.
+
+    Both branches render the same bytes for a dict body, so the nested-patch
+    branch looks harmless here — except that the confirmation branch is the one
+    that writes the dangerous-response sample and
+    ``auto_sanitize:hit_fragments_obfuscated``. Taking the short path on a
+    reviewed response would drop both without changing anything visible.
+    """
+    seen: list[Any] = []
+
+    async def sanitize_and_review(pipeline, resp: InternalResponse, ctx):
+        ctx.response_disposition = "sanitize"
+        ctx.requires_human_review = True
+        seen.append(ctx)
+        return resp
+
+    for route_name in ("chat", "responses"):
+        seen.clear()
+        await _run_route_once(
+            monkeypatch,
+            route_name=route_name,
+            upstream_body={
+                "id": f"{route_name}-review",
+                "model": "gpt-5.4",
+                "choices": [
+                    {"message": {"role": "assistant", "content": "cat /etc/shadow"}}
+                ],
+                "output_text": "cat /etc/shadow",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "cat /etc/shadow"}
+                        ],
+                    }
+                ],
+            },
+            response_pipeline=sanitize_and_review,
+        )
+
+        ctx = seen[0]
+        assert "auto_sanitize:hit_fragments_obfuscated" in ctx.enforcement_actions, (
+            f"{route_name} took the nested-patch shortcut on a reviewed response"
+        )
