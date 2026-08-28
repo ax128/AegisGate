@@ -790,3 +790,262 @@ async def test_sanitize_with_review_keeps_the_auto_sanitize_audit_trail(
         assert "auto_sanitize:hit_fragments_obfuscated" in ctx.enforcement_actions, (
             f"{route_name} took the nested-patch shortcut on a reviewed response"
         )
+
+
+# ── every exit is at least as redacted as allow, on every route ────────────
+
+
+def _pipeline_at(disposition: str):
+    """What the response pipeline does to ``output_text``, plus a disposition.
+
+    ``ExactValueRedactionFilter`` is the first response filter, and it only ever
+    rewrote ``output_text``. Reproducing exactly that is what makes ``allow`` the
+    baseline the stricter exits are compared against.
+    """
+
+    async def fake_run_response_pipeline(pipeline, resp: InternalResponse, ctx):
+        from aegisgate.config.redact_values import replace_exact_values
+
+        resp.output_text, _ = replace_exact_values(resp.output_text)
+        ctx.response_disposition = disposition
+        return resp
+
+    return fake_run_response_pipeline
+
+
+def _body_for(route_name: str, value: str) -> dict[str, Any]:
+    text = f"the key is {value}"
+    if route_name == "chat":
+        return {
+            "id": "c",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text,
+                        "tool_calls": [
+                            {
+                                "id": "t",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": json.dumps({"k": value}),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    if route_name == "responses":
+        return {
+            "id": "r",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output_text": text,
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                }
+            ],
+        }
+    return {
+        "id": "m",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4.5",
+        "content": [{"type": "text", "text": text}],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route_name", ["chat", "responses", "messages"])
+@pytest.mark.parametrize("disposition", ["allow", "sanitize", "block"])
+async def test_no_exit_is_less_redacted_than_allow(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_exact_value: str,
+    route_name: str,
+    disposition: str,
+) -> None:
+    """A stricter disposition must never hand back the less redacted body.
+
+    ``sanitize`` and the auto-obfuscation branch render the *upstream* body plus
+    fragment obfuscation, and fragment obfuscation only touches
+    dangerous-command regions — so the pipeline's exact-value rewrite, which
+    lived in ``output_text``, simply was not in what the client received. On
+    chat and responses this was a regression: before the nested-patch branch
+    existed, a surgical sanitize fell through to the allow renderer, which
+    assigns the redacted ``output_text`` to ``message.content``.
+
+    The generic proxy already had this pass; these three routes are the rest of
+    the same hole.
+    """
+    result, _ = await _run_route_once(
+        monkeypatch,
+        route_name=route_name,
+        upstream_body=_body_for(route_name, configured_exact_value),
+        response_pipeline=_pipeline_at(disposition),
+    )
+
+    blob = json.dumps(result, ensure_ascii=False)
+    assert configured_exact_value not in blob, (
+        f"{route_name}/{disposition} returned a configured exact value in clear"
+    )
+    assert "[REDACTED:EXACT_VALUE]" in blob
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_call_arguments_are_redacted_on_every_exit(
+    monkeypatch: pytest.MonkeyPatch, configured_exact_value: str
+) -> None:
+    """``tool_calls`` is where an SDK actually reads, and it stayed valid JSON."""
+    for disposition in ("allow", "sanitize", "block"):
+        result, _ = await _run_route_once(
+            monkeypatch,
+            route_name="chat",
+            upstream_body=_body_for("chat", configured_exact_value),
+            response_pipeline=_pipeline_at(disposition),
+        )
+
+        arguments = result["choices"][0]["message"]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        assert configured_exact_value not in arguments, disposition
+        assert json.loads(arguments)["k"] == "[REDACTED:EXACT_VALUE]", disposition
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route_name", ["chat", "responses", "messages"])
+async def test_a_clean_body_is_unchanged_by_the_added_pass(
+    monkeypatch: pytest.MonkeyPatch, route_name: str
+) -> None:
+    """With nothing configured the pass must not change the text it carries.
+
+    Route level, so it can only speak about the *returned* body. Whether the
+    renderers write through to the caller's object is a separate question that
+    this harness structurally cannot answer — ``fake_forward_json`` hands the
+    route a ``deepcopy`` — so it is asked directly below instead.
+    """
+    body = _body_for(route_name, "ordinary text")
+
+    result, _ = await _run_route_once(
+        monkeypatch,
+        route_name=route_name,
+        upstream_body=body,
+        response_pipeline=_pipeline_at("sanitize"),
+    )
+
+    blob = json.dumps(result, ensure_ascii=False)
+    assert "[REDACTED:EXACT_VALUE]" not in blob
+    assert "the key is ordinary text" in blob
+
+
+@pytest.mark.parametrize(
+    ("patcher", "route_name"),
+    [
+        (renderers.patch_chat_response_body, "chat"),
+        (renderers.patch_responses_body, "responses"),
+        (renderers.patch_messages_response_body, "messages"),
+    ],
+)
+def test_the_sanitize_renderers_do_not_write_through_to_the_upstream_body(
+    patcher, route_name: str
+) -> None:
+    """The added pass may not turn into an in-place edit of the caller's body.
+
+    ``upstream_body`` is still referenced after the render — the audit trail and
+    the dangerous-sample log read it — so writing through would change what those
+    record. The route-level case above cannot see this: the test harness deep
+    copies before the route ever gets the body, so a mutation there is invisible.
+    """
+    from aegisgate.core.context import RequestContext
+
+    ctx = RequestContext(request_id="wt", session_id="wt", route=route_name)
+    body = _body_for(route_name, "ordinary text")
+    before = copy.deepcopy(body)
+
+    out = patcher(body, ctx, ops=openai_router._NON_STREAM_RENDER_OPS)
+
+    assert body == before, "the renderer wrote through to the upstream body"
+    assert out is not body
+
+
+def test_nested_sanitize_does_not_mutate_the_body_it_was_given() -> None:
+    """The per-level deepcopy is gone; the walk still may not write through.
+
+    Containers are rebuilt on the way down and only immutable scalars are
+    shared, which is what the list branch always did.
+    """
+    from aegisgate.core.context import RequestContext
+
+    ctx = RequestContext(request_id="n", session_id="n", route="/v1/embeddings")
+    body = {
+        "object": "list",
+        "data": [{"index": 0, "note": "rm -rf /tmp/x", "vec": [0.5, 1.0]}],
+        "usage": {"total_tokens": 7},
+    }
+    before = copy.deepcopy(body)
+
+    out = renderers.sanitize_nested_text_value(
+        body, ctx, ops=openai_router._NON_STREAM_RENDER_OPS
+    )
+
+    assert body == before
+    assert out is not body
+    assert out["data"] is not body["data"]
+    assert out["data"][0] is not body["data"][0]
+    assert out["usage"] is not body["usage"]
+    assert out["data"][0]["vec"] == [0.5, 1.0]
+    assert out["usage"]["total_tokens"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["sanitize", "block"])
+async def test_all_four_routes_redact_configured_values_on_the_strict_exits(
+    monkeypatch: pytest.MonkeyPatch, configured_exact_value: str, disposition: str
+) -> None:
+    """The four exits are one rule, and this is what says so.
+
+    Three of them get the pass inside ``patch_*_response_body``; the generic
+    proxy has no patch_* renderer and calls ``apply_exact_values_to_body``
+    itself. Nothing but a comment tied those two implementations together, so
+    a change to one could leave the other behind exactly the way a407f2b left
+    three routes behind. Whatever the wiring, all four have to answer the same.
+    """
+    results: dict[str, str] = {}
+
+    for route_name in ("chat", "responses", "messages"):
+        result, _ = await _run_route_once(
+            monkeypatch,
+            route_name=route_name,
+            upstream_body=_body_for(route_name, configured_exact_value),
+            response_pipeline=_pipeline_at(disposition),
+        )
+        results[route_name] = json.dumps(result, ensure_ascii=False)
+
+    generic_body = {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [
+            {"object": "embedding", "index": 0, "note": f"the key is {configured_exact_value}"}
+        ],
+    }
+    generic = await _run_generic_once(
+        monkeypatch,
+        upstream_body=generic_body,
+        # The same pipeline stand-in the other three use, so all four are being
+        # asked the same question: it applies the exact-value rewrite to
+        # output_text exactly as ExactValueRedactionFilter would, then sets the
+        # disposition. generic reaches its sanitize exit on the disposition
+        # alone and its block exit through _needs_confirmation.
+        response_pipeline=_pipeline_at(disposition),
+    )
+    results["generic"] = json.dumps(generic, ensure_ascii=False)
+
+    leaked = [route for route, blob in results.items() if configured_exact_value in blob]
+    assert not leaked, f"{disposition} exit leaked a configured value on: {leaked}"

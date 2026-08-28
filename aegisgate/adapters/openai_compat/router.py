@@ -5640,8 +5640,14 @@ async def _execute_messages_once(
                 source="messages_auto_sanitize",
                 log_key="messages_auto_sanitize",
             )
+            # The pipeline's own text, not the pre-pipeline capture above. The
+            # dangerous-sample log wants what the model actually said; the client
+            # must not. Obfuscating ``capped_upstream_text`` discards every
+            # response-side rewrite -- exact values included -- so the strictest
+            # exit returned the least redacted text. chat and responses already
+            # feed final_resp.output_text here.
             sanitized_text = _build_sanitized_full_response(
-                ctx, source_text=capped_upstream_text
+                ctx, source_text=internal_resp.output_text
             )
             if not isinstance(upstream_body, dict):
                 internal_resp.output_text = sanitized_text
@@ -6296,8 +6302,11 @@ async def _execute_generic_once(
             source="generic_auto_sanitize",
             log_key="generic_auto_sanitize",
         )
+        # The pipeline's own text, not the pre-pipeline capture above -- same
+        # reason as the messages route. This exit replaces the whole body, so
+        # the pre-pipeline text was the only thing the client got back.
         sanitized_text = _build_sanitized_full_response(
-            ctx, source_text=capped_upstream_text
+            ctx, source_text=internal_resp.output_text
         )
         ctx.response_disposition = "sanitize"
         ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")
@@ -6337,6 +6346,11 @@ async def _execute_generic_once(
         # disposition would hand back configured values that the allow
         # disposition redacts — the stricter path returning the less redacted
         # body. Restoration is not repeated here: that one is a reveal.
+        #
+        # chat / responses / messages get the same pass inside their own
+        # ``patch_*_response_body`` (``renderers._exact_value_redacted_body``).
+        # This route has no patch_* renderer of its own, so it says it here;
+        # all four exits are one rule, and changing one means changing four.
         redacted = renderers.apply_exact_values_to_body(upstream_body)
         rendered = (
             renderers.sanitize_nested_text_value(
