@@ -33,7 +33,7 @@ from aegisgate.config.redact_values import load_redact_values, replace_exact_val
 from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
-from aegisgate.util.masking import mask_for_log
+from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
     protected_spans_for_text,
@@ -623,34 +623,45 @@ def _redact_text(
     # rule pays for a second search.
     normalized_forms: tuple[str, ...] | None = None
 
-    def _record(pattern_id: str, raw: str) -> None:
+    def _record(pattern_id: str, *, masked: str) -> None:
         if pattern_id in hit_set or len(hit_ids) >= _V2_MAX_MATCH_IDS:
             return
         hit_set.add(pattern_id)
         hit_ids.append(pattern_id)
-        markers.append({"kind": pattern_id, "masked_value": mask_for_log(raw)})
+        markers.append({"kind": pattern_id, "masked_value": masked})
 
     for pattern_id, pattern in _v2_relaxed_redaction_patterns():
         replacement = f"[REDACTED:{pattern_id}]"
         protected_spans = protected_spans_for_text(value, whitelist)
         matched_here = 0
+        protected_here = 0
 
         def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
-            nonlocal replacement_count, matched_here
+            nonlocal replacement_count, matched_here, protected_here
             if protected_spans and range_overlaps_protected(
                 protected_spans,
                 start=m.start(),
                 end=m.end(),
             ):
+                protected_here += 1
                 return m.group(0)
             replacement_count += 1
             matched_here += 1
-            _record(_pid, m.group(0))
+            _record(_pid, masked=mask_for_log(m.group(0)))
             return replacement
 
         value = pattern.sub(_repl, value)
         if matched_here > 0:
             normalized_forms = None  # the text moved; the old forms are stale
+            continue
+
+        if protected_here:
+            # The rule did match; every match sat inside a span the caller asked
+            # to keep. Falling through would let the normalized probe below find
+            # that same protected text and, having no span it may substitute,
+            # replace the *whole leaf* -- so "protect this field" would become
+            # "delete this message" for any leaf that also happens to contain a
+            # newline or a full-width character. Same guard the V1 path has.
             continue
 
         # Same contract as the V1 forward path: detect on the normalized copies,
@@ -665,7 +676,9 @@ def _redact_text(
             continue
         if not pattern_hits_in(pattern, normalized_forms):
             continue
-        _record(pattern_id, value)
+        # Not ``mask_for_log(value)``: there is no fragment to mask, and the
+        # leaf is unbounded. See util.masking.NORMALIZED_MATCH_MASK.
+        _record(pattern_id, masked=NORMALIZED_MATCH_MASK)
         replacement_count += 1
         return replacement, replacement_count, hit_ids, markers
     return value, replacement_count, hit_ids, markers

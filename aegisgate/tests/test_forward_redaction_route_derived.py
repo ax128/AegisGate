@@ -114,6 +114,34 @@ def test_multipart_forward_now_uses_the_route(monkeypatch: pytest.MonkeyPatch) -
     assert 'relaxed_patterns=is_low_false_positive_route(request_path)' in _ROUTER_SRC
 
 
+def test_multipart_media_locators_are_redacted_not_forwarded_verbatim() -> None:
+    """The locator fix reached the JSON paths; multipart kept the old bypass.
+
+    The form branch computed ``cleaned``, recorded the hits for the audit log,
+    and then appended ``raw_text`` anyway for ``image_url`` / ``file_id`` — so a
+    presigned link carrying a credential in its query left the gateway intact on
+    the one route whose whole purpose is uploading media.
+    """
+    assert "data.append((str(key), raw_text))\n            else:" not in _ROUTER_SRC
+    assert "if field in _MEDIA_LOCATOR_FIELDS:" in _ROUTER_SRC
+    assert "cleaned, node_hits = _redact_media_locator(" in _ROUTER_SRC
+
+
+def test_multipart_locator_path_actually_redacts() -> None:
+    """The behaviour behind the wiring above, at the multipart path/field."""
+    cleaned, hits = sanitize._redact_media_locator(
+        "https://example.com/img.png?api_key=sk-abcdefghijklmnop&w=320",
+        role="user",
+        path="multipart.image_url",
+        field="image_url",
+    )
+
+    assert "sk-abcdefghijklmnop" not in cleaned
+    assert cleaned.startswith("https://example.com/img.png")
+    assert "w=320" in cleaned
+    assert hits
+
+
 def test_role_no_longer_changes_the_outcome() -> None:
     """Same text, same route verdict, different roles — identical result.
 

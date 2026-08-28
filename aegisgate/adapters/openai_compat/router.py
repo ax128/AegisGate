@@ -102,6 +102,7 @@ from aegisgate.config.settings import settings
 from aegisgate.config.security_rules import is_low_false_positive_route, load_security_rules
 from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exports
     _MAX_REDACTION_HIT_LOG_ITEMS,
+    _MEDIA_LOCATOR_FIELDS,
     _RESPONSES_SENSITIVE_OUTPUT_TYPES,
     _SYSTEM_EXEC_RUNTIME_LINE_RE,
     _UPSTREAM_EOF_RECOVERY_NOTICE,
@@ -109,6 +110,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _looks_like_gateway_internal_history_text,
     _looks_like_gateway_upstream_recovery_notice_text,
     _preserves_json_shape,
+    _redact_media_locator,
     _responses_function_output_redaction_patterns,
     _responses_relaxed_redaction_patterns,
     _sanitize_chat_messages_for_upstream_with_hits,
@@ -6431,27 +6433,40 @@ async def _execute_multipart_once(
                 data.append((str(key), raw_text))
                 continue
 
-            cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                raw_text,
-                role="user",
-                path=f"multipart.{key}",
-                field=str(key),
-                whitelist_keys=whitelist_keys,
-                # Derived from the route, like every other forward-path call.
-                # This used to fall through to the role-derived default, and
-                # role="user" is in the relaxed-roles set — so the multipart
-                # forward path rewrote with the relaxed set while the pipeline
-                # scored the very same fields with the full one. The multipart
-                # routes are not on the low-false-positive list, so the answer
-                # here is the full set.
-                relaxed_patterns=is_low_false_positive_route(request_path),
-            )
-            redaction_hits.extend(node_hits)
-            # Preserve media locator fields as-is (e.g. signed image URLs).
-            if str(key).strip().lower() in {"image_url", "file_id"}:
-                data.append((str(key), raw_text))
+            field = str(key).strip().lower()
+            if field in _MEDIA_LOCATOR_FIELDS:
+                # Same treatment the JSON forward paths give a locator: the
+                # credential-only set, per-parameter query rewriting, and a
+                # whole-value replacement if the result stops being a fetchable
+                # URL. These were scanned for the audit log and then forwarded
+                # verbatim, so a presigned link carrying ``?api_key=…`` left the
+                # gateway intact — the multipart route was the one surface the
+                # locator fix did not reach.
+                cleaned, node_hits = _redact_media_locator(
+                    raw_text,
+                    role="user",
+                    path=f"multipart.{key}",
+                    field=field,
+                    whitelist_keys=whitelist_keys,
+                )
             else:
-                data.append((str(key), cleaned))
+                cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
+                    raw_text,
+                    role="user",
+                    path=f"multipart.{key}",
+                    field=str(key),
+                    whitelist_keys=whitelist_keys,
+                    # Derived from the route, like every other forward-path call.
+                    # This used to fall through to the role-derived default, and
+                    # role="user" is in the relaxed-roles set — so the multipart
+                    # forward path rewrote with the relaxed set while the pipeline
+                    # scored the very same fields with the full one. The multipart
+                    # routes are not on the low-false-positive list, so the answer
+                    # here is the full set.
+                    relaxed_patterns=is_low_false_positive_route(request_path),
+                )
+            redaction_hits.extend(node_hits)
+            data.append((str(key), cleaned))
 
     if filter_mode != "passthrough":
         analysis_parts = [value for _, value in data]

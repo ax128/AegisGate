@@ -24,6 +24,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest
 from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.storage.kv import KVStore
+from aegisgate.util.masking import NORMALIZED_MATCH_MASK
 
 _ZWSP = "​"
 # A token shape already used elsewhere in the suite, with one zero-width
@@ -206,6 +207,68 @@ def test_v2_skip_fields_are_untouched(field: str) -> None:
     )
     assert value == f"payload {_SPLIT_TOKEN}"
     assert count == 0
+
+
+def test_v2_protected_span_is_not_swept_up_by_the_normalized_probe() -> None:
+    """The V1 guard, on the layer that was missing it.
+
+    The raw ``sub`` refuses to rewrite a protected span, which leaves the
+    per-rule match count at zero — indistinguishable from "this rule found
+    nothing". The normalized probe then finds the same credential in the
+    normalized copy and, having no span it may substitute, replaces the entire
+    leaf. A newline is enough to produce a differing normalized form, so this
+    fired on essentially every multi-line value: "protect this field" became
+    "delete this field", and the rest of the leaf went with it.
+    """
+    text = f"trace_id: {_PLAIN_TOKEN}\nplease keep the rest of this note"
+
+    value, count, hit_ids, _ = v2_router._redact_text(
+        text, field="note", whitelist_keys={"trace_id"}
+    )
+
+    assert value == text
+    assert count == 0
+    assert not hit_ids
+
+
+def test_v2_the_same_leaf_without_the_whitelist_is_still_redacted() -> None:
+    """Guards the premise: the protection is what changed the outcome."""
+    text = f"trace_id: {_PLAIN_TOKEN}\nplease keep the rest of this note"
+
+    value, count, hit_ids, _ = v2_router._redact_text(text, field="note")
+
+    assert _PLAIN_TOKEN not in value
+    assert count >= 1
+    assert hit_ids
+    # Surgical, not whole-leaf: the surrounding text still has to survive.
+    assert "please keep the rest of this note" in value
+
+
+def test_v2_a_normalized_only_hit_does_not_log_the_whole_leaf() -> None:
+    """There is no fragment to mask, so it must not mask the leaf instead.
+
+    ``mask_for_log`` keeps the first three and last two characters. Handed a
+    whole leaf, that is an unbounded string in the redaction log line with the
+    opening of the message in cleartext — the V1 path uses a fixed marker for
+    exactly this reason, and both now read it from ``util.masking``.
+    """
+    long_leaf = f"{_FULLWIDTH_TEXT} " + ("补充说明。" * 400) + f" {_SPLIT_TOKEN}"
+    assert len(long_leaf) > 2000
+
+    value, count, hit_ids, markers = v2_router._redact_text(long_leaf, field="text")
+
+    assert value == "[REDACTED:token]"
+    assert count >= 1
+    assert hit_ids == ["token"]
+    masked = markers[0]["masked_value"]
+    assert masked == NORMALIZED_MATCH_MASK
+    assert len(masked) < 64
+    assert long_leaf[:3] not in masked
+
+
+def test_both_layers_use_the_same_normalized_match_marker() -> None:
+    """One constant, so the two forward paths cannot drift apart on it."""
+    assert sanitize._NORMALIZED_MATCH_MASK is NORMALIZED_MATCH_MASK
 
 
 # ── the shared helper does what both layers rely on ────────────────────────

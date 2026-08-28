@@ -24,7 +24,7 @@ from aegisgate.config.security_rules import (
     select_relaxed_pii_patterns,
 )
 from aegisgate.util.base64_detect import looks_like_base64_blob
-from aegisgate.util.masking import mask_for_log
+from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
     protected_spans_for_text,
@@ -105,11 +105,10 @@ _MEDIA_SOURCE_URL_BLOCK_TYPES = frozenset(
 # The id the whole-value fallback reports when a redacted media locator stops
 # being a usable URL.
 _URL_QUERY_PATTERN_ID = "URL_TOKEN_QUERY"
-# What a normalized-only hit reports instead of a masked fragment. There is no
-# fragment: the match exists only in the normalized copy. Masking the whole leaf
-# would put an unbounded string in the log line (and its first three characters
-# in cleartext) for a value nobody can point at.
-_NORMALIZED_MATCH_MASK = "[normalized-form match]"
+# Shared with the V2 forward path, which reports normalized-only hits the same
+# way. See ``util.masking.NORMALIZED_MATCH_MASK`` for why it is not a mask of
+# the leaf.
+_NORMALIZED_MATCH_MASK = NORMALIZED_MATCH_MASK
 _CONTENT_BLOCK_PATH_RE = re.compile(r"(?:^|\.)content\[\d+\]$")
 _SYSTEM_BLOCK_PATH_RE = re.compile(r"^system\[\d+\]$")
 
