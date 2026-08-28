@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Iterable, Sequence
@@ -222,6 +223,46 @@ def active_exact_values() -> tuple[str, ...]:
     return tuple(load_redact_values())
 
 
+# One compiled alternation, keyed on the value list it was built from. A single
+# slot rather than an lru_cache: the entries hold the operator's secrets, and a
+# cache with history would keep every superseded configuration's plaintext alive
+# for as long as the process runs. Replacing the slot lets the old one be
+# collected, which is the lifetime load_redact_values' own cache already has.
+#
+# Unlocked on purpose, like _cached_path: rebinding one tuple is atomic, and the
+# worst a race can do is compile the same pattern twice.
+_pattern_cache: tuple[tuple[str, ...], re.Pattern[str] | None] | None = None
+
+
+def _exact_value_pattern(values: tuple[str, ...]) -> re.Pattern[str] | None:
+    """One alternation matching any configured value, longest first.
+
+    The loop this replaces scanned the whole text once per configured value, and
+    it runs on every string leaf of every forwarded payload — including the
+    base64 data URIs the blob heuristic used to skip before exact values were
+    moved ahead of it. On a 2.6 MB leaf with 50 values configured that was
+    ~36 ms; one alternation is ~1.4 ms regardless of how many values there are.
+
+    Longest-first ordering is what preserves the loop's semantics: Python's
+    ``|`` takes the first alternative that matches at a position, so a value
+    that is a prefix of a longer one must come second. Empty strings are dropped
+    — as an alternative one would match at every position, and in the old loop
+    ``"" in text`` was likewise always true.
+    """
+    global _pattern_cache
+
+    cached = _pattern_cache
+    if cached is not None and cached[0] == values:
+        return cached[1]
+
+    usable = sorted({value for value in values if value}, key=len, reverse=True)
+    pattern = (
+        re.compile("|".join(re.escape(value) for value in usable)) if usable else None
+    )
+    _pattern_cache = (values, pattern)
+    return pattern
+
+
 def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, int]:
     """Replace every entry of *values* in *text*.
 
@@ -233,15 +274,10 @@ def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, in
     if not values or not text:
         return text, 0
 
-    # Sort by length descending so longer values match first.
-    sorted_values = sorted(values, key=len, reverse=True)
-    count = 0
-    for val in sorted_values:
-        if val in text:
-            n = text.count(val)
-            text = text.replace(val, _PLACEHOLDER)
-            count += n
-    return text, count
+    pattern = _exact_value_pattern(tuple(values))
+    if pattern is None:
+        return text, 0
+    return pattern.subn(_PLACEHOLDER, text)
 
 
 def replace_exact_values(text: str) -> tuple[str, int]:

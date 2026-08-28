@@ -619,3 +619,100 @@ def test_the_hit_row_never_carries_the_configured_value(values_file) -> None:
 
     assert hits[0]["masked_value"] == "[configured]"
     assert _GOOD_VALUE not in json.dumps(hits, ensure_ascii=False)
+
+
+class TestExactValueAlternation:
+    """The replacement is one compiled alternation, not a scan per value.
+
+    It runs on every string leaf of every forwarded payload, and since exact
+    values were moved ahead of the base64-blob skip that includes multi-megabyte
+    data URIs. Per-value scanning made the cost linear in the number of
+    configured values; the properties below are what the rewrite has to keep.
+    """
+
+    def test_longer_values_still_win_over_their_own_prefixes(self) -> None:
+        """``|`` takes the first matching alternative, so ordering is the semantics."""
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        values = ["SECRETVALUE1234567", "SECRETVALUE12"]
+        out, count = replace_exact_values_from("x SECRETVALUE1234567 y", values)
+
+        assert out == "x [REDACTED:EXACT_VALUE] y"
+        assert count == 1
+        # Order of the caller's list must not change the answer.
+        assert replace_exact_values_from("x SECRETVALUE1234567 y", values[::-1]) == (
+            out,
+            count,
+        )
+
+    def test_an_empty_value_does_not_match_everywhere(self) -> None:
+        """As an alternative, ``""`` would match at every position.
+
+        ``load_redact_values`` filters these out, but this function is reachable
+        with any sequence and the failure mode is destroying the whole payload.
+        """
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from("ordinary text", ["", "  "])
+
+        assert out == "ordinary text"
+        assert count == 0
+
+    def test_only_empty_values_is_the_same_as_nothing_configured(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        assert replace_exact_values_from("ordinary text", [""]) == ("ordinary text", 0)
+
+    def test_the_placeholder_is_not_itself_rescanned(self) -> None:
+        """The per-value loop replaced inside its own output; one pass cannot.
+
+        With ``REDACTED:E`` configured, the loop turned a single hit into
+        ``[[REDACTED:EXACT_VALUE]XACT_VALUE]`` and counted it twice.
+        """
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            "ABCDEFGHIJ", ["ABCDEFGHIJ", "REDACTED:E"]
+        )
+
+        assert out == "[REDACTED:EXACT_VALUE]"
+        assert count == 1
+
+    def test_every_occurrence_is_counted(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            "A SECRETVALUE12 B SECRETVALUE12 C", ["SECRETVALUE12"]
+        )
+
+        assert out == "A [REDACTED:EXACT_VALUE] B [REDACTED:EXACT_VALUE] C"
+        assert count == 2
+
+    def test_a_changed_value_list_is_not_served_from_the_cache(self) -> None:
+        """The compiled pattern is memoised on one slot; the key has to work."""
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        assert replace_exact_values_from("hit AAAAAAAAAA", ["AAAAAAAAAA"])[1] == 1
+        assert replace_exact_values_from("hit AAAAAAAAAA", ["BBBBBBBBBB"])[1] == 0
+        assert replace_exact_values_from("hit AAAAAAAAAA", ["AAAAAAAAAA"])[1] == 1
+
+    def test_the_cache_keeps_no_history_of_superseded_secrets(self) -> None:
+        """A cache with history would hold every past configuration's plaintext."""
+        from aegisgate.config import redact_values
+
+        redact_values.replace_exact_values_from("x", ["OLDSECRET123"])
+        redact_values.replace_exact_values_from("x", ["NEWSECRET123"])
+
+        cached_values, _ = redact_values._pattern_cache
+        assert cached_values == ("NEWSECRET123",)
+
+    def test_regex_metacharacters_in_a_value_are_literal(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            "a.b*c[d]e+f", ["a.b*c[d]e+f"]
+        )
+        assert out == "[REDACTED:EXACT_VALUE]"
+        assert count == 1
+        # ...and the same value must not match what the regex would have.
+        assert replace_exact_values_from("aXbYcZdWeQf", ["a.b*c[d]e+f"])[1] == 0
