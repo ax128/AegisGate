@@ -27,8 +27,9 @@ redaction:
     # More-specific / credential-shaped rules must precede the broad digit, hex
     # and base58 patterns. PHONE used to run first and only replace the 10-digit
     # middle of ``xoxb-<digits>-…``, leaving the prefix and tail in the
-    # forwarded text. CARD / IPV6 / CRYPTO_SOL_ADDR had the same shape of
-    # problem against IMEI/IMSI, MAC, and TRON.
+    # forwarded text. CARD / IPV6 / CRYPTO_SOL_ADDR had the milder form of the
+    # same ordering bug: they mis-labelled IMEI/IMSI, MAC, and TRON, but those
+    # values were still fully replaced.
     - id: EMAIL
       regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     - id: TOKEN

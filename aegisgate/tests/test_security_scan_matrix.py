@@ -70,7 +70,7 @@ _PII_SAMPLES: dict[str, str] = {
     "CN_ID": "11010119900101123X",
     "AWS_ACCESS_KEY": "AKIAIOSFODNN7EXAMPLE",
     "GITHUB_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz012345",
-    "SLACK_TOKEN": "xoxb-abcdefghij-klmnopqrstuv",
+    "SLACK_TOKEN": "xoxb-1234567890-abcdefghij",
     "IBAN": "DE89370400440532013000",
     "IPV4": "192.0.2.55",
     "IPV6": "2001:db8:85a3:0:0:8a2e:370:7334",
@@ -471,6 +471,8 @@ def test_specific_pii_rules_precede_broad_digit_rules() -> None:
     index = {pattern_id: ids.index(pattern_id) for pattern_id in ids}
 
     assert index["SLACK_TOKEN"] < index["PHONE"]
+    assert index["GITHUB_TOKEN"] < index["PHONE"]
+    assert index["AWS_ACCESS_KEY"] < index["PHONE"]
     assert index["CN_MOBILE"] < index["PHONE"]
     assert index["IMEI"] < index["CARD"]
     assert index["IMSI"] < index["CARD"]
@@ -485,7 +487,9 @@ def test_specific_pii_rules_precede_broad_digit_rules() -> None:
     ]
     fallback_index = {pattern_id: fallback_ids.index(pattern_id) for pattern_id in fallback_ids}
     assert fallback_index["SLACK_TOKEN"] < fallback_index["PHONE"]
+    assert fallback_index["GITHUB_TOKEN"] < fallback_index["PHONE"]
     assert fallback_index["CN_MOBILE"] < fallback_index["PHONE"]
+    assert fallback_index["SSN"] < fallback_index["PHONE"]
 
 
 def test_numeric_slack_token_is_redacted_as_slack_not_phone() -> None:
@@ -502,6 +506,17 @@ def test_numeric_slack_token_is_redacted_as_slack_not_phone() -> None:
     kinds = " ".join(mapping)
     assert "SLACK_TOKEN" in kinds
     assert "PHONE" not in kinds
+
+    forwarded, hits = _sanitize_text_for_upstream_with_hits(
+        sample,
+        role="user",
+        path="messages[0].content",
+        field="content",
+        relaxed_patterns=False,
+    )
+    assert sample not in forwarded
+    assert "xoxb-" not in forwarded
+    assert any(hit["pattern"] == "SLACK_TOKEN" for hit in hits)
 
 
 # ── request sanitizer ──────────────────────────────────────────────────────
