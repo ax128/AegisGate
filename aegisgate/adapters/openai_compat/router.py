@@ -64,6 +64,7 @@ from aegisgate.adapters.openai_compat.security_view import (
     prepare_responses_security_view,
 )
 from aegisgate.adapters.openai_compat.stream_utils import (
+    RESPONSE_CONFIRMATION_TAGS,
     _build_streaming_response,
     _extract_sse_data_payload,
     _extract_sse_data_payload_from_chunk,
@@ -1682,11 +1683,22 @@ def _request_target_path(request: Request, *, fallback_path: str | None = None) 
 
 
 def _needs_confirmation(ctx: RequestContext) -> bool:
+    """Whether this response gets replaced by an obfuscated summary.
+
+    The confirmation flow is gone; what "needs confirmation" now means is "the
+    whole answer is auto-obfuscated". Any ``response_``-prefixed tag used to be
+    enough, which swept in tags that only exist for the audit log — the length
+    cap's ``response_truncated`` turned a long but harmless answer into a
+    summary. The gate is the explicit set, shared with ``_stream_block_reason``
+    so the streaming and non-streaming sides agree on it.
+
+    ``requires_human_review`` still gates on its own, unconditionally.
+    """
     if ctx.response_disposition == "block":
         return True
     if ctx.requires_human_review:
         return True
-    return any(tag.startswith("response_") for tag in ctx.security_tags)
+    return bool(ctx.security_tags & RESPONSE_CONFIRMATION_TAGS)
 
 
 def _confirmation_reason_and_summary(
