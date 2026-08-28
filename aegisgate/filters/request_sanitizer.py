@@ -335,7 +335,31 @@ class RequestSanitizer(BaseFilter):
             }
             logger.info("request leak_check review request_id=%s", ctx.request_id)
         elif has_leak:
-            # Every hit sits in a system prompt. Record it, do not move the score.
+            # Every hit sits in a system prompt. The configured action still
+            # runs: an operator who set leak_check to ``block`` asked for strict
+            # blocking — the shipped comment next to that setting says so — and
+            # this branch is not entitled to overrule it. What it withholds is
+            # only the ``review`` score bump.
+            #
+            # Skipping _apply_action entirely, as the first cut did, silently
+            # turned `leak_check: block` into "allow" for every system prompt,
+            # and left `enforcement_actions` empty so the audit trail could not
+            # even show the rule had run.
+            action = self._apply_action(ctx, "leak_check", "review")
+            if action == "block":
+                self._block_request(req, ctx, reason="request_leak_check_failed")
+                self._report = {
+                    "filter": self.name,
+                    "hit": True,
+                    "risk_score": ctx.risk_score,
+                    "action": "block",
+                }
+                logger.info(
+                    "request blocked request_id=%s reason=leak_check", ctx.request_id
+                )
+                return req
+
+            # Record it, do not move the score.
             #
             # The 0.6 above sits over OutputSanitizer's sanitize gate (~0.35),
             # which marks an otherwise clean answer response_disposition=

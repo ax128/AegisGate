@@ -307,6 +307,45 @@ def test_the_same_text_in_a_user_message_still_raises_the_score() -> None:
     assert ctx.risk_score >= 0.6
 
 
+@pytest.mark.parametrize("derived", [True, False], ids=["instructions", "system-message"])
+def test_a_block_configured_leak_check_still_blocks_a_system_prompt(
+    derived: bool,
+) -> None:
+    """Withholding the score bump must not withhold the operator's block.
+
+    ``leak_check`` ships as ``review`` with a comment saying to switch it to
+    ``block`` for strict blocking, so ``block`` is a supported configuration and
+    this branch does not get to overrule it. The first cut skipped
+    ``_apply_action`` entirely for this surface, which silently turned
+    ``leak_check: block`` into "allow" for every system prompt.
+    """
+    sanitizer = RequestSanitizer()
+    sanitizer._action_map = dict(sanitizer._action_map, leak_check="block")
+
+    ctx = _ctx({"request_sanitizer"})
+    sanitizer.process_request(
+        _system_prompt_request(_SCAN_ONLY_LEAK_TEXT, derived=derived), ctx
+    )
+
+    assert ctx.request_disposition == "block"
+    assert "request_leak_check_failed" in ctx.disposition_reasons
+
+
+@pytest.mark.parametrize("derived", [True, False], ids=["instructions", "system-message"])
+def test_the_observed_path_still_records_the_rule_that_ran(derived: bool) -> None:
+    """An empty ``enforcement_actions`` cannot show that leak_check ran at all.
+
+    The score is withheld; the record of the decision is not.
+    """
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(
+        _system_prompt_request(_SCAN_ONLY_LEAK_TEXT, derived=derived), ctx
+    )
+
+    assert "request_sanitizer:leak_check:review" in ctx.enforcement_actions
+    assert ctx.risk_score == 0.0
+
+
 def test_the_surface_test_cannot_be_claimed_by_a_request() -> None:
     """``source`` is caller-supplied on the chat route; ``role`` is not.
 
