@@ -42,6 +42,16 @@ class RestorationFilter(BaseFilter):
 
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
+    @staticmethod
+    def _forget_mapping(ctx: RequestContext) -> None:
+        """Drop the mapping on a guard rejection, approvals included.
+
+        Leaving ``restored_placeholders`` behind would let a renderer restore a
+        token the guard just refused.
+        """
+        ctx.redaction_mapping.clear()
+        ctx.restored_placeholders.clear()
+
     def _apply_action(self, ctx: RequestContext, key: str) -> None:
         action = self._action_map.get(key)
         if not action:
@@ -72,7 +82,7 @@ class RestorationFilter(BaseFilter):
                     "mapping_age_seconds": round(mapping_age, 2),
                 }
                 logger.info("restoration skipped stale mapping request_id=%s age=%.2f", ctx.request_id, mapping_age)
-                ctx.redaction_mapping.clear()
+                self._forget_mapping(ctx)
                 return resp
 
         mapping = dict(ctx.redaction_mapping)
@@ -85,14 +95,27 @@ class RestorationFilter(BaseFilter):
         if not ctx.restoration_store_consumed:
             ctx.restoration_store_consumed = True
             consumed = self.store.consume_mapping(ctx.session_id, ctx.request_id)
-        if not mapping:
+        if not mapping and consumed:
             mapping = consumed
+            # The consume is read-and-delete, so this is now the only copy. It
+            # used to live in a local that went out of scope: the next probe —
+            # and the renderers that restore the nested protocol fields — found
+            # both the store and the context empty.
+            ctx.redaction_mapping.update(consumed)
 
         if not mapping:
             return resp
 
         placeholders_in_output = self._placeholder_re.findall(resp.output_text)
         placeholder_count = len(placeholders_in_output)
+
+        if placeholder_count == 0:
+            # Streaming re-runs the response pipeline once per probe against the
+            # same context, and the first probes normally arrive before the model
+            # has echoed anything. Clearing here left the later probes — and the
+            # volume / partial / exfiltration guards — with nothing to work on.
+            # Nothing was restored, so no tag and no approved placeholder set.
+            return resp
 
         if placeholder_count > self._max_placeholders_per_response:
             ctx.security_tags.add("restoration_too_many_placeholders")
@@ -105,7 +128,7 @@ class RestorationFilter(BaseFilter):
                 "placeholder_count": placeholder_count,
             }
             logger.info("restoration blocked placeholder volume request_id=%s count=%d", ctx.request_id, placeholder_count)
-            ctx.redaction_mapping.clear()
+            self._forget_mapping(ctx)
             return resp
 
         missing_placeholders = {token for token in placeholders_in_output if token not in mapping}
@@ -124,7 +147,7 @@ class RestorationFilter(BaseFilter):
                 ctx.request_id,
                 len(missing_placeholders),
             )
-            ctx.redaction_mapping.clear()
+            self._forget_mapping(ctx)
             return resp
 
         placeholders_present = {token for token in placeholders_in_output if token in mapping}
@@ -144,13 +167,18 @@ class RestorationFilter(BaseFilter):
                 ctx.request_id,
                 len(placeholders_present),
             )
-            ctx.redaction_mapping.clear()
+            self._forget_mapping(ctx)
             return resp
 
         for placeholder, raw in mapping.items():
             resp.output_text = resp.output_text.replace(placeholder, raw)
 
-        ctx.redaction_mapping.clear()
+        # The renderers restore the same tokens in the nested protocol fields, so
+        # the mapping has to outlive this filter. The route clears it once the
+        # rendered body exists. Only tokens that were in *this* round's
+        # output_text are approved: anything the guards above never scanned must
+        # stay a placeholder on the way back to the client.
+        ctx.restored_placeholders = placeholders_present
         ctx.security_tags.add("restoration_applied")
 
         self._report = {
