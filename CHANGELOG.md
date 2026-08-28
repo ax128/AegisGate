@@ -17,10 +17,28 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   排在 PHONE / CARD / IPV6 / SOL 这类宽规则之前；回退用的 `_DEFAULT_RULES` 同一顺序。
 - **MAC 不再从更长的 IPv6 里切出 6 组两位 hextet。** MAC 提前之后，无边界的
   `aa:bb:cc:dd:ee:ff` 会先吃掉 `aa:bb:cc:dd:ee:ff:10:20` 的前六组，把 `:10:20` 原样转发出去。
-  MAC 规则现在用负向环视，不在更长的冒号/连字符十六进制串里匹配。
+  MAC 规则现在按分隔符拆成两支：冒号支带负向环视，落在更长的冒号十六进制串里就交给后面的 IPV6
+  整条替换；连字符支不带环视（见下条）。
+- **连字符写法的 MAC 紧邻冒号时不再漏脱敏。** 上一条的环视对两种分隔符一视同仁地排除 `:`，
+  于是 `mac:00-11-22-33-44-55`、`hwaddr:aa-bb-cc-dd-ee-ff`、`00-11-22-33-44-55:8080` 这类文本
+  **一条规则都不命中**（冒号写法还有 IPV6 兜底，连字符写法没有），比修复前更差。
+  连字符支改为只靠 `\b` 定界 —— 加环视会连 `mac-`、`id-` 这类以十六进制字母结尾的标签一起挡掉 ——
+  并放宽到 5–7 组分隔符，把 8 组的 EUI-64 写法整体替换，而不是吃掉 6 组、把剩下的转发出去。
+  守护见 `test_hyphen_mac_is_redacted_next_to_a_colon`。
+- **规则顺序在加载时自检。** 顺序现在是安全语义的一部分，但运行时读的往往不是仓库里这份文件：
+  挂载的配置目录保留首次生成的内容（`init_config` 从不整文件覆盖），控制台新增规则只能**追加到末尾**，
+  正好落在宽规则之后。`config/security_rules.py` 新增 `pii_order_violations()`，`load_security_rules()`
+  每次真正读盘后自检一次，发现宽规则排在具体规则前面就打 WARNING 并点名具体 id 对（同一组合只告警一次）。
+  只告警不报错：这类部署仍在脱敏，只是切得和标得更差。
+
+  **升级动作**：挂载了 `./config` 的部署升级后规则文件不会被覆盖，本次的顺序修复不会自动生效。
+  重建镜像后请看启动日志里的 `redaction.pii_patterns runs broad rules before specific ones`，
+  按点名的 id 对手工调整挂载目录里的 `security_filters.yaml`（或备份后删除该文件让 `init_config` 重新生成）。
+
   守护见 `test_security_scan_matrix.py`：`test_numeric_slack_token_is_redacted_as_slack_not_phone`、
-  `test_mac_does_not_split_ipv6_with_two_digit_hextets`
-  与 `test_specific_pii_rules_precede_broad_digit_rules`。
+  `test_mac_does_not_split_ipv6_with_two_digit_hextets`、`test_hyphen_mac_is_redacted_next_to_a_colon`、
+  `test_specific_pii_rules_precede_broad_digit_rules`
+  与 `test_shipped_pii_order_passes_its_own_load_time_lint`。
 
 ### Added（外泄链路加固 S0：外泄链路规则，仅改 YAML）
 

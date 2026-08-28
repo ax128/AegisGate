@@ -24,6 +24,7 @@ from aegisgate.config.security_rules import (
     DEFAULT_RELAXED_PII_IDS,
     LOW_FALSE_POSITIVE_V1_ROUTES,
     load_security_rules,
+    pii_order_violations,
 )
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
@@ -553,6 +554,57 @@ def test_mac_does_not_split_ipv6_with_two_digit_hextets(
     kinds = _mapping_kinds(mapping)
     assert "IPV6" in kinds
     assert "MAC_ADDRESS" not in kinds
+
+
+@pytest.mark.parametrize(
+    "sample,address",
+    (
+        ("mac:00-11-22-33-44-55", "00-11-22-33-44-55"),
+        ("hwaddr:aa-bb-cc-dd-ee-ff", "aa-bb-cc-dd-ee-ff"),
+        ("mac-00-11-22-33-44-55", "00-11-22-33-44-55"),
+        ("00-11-22-33-44-55:8080", "00-11-22-33-44-55"),
+        ("device 00-11-22-33-44-55 online", "00-11-22-33-44-55"),
+        ("aa-bb-cc-dd-ee-ff-11-22", "aa-bb-cc-dd-ee-ff-11-22"),
+    ),
+)
+def test_hyphen_mac_is_redacted_next_to_a_colon(sample: str, address: str) -> None:
+    """The IPv6 guard must not disarm the hyphen spelling of a MAC.
+
+    A colon-separated MAC the guard skips is still caught by IPV6 further down
+    the list. Hyphen-separated hex has no such fallback, so guarding it on ``:``
+    — a separator it never uses — forwarded ``mac:00-11-22-33-44-55`` whole, and
+    a lookbehind there would also reject every label ending in a hex letter
+    (``mac-``). The last case is the 8-group EUI-64 spelling: one value, not six
+    groups replaced with the remainder forwarded.
+    """
+    cleaned, mapping = _redact(sample, route="/v1/embeddings")
+    assert address not in cleaned, cleaned
+    assert "MAC_ADDRESS" in _mapping_kinds(mapping), cleaned
+    for group in address.split("-"):
+        assert f"-{group}" not in cleaned, cleaned
+
+
+def test_shipped_pii_order_passes_its_own_load_time_lint() -> None:
+    """The lint that guards deployments must agree with the shipped file.
+
+    The runtime rarely reads the file this repo ships: a mounted config
+    directory keeps whatever it was created with, and the console can only
+    append. ``pii_order_violations`` is what tells those deployments; a shipped
+    file that trips it would make the warning noise instead of signal.
+    """
+    assert pii_order_violations(load_security_rules().get("redaction")) == []
+
+    backwards = {
+        "pii_patterns": [
+            {"id": "PHONE", "regex": r"\d{10}"},
+            {"id": "CARD", "regex": r"\d{13,16}"},
+            {"id": "SLACK_TOKEN", "regex": r"xox[baprs]-\S+"},
+            {"id": "IMEI", "regex": r"imei:\s*\d{15}", "enabled": False},
+        ]
+    }
+    # IMEI is behind CARD too, but a disabled rule shadows nothing.
+    assert pii_order_violations(backwards) == ["SLACK_TOKEN:PHONE"]
+    assert pii_order_violations(None) == []
 
 
 # ── request sanitizer ──────────────────────────────────────────────────────

@@ -651,6 +651,7 @@ DEFAULT_RELAXED_PII_IDS = _DEFAULT_RELAXED_PII_IDS
 _RELAXED_PII_ALL = "*"
 # Config mistakes are logged once per distinct value, not per pipeline rebuild.
 _WARNED_RELAXED_PII_CONFIG: set[tuple[str, ...]] = set()
+_WARNED_PII_ORDER: set[tuple[str, ...]] = set()
 
 # Routes whose request bodies are structured conversation payloads: a false
 # positive there corrupts the prompt, so only the relaxed (credential-only by
@@ -775,6 +776,10 @@ def load_security_rules(path: str | None = None) -> dict[str, Any]:
             # to a healthy one from outside.
             _CACHE_LOAD_ERROR = _one_line(f"{type(exc).__name__}: {exc}")
             raise
+
+        violations = pii_order_violations(rules.get("redaction"))
+        if violations:
+            _warn_pii_order_once(violations)
 
         _CACHE_PATH = path_key
         _CACHE_MTIME_NS = mtime_ns
@@ -915,6 +920,68 @@ def _warn_relaxed_pii_config_once(key: tuple[str, ...], message: str, *args: Any
         return
     _WARNED_RELAXED_PII_CONFIG.add(key)
     logger.warning(message, *args)
+
+
+# Redaction patterns run in declaration order and the first hit takes the span,
+# so a broad digit / hex / base58 rule sitting before a more specific one replaces
+# only the fragment it understands and forwards the rest — that is how PHONE used
+# to eat the 10-digit middle of ``xoxb-…`` and leave the prefix and tail in the
+# clear. The shipped file is ordered correctly and a test pins it, but the file
+# the runtime reads is often not the shipped one: a mounted config directory
+# keeps whatever it was first created with, and the console can only *append* a
+# new rule (``gateway_ui_routes`` add → ``items.append``), which lands it after
+# the broad patterns. So the invariant is checked where the rules are actually
+# loaded. A violation warns rather than raises: such a deployment is still
+# redacting, it just cuts and labels some values worse than it could.
+_PII_ORDER_CONSTRAINTS: tuple[tuple[str, str], ...] = (
+    ("SLACK_TOKEN", "PHONE"),
+    ("GITHUB_TOKEN", "PHONE"),
+    ("AWS_ACCESS_KEY", "PHONE"),
+    ("CN_MOBILE", "PHONE"),
+    ("CN_ID", "CARD"),
+    ("IMEI", "CARD"),
+    ("IMSI", "CARD"),
+    ("MAC_ADDRESS", "IPV6"),
+    ("CRYPTO_TRON_ADDR", "CRYPTO_SOL_ADDR"),
+)
+
+
+def pii_order_violations(redaction: Any) -> list[str]:
+    """``specific:broad`` pairs whose declaration order is backwards.
+
+    Only pairs where both ids are present *and* compiled: a disabled rule
+    shadows nothing, and a pair the deployment does not configure at all is not
+    this function's business. Duplicated ids resolve to their first position,
+    which is the one that decides the match.
+    """
+    if not isinstance(redaction, dict):
+        return []
+    patterns = redaction.get("pii_patterns")
+    if not isinstance(patterns, list):
+        return []
+    index: dict[str, int] = {}
+    for position, item in enumerate(patterns):
+        if not isinstance(item, dict) or not item.get("regex") or not rule_enabled(item):
+            continue
+        index.setdefault(str(item.get("id", "PII")).strip().upper(), position)
+    return [
+        f"{specific}:{broad}"
+        for specific, broad in _PII_ORDER_CONSTRAINTS
+        if specific in index and broad in index and index[specific] > index[broad]
+    ]
+
+
+def _warn_pii_order_once(violations: list[str]) -> None:
+    key = tuple(violations)
+    if key in _WARNED_PII_ORDER:
+        return
+    _WARNED_PII_ORDER.add(key)
+    logger.warning(
+        "redaction.pii_patterns runs broad rules before specific ones pairs=%s — "
+        "the broad rule replaces only the fragment it matches and the remainder "
+        "is forwarded in the clear; move each id before the one after the colon",
+        ",".join(violations),
+    )
 
 
 def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:

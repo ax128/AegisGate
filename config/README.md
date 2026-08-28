@@ -47,6 +47,12 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
   - **升级时的定点迁移**：`init_config.migrate_http_smuggling_regex()` 只替换本目录 `security_filters.yaml`
     里 id 为 `http_smuggling_*` / `web_http_smuggling_*` 的 regex，其余自定义规则原样保留；改写前另存
     `security_filters.yaml.bak-<UTC>`（`config/*.yaml.bak-*` 已在 `.gitignore` 中）。回滚 = 把备份拷回并回退镜像。
+  - **`redaction.pii_patterns` 的顺序不做迁移，只在加载时告警**：规则按声明顺序匹配，宽规则（PHONE /
+    CARD / IPV6 / CRYPTO_SOL_ADDR）排在具体规则前面时，它只替换自己认得的那一段，剩下的原样转发。
+    本目录的文件不会被升级覆盖，控制台新增规则也只能追加到末尾，因此 `load_security_rules()` 每次读盘后
+    会自检一次，命中就打 `redaction.pii_patterns runs broad rules before specific ones` 并点名 id 对。
+    看到这条告警时，按点名的顺序手工调整本目录的 `security_filters.yaml`，或备份后删除该文件让
+    `init_config` 从镜像重新生成。
   - **控制台写入也建备份**：`core/rules_write.py` 在每一次成功写入前都会存一份 `.bak-<时间戳>`，并按
     `_MAX_BACKUPS` 保留最近若干份、自动清理更旧的。文档内容未变时不写、也不轮换备份。备份落在被编辑
     的那个文件旁边——Docker 下是挂载的配置目录，裸机下是包内策略目录，因此 `.gitignore` 里的

@@ -32,7 +32,10 @@ redaction:
     # and SOL as whole values — reorder only changes the label.
     # MAC is different: ``\b`` sits on ``:``, so an unbounded MAC would eat six
     # 2-digit hextets out of a longer IPv6 and leave the rest in the clear.
-    # The lookarounds below keep MAC from matching inside one.
+    # The guards on the colon branch below keep MAC from matching inside one.
+    # Order here is load-bearing, and ``pii_order_violations`` in
+    # ``config/security_rules.py`` warns at load time when an edit breaks it —
+    # the console can only append, so a rule added there lands after PHONE/CARD.
     - id: EMAIL
       regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     - id: TOKEN
@@ -52,7 +55,15 @@ redaction:
     - id: IMSI
       regex: '\b(?:imsi|subscriber[_\s-]?id)\b\s*[:=]\s*\d{14,16}\b'
     - id: MAC_ADDRESS
-      regex: '\b(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])\b'
+      # Two separator-pure branches, each guarded on its own separator.
+      # Colon form: a longer colon-hex run is an IPv6 address, so the guards
+      # hand it to IPV6 below instead of eating six hextets out of it.
+      # Hyphen form: nothing else matches hyphen-separated hex, so it must
+      # still fire right after a ``:`` (``mac:aa-bb-cc-dd-ee-ff``) — a lookbehind
+      # there would also reject every label ending in a hex letter (``mac-``,
+      # ``id-``). ``{5,7}`` covers the 8-group EUI-64 spelling as one value
+      # rather than replacing six groups and forwarding the rest.
+      regex: '\b(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])\b|\b(?:[0-9A-Fa-f]{2}-){5,7}[0-9A-Fa-f]{2}(?![0-9A-Fa-f-])\b'
     - id: SSN
       regex: '\b\d{3}-\d{2}-\d{4}\b'
     - id: PHONE
