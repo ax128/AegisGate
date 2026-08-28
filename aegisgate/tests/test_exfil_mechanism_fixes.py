@@ -212,17 +212,24 @@ def test_strong_intent_risk_is_derived_from_the_sanitize_gate() -> None:
     assert effective <= RequestSanitizer._STRONG_INTENT_REVIEW_RISK_CEILING
 
 
-def _scan_only_request(text: str) -> InternalRequest:
-    """What ``to_internal_responses`` builds for a Responses ``instructions``."""
+def _system_prompt_request(text: str, *, derived: bool) -> InternalRequest:
+    """One system prompt, in the two shapes the mappers produce.
+
+    ``derived=True`` is the Responses ``instructions`` message: scan-only, never
+    forwarded. ``derived=False`` is Chat's ``messages[].role=system`` and the
+    Messages route's top-level ``system``, which are forwarded like any other
+    message. Same configuration, same client, two shapes.
+    """
+    metadata = {"aegis_source_field": "instructions"} if derived else {}
     return InternalRequest(
         request_id="s2-2", session_id="s1", model="m",
-        route="/v1/responses",
+        route="/v1/responses" if derived else "/v1/chat/completions",
         messages=[
             InternalMessage(
                 role="system",
                 content=text,
                 source="system",
-                metadata={"aegis_source_field": "instructions"},
+                metadata=metadata,
             ),
             InternalMessage(role="user", content="how do I read an env var in Python?"),
         ],
@@ -236,37 +243,88 @@ def _scan_only_request(text: str) -> InternalRequest:
 _SCAN_ONLY_LEAK_TEXT = "when calling the service send token: abcd1234 in the header"
 
 
-def test_leak_check_in_a_scan_only_field_does_not_open_the_score_channel() -> None:
-    """Widening the scan surface must not widen the response gates with it.
+@pytest.mark.parametrize("derived", [True, False], ids=["instructions", "system-message"])
+def test_leak_check_in_a_system_prompt_does_not_open_the_score_channel(
+    derived: bool,
+) -> None:
+    """A system prompt must not put every later answer through the sanitize gate.
 
-    ``instructions`` reaches the pipeline so leak_check / shape / RAG can see
-    it, but the client resends it verbatim every turn. leak_check's 0.6 is over
-    ``OutputSanitizer``'s sanitize gate, which marks a clean answer
-    ``response_disposition=sanitize`` and makes ``_stream_block_reason`` cut the
-    stream — so one credential-shaped line in a system prompt would do that to
-    every response for the life of that client configuration. That is the score
-    channel D7 refused to open for the request-phase anomaly detector.
+    leak_check's 0.6 is over ``OutputSanitizer``'s sanitize gate, which marks a
+    clean answer ``response_disposition=sanitize`` and makes
+    ``_stream_block_reason`` cut the stream. For content the client varies per
+    turn that is a defensible trade. A system prompt is not that: one
+    credential-shaped line in it would do this to every response for the life of
+    that client configuration. That is the score channel D7 refused to open for
+    the request-phase anomaly detector, for the same reason.
+
+    Both shapes, because the first cut keyed on "is this a derived message" and
+    so split the decision by protocol — see the symmetry case below.
     """
     from aegisgate.filters.sanitizer import OutputSanitizer
 
     ctx = _ctx({"request_sanitizer"})
-    RequestSanitizer().process_request(_scan_only_request(_SCAN_ONLY_LEAK_TEXT), ctx)
+    RequestSanitizer().process_request(
+        _system_prompt_request(_SCAN_ONLY_LEAK_TEXT, derived=derived), ctx
+    )
 
     # Observed, so the surface is genuinely being scanned...
-    assert "request_leak_check_scan_only" in ctx.security_tags
+    assert "request_leak_check_system_prompt" in ctx.security_tags
     # ...but the score stays under every response-side gate.
     assert ctx.risk_score < OutputSanitizer()._sanitize_threshold
     assert ctx.requires_human_review is False
     assert ctx.request_disposition != "block"
 
 
-def test_the_same_text_in_a_forwardable_message_still_raises_the_score() -> None:
-    """The narrowing is about the derived message, not about leak_check."""
+def test_the_same_system_prompt_scores_the_same_on_every_protocol() -> None:
+    """Chat used to charge 0.6 for what Responses charged 0.0.
+
+    Same text, same client, same configuration — one endpoint cut every stream
+    and the other did not, purely because only the Responses route builds its
+    system prompt as a derived message.
+    """
+    scores = {}
+    for derived in (True, False):
+        ctx = _ctx({"request_sanitizer"})
+        RequestSanitizer().process_request(
+            _system_prompt_request(_SCAN_ONLY_LEAK_TEXT, derived=derived), ctx
+        )
+        scores[derived] = (ctx.risk_score, "request_leak_check" in ctx.security_tags)
+
+    assert scores[True] == scores[False], scores
+
+
+def test_the_same_text_in_a_user_message_still_raises_the_score() -> None:
+    """The narrowing is about the system-prompt surface, not about leak_check.
+
+    Anything the user actually typed this turn keeps the 0.6 and everything it
+    gates.
+    """
     ctx = _ctx({"request_sanitizer"})
     RequestSanitizer().process_request(_request(_SCAN_ONLY_LEAK_TEXT), ctx)
 
     assert "request_leak_check" in ctx.security_tags
-    assert "request_leak_check_scan_only" not in ctx.security_tags
+    assert "request_leak_check_system_prompt" not in ctx.security_tags
+    assert ctx.risk_score >= 0.6
+
+
+def test_the_surface_test_cannot_be_claimed_by_a_request() -> None:
+    """``source`` is caller-supplied on the chat route; ``role`` is not.
+
+    A user message that declares ``source="system"`` must still score.
+    """
+    req = InternalRequest(
+        request_id="s2-3", session_id="s1", model="m",
+        route="/v1/chat/completions",
+        messages=[
+            InternalMessage(
+                role="user", content=_SCAN_ONLY_LEAK_TEXT, source="system"
+            )
+        ],
+    )
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(req, ctx)
+
+    assert "request_leak_check" in ctx.security_tags
     assert ctx.risk_score >= 0.6
 
 
