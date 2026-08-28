@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import re
 
+# What a rule that only matched the *normalized* copy of a leaf reports instead
+# of a masked fragment. There is no fragment to mask: the match exists only in a
+# form the original text does not contain, so there is no span to point at.
+#
+# Handing the whole leaf to :func:`mask_for_log` is the alternative, and it is
+# the wrong one — the leaf is unbounded in length and its first three characters
+# would go into the log line in cleartext. Both forward paths use this.
+NORMALIZED_MATCH_MASK = "[normalized-form match]"
+
 
 def mask_for_log(value: str) -> str:
     """Return a partially-masked version of *value* safe for log output.
