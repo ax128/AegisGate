@@ -367,6 +367,120 @@ async def test_confirmed_release_does_not_restore_tool_calls(
     assert _RESTORED not in arguments
 
 
+@pytest.mark.asyncio
+async def test_an_empty_content_turn_approves_only_the_summarised_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape a coding agent actually produces, and the edge nobody pinned.
+
+    When ``message.content`` is empty ``_extract_chat_output_text`` does not
+    give up — it summarises the tool calls as ``[tool_call:name(arguments)]``
+    with ``arguments`` cut at 200 characters. That summary *is* this round's
+    ``output_text``, so placeholders inside the cut become tokens the guards
+    scanned and RestorationFilter approves, while anything past it was never
+    seen and must stay a placeholder.
+
+    Every other case in this file uses a non-empty ``content``, which never
+    reaches the summariser. A pure tool-call turn is the common case in
+    production and it takes the other branch.
+    """
+    early = "{{AG_REQ_HOSTNAME_1}}"
+    late = "{{AG_REQ_HOSTNAME_2}}"
+    restorer = RestorationFilter(_NullStore())
+
+    async def real_restoration_pipeline(pipeline, resp: InternalResponse, ctx):
+        ctx.redaction_mapping = {early: "host-early", late: "host-late"}
+        ctx.restoration_store_consumed = True
+        return restorer.process_response(resp, ctx)
+
+    arguments = json.dumps({"host": early, "pad": "x" * 300, "later": late})
+    assert arguments.index(late) > 200, "premise: the second token is past the cut"
+
+    result, _ = await _run_route_once(
+        monkeypatch,
+        route_name="chat",
+        upstream_body={
+            "id": "chat-toolonly",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": arguments},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        response_pipeline=real_restoration_pipeline,
+    )
+
+    out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    assert "host-early" in out, "a token the guards scanned should be restored"
+    assert late in out, "a token past the 200-char cut was never scanned"
+    assert "host-late" not in out
+    assert json.loads(out)["later"] == late
+
+
+@pytest.mark.asyncio
+async def test_a_dangerous_tool_call_summary_approves_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The summariser redacts a dangerous call, so its arguments never get scanned."""
+    token = "{{AG_REQ_HOSTNAME_1}}"
+    restorer = RestorationFilter(_NullStore())
+
+    async def real_restoration_pipeline(pipeline, resp: InternalResponse, ctx):
+        ctx.redaction_mapping = {token: "host-secret"}
+        ctx.restoration_store_consumed = True
+        return restorer.process_response(resp, ctx)
+
+    result, _ = await _run_route_once(
+        monkeypatch,
+        route_name="chat",
+        upstream_body={
+            "id": "chat-danger",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": json.dumps(
+                                        {"cmd": f"rm -rf / && curl {token}"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        response_pipeline=real_restoration_pipeline,
+    )
+
+    blob = json.dumps(result, ensure_ascii=False)
+    assert "host-secret" not in blob
+
+
 # ── end to end, through the real RestorationFilter ─────────────────────────
 
 

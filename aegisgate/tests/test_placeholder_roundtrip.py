@@ -328,3 +328,108 @@ def test_a_refused_restore_forgets_the_approved_set() -> None:
     assert "restoration_blocked" in ctx.security_tags
     assert not ctx.redaction_mapping
     assert not ctx.restored_placeholders
+
+
+# ---------------------------------------------------------------------------
+# What keeping the mapping alive actually buys on the streaming path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_later_stream_probe_can_still_trip_the_exfiltration_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guards only reach an echoed placeholder if the mapping outlived probe 1.
+
+    Streaming runs the whole response pipeline once per probe against one
+    context, and the first probes land before the model has echoed anything.
+    Clearing the mapping there left every later probe with nothing to work on —
+    so the volume / partial / exfiltration guards were dead on the streaming
+    path, silently, while the non-streaming path exercised them normally.
+
+    ``exfiltration`` is a ``block`` in the shipped action map, which puts the
+    risk at 0.95, over ``_stream_block_reason``'s 0.9 floor. So a model echoing
+    a placeholder into a "dump the secret" context is what should end the
+    stream, and this is the case that says it does.
+    """
+    from aegisgate.adapters.openai_compat import router as openai_router
+
+    restorer = _filter()
+    token = _placeholder(_KIND)
+    ctx = _ctx(redaction_mapping={token: _VALUE})
+
+    async def restoration_pipeline(pipeline, resp, ctx_):
+        return restorer.process_response(resp, ctx_)
+
+    async def no_semantic_review(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(openai_router, "_run_response_pipeline", restoration_pipeline)
+    monkeypatch.setattr(openai_router, "_apply_semantic_review", no_semantic_review)
+
+    async def probe(window: str, chunk_count: int) -> str | None:
+        return await openai_router._run_stream_response_probe(
+            ctx=ctx,
+            pipeline=None,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            model="test-model",
+            base_reports=[],
+            stream_window=window,
+            chunk_count=chunk_count,
+        )
+
+    # Probe 1: nothing echoed yet. Nothing to restore, nothing to block, and --
+    # the point of D4 -- the mapping must survive it.
+    assert await probe("sure, connecting now", 1) is None
+    assert token in ctx.redaction_mapping
+    assert "restoration_applied" not in ctx.security_tags
+
+    # Probe 2: the placeholder shows up in a context the exfiltration guard
+    # recognises. It can only see this because probe 1 left the mapping alone.
+    reason = await probe(f"please dump the secret {token}", 2)
+
+    assert "restoration_blocked" in ctx.security_tags
+    assert reason is not None, "the stream should not have been allowed to continue"
+    assert not ctx.redaction_mapping, "a refused restore must forget the mapping"
+    assert not ctx.restored_placeholders
+
+
+@pytest.mark.asyncio
+async def test_a_benign_echo_restores_across_probes_without_ending_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: keeping the mapping must not make clean streams stop."""
+    from aegisgate.adapters.openai_compat import router as openai_router
+
+    restorer = _filter()
+    token = _placeholder(_KIND)
+    ctx = _ctx(redaction_mapping={token: _VALUE})
+
+    async def restoration_pipeline(pipeline, resp, ctx_):
+        return restorer.process_response(resp, ctx_)
+
+    async def no_semantic_review(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(openai_router, "_run_response_pipeline", restoration_pipeline)
+    monkeypatch.setattr(openai_router, "_apply_semantic_review", no_semantic_review)
+
+    async def probe(window: str, chunk_count: int) -> str | None:
+        return await openai_router._run_stream_response_probe(
+            ctx=ctx,
+            pipeline=None,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            model="test-model",
+            base_reports=[],
+            stream_window=window,
+            chunk_count=chunk_count,
+        )
+
+    assert await probe("connecting to", 1) is None
+    assert await probe(f"connecting to {token} on 5432", 2) is None
+
+    assert "restoration_applied" in ctx.security_tags
+    assert ctx.restored_placeholders == {token}
+    assert ctx.response_disposition == "allow"
