@@ -6433,8 +6433,11 @@ async def _execute_multipart_once(
                 data.append((str(key), raw_text))
                 continue
 
-            field = str(key).strip().lower()
-            if field in _MEDIA_LOCATOR_FIELDS:
+            # Lowercased for the membership test only. The value handed to the
+            # redactors stays the caller's own spelling, so one form key does not
+            # get two different ``field`` values in the audit rows depending on
+            # which branch it took.
+            if str(key).strip().lower() in _MEDIA_LOCATOR_FIELDS:
                 # Same treatment the JSON forward paths give a locator: the
                 # credential-only set, per-parameter query rewriting, and a
                 # whole-value replacement if the result stops being a fetchable
@@ -6446,7 +6449,7 @@ async def _execute_multipart_once(
                     raw_text,
                     role="user",
                     path=f"multipart.{key}",
-                    field=field,
+                    field=str(key),
                     whitelist_keys=whitelist_keys,
                 )
             else:
