@@ -225,6 +225,30 @@ class RequestSanitizer(BaseFilter):
             msg.content = self._block_message
         return req
 
+    @staticmethod
+    def _is_system_prompt_surface(msg: object) -> bool:
+        """Text the client resends verbatim every turn, rather than user input.
+
+        Both halves are the same surface wearing two shapes. ``instructions`` on
+        the Responses route reaches the pipeline as a derived scan-only message;
+        Chat's ``messages[].role=system`` and the Messages route's top-level
+        ``system`` reach it as ordinary forwarded messages. All three are one
+        client configuration that does not vary per request, so a leak_check hit
+        in any of them means the same thing and has to score the same way.
+
+        Deriving this from ``is_derived_scan_message`` alone — as the first cut
+        did — split the decision by protocol: the same system prompt scored 0.6
+        through Chat and 0.0 through Responses, so one endpoint cut every stream
+        and the other did not.
+
+        ``role`` rather than ``source``: the mappers set ``source`` from a
+        caller-supplied field on the chat route, and this must not be something
+        a request can claim for itself.
+        """
+        if is_derived_scan_message(msg):
+            return True
+        return str(getattr(msg, "role", "")).strip().lower() == "system"
+
     def _sanitize_shape(self, req: InternalRequest) -> bool:
         any_sanitized = False
         for msg in req.messages:
@@ -271,7 +295,7 @@ class RequestSanitizer(BaseFilter):
         discussion_context = False
         strong_intent_categories: set[str] = set()
         has_leak = False
-        has_forwardable_leak = False
+        has_scoring_leak = False
         shape_hits: set[str] = set()
 
         for msg in req.messages:
@@ -282,11 +306,11 @@ class RequestSanitizer(BaseFilter):
             strong_intent_categories.update(self._matched_categories(text))
             if self._matches_any(text, self._leak_check_patterns):
                 has_leak = True
-                if not is_derived_scan_message(msg):
-                    has_forwardable_leak = True
+                if not self._is_system_prompt_surface(msg):
+                    has_scoring_leak = True
             shape_hits.update(self._shape_hits(text))
 
-        if has_forwardable_leak:
+        if has_scoring_leak:
             action = self._apply_action(ctx, "leak_check", "review")
             if action == "block":
                 self._block_request(req, ctx, reason="request_leak_check_failed")
@@ -311,21 +335,47 @@ class RequestSanitizer(BaseFilter):
             }
             logger.info("request leak_check review request_id=%s", ctx.request_id)
         elif has_leak:
-            # The only hit is inside a derived scan-only message. Record it, do
-            # not move the score.
+            # Every hit sits in a system prompt. The configured action still
+            # runs: an operator who set leak_check to ``block`` asked for strict
+            # blocking — the shipped comment next to that setting says so — and
+            # this branch is not entitled to overrule it. What it withholds is
+            # only the ``review`` score bump.
+            #
+            # Skipping _apply_action entirely, as the first cut did, silently
+            # turned `leak_check: block` into "allow" for every system prompt,
+            # and left `enforcement_actions` empty so the audit trail could not
+            # even show the rule had run.
+            action = self._apply_action(ctx, "leak_check", "review")
+            if action == "block":
+                self._block_request(req, ctx, reason="request_leak_check_failed")
+                self._report = {
+                    "filter": self.name,
+                    "hit": True,
+                    "risk_score": ctx.risk_score,
+                    "action": "block",
+                }
+                logger.info(
+                    "request blocked request_id=%s reason=leak_check", ctx.request_id
+                )
+                return req
+
+            # Record it, do not move the score.
             #
             # The 0.6 above sits over OutputSanitizer's sanitize gate (~0.35),
             # which marks an otherwise clean answer response_disposition=
             # sanitize and makes _stream_block_reason cut the stream. That is a
             # deliberate trade for content the client varies per turn. It is a
-            # different trade for a field the client resends verbatim every
-            # turn: one credential-shaped line in a Responses `instructions`
-            # system prompt would sanitize every answer and cut every stream for
-            # the life of that configuration, which is the score channel D7
-            # refused to open for the request-phase anomaly detector for exactly
-            # this reason. Widening the scan surface was the point; opening that
-            # channel with it was not.
-            ctx.security_tags.add("request_leak_check_scan_only")
+            # different trade for text the client resends verbatim on every
+            # request: one credential-shaped line in a coding agent's system
+            # prompt would sanitize every answer and cut every stream for the
+            # life of that configuration. That is the score channel D7 refused
+            # to open for the request-phase anomaly detector, for this reason.
+            #
+            # Redaction still runs on these messages — E1 on the pipeline copy,
+            # E3 on the bytes actually forwarded — so this decides how loudly a
+            # *post-redaction* residue scores, not whether the credential is
+            # protected. The tag keeps it visible in the audit trail.
+            ctx.security_tags.add("request_leak_check_system_prompt")
             self._report = {
                 "filter": self.name,
                 "hit": True,
@@ -333,7 +383,7 @@ class RequestSanitizer(BaseFilter):
                 "action": "observe",
             }
             logger.info(
-                "request leak_check observed in scan-only field request_id=%s",
+                "request leak_check observed in a system prompt request_id=%s",
                 ctx.request_id,
             )
 
