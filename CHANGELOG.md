@@ -9,6 +9,15 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（PII 规则顺序：具体规则先于宽规则）
+
+- **PHONE 不再切碎带 10 位数字段的 Slack token。** `redaction.pii_patterns` 按声明顺序匹配，
+  PHONE 原先排在 SLACK_TOKEN 前面，会先吃掉 `xoxb-<10 位数字>-…` 的中间数字，把 `xoxb-` 和字母尾巴
+  原样转发出去。现在凭据类与更具体的形态（Slack / GitHub / AWS、国内手机号、IMEI/IMSI、MAC、TRON）
+  排在 PHONE / CARD / IPV6 / SOL 这类宽规则之前；回退用的 `_DEFAULT_RULES` 同一顺序。
+  守护见 `test_security_scan_matrix.py`：`test_numeric_slack_token_is_redacted_as_slack_not_phone`
+  与 `test_specific_pii_rules_precede_broad_digit_rules`。
+
 ### Added（外泄链路加固 S0：外泄链路规则，仅改 YAML）
 
 - **`security_filters.yaml` 新增 6 条 `exfil_chain_*` 规则**，判定「采集 + 出口」两种能力在同一条命令里
