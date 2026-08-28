@@ -921,21 +921,58 @@ async def test_chat_tool_call_arguments_are_redacted_on_every_exit(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route_name", ["chat", "responses", "messages"])
-async def test_a_clean_body_is_untouched_by_the_added_pass(
+async def test_a_clean_body_is_unchanged_by_the_added_pass(
     monkeypatch: pytest.MonkeyPatch, route_name: str
 ) -> None:
-    """With nothing configured the pass must not move a byte."""
-    body = _body_for(route_name, "ordinary text")
-    before = copy.deepcopy(body)
+    """With nothing configured the pass must not change the text it carries.
 
-    await _run_route_once(
+    Route level, so it can only speak about the *returned* body. Whether the
+    renderers write through to the caller's object is a separate question that
+    this harness structurally cannot answer — ``fake_forward_json`` hands the
+    route a ``deepcopy`` — so it is asked directly below instead.
+    """
+    body = _body_for(route_name, "ordinary text")
+
+    result, _ = await _run_route_once(
         monkeypatch,
         route_name=route_name,
         upstream_body=body,
         response_pipeline=_pipeline_at("sanitize"),
     )
 
-    assert body == before, "the upstream body was mutated in place"
+    blob = json.dumps(result, ensure_ascii=False)
+    assert "[REDACTED:EXACT_VALUE]" not in blob
+    assert "the key is ordinary text" in blob
+
+
+@pytest.mark.parametrize(
+    ("patcher", "route_name"),
+    [
+        (renderers.patch_chat_response_body, "chat"),
+        (renderers.patch_responses_body, "responses"),
+        (renderers.patch_messages_response_body, "messages"),
+    ],
+)
+def test_the_sanitize_renderers_do_not_write_through_to_the_upstream_body(
+    patcher, route_name: str
+) -> None:
+    """The added pass may not turn into an in-place edit of the caller's body.
+
+    ``upstream_body`` is still referenced after the render — the audit trail and
+    the dangerous-sample log read it — so writing through would change what those
+    record. The route-level case above cannot see this: the test harness deep
+    copies before the route ever gets the body, so a mutation there is invisible.
+    """
+    from aegisgate.core.context import RequestContext
+
+    ctx = RequestContext(request_id="wt", session_id="wt", route=route_name)
+    body = _body_for(route_name, "ordinary text")
+    before = copy.deepcopy(body)
+
+    out = patcher(body, ctx, ops=openai_router._NON_STREAM_RENDER_OPS)
+
+    assert body == before, "the renderer wrote through to the upstream body"
+    assert out is not body
 
 
 def test_nested_sanitize_does_not_mutate_the_body_it_was_given() -> None:
