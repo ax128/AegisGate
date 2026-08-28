@@ -194,7 +194,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-    def test_chat_image_url_preserved_but_hits_recorded(self) -> None:
+    def test_chat_image_url_credentials_redacted_shape_kept(self) -> None:
         messages = [
             {
                 "role": "user",
@@ -211,7 +211,14 @@ class TestSanitizeChatStructuredContent:
 
         sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
-        assert sanitized == messages
+        # Media locators used to be scanned for the audit log and then forwarded
+        # verbatim, so a link carrying a credential in its query left the gateway
+        # intact. They now run the credential-only rule set, and the result still
+        # has to be a fetchable URL.
+        url = sanitized[0]["content"][0]["image_url"]["url"]
+        assert "token=abc.def.ghi" not in url
+        assert "[REDACTED:URL_TOKEN_QUERY]" in url
+        assert url.startswith("https://example.com/img.png")
         assert hits == [
             {
                 "path": "messages[0].content[0].image_url.url",
@@ -253,7 +260,7 @@ class TestSanitizeChatStructuredContent:
             }
         ]
 
-    def test_chat_media_source_url_preserved_but_hits_recorded(self) -> None:
+    def test_chat_media_source_url_credentials_redacted_shape_kept(self) -> None:
         messages = [
             {
                 "role": "user",
@@ -271,7 +278,10 @@ class TestSanitizeChatStructuredContent:
 
         sanitized, hits = _sanitize_chat_messages_for_upstream_with_hits(messages, route="/v1/chat/completions")
 
-        assert sanitized == messages
+        url = sanitized[0]["content"][0]["source"]["url"]
+        assert "token=abc.def.ghi" not in url
+        assert "[REDACTED:URL_TOKEN_QUERY]" in url
+        assert url.startswith("https://example.com/img.png")
         assert hits == [
             {
                 "path": "messages[0].content[0].source.url",
@@ -376,7 +386,7 @@ def test_shape_guard_reports_preserved_shape_after_sanitize() -> None:
     assert _preserves_json_shape(payload, sanitized) is True
 
 
-def test_responses_image_url_preserved_but_hits_recorded() -> None:
+def test_responses_image_url_credentials_redacted_shape_kept() -> None:
     payload = [
         {
             "role": "user",
@@ -391,7 +401,10 @@ def test_responses_image_url_preserved_but_hits_recorded() -> None:
 
     sanitized, hits = _sanitize_responses_input_for_upstream_with_hits(payload, route="/v1/responses")
 
-    assert sanitized == payload
+    url = sanitized[0]["content"][0]["image_url"]
+    assert "token=abc.def.ghi" not in url
+    assert "[REDACTED:URL_TOKEN_QUERY]" in url
+    assert url.startswith("https://example.com/img.png")
     assert hits == [
         {
             "path": "input[0].content[0].image_url",

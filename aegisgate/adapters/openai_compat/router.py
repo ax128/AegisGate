@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.datastructures import UploadFile
 
 from aegisgate.adapters.openai_compat.mapper import (
+    first_forwardable_message,
     messages_payload_to_responses_payload,
     responses_response_to_messages_response,
     to_chat_response,
@@ -1014,8 +1015,20 @@ def _build_responses_upstream_payload(
             upstream_payload["input"] = sanitized_input
             redaction_hits.extend(input_hits)
         else:
+            # First *forwardable* message, not first message. The mapper puts a
+            # derived ``instructions`` message at the front so the pipeline can
+            # scan the system prompt; using index 0 here would forward that
+            # prompt as the user's input and drop the real question.
+            forwardable = first_forwardable_message(sanitized_req_messages)
+            if forwardable is None:
+                # Unreachable through the mapper, which always has a real
+                # message before it inserts a derived one. Leaving the key alone
+                # would not be a safe default if that ever changed: the payload
+                # copy still holds the caller's original ``input``, so the
+                # request would be forwarded without the pipeline's rewrites.
+                raise ValueError("responses_input_shape_violation")
             upstream_payload["input"] = _strip_system_exec_runtime_lines(
-                str(sanitized_req_messages[0].content)
+                str(forwardable.content)
             )
 
     original_instructions = upstream_payload.get("instructions")

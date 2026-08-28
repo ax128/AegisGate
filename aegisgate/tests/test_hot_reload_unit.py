@@ -435,3 +435,55 @@ redaction:
                 security_rules.load_security_rules()
         finally:
             security_rules.invalidate_security_rules_cache()
+
+
+class TestEveryRulesDerivedCacheIsCleared:
+    """A rules-derived ``lru_cache`` that nobody clears is a silent staleness.
+
+    ``_clear_openai_lru_caches`` is a hand-written list, and the modules it
+    covers keep gaining helpers. When one is missed the adapter goes on serving
+    patterns compiled from the previous rules file and only that one layer is
+    stale — no error, no log line, and the surfaces it feeds (media locators and
+    historical ``function_call`` arguments, via the credential-only set) simply
+    do not see a rule the operator just added.
+    """
+
+    def _cached_names(self, module) -> set[str]:
+        """``lru_cache``d callables the module itself defines.
+
+        The ``__module__`` check keeps imported ones out — ``urllib.parse
+        .urlsplit`` is memoised too, and clearing it on a rules reload would
+        say nothing about this file.
+        """
+        names: set[str] = set()
+        for name in dir(module):
+            candidate = getattr(module, name, None)
+            if not callable(candidate) or not hasattr(candidate, "cache_clear"):
+                continue
+            if getattr(candidate, "__module__", None) != module.__name__:
+                continue
+            names.add(name)
+        return names
+
+    def test_sanitize_module_caches_are_all_registered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aegisgate.adapters.openai_compat import sanitize
+
+        cleared: set[str] = set()
+        for name in self._cached_names(sanitize):
+            original = getattr(sanitize, name)
+            monkeypatch.setattr(
+                original,
+                "cache_clear",
+                lambda _name=name: cleared.add(_name),
+                raising=False,
+            )
+
+        hot_reload._clear_openai_lru_caches()
+
+        missing = self._cached_names(sanitize) - cleared
+        assert not missing, (
+            f"rules-derived caches never cleared on reload: {sorted(missing)}. "
+            "Add them to _clear_openai_lru_caches."
+        )

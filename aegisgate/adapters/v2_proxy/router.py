@@ -39,6 +39,11 @@ from aegisgate.util.redaction_whitelist import (
     protected_spans_for_text,
     range_overlaps_protected,
 )
+from aegisgate.util.text_normalize import (
+    build_haystacks,
+    pattern_hits_in,
+    strip_invisibles,
+)
 
 router = APIRouter()
 
@@ -600,7 +605,9 @@ def _redact_text(
     """
     if _should_skip_v2_field_redaction(field):
         return text, 0, [], []
-    if looks_like_base64_blob(text):
+    # Detection copy only: a zero-width character inserted into a credential
+    # otherwise makes the leaf look base64-ish enough to be waved through.
+    if looks_like_base64_blob(strip_invisibles(text)):
         return text, 0, [], []
     value = text
     whitelist = set(normalize_whitelist_keys(whitelist_keys))
@@ -611,12 +618,25 @@ def _redact_text(
     hit_ids: list[str] = []
     hit_set: set[str] = set()
     markers: list[dict[str, str]] = []
+    # Built on the first raw miss, reused across rules, dropped when the text
+    # moves. Plain ASCII normalizes back to itself, so it comes out empty and no
+    # rule pays for a second search.
+    normalized_forms: tuple[str, ...] | None = None
+
+    def _record(pattern_id: str, raw: str) -> None:
+        if pattern_id in hit_set or len(hit_ids) >= _V2_MAX_MATCH_IDS:
+            return
+        hit_set.add(pattern_id)
+        hit_ids.append(pattern_id)
+        markers.append({"kind": pattern_id, "masked_value": mask_for_log(raw)})
+
     for pattern_id, pattern in _v2_relaxed_redaction_patterns():
         replacement = f"[REDACTED:{pattern_id}]"
         protected_spans = protected_spans_for_text(value, whitelist)
+        matched_here = 0
 
         def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
-            nonlocal replacement_count
+            nonlocal replacement_count, matched_here
             if protected_spans and range_overlaps_protected(
                 protected_spans,
                 start=m.start(),
@@ -624,13 +644,30 @@ def _redact_text(
             ):
                 return m.group(0)
             replacement_count += 1
-            if _pid not in hit_set and len(hit_ids) < _V2_MAX_MATCH_IDS:
-                hit_set.add(_pid)
-                hit_ids.append(_pid)
-                markers.append({"kind": _pid, "masked_value": mask_for_log(m.group(0))})
+            matched_here += 1
+            _record(_pid, m.group(0))
             return replacement
 
         value = pattern.sub(_repl, value)
+        if matched_here > 0:
+            normalized_forms = None  # the text moved; the old forms are stale
+            continue
+
+        # Same contract as the V1 forward path: detect on the normalized copies,
+        # never write NFKC/lowercased text back into a forwarded body. A hit that
+        # exists only there has no span in the original to substitute, so the
+        # whole leaf is replaced.
+        if normalized_forms is None:
+            normalized_forms = tuple(
+                form for form in build_haystacks(value) if form != value
+            )
+        if not normalized_forms:
+            continue
+        if not pattern_hits_in(pattern, normalized_forms):
+            continue
+        _record(pattern_id, value)
+        replacement_count += 1
+        return replacement, replacement_count, hit_ids, markers
     return value, replacement_count, hit_ids, markers
 
 

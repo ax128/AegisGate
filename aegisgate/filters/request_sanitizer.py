@@ -11,7 +11,7 @@ from aegisgate.config.security_level import (
 )
 from aegisgate.config.security_rules import load_security_rules
 from aegisgate.core.context import RequestContext
-from aegisgate.core.models import InternalRequest
+from aegisgate.core.models import InternalRequest, is_derived_scan_message
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
@@ -271,6 +271,7 @@ class RequestSanitizer(BaseFilter):
         discussion_context = False
         strong_intent_categories: set[str] = set()
         has_leak = False
+        has_forwardable_leak = False
         shape_hits: set[str] = set()
 
         for msg in req.messages:
@@ -281,9 +282,11 @@ class RequestSanitizer(BaseFilter):
             strong_intent_categories.update(self._matched_categories(text))
             if self._matches_any(text, self._leak_check_patterns):
                 has_leak = True
+                if not is_derived_scan_message(msg):
+                    has_forwardable_leak = True
             shape_hits.update(self._shape_hits(text))
 
-        if has_leak:
+        if has_forwardable_leak:
             action = self._apply_action(ctx, "leak_check", "review")
             if action == "block":
                 self._block_request(req, ctx, reason="request_leak_check_failed")
@@ -307,6 +310,32 @@ class RequestSanitizer(BaseFilter):
                 "action": "review",
             }
             logger.info("request leak_check review request_id=%s", ctx.request_id)
+        elif has_leak:
+            # The only hit is inside a derived scan-only message. Record it, do
+            # not move the score.
+            #
+            # The 0.6 above sits over OutputSanitizer's sanitize gate (~0.35),
+            # which marks an otherwise clean answer response_disposition=
+            # sanitize and makes _stream_block_reason cut the stream. That is a
+            # deliberate trade for content the client varies per turn. It is a
+            # different trade for a field the client resends verbatim every
+            # turn: one credential-shaped line in a Responses `instructions`
+            # system prompt would sanitize every answer and cut every stream for
+            # the life of that configuration, which is the score channel D7
+            # refused to open for the request-phase anomaly detector for exactly
+            # this reason. Widening the scan surface was the point; opening that
+            # channel with it was not.
+            ctx.security_tags.add("request_leak_check_scan_only")
+            self._report = {
+                "filter": self.name,
+                "hit": True,
+                "risk_score": ctx.risk_score,
+                "action": "observe",
+            }
+            logger.info(
+                "request leak_check observed in scan-only field request_id=%s",
+                ctx.request_id,
+            )
 
         if strong_intent_categories:
             if "secret_exfiltration" in strong_intent_categories:

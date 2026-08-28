@@ -362,6 +362,13 @@ def reload_policy_cache() -> None:
 
 
 def _clear_openai_lru_caches() -> None:
+    """Drop every rules-derived cache in the openai_compat adapter.
+
+    Missing one here is silent: the adapter keeps serving patterns compiled
+    from the previous rules file, and only that one layer is stale.
+    ``test_hot_reload_unit`` pins this list against ``sanitize.py``.
+    """
+    from aegisgate.adapters.openai_compat import sanitize
     from aegisgate.adapters.openai_compat.router import (
         _responses_function_output_redaction_patterns,
         _responses_relaxed_redaction_patterns,
@@ -375,6 +382,13 @@ def _clear_openai_lru_caches() -> None:
     _confirmation_hit_regex_patterns.cache_clear()
     _critical_danger_patterns.cache_clear()
     _tool_call_guard_patterns.cache_clear()
+    # Derived from the two pattern tuples above, so they go stale the same way.
+    # The credential-only set is what the media locators and the historical
+    # function_call arguments are redacted with; a rules reload that added a
+    # credential rule would not have reached either surface.
+    sanitize._field_value_pattern_ids.cache_clear()
+    sanitize._credential_only_patterns.cache_clear()
+    sanitize._url_token_query_pattern.cache_clear()
 
 
 def _clear_v2_lru_caches() -> None:
