@@ -797,7 +797,7 @@ def test_readme_zh_pipeline_chains_match_the_constructed_filters() -> None:
     pipeline = _build_pipeline()
 
     def _documented(label: str) -> list[str]:
-        match = re.search(rf"{label}：`([^`]+)`", readme_zh)
+        match = re.search(rf"{re.escape(label)}：`([^`]+)`", readme_zh)
         assert match, f"README_zh no longer states a {label} chain"
         return [name.strip() for name in match.group(1).split("->")]
 
@@ -814,10 +814,16 @@ def test_readme_zh_does_not_call_the_enabled_subset_the_constructed_list() -> No
     """
     readme_zh = (_REPO_ROOT / "README_zh.md").read_text(encoding="utf-8")
 
+    # Default to None rather than letting ``next`` raise: a StopIteration here
+    # reports as an error with no message, when what happened is simply that the
+    # bullet was renamed or removed.
     overview = next(
-        line
-        for line in readme_zh.splitlines()
-        if line.startswith("- 请求侧（")
+        (line for line in readme_zh.splitlines() if line.startswith("- 请求侧（")),
+        None,
+    )
+    assert overview is not None, (
+        "README_zh no longer has a '- 请求侧（' overview bullet; if it was "
+        "renamed, point this guard at the new one rather than dropping it"
     )
     assert "实际构造" not in overview or "system_prompt_guard" in overview, (
         "the overview bullet claims to be the constructed list but omits the "
