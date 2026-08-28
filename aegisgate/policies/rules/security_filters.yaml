@@ -24,26 +24,41 @@ redaction:
   #   - EMAIL
   #   - IBAN
   pii_patterns:
+    # More-specific / credential-shaped rules must precede the broad digit, hex
+    # and base58 patterns. PHONE used to run first and only replace the 10-digit
+    # middle of ``xoxb-<digits>-…``, leaving the prefix and tail in the
+    # forwarded text.
+    # IMEI/IMSI (labelled) and TRON (fixed length + word boundary) overlap CARD
+    # and SOL as whole values — reorder only changes the label.
+    # MAC is different: ``\b`` sits on ``:``, so an unbounded MAC would eat six
+    # 2-digit hextets out of a longer IPv6 and leave the rest in the clear.
+    # The lookarounds below keep MAC from matching inside one.
     - id: EMAIL
       regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     - id: TOKEN
       regex: '\b(?:sk|rk|pk)-[A-Za-z0-9\-_]{10,}\b'
-    - id: PHONE
-      regex: '\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b'
-    - id: SSN
-      regex: '\b\d{3}-\d{2}-\d{4}\b'
-    - id: CARD
-      regex: '\b(?:\d[ -]*?){13,16}\b'
-    - id: CN_MOBILE
-      regex: '(?<!\d)1[3-9]\d{9}(?!\d)'
-    - id: CN_ID
-      regex: '(?<!\d)\d{17}[\dXx](?!\d)'
     - id: AWS_ACCESS_KEY
       regex: '\bAKIA[0-9A-Z]{16}\b'
     - id: GITHUB_TOKEN
       regex: '\bghp_[A-Za-z0-9]{20,}\b'
     - id: SLACK_TOKEN
       regex: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
+    - id: CN_MOBILE
+      regex: '(?<!\d)1[3-9]\d{9}(?!\d)'
+    - id: CN_ID
+      regex: '(?<!\d)\d{17}[\dXx](?!\d)'
+    - id: IMEI
+      regex: '\b(?:imei|设备imei)\b\s*[:=]\s*\d{15}\b'
+    - id: IMSI
+      regex: '\b(?:imsi|subscriber[_\s-]?id)\b\s*[:=]\s*\d{14,16}\b'
+    - id: MAC_ADDRESS
+      regex: '\b(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])\b'
+    - id: SSN
+      regex: '\b\d{3}-\d{2}-\d{4}\b'
+    - id: PHONE
+      regex: '\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b'
+    - id: CARD
+      regex: '\b(?:\d[ -]*?){13,16}\b'
     - id: IBAN
       regex: '\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b'
     - id: IPV4
@@ -83,22 +98,16 @@ redaction:
       regex: '\b(?:driver(?:[_\s-]?license)?|驾照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9\-]{5,20}\b'
     - id: TAX_ID
       regex: '\b(?:tax[_\s-]?(?:id|no|number)|ein|ssn|tin|税号)\b\s*[:=]\s*[A-Z0-9\-]{6,20}\b'
-    - id: MAC_ADDRESS
-      regex: '\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
-    - id: IMEI
-      regex: '\b(?:imei|设备imei)\b\s*[:=]\s*\d{15}\b'
-    - id: IMSI
-      regex: '\b(?:imsi|subscriber[_\s-]?id)\b\s*[:=]\s*\d{14,16}\b'
     - id: DEVICE_SERIAL
       regex: '\b(?:serial(?:[_\s-]?number)?|sn|设备序列号)\b\s*[:=]\s*[A-Za-z0-9\-]{6,40}\b'
     - id: CRYPTO_BTC_ADDR
       regex: '\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b'
     - id: CRYPTO_ETH_ADDR
       regex: '\b0x[a-fA-F0-9]{40}\b'
-    - id: CRYPTO_SOL_ADDR
-      regex: '\b(?=[1-9A-HJ-NP-Za-km-z]*[G-HJ-NP-Zg-hj-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}\b'
     - id: CRYPTO_TRON_ADDR
       regex: '\bT[1-9A-HJ-NP-Za-km-z]{33}\b'
+    - id: CRYPTO_SOL_ADDR
+      regex: '\b(?=[1-9A-HJ-NP-Za-km-z]*[G-HJ-NP-Zg-hj-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}\b'
     - id: CRYPTO_WIF_KEY
       regex: '\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b'
     - id: CRYPTO_XPRV
