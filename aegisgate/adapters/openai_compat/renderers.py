@@ -12,8 +12,10 @@ from aegisgate.adapters.openai_compat.mapper import (
     to_messages_response,
     to_responses_output,
 )
-from aegisgate.config.redact_values import replace_exact_values
-from aegisgate.config.settings import settings
+from aegisgate.config.redact_values import (
+    active_exact_values,
+    replace_exact_values_from,
+)
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalResponse
 
@@ -104,17 +106,27 @@ def approved_placeholder_mapping(ctx: RequestContext) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class _LeafOps:
-    """What one string leaf goes through, in response-pipeline order."""
+    """What one string leaf goes through, in response-pipeline order.
 
-    exact_values: bool
+    ``exact_values`` is a snapshot, not a flag: resolving the configured list
+    per leaf takes the module lock and ``stat``s the file behind it, and this
+    runs over every string in the body.
+    """
+
+    exact_values: tuple[str, ...]
     placeholders: dict[str, str]
+
+    @property
+    def is_noop(self) -> bool:
+        """True when every leaf would come back exactly as it went in."""
+        return not self.exact_values and not self.placeholders
 
     def apply(self, value: str) -> str:
         if not value:
             return value
         out = value
         if self.exact_values:
-            replaced, count = replace_exact_values(out)
+            replaced, count = replace_exact_values_from(out, self.exact_values)
             if count > 0:
                 out = replaced
         for token, raw in self.placeholders.items():
@@ -134,9 +146,32 @@ class _LeafOps:
 
 def _leaf_ops(ctx: RequestContext) -> _LeafOps:
     return _LeafOps(
-        exact_values=bool(settings.enable_exact_value_redaction),
+        exact_values=active_exact_values(),
         placeholders=approved_placeholder_mapping(ctx),
     )
+
+
+def apply_exact_values_to_body(
+    upstream_body: dict[str, Any] | str,
+) -> dict[str, Any] | str:
+    """Redaction-only leaf pass, for the surgical-``sanitize`` renderers.
+
+    ``sanitize`` renders the *upstream* body plus fragment obfuscation, so the
+    response pipeline's own ``ExactValueRedactionFilter`` rewrite — which only
+    ever touched ``output_text`` — is not in what the client receives. Without
+    this the stricter disposition would hand back a body the ``allow``
+    disposition redacts.
+
+    Placeholder restoration is deliberately **not** part of this. Restoring is a
+    reveal, and a response the pipeline decided to sanitize is not where one
+    belongs; the approved-token substitution stays on the allow path.
+    """
+    ops = _LeafOps(exact_values=active_exact_values(), placeholders={})
+    if ops.is_noop:
+        return upstream_body
+    if isinstance(upstream_body, dict):
+        return ops.apply_nested(upstream_body)
+    return ops.apply(str(upstream_body))
 
 
 def _apply_chat_body(
@@ -264,17 +299,29 @@ def apply_pipeline_text_to_body(
     if not isinstance(upstream_body, dict):
         return ops.apply(str(upstream_body))
 
-    out = copy.deepcopy(upstream_body)
     normalized_route = str(route or "").strip().lower()
+    # Chat and Responses assign ``output_text`` regardless of what the leaf ops
+    # do, so they always rebuild.
     if normalized_route == ROUTE_CHAT:
-        return _apply_chat_body(out, final_resp, ops)
+        return _apply_chat_body(copy.deepcopy(upstream_body), final_resp, ops)
     if normalized_route == ROUTE_RESPONSES:
-        return _apply_responses_body(out, final_resp, ops)
+        return _apply_responses_body(copy.deepcopy(upstream_body), final_resp, ops)
+
+    # The two routes below write nothing but leaves, so with no exact values
+    # configured and nothing approved for restoration there is nothing to do.
+    # Walking an embeddings body to rebuild a few thousand floats unchanged is
+    # what this avoids — those are the bodies the generic proxy carries, and
+    # returning the object untouched is what this path did before the
+    # write-back existed.
+    if ops.is_noop:
+        return upstream_body
     if normalized_route == ROUTE_MESSAGES:
-        return _apply_messages_body(out, ops)
+        return _apply_messages_body(copy.deepcopy(upstream_body), ops)
     # Generic provider bodies have no known schema, so there is no defined place
     # to write output_text — only the leaves are transformed, shape intact.
-    return ops.apply_nested(out)
+    # ``apply_nested`` already returns a new tree, so nothing needs copying
+    # first; every value it passes through unchanged is immutable.
+    return ops.apply_nested(upstream_body)
 
 
 def sanitize_nested_text_value(
