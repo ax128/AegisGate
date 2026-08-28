@@ -101,6 +101,11 @@ _MEDIA_SOURCE_URL_BLOCK_TYPES = frozenset(
 # The id the whole-value fallback reports when a redacted media locator stops
 # being a usable URL.
 _URL_QUERY_PATTERN_ID = "URL_TOKEN_QUERY"
+# What a normalized-only hit reports instead of a masked fragment. There is no
+# fragment: the match exists only in the normalized copy. Masking the whole leaf
+# would put an unbounded string in the log line (and its first three characters
+# in cleartext) for a value nobody can point at.
+_NORMALIZED_MATCH_MASK = "[normalized-form match]"
 _CONTENT_BLOCK_PATH_RE = re.compile(r"(?:^|\.)content\[\d+\]$")
 _SYSTEM_BLOCK_PATH_RE = re.compile(r"^system\[\d+\]$")
 
@@ -387,6 +392,7 @@ def _query_pair_is_credential(key: str, value: str) -> bool:
 def _redact_url_query_credentials(
     parsed: SplitResult,
     *,
+    original: str,
     role: str,
     path: str,
     field: str,
@@ -435,7 +441,10 @@ def _redact_url_query_credentials(
             continue
         rebuilt.append(pair)
     if not changed:
-        return parsed.geturl(), hits
+        # The caller's own bytes, not ``parsed.geturl()``: a round trip through
+        # urlsplit lowercases the scheme, so a locator with nothing to redact
+        # would still leave the gateway rewritten.
+        return original, hits
     return parsed._replace(query="&".join(rebuilt)).geturl(), hits
 
 
@@ -474,6 +483,7 @@ def _redact_media_locator(
     if parsed.query:
         candidate, query_hits = _redact_url_query_credentials(
             parsed,
+            original=text,
             role=role,
             path=path,
             field=field,
@@ -571,15 +581,17 @@ def _redact_leaf_with_patterns(
     normalized_forms: tuple[str, ...] | None = None
     for pattern_id, pattern in patterns:
         match_count = 0
+        protected_count = 0
         first_raw = ""
 
         def _repl(match: re.Match[str]) -> str:
-            nonlocal match_count, first_raw
+            nonlocal match_count, protected_count, first_raw
             if protected_spans and range_overlaps_protected(
                 protected_spans,
                 start=match.start(),
                 end=match.end(),
             ):
+                protected_count += 1
                 return match.group(0)
             if not first_raw:
                 first_raw = match.group(0)
@@ -602,6 +614,16 @@ def _redact_leaf_with_patterns(
             )
             continue
 
+        if protected_count:
+            # The rule did match; every match sat inside a span the caller asked
+            # to keep — a redaction-whitelist key, or a ``[REDACTED:…]`` marker
+            # an earlier rule wrote. The normalized probe below would find the
+            # same protected text again and, having no span to substitute,
+            # replace the *whole leaf*: "protect this field" would become
+            # "delete this message" for any leaf that also happens to carry a
+            # full-width character.
+            continue
+
         if normalized_forms is None:
             normalized_forms = tuple(
                 form for form in build_haystacks(cleaned) if form != cleaned
@@ -617,7 +639,7 @@ def _redact_leaf_with_patterns(
                 "role": role or "unknown",
                 "pattern": pattern_id,
                 "count": 1,
-                "masked_value": mask_for_log(cleaned),
+                "masked_value": _NORMALIZED_MATCH_MASK,
             }
         )
         # Whole-leaf replacement, deliberately coarser than a surgical one: the

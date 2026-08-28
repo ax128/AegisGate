@@ -848,3 +848,43 @@ class TestCredentialOnlySurfaces:
         )
         assert hits
         assert cleaned == "[REDACTED:URL_TOKEN_QUERY]"
+
+
+class TestMediaLocatorByteFidelity:
+    """A locator with nothing to redact has to leave exactly as it arrived."""
+
+    def test_an_uppercase_scheme_survives_the_query_pass(self) -> None:
+        """``urlsplit(...).geturl()`` lowercases the scheme.
+
+        The query is rewritten parameter by parameter, so the round trip only
+        happens for locators that *have* a query — and it happened even when no
+        parameter was a credential, rewriting a locator the gateway had decided
+        to leave alone.
+        """
+        from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+        original = "HTTPS://Example.COM/img.png?w=320&h=240"
+        cleaned, hits = _redact_media_locator(
+            original,
+            role="user",
+            path="messages[0].content[0].image_url",
+            field="url",
+        )
+
+        assert cleaned == original
+        assert not hits
+
+    def test_a_credential_in_the_query_is_still_removed(self) -> None:
+        """Guards the premise: the pass is running, it just kept its hands off."""
+        from aegisgate.adapters.openai_compat.sanitize import _redact_media_locator
+
+        cleaned, hits = _redact_media_locator(
+            f"HTTPS://Example.COM/img.png?api_key={_SK_TOKEN}&w=320",
+            role="user",
+            path="messages[0].content[0].image_url",
+            field="url",
+        )
+
+        assert _SK_TOKEN not in cleaned
+        assert "w=320" in cleaned
+        assert hits

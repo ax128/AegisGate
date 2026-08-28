@@ -673,3 +673,37 @@ def test_derived_messages_are_identifiable_and_skipped() -> None:
     assert mapper.first_forwardable_message([derived, plain]) is plain
     assert mapper.first_forwardable_message([derived]) is None
     assert mapper.first_forwardable_message([]) is None
+
+
+def test_a_payload_with_nothing_forwardable_is_refused_not_forwarded() -> None:
+    """The "no forwardable message" case must not fall through to the original.
+
+    Unreachable through the mapper, which always has a real message before it
+    inserts a derived one. It matters anyway because the failure mode is silent:
+    ``upstream_payload`` is a copy of the caller's payload, so skipping the
+    assignment forwards the ``input`` the request pipeline never rewrote.
+    """
+    from aegisgate.adapters.openai_compat.router import (
+        _build_responses_upstream_payload,
+    )
+    from aegisgate.core.models import InternalMessage
+
+    derived_only = [
+        InternalMessage(
+            role="system",
+            content="rules",
+            source="system",
+            metadata={"aegis_source_field": "instructions"},
+        )
+    ]
+
+    with pytest.raises(ValueError, match="responses_input_shape_violation"):
+        _build_responses_upstream_payload(
+            {"model": "gpt-5.4", "instructions": "SYSTEM RULES", "input": "hello"},
+            derived_only,
+            request_id="req-instr-3",
+            session_id="sess-instr-3",
+            route="/v1/responses",
+            tenant_id="default",
+            request_headers={},
+        )

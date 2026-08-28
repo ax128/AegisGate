@@ -31,10 +31,14 @@ DEFAULT_BIDI_CHARS: frozenset[str] = frozenset(
 )
 
 
-_INVISIBLE_STRIP_TABLE = str.maketrans(
-    "", "", "".join(DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS)
+_INVISIBLE_STRIP_CHARS = DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS
+_INVISIBLE_STRIP_TABLE = str.maketrans("", "", "".join(_INVISIBLE_STRIP_CHARS))
+# Escaped, and sorted so the class does not depend on set iteration order. None
+# of today's code points is a metacharacter, but the two sets above are meant to
+# be extended, and one ``-`` or ``^`` would silently turn this into a range.
+_INVISIBLE_RE = re.compile(
+    f"[{''.join(re.escape(char) for char in sorted(_INVISIBLE_STRIP_CHARS))}]"
 )
-_INVISIBLE_RE = re.compile(f"[{''.join(DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS)}]")
 
 
 def strip_invisibles(text: str) -> str:

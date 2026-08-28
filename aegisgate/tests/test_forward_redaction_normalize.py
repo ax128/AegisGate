@@ -218,3 +218,60 @@ def test_strip_invisibles_is_a_no_op_on_ordinary_text() -> None:
     assert strip_invisibles(text) is text
     assert strip_invisibles(_SPLIT_TOKEN) == _PLAIN_TOKEN
     assert not re.search(r"[​‌‍⁠﻿­]", strip_invisibles(_SPLIT_TOKEN))
+
+
+# ── the normalized probe respects what the raw pass was told to keep ───────
+
+
+def test_a_protected_span_is_not_swept_up_by_the_normalized_probe() -> None:
+    """A whitelisted value must not turn into a whole-leaf redaction.
+
+    The raw ``sub`` refuses to rewrite a protected span, which leaves the
+    per-rule match count at zero — the same state as "this rule found nothing".
+    The normalized probe then finds the very same credential in the normalized
+    copy and, having no span it may substitute, replaces the entire leaf. For a
+    caller that asked to protect one field, "keep this" would become "delete
+    this message", and only for leaves that also carry a full-width character.
+    """
+    text = f"参数（可选）：demo_key: {_PLAIN_TOKEN} 请勿改动"
+    cleaned, hits = sanitize._sanitize_text_for_upstream_with_hits(
+        text,
+        role="user",
+        path="messages[0].content[0].text",
+        field="text",
+        whitelist_keys={"demo_key"},
+        relaxed_patterns=True,
+    )
+
+    assert cleaned == text
+    assert not hits
+
+
+def test_the_same_leaf_without_the_whitelist_is_still_redacted() -> None:
+    """Guards the premise: the protection is what changed the outcome."""
+    text = f"参数（可选）：demo_key: {_PLAIN_TOKEN} 请勿改动"
+    cleaned, hits = _forward(text)
+
+    assert _PLAIN_TOKEN not in cleaned
+    assert hits
+
+
+def test_a_normalized_only_hit_does_not_log_the_whole_leaf() -> None:
+    """There is no fragment to mask, so it must not mask the leaf instead.
+
+    ``mask_for_log`` keeps the first three and last two characters and turns
+    everything between into asterisks. Handed a whole leaf that is what goes
+    into the redaction log line: unbounded in length, and the opening of the
+    message in cleartext.
+    """
+    long_leaf = f"{_FULLWIDTH_TEXT} " + ("补充说明。" * 400) + f" {_SPLIT_TOKEN}"
+    assert len(long_leaf) > 2000
+
+    cleaned, hits = _forward(long_leaf)
+
+    assert cleaned == "[REDACTED:TOKEN]"
+    assert [hit["pattern"] for hit in hits] == ["TOKEN"]
+    masked = hits[0]["masked_value"]
+    assert masked == sanitize._NORMALIZED_MATCH_MASK
+    assert len(masked) < 64
+    assert long_leaf[:3] not in masked

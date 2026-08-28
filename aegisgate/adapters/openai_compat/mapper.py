@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from aegisgate.config.settings import settings
-from aegisgate.core.models import InternalMessage, InternalRequest, InternalResponse
+from aegisgate.core.models import (
+    AEGIS_SOURCE_FIELD_KEY,
+    InternalMessage,
+    InternalRequest,
+    InternalResponse,
+    is_derived_scan_message,
+)
 from aegisgate.util.logger import logger
-
-# Marks an InternalMessage the mapper derived from a payload field that the
-# forward-path builders rebuild from the original payload. Such a message is for
-# the request scanning surface only and must never be forwarded.
-AEGIS_SOURCE_FIELD_KEY = "aegis_source_field"
-
 
 _BINARY_PLACEHOLDER = "[BINARY_CONTENT]"
 _IMAGE_PLACEHOLDER = "[IMAGE_CONTENT]"
@@ -328,17 +328,6 @@ def to_internal_responses(payload: dict) -> InternalRequest:
         messages=messages,
         metadata={"raw": payload},
     )
-
-
-def is_derived_scan_message(message: Any) -> bool:
-    """True for a message that exists only to widen the request scanning surface.
-
-    Derived messages are built from fields the forward path rebuilds from the
-    original payload (``instructions`` today). Feeding one back into an upstream
-    payload would put the system prompt where the user's own input belongs.
-    """
-    metadata = getattr(message, "metadata", None)
-    return bool(isinstance(metadata, dict) and metadata.get(AEGIS_SOURCE_FIELD_KEY))
 
 
 def first_forwardable_message(messages: list) -> Any | None:

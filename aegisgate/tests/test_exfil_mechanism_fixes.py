@@ -212,6 +212,64 @@ def test_strong_intent_risk_is_derived_from_the_sanitize_gate() -> None:
     assert effective <= RequestSanitizer._STRONG_INTENT_REVIEW_RISK_CEILING
 
 
+def _scan_only_request(text: str) -> InternalRequest:
+    """What ``to_internal_responses`` builds for a Responses ``instructions``."""
+    return InternalRequest(
+        request_id="s2-2", session_id="s1", model="m",
+        route="/v1/responses",
+        messages=[
+            InternalMessage(
+                role="system",
+                content=text,
+                source="system",
+                metadata={"aegis_source_field": "instructions"},
+            ),
+            InternalMessage(role="user", content="how do I read an env var in Python?"),
+        ],
+    )
+
+
+# The leak_check pattern that a coding agent's system prompt trips without any
+# of the redaction rules covering it first: ``api_key_generic`` accepts eight
+# characters and the bare word ``token``, while the built-in ``FIELD_SECRET``
+# needs twelve and does not list it.
+_SCAN_ONLY_LEAK_TEXT = "when calling the service send token: abcd1234 in the header"
+
+
+def test_leak_check_in_a_scan_only_field_does_not_open_the_score_channel() -> None:
+    """Widening the scan surface must not widen the response gates with it.
+
+    ``instructions`` reaches the pipeline so leak_check / shape / RAG can see
+    it, but the client resends it verbatim every turn. leak_check's 0.6 is over
+    ``OutputSanitizer``'s sanitize gate, which marks a clean answer
+    ``response_disposition=sanitize`` and makes ``_stream_block_reason`` cut the
+    stream — so one credential-shaped line in a system prompt would do that to
+    every response for the life of that client configuration. That is the score
+    channel D7 refused to open for the request-phase anomaly detector.
+    """
+    from aegisgate.filters.sanitizer import OutputSanitizer
+
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(_scan_only_request(_SCAN_ONLY_LEAK_TEXT), ctx)
+
+    # Observed, so the surface is genuinely being scanned...
+    assert "request_leak_check_scan_only" in ctx.security_tags
+    # ...but the score stays under every response-side gate.
+    assert ctx.risk_score < OutputSanitizer()._sanitize_threshold
+    assert ctx.requires_human_review is False
+    assert ctx.request_disposition != "block"
+
+
+def test_the_same_text_in_a_forwardable_message_still_raises_the_score() -> None:
+    """The narrowing is about the derived message, not about leak_check."""
+    ctx = _ctx({"request_sanitizer"})
+    RequestSanitizer().process_request(_request(_SCAN_ONLY_LEAK_TEXT), ctx)
+
+    assert "request_leak_check" in ctx.security_tags
+    assert "request_leak_check_scan_only" not in ctx.security_tags
+    assert ctx.risk_score >= 0.6
+
+
 def test_request_sanitizer_leaves_ordinary_requests_alone() -> None:
     ctx = _ctx({"request_sanitizer"})
     RequestSanitizer().process_request(_request("how do I read an env var in Python?"), ctx)
