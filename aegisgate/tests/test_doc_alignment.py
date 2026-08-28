@@ -723,6 +723,10 @@ def test_pipeline_phases_match_the_documented_ones() -> None:
     request_names = [f.name for f in pipeline.request_filters]
     response_names = [f.name for f in pipeline.response_filters]
 
+    # Both lists are pinned whole, on purpose. Adding or removing a filter here
+    # is a change to what the gateway intercepts, so it should require editing
+    # this test and the README paragraph it guards — not slip through because
+    # the assertion only checked the names someone happened to think of.
     assert request_names == [
         "exact_value_redaction",
         "redaction",
