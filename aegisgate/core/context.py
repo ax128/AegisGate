@@ -22,6 +22,12 @@ class RequestContext:
     # once per probe, and the consume is read-and-delete, so any repeat can
     # only ever return an empty mapping.
     restoration_store_consumed: bool = False
+    # Placeholder tokens RestorationFilter actually restored in this round's
+    # ``output_text``, after its volume / partial / exfiltration guards passed.
+    # Response renderers may only restore these in the nested protocol fields —
+    # a placeholder the guards never saw must stay a placeholder. Tokens only,
+    # never plaintext.
+    restored_placeholders: set[str] = field(default_factory=set)
     security_tags: set[str] = field(default_factory=set)
     enforcement_actions: list[str] = field(default_factory=list)
     request_disposition: str = "allow"

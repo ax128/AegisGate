@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from cryptography.fernet import InvalidToken
@@ -204,14 +204,33 @@ def save_redact_values(values: Iterable[object]) -> None:
     logger.info("redact_values: saved %d values to %s", len(clean), path)
 
 
-def replace_exact_values(text: str) -> tuple[str, int]:
-    """Replace all configured exact values in *text*.
+def active_exact_values() -> tuple[str, ...]:
+    """The configured values, snapshotted once for one payload/body walk.
 
-    Returns ``(replaced_text, replacement_count)``.  Values are matched
-    longest-first to avoid partial replacements.
+    :func:`load_redact_values` is mtime-cached but still takes the lock and
+    ``stat``s the file on every call, and the callers that matter walk every
+    string leaf of a request or a response. Resolve once and thread the tuple
+    down; an empty tuple turns the per-leaf step into a single truth test.
+
+    Returns an empty tuple when the feature is off, so callers do not have to
+    check the flag separately.
     """
-    values = load_redact_values()
-    if not values:
+    from aegisgate.config.settings import settings
+
+    if not settings.enable_exact_value_redaction:
+        return ()
+    return tuple(load_redact_values())
+
+
+def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, int]:
+    """Replace every entry of *values* in *text*.
+
+    Split out from :func:`replace_exact_values` so a caller walking thousands of
+    string leaves can resolve the list **once** instead of re-reading it (and
+    re-``stat``-ing the file behind it) per leaf. An empty list returns the text
+    unchanged and untouched.
+    """
+    if not values or not text:
         return text, 0
 
     # Sort by length descending so longer values match first.
@@ -223,3 +242,12 @@ def replace_exact_values(text: str) -> tuple[str, int]:
             text = text.replace(val, _PLACEHOLDER)
             count += n
     return text, count
+
+
+def replace_exact_values(text: str) -> tuple[str, int]:
+    """Replace all configured exact values in *text*.
+
+    Returns ``(replaced_text, replacement_count)``.  Values are matched
+    longest-first to avoid partial replacements.
+    """
+    return replace_exact_values_from(text, load_redact_values())
