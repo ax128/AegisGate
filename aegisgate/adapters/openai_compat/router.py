@@ -5640,8 +5640,14 @@ async def _execute_messages_once(
                 source="messages_auto_sanitize",
                 log_key="messages_auto_sanitize",
             )
+            # The pipeline's own text, not the pre-pipeline capture above. The
+            # dangerous-sample log wants what the model actually said; the client
+            # must not. Obfuscating ``capped_upstream_text`` discards every
+            # response-side rewrite -- exact values included -- so the strictest
+            # exit returned the least redacted text. chat and responses already
+            # feed final_resp.output_text here.
             sanitized_text = _build_sanitized_full_response(
-                ctx, source_text=capped_upstream_text
+                ctx, source_text=internal_resp.output_text
             )
             if not isinstance(upstream_body, dict):
                 internal_resp.output_text = sanitized_text
@@ -6296,8 +6302,11 @@ async def _execute_generic_once(
             source="generic_auto_sanitize",
             log_key="generic_auto_sanitize",
         )
+        # The pipeline's own text, not the pre-pipeline capture above -- same
+        # reason as the messages route. This exit replaces the whole body, so
+        # the pre-pipeline text was the only thing the client got back.
         sanitized_text = _build_sanitized_full_response(
-            ctx, source_text=capped_upstream_text
+            ctx, source_text=internal_resp.output_text
         )
         ctx.response_disposition = "sanitize"
         ctx.enforcement_actions.append("auto_sanitize:hit_fragments_obfuscated")

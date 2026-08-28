@@ -1002,3 +1002,50 @@ def test_nested_sanitize_does_not_mutate_the_body_it_was_given() -> None:
     assert out["usage"] is not body["usage"]
     assert out["data"][0]["vec"] == [0.5, 1.0]
     assert out["usage"]["total_tokens"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["sanitize", "block"])
+async def test_all_four_routes_redact_configured_values_on_the_strict_exits(
+    monkeypatch: pytest.MonkeyPatch, configured_exact_value: str, disposition: str
+) -> None:
+    """The four exits are one rule, and this is what says so.
+
+    Three of them get the pass inside ``patch_*_response_body``; the generic
+    proxy has no patch_* renderer and calls ``apply_exact_values_to_body``
+    itself. Nothing but a comment tied those two implementations together, so
+    a change to one could leave the other behind exactly the way a407f2b left
+    three routes behind. Whatever the wiring, all four have to answer the same.
+    """
+    results: dict[str, str] = {}
+
+    for route_name in ("chat", "responses", "messages"):
+        result, _ = await _run_route_once(
+            monkeypatch,
+            route_name=route_name,
+            upstream_body=_body_for(route_name, configured_exact_value),
+            response_pipeline=_pipeline_at(disposition),
+        )
+        results[route_name] = json.dumps(result, ensure_ascii=False)
+
+    generic_body = {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [
+            {"object": "embedding", "index": 0, "note": f"the key is {configured_exact_value}"}
+        ],
+    }
+    generic = await _run_generic_once(
+        monkeypatch,
+        upstream_body=generic_body,
+        # The same pipeline stand-in the other three use, so all four are being
+        # asked the same question: it applies the exact-value rewrite to
+        # output_text exactly as ExactValueRedactionFilter would, then sets the
+        # disposition. generic reaches its sanitize exit on the disposition
+        # alone and its block exit through _needs_confirmation.
+        response_pipeline=_pipeline_at(disposition),
+    )
+    results["generic"] = json.dumps(generic, ensure_ascii=False)
+
+    leaked = [route for route, blob in results.items() if configured_exact_value in blob]
+    assert not leaked, f"{disposition} exit leaked a configured value on: {leaked}"
