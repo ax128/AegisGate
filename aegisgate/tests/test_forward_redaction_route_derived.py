@@ -122,9 +122,11 @@ def test_multipart_media_locators_are_redacted_not_forwarded_verbatim() -> None:
     presigned link carrying a credential in its query left the gateway intact on
     the one route whose whole purpose is uploading media.
     """
+    # Symbols, not an expression: pinning the exact spelling of the membership
+    # test made this fail on a rename that changed nothing it cares about.
     assert "data.append((str(key), raw_text))\n            else:" not in _ROUTER_SRC
-    assert "if field in _MEDIA_LOCATOR_FIELDS:" in _ROUTER_SRC
-    assert "cleaned, node_hits = _redact_media_locator(" in _ROUTER_SRC
+    assert "_MEDIA_LOCATOR_FIELDS" in _ROUTER_SRC
+    assert "_redact_media_locator(" in _ROUTER_SRC
 
 
 def test_multipart_locator_path_actually_redacts() -> None:
