@@ -112,6 +112,13 @@ def _extract_stream_event_type(data_payload: str) -> str:
 # ``requires_human_review`` once ``risk_score`` reaches the review threshold.
 # Copying just the literal would make the same high-risk-command answer
 # "stream terminated, non-stream allowed".
+# Tags that exist for the audit log only: they record something about the
+# response without claiming it is dangerous, so neither gate may fire on them.
+# ``response_truncated`` is the length cap's, and turning a long but harmless
+# answer into an obfuscated summary is the bug that started this.
+RESPONSE_AUDIT_ONLY_TAGS: frozenset[str] = frozenset({"response_truncated"})
+
+
 RESPONSE_CONFIRMATION_TAGS: frozenset[str] = frozenset(
     {
         "response_privilege_abuse",
@@ -144,10 +151,21 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         if has_block_action:
             return "response_tool_call_violation"
 
-    # "review plus any response_-prefixed tag" used to end the stream here. It
-    # caught audit-only tags — ``response_truncated`` from the length cap is the
-    # plain case — so a long but harmless answer was cut off. The explicit set
-    # below is the gate now.
+    # "review plus any response_-prefixed tag" ends the stream, minus the
+    # audit-only tags — that exclusion is the whole of what was wrong with it.
+    #
+    # Deleting the rule outright would only have loosened this gate: the length
+    # cap runs on the four non-streaming response stages and nowhere else
+    # (``_cap_response_text`` has no streaming caller), so ``response_truncated``
+    # never reached it in the first place, while an injection or anomaly tag
+    # that raised review — the typoglycemia pair this plan explicitly does not
+    # fix — would have stopped the non-streaming answer and let the stream run.
+    if ctx.requires_human_review and any(
+        tag.startswith("response_") and tag not in RESPONSE_AUDIT_ONLY_TAGS
+        for tag in ctx.security_tags
+    ):
+        return "response_human_review_required"
+
     for tag in RESPONSE_CONFIRMATION_TAGS:
         if tag in ctx.security_tags:
             return tag

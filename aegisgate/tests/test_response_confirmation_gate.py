@@ -7,8 +7,11 @@ audit log — ``response_truncated``, written by the length cap, is the plain
 case: a long but harmless answer came back as a summary.
 
 ``_stream_block_reason`` had the mirror-image rule (``requires_human_review``
-plus any ``response_`` tag). Both now read one frozenset, so a tag cannot end
-the stream while the non-streaming answer sails through.
+plus any ``response_`` tag). It keeps that rule, minus the audit-only tags —
+deleting it would have loosened the streaming gate rather than narrowing it,
+since the length cap never ran on a stream to begin with. Both sides also read
+one frozenset of high-risk tags, so a tag in it cannot end the stream while the
+non-streaming answer sails through.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import pytest
 
 from aegisgate.adapters.openai_compat import router as openai_router
 from aegisgate.adapters.openai_compat.stream_utils import (
+    RESPONSE_AUDIT_ONLY_TAGS,
     RESPONSE_CONFIRMATION_TAGS,
     _stream_block_reason,
 )
@@ -111,18 +115,53 @@ def test_length_cap_gates_neither_side() -> None:
     assert openai_router._needs_confirmation(ctx) is False
 
 
-def test_review_alone_no_longer_ends_the_stream() -> None:
-    """A documented remaining split, deliberately not closed here.
+def test_the_length_cap_does_not_end_the_stream_even_with_review() -> None:
+    """The narrowing on the streaming side is the audit-only exclusion, only.
 
-    Non-streaming still treats ``requires_human_review`` as a gate on its own.
-    Streaming does not, now that the prefix rule is gone. Closing it means
-    changing what review does on one of the two sides, which is a separate call.
+    ``response_truncated`` cannot actually reach this gate in production —
+    ``_cap_response_text`` has no streaming caller — so this pins the intent
+    rather than a live path: an audit-only tag is not evidence of anything, and
+    pairing it with review must not cut a long but harmless answer short.
     """
     ctx = _ctx()
     ctx.requires_human_review = True
     ctx.security_tags.add("response_truncated")
     assert _stream_block_reason(ctx) is None
     assert openai_router._needs_confirmation(ctx) is True
+
+
+def test_review_plus_a_real_response_tag_still_ends_the_stream() -> None:
+    """Deleting this rule outright would have loosened the streaming gate.
+
+    ``PromptInjectionDetector`` raises review for typoglycemia without a
+    discussion context, and that tag is not in the confirmation set — which is
+    exactly the pair this plan says it does not fix. Non-streaming obfuscates
+    it. If the streaming side stopped gating on review, the same response would
+    stream out in full: a split decision created here, not inherited.
+    """
+    ctx = _ctx()
+    ctx.requires_human_review = True
+    ctx.security_tags.add("response_injection_typoglycemia")
+    assert _stream_block_reason(ctx) == "response_human_review_required"
+    assert openai_router._needs_confirmation(ctx) is True
+
+
+def test_review_with_no_response_tag_is_the_remaining_split() -> None:
+    """A documented remaining divergence, deliberately not closed here.
+
+    Non-streaming treats ``requires_human_review`` as a gate on its own;
+    streaming wants a response-side tag with it. Closing this means changing
+    what review does on one of the two sides, which is a separate call.
+    """
+    ctx = _ctx()
+    ctx.requires_human_review = True
+    assert _stream_block_reason(ctx) is None
+    assert openai_router._needs_confirmation(ctx) is True
+
+
+def test_the_two_tag_sets_do_not_overlap() -> None:
+    """An audit-only tag that also gated would be a contradiction in the file."""
+    assert not (RESPONSE_AUDIT_ONLY_TAGS & RESPONSE_CONFIRMATION_TAGS)
 
 
 def test_the_two_gates_read_the_same_object() -> None:
