@@ -777,3 +777,55 @@ def test_readmes_state_the_cross_phase_caveat() -> None:
     for name in ("anomaly_detector", "injection_detector", "privilege_guard"):
         assert name in readme
         assert name in readme_zh
+
+
+def test_readme_zh_pipeline_chains_match_the_constructed_filters() -> None:
+    """§1.3 states a construction order; it has to be the real one.
+
+    The overview bullet above it lists the *enabled* subset, which is a
+    different claim about a different thing. One of them once carried the label
+    "按 `_build_pipeline()` 实际构造" while listing four of the six constructed
+    filters — the two readings of "默认策略" collapsed into one sentence that was
+    wrong under either. Pinning the chain lines is what makes the distinction
+    survive: this fails the moment the pipeline gains or loses a filter.
+    """
+    import re
+
+    from aegisgate.adapters.openai_compat.pipeline_runtime import _build_pipeline
+
+    readme_zh = (_REPO_ROOT / "README_zh.md").read_text(encoding="utf-8")
+    pipeline = _build_pipeline()
+
+    def _documented(label: str) -> list[str]:
+        match = re.search(rf"{re.escape(label)}：`([^`]+)`", readme_zh)
+        assert match, f"README_zh no longer states a {label} chain"
+        return [name.strip() for name in match.group(1).split("->")]
+
+    assert _documented("请求侧过滤") == [f.name for f in pipeline.request_filters]
+    assert _documented("响应侧过滤") == [f.name for f in pipeline.response_filters]
+
+
+def test_readme_zh_does_not_call_the_enabled_subset_the_constructed_list() -> None:
+    """The overview bullet may not claim to be the construction order.
+
+    It lists what ``default.yaml`` enables, which is a strict subset. Labelling
+    that as what ``_build_pipeline()`` builds is how a reader concludes the two
+    optional guards do not exist.
+    """
+    readme_zh = (_REPO_ROOT / "README_zh.md").read_text(encoding="utf-8")
+
+    # Default to None rather than letting ``next`` raise: a StopIteration here
+    # reports as an error with no message, when what happened is simply that the
+    # bullet was renamed or removed.
+    overview = next(
+        (line for line in readme_zh.splitlines() if line.startswith("- 请求侧（")),
+        None,
+    )
+    assert overview is not None, (
+        "README_zh no longer has a '- 请求侧（' overview bullet; if it was "
+        "renamed, point this guard at the new one rather than dropping it"
+    )
+    assert "实际构造" not in overview or "system_prompt_guard" in overview, (
+        "the overview bullet claims to be the constructed list but omits the "
+        "guards _build_pipeline() constructs"
+    )
