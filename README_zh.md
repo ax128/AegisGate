@@ -112,7 +112,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
   - `stream=true` 流式透传
   - 支持 query 透传（例如 `?anthropic-version=2023-06-01`）
   - 默认仍沿用 v1 请求/响应安全管道；若使用 `__passthrough` 或命中上游白名单绕过，才会跳过过滤
-- 请求侧（默认策略，按 `_build_pipeline()` 实际构造）：`exact_value_redaction`、`redaction`、`request_sanitizer`、`rag_poison_guard`
+- 请求侧（`default.yaml` 的 `enabled_filters` 里启用的）：`exact_value_redaction`、`redaction`、`request_sanitizer`、`rag_poison_guard`；`_build_pipeline()` 另外构造了 `system_prompt_guard` 与 `untrusted_content_guard`，默认策略不启用它们，完整构造顺序见 §1.3
 - 响应侧（默认策略）：`exact_value_redaction`、`anomaly_detector`、`injection_detector`、`rag_poison_guard`、`privilege_guard`、`tool_call_guard`、`restoration`、`post_restore_guard`、`output_sanitizer`
 - 注意 `enabled_filters` 是**跨相位**名单：`anomaly_detector` / `injection_detector` / `privilege_guard` 只在响应相位构造，请求相位不跑
 - 扩展脱敏：覆盖 `P0/P1` 常见敏感字段 + `Crypto` 专项字段（地址/私钥/助记词/交易所密钥）

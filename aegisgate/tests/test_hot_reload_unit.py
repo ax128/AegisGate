@@ -465,14 +465,27 @@ class TestEveryRulesDerivedCacheIsCleared:
             names.add(name)
         return names
 
-    def test_sanitize_module_caches_are_all_registered(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("module_name", ["sanitize", "router"])
+    def test_openai_adapter_caches_are_all_registered(
+        self, monkeypatch: pytest.MonkeyPatch, module_name: str
     ) -> None:
-        from aegisgate.adapters.openai_compat import sanitize
+        """Both modules ``_clear_openai_lru_caches`` reaches into, not just one.
+
+        It clears three caches out of ``router`` and three out of ``sanitize``.
+        Pinning only ``sanitize`` left the other half of its own list unguarded,
+        which is the same silent staleness this class exists to prevent — a new
+        rules-derived cache in ``router`` would have slipped through the test
+        that was written to catch exactly that.
+        """
+        import importlib
+
+        module = importlib.import_module(
+            f"aegisgate.adapters.openai_compat.{module_name}"
+        )
 
         cleared: set[str] = set()
-        for name in self._cached_names(sanitize):
-            original = getattr(sanitize, name)
+        for name in self._cached_names(module):
+            original = getattr(module, name)
             monkeypatch.setattr(
                 original,
                 "cache_clear",
@@ -482,8 +495,8 @@ class TestEveryRulesDerivedCacheIsCleared:
 
         hot_reload._clear_openai_lru_caches()
 
-        missing = self._cached_names(sanitize) - cleared
+        missing = self._cached_names(module) - cleared
         assert not missing, (
-            f"rules-derived caches never cleared on reload: {sorted(missing)}. "
-            "Add them to _clear_openai_lru_caches."
+            f"rules-derived caches in {module_name} never cleared on reload: "
+            f"{sorted(missing)}. Add them to _clear_openai_lru_caches."
         )
