@@ -244,6 +244,18 @@ def _redact(text: str, *, route: str) -> tuple[str, dict[str, str]]:
     return req.messages[0].content, dict(ctx.redaction_mapping)
 
 
+def _mapping_kinds(mapping: dict[str, str]) -> set[str]:
+    """Placeholder keys are ``{{AG_<prefix>_<KIND>_<n>}}``; KIND may contain underscores."""
+    kinds: set[str] = set()
+    for placeholder in mapping:
+        inner = placeholder.strip("{}")
+        parts = inner.split("_")
+        if len(parts) < 4 or parts[0] != "AG":
+            continue
+        kinds.add("_".join(parts[2:-1]))
+    return kinds
+
+
 def _scan_pipeline() -> Pipeline:
     store = _MemoryKVStore()
     return Pipeline(
@@ -379,10 +391,10 @@ def test_full_route_redacts_every_pii_sample(pattern_id: str, sample: str) -> No
     cleaned, mapping = _redact(sample, route="/v1/embeddings")
     assert sample not in cleaned, f"{pattern_id} leaked on the full-set route"
     assert mapping, f"{pattern_id} produced no placeholder"
-    kinds = " ".join(mapping)
+    kinds = _mapping_kinds(mapping)
     expected = _PATTERN_SHADOWS.get(pattern_id, pattern_id)
     assert expected in kinds, (
-        f"{pattern_id} redacted as {kinds!r}, expected {expected}"
+        f"{pattern_id} redacted as {sorted(kinds)!r}, expected {expected}"
     )
 
 
@@ -503,7 +515,7 @@ def test_numeric_slack_token_is_redacted_as_slack_not_phone() -> None:
     assert sample not in cleaned
     assert "xoxb-" not in cleaned
     assert "abcdefghij" not in cleaned
-    kinds = " ".join(mapping)
+    kinds = _mapping_kinds(mapping)
     assert "SLACK_TOKEN" in kinds
     assert "PHONE" not in kinds
 
@@ -517,6 +529,30 @@ def test_numeric_slack_token_is_redacted_as_slack_not_phone() -> None:
     assert sample not in forwarded
     assert "xoxb-" not in forwarded
     assert any(hit["pattern"] == "SLACK_TOKEN" for hit in hits)
+
+
+@pytest.mark.parametrize(
+    "sample,forbidden_fragment",
+    (
+        ("aa:bb:cc:dd:ee:ff:10:20", ":10:20"),
+        ("2001:db8:aa:bb:cc:dd:ee:ff", "2001:db8:"),
+    ),
+)
+def test_mac_does_not_split_ipv6_with_two_digit_hextets(
+    sample: str, forbidden_fragment: str
+) -> None:
+    """MAC must not eat six 2-digit hextets out of a longer IPv6 address.
+
+    ``\\b`` sits on ``:``, so the unbounded MAC regex replaces
+    ``aa:bb:cc:dd:ee:ff`` inside a longer address and leaves the rest in
+    the forwarded text — the same leftover-fragment class as PHONE/Slack.
+    """
+    cleaned, mapping = _redact(sample, route="/v1/embeddings")
+    assert sample not in cleaned
+    assert forbidden_fragment not in cleaned, cleaned
+    kinds = _mapping_kinds(mapping)
+    assert "IPV6" in kinds
+    assert "MAC_ADDRESS" not in kinds
 
 
 # ── request sanitizer ──────────────────────────────────────────────────────
