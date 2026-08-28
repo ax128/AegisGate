@@ -324,6 +324,28 @@ def apply_pipeline_text_to_body(
     return ops.apply_nested(upstream_body)
 
 
+def _exact_value_redacted_body(upstream_body: dict[str, Any]) -> dict[str, Any]:
+    """``upstream_body`` with the exact-value pass applied, as a tree we own.
+
+    The surgical-``sanitize`` and auto-obfuscation renderers below patch the
+    *upstream* body, so ``final_resp.output_text`` — the only text the response
+    pipeline's ``ExactValueRedactionFilter`` ever rewrote — is not what reaches
+    the client. Fragment obfuscation only touches dangerous-command regions, so
+    without this pass the stricter dispositions hand back configured values that
+    the ``allow`` disposition redacts.
+
+    Placeholder restoration is deliberately not repeated here: restoring is a
+    reveal, and a response the pipeline decided to sanitize is not where one
+    belongs. That stays on the allow path.
+    """
+    redacted = apply_exact_values_to_body(upstream_body)
+    if isinstance(redacted, dict) and redacted is not upstream_body:
+        # ``apply_nested`` rebuilt every container on the way down, so this tree
+        # shares nothing mutable with the caller's and needs no second copy.
+        return redacted
+    return copy.deepcopy(upstream_body)
+
+
 def sanitize_nested_text_value(
     value: Any,
     ctx: RequestContext,
@@ -335,11 +357,17 @@ def sanitize_nested_text_value(
     if isinstance(value, list):
         return [sanitize_nested_text_value(item, ctx, ops=ops) for item in value]
     if isinstance(value, dict):
-        patched = copy.deepcopy(value)
-        for key, item in list(patched.items()):
-            if isinstance(item, (str, list, dict)):
-                patched[key] = sanitize_nested_text_value(item, ctx, ops=ops)
-        return patched
+        # Rebuild one level at a time. This used to ``deepcopy`` the whole
+        # subtree at *every* dict on the way down, so a generic-proxy body paid
+        # for its embedding vectors once per level of nesting above them.
+        # Scalars are immutable and shared, which is what the list branch has
+        # always done.
+        return {
+            key: sanitize_nested_text_value(item, ctx, ops=ops)
+            if isinstance(item, (str, list, dict))
+            else item
+            for key, item in value.items()
+        }
     return value
 
 
@@ -489,7 +517,7 @@ def patch_chat_response_body(
     *,
     ops: NonStreamRenderOps,
 ) -> dict[str, Any]:
-    out = copy.deepcopy(upstream_body)
+    out = _exact_value_redacted_body(upstream_body)
     choices = out.get("choices")
     if isinstance(choices, list):
         updated_choices: list[Any] = []
@@ -512,7 +540,7 @@ def patch_responses_body(
     *,
     ops: NonStreamRenderOps,
 ) -> dict[str, Any]:
-    out = copy.deepcopy(upstream_body)
+    out = _exact_value_redacted_body(upstream_body)
     if isinstance(out.get("output_text"), str):
         out["output_text"] = ops.sanitize_text(str(out["output_text"]), ctx)
     output = out.get("output")
@@ -556,7 +584,7 @@ def patch_messages_response_body(
     *,
     ops: NonStreamRenderOps,
 ) -> dict[str, Any]:
-    out = copy.deepcopy(upstream_body)
+    out = _exact_value_redacted_body(upstream_body)
     content = out.get("content")
     if isinstance(content, list):
         out["content"] = [
