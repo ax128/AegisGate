@@ -29,11 +29,11 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "GITHUB_TOKEN", "regex": r"\bghp_[A-Za-z0-9]{20,}\b"},
             {"id": "SLACK_TOKEN", "regex": r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"},
             {"id": "CN_MOBILE", "regex": r"(?<!\d)1[3-9]\d{9}(?!\d)"},
-            {"id": "CN_ID", "regex": r"(?<!\d)\d{17}[\dXx](?!\d)"},
+            {"id": "CN_ID", "regex": r"(?<!\d)\d{17}[\dXx](?!\d)", "validator": "cn_id"},
             {"id": "SSN", "regex": r"\b\d{3}-\d{2}-\d{4}\b"},
             {"id": "PHONE", "regex": r"\b(?:\+?1[-.\s]?)?(?:[(]?\d{3}[)]?[-.\s]?)\d{3}[-.\s]?\d{4}\b"},
-            {"id": "CARD", "regex": r"\b(?:\d[ -]*?){13,16}\b"},
-            {"id": "IBAN", "regex": r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b"},
+            {"id": "CARD", "regex": r"\b(?:\d[ -]*?){13,16}\b", "validator": "luhn"},
+            {"id": "IBAN", "regex": r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b", "validator": "iban_mod97"},
         ],
     },
     "restoration": {
@@ -1028,6 +1028,32 @@ def rule_enabled(item: Any) -> bool:
     if not isinstance(item, dict):
         return True
     return item.get("enabled") is not False
+
+
+def rule_validator(item: Any) -> str | None:
+    """The rule's optional checksum validator name, or None.
+
+    Deliberately *not* the shared-by-every-compile-site predicate rule_enabled
+    is. pii_patterns is compiled in three places — filters/redaction.py,
+    adapters/openai_compat/sanitize.py and adapters/v2_proxy/router.py — and
+    only the first reads this. That is safe *because this field cannot suppress
+    redaction*: all three keep redacting, and V1 additionally records that the
+    checksum failed. The moment anyone adds an action that skips redaction,
+    this asymmetry becomes a real divergence and all three sites (plus the
+    console's editable-field whitelist) have to be unified first.
+
+    An unrecognised name reads as "no validator", so a typo degrades to today's
+    behaviour rather than to an exception on the request path.
+    """
+    from aegisgate.util.checksums import VALIDATORS
+
+    if not isinstance(item, dict):
+        return None
+    name = item.get("validator")
+    if not isinstance(name, str):
+        return None
+    name = name.strip().lower()
+    return name if name in VALIDATORS else None
 
 
 def configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:

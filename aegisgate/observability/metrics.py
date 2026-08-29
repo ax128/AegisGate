@@ -74,12 +74,33 @@ if _HAS_PROMETHEUS:
         "Semantic review outcomes",
         ["outcome"],
     )
+
+    # Labelled by *validator name*, never by rule id: the same bounded-enum rule
+    # as above, and here the bound is the number of pure functions implemented
+    # in util/checksums.py — fixed at compile time.
+    #
+    # The cost is that the metric cannot say which rule failed. That is in the
+    # audit line (report.validator_failed is a per-rule-id dict); the metric
+    # answers "how big is this", which is the input the decision needs.
+    PII_VALIDATOR_FAILURES = Counter(
+        "aegisgate_pii_validator_failures_total",
+        # The scope belongs on the metric, not only in config/README.md: the
+        # person reading a flat zero here is exactly the person who will read it
+        # as "we have no false positives". CARD, CN_ID and IBAN are not in the
+        # relaxed id set, and /v1/chat/completions, /v1/responses and
+        # /v1/messages run only that set — so these rules, and therefore their
+        # check digits, never fire on the three protocol routes.
+        "Values redacted by a PII rule whose check digit did not validate; V1 "
+        "request pipeline only, and not on the relaxed protocol routes",
+        ["validator"],
+    )
 else:
     FILTER_MATCHES = None  # type: ignore[assignment]
     FILTER_ERRORS = None  # type: ignore[assignment]
     DISPOSITION = None  # type: ignore[assignment]
     STREAM_PROBES = None  # type: ignore[assignment]
     SEMANTIC_CALLS = None  # type: ignore[assignment]
+    PII_VALIDATOR_FAILURES = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Histograms
@@ -136,7 +157,7 @@ def inc_filter_error(filter_name: str, phase: str) -> None:
 
 
 def inc_disposition(phase: str, disposition: str) -> None:
-    """Count the final disposition of one request. Exactly once per request."""
+    """Count one phase's final disposition. Once per request per phase."""
     if DISPOSITION is not None:
         DISPOSITION.labels(phase=phase, disposition=disposition).inc()
 
@@ -151,6 +172,16 @@ def inc_semantic_call(outcome: str) -> None:
     """Count one semantic review by outcome."""
     if SEMANTIC_CALLS is not None:
         SEMANTIC_CALLS.labels(outcome=outcome).inc()
+
+
+def inc_validator_failure(validator: str) -> None:
+    """Count one distinct value that matched a PII rule but failed its checksum.
+
+    Distinct values, not occurrences: the validator runs after the redaction
+    filter's dedupe cache, so a value repeated in one request counts once.
+    """
+    if PII_VALIDATOR_FAILURES is not None:
+        PII_VALIDATOR_FAILURES.labels(validator=validator).inc()
 
 
 def get_metrics_app():

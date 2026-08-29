@@ -15,13 +15,16 @@ from aegisgate.config.security_rules import (
     is_low_false_positive_route,
     load_security_rules,
     rule_enabled,
+    rule_validator,
     select_relaxed_pii_patterns,
 )
 from aegisgate.config.settings import settings
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
+from aegisgate.observability.metrics import inc_validator_failure
 from aegisgate.storage.kv import KVStore
+from aegisgate.util.checksums import VALIDATORS as _CHECKSUM_VALIDATORS
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
@@ -77,6 +80,11 @@ class RedactionFilter(BaseFilter):
         self._field_value_min_len = max(8, int(redaction_rules.get("field_value_min_len", 12)))
 
         compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
+        # rule id -> validator name. Keyed by id, so it serves both compiled
+        # sets below: _responses_relaxed_pii_patterns is a subset of
+        # compiled_patterns and carries the same ids, and a rule missing from
+        # the table simply has no validator.
+        pii_validators: dict[str, str] = {}
         for item in redaction_rules.get("pii_patterns", []):
             # A bare string here used to raise AttributeError out of the pipeline
             # build, taking every V1 request with it.
@@ -101,7 +109,12 @@ class RedactionFilter(BaseFilter):
                     e,
                     (regex[:80] + "…") if len(regex) > 80 else regex,
                 )
+                continue
+            validator_name = rule_validator(item)
+            if validator_name:
+                pii_validators[pattern_id] = validator_name
         self._pii_patterns = compiled_patterns
+        self._pii_validators = pii_validators
         self._responses_relaxed_pii_patterns = select_relaxed_pii_patterns(
             compiled_patterns,
             redaction_rules=redaction_rules,
@@ -202,6 +215,10 @@ class RedactionFilter(BaseFilter):
         mapping: dict[str, str] = {}
         value_to_placeholder: dict[str, str] = {}
         log_markers: list[dict[str, Any]] = []
+        # A function-level accumulator, not self._report: that dict is rebuilt
+        # wholesale on a hit below, so a key written from the closure would
+        # vanish without a trace.
+        validator_failed: dict[str, int] = {}
         serial = 0
         request_prefix = self._request_prefix(ctx.request_id)
         active_pii_patterns = (
@@ -229,6 +246,22 @@ class RedactionFilter(BaseFilter):
                 existing = value_to_placeholder.get(raw_value)
                 if existing:
                     return existing
+
+                # After the whitelist (an exempted value should not produce a
+                # record at all) and after the dedupe cache (the validator is a
+                # pure function of raw_value, so running it again per repeat
+                # would only cost time — and it makes the count mean "distinct
+                # values", not "occurrences in the text").
+                #
+                # This does not change what happens to the value: it is redacted
+                # either way. It only records that a rule matching on shape alone
+                # matched something the shape's own check digit rejects.
+                validator_name = self._pii_validators.get(kind)
+                if validator_name is not None:
+                    check = _CHECKSUM_VALIDATORS.get(validator_name)
+                    if check is not None and not check(raw_value):
+                        validator_failed[kind] = validator_failed.get(kind, 0) + 1
+                        inc_validator_failure(validator_name)
 
                 serial += 1
                 placeholder = f"{{{{AG_{request_prefix}_{label}_{serial}}}}}"
@@ -278,6 +311,12 @@ class RedactionFilter(BaseFilter):
                 "hit": True,
                 "risk_score": 0.2,
                 "replacements": len(mapping),
+                # Merged here, not written into self._report from the closure:
+                # the dict above is rebuilt wholesale on every hit, so a key set
+                # earlier would vanish without a trace. A non-empty
+                # validator_failed implies a non-empty mapping, because a failing
+                # value is still redacted and so still produces one.
+                **({"validator_failed": dict(validator_failed)} if validator_failed else {}),
             }
             ctx.security_tags.add("redaction_applied")
             # WARNING level: a request carrying sensitive fields is a security audit event and

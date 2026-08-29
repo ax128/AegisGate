@@ -53,6 +53,23 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
     会自检一次，命中就打 `redaction.pii_patterns runs broad rules before specific ones` 并点名 id 对。
     看到这条告警时，按点名的顺序手工调整本目录的 `security_filters.yaml`，或备份后删除该文件让
     `init_config` 从镜像重新生成。
+  - **`redaction.pii_patterns` 的可选 `validator` 字段（校验位）**：`CARD` / `CN_ID` / `IBAN` 三条规则
+    是按**形状**匹配的（`CARD` 是任意 13–16 位数字串），一个 15 位订单号照样命中。给规则加
+    `validator: luhn | cn_id | iban_mod97` 之后，命中的值会再过一次校验位。
+    - **它只做观测，不改变任何脱敏结果**：校验失败的值**照旧脱敏**，只是在该请求的 filter report 里
+      多记一笔 `validator_failed: {规则 id: 个数}`（进 `audit.jsonl` 与统计，**不回给客户端**），
+      并计一个 `aegisgate_pii_validator_failures_total{validator=...}` 指标。用它先量出自己流量上的
+      误报量级，再决定要不要付「校验失败就不脱敏」的成本。
+    - **生效面**：目前只有 **V1 请求 pipeline**（`filters/redaction.py`）读它；responses sanitizer 与
+      V2 转发面忽略它但**继续脱敏**，所以不存在「某一面漏脱敏」的风险。无法识别的名字等同于没写。
+    - **注意路由差异**：`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 使用低误报（relaxed）
+      规则集，其中**不含** `CARD` / `CN_ID` / `IBAN`，所以这三条主协议路由上校验器根本不会触发。
+      计数来自使用完整规则集的其它路由。
+    - **控制台不提供该字段的编辑入口**：已有规则上的 `validator` 在控制台编辑后会**保留**（写入只拷贝
+      白名单里的键），但控制台**新建**的规则不会有它，要加得手改 YAML。
+    - **已有部署不会自动升级**：`ensure_config_dir` 不覆盖已存在的 `config/security_filters.yaml`，
+      所以老环境的那份**不会自动获得 `validator`**，校验位在那里不生效（没有安全后果，照旧脱敏，
+      但量不到误报）。需要的话手工补上，或备份后删除该文件让它重新生成。
   - **控制台写入也建备份**：`core/rules_write.py` 在每一次成功写入前都会存一份 `.bak-<时间戳>`，并按
     `_MAX_BACKUPS` 保留最近若干份、自动清理更旧的。文档内容未变时不写、也不轮换备份。备份落在被编辑
     的那个文件旁边——Docker 下是挂载的配置目录，裸机下是包内策略目录，因此 `.gitignore` 里的
