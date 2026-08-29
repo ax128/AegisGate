@@ -230,7 +230,7 @@ def reload_settings() -> None:
             from aegisgate.util.logger import apply_log_level
 
             apply_log_level(settings.log_level)
-            configure_logging(settings.log_level)
+            configure_logging(settings.log_level, json_format=settings.log_json)
             from aegisgate.adapters.openai_compat.pipeline_runtime import (
                 reload_runtime_dependencies,
             )

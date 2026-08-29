@@ -81,6 +81,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 |------|------|------|
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` / `debug` |
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` / `true` |
+| `AEGIS_LOG_JSON` | 日志按行输出 JSON 对象（OTel span 活跃时带 `trace_id` / `span_id`）。作用于 `aegisgate` logger 的**全部** handler，stderr 与 `logs/aegisgate/YY/MM/DD.log` **落盘格式同时改变**；支持热更新 | `false` / `true` |
 | `AEGIS_SECURITY_LEVEL` | 安全档位（`medium` 默认：宽松仅高危拦截；`low`：极宽松基本只脱敏；`high`：全量检测） | `low` / `medium` / `high` |
 | `AEGIS_ENABLE_SEMANTIC_MODULE` | 启用语义复核（灰区门控：仅当风险评分落在 `(AEGIS_SEMANTIC_GRAY_LOW, AEGIS_SEMANTIC_GRAY_HIGH)` 才触发） | `true` / `false` |
 | `AEGIS_SEMANTIC_SERVICE_URL` | 当前主链路使用的语义服务地址；留空时**仅灰区触发**会记录 `semantic_service_unconfigured` 并降级（不做语义风险抬升） | 语义服务 URL / 空 |

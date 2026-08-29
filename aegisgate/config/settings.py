@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     log_level: str = "info"
     # Whether DEBUG logs the full request body; False logs only method/path/route/headers + body_size.
     log_full_request_body: bool = False
+    # Structured JSON logging. Default false keeps the human-readable format; turn it on for
+    # containerised deployments feeding a log collector. Each line becomes one JSON object, and
+    # carries trace_id / span_id whenever an OTel span is active.
+    log_json: bool = False
     host: str = "127.0.0.1"
     port: int = 18080
     enable_relay_endpoint: bool = False

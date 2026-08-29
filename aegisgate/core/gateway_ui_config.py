@@ -167,6 +167,8 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
        options=["debug", "info", "warning", "error"]),
     _f("AEGIS_LOG_FULL_REQUEST_BODY", "log_full_request_body", "打印完整请求体", "bool", "general", "日志",
        "仅调试用；开启后请求正文会进入日志"),
+    _f("AEGIS_LOG_JSON", "log_json", "JSON 结构化日志", "bool", "general", "日志",
+       "每行输出一个 JSON 对象；OTel span 活跃时带 trace_id / span_id"),
     _f("AEGIS_AUDIT_LOG_PATH", "audit_log_path", "审计日志路径", "string", "general", "日志",
        "留空则关闭审计文件"),
     _f("AEGIS_ENABLE_DANGEROUS_RESPONSE_LOG", "enable_dangerous_response_log", "保存危险响应样本", "bool",

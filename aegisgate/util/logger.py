@@ -114,6 +114,18 @@ class DailyRotatingFileHandler(logging.Handler):
         super().close()
 
 
+def build_default_formatter() -> logging.Formatter:
+    """The human-readable format, in one place so configure_logging can restore it.
+
+    Restoring a generic ``logging.Formatter()`` instead would silently drop the
+    timestamp and the logger name the moment anyone turned JSON off.
+    """
+    return logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
 def _build_logger() -> logging.Logger:
     configured_logger = logging.getLogger("aegisgate")
     if configured_logger.handlers:
@@ -122,10 +134,7 @@ def _build_logger() -> logging.Logger:
     resolved_level = _normalize_level(settings.log_level)
     configured_logger.setLevel(resolved_level)
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    formatter = build_default_formatter()
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(resolved_level)

@@ -178,7 +178,7 @@ def _assign_boundary_tenant_scope(
 
 
 def _initialize_observability() -> None:
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, json_format=settings.log_json)
     init_tracing(settings.app_name)
 
 
