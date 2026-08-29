@@ -177,9 +177,9 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 热更新说明：
 - watcher 默认轮询以下文件：`config/.env`、`security_filters.yaml`、策略 YAML、`gw_tokens.json`。
 - `security_filters.yaml` 与策略 YAML 变更后，会清缓存并在下一次请求时重建 filter pipeline。
-- `.env` 仅支持**部分**参数热更新。以下 12 项安全关键参数在启动时固定，热更新不会生效（以 `aegisgate/core/hot_reload.py` 的 `_IMMUTABLE_FIELDS` 为准）：
-  `gateway_key`、`security_level`、`enforce_loopback_only`、`allow_public_numeric_tokens`、`allow_public_passthrough_mode`、`allow_public_upstream_whitelist`、`enable_request_hmac_auth`、`request_hmac_secret`、`trusted_proxy_ips`、`xff_strict_internal`、`v2_block_internal_targets`、`local_ui_allow_internal_network`。
-  控制台配置页开放其中 11 项（`gateway_key` 走密钥管理页），带 **需重启** 徽章，见 [WEBUI-QUICKSTART.md](../WEBUI-QUICKSTART.md) §4.1。
+- `.env` 仅支持**部分**参数热更新。以下 13 项安全关键参数在启动时固定，热更新不会生效（以 `aegisgate/core/hot_reload.py` 的 `_IMMUTABLE_FIELDS` 为准）：
+  `gateway_key`、`security_level`、`enforce_loopback_only`、`allow_public_numeric_tokens`、`allow_public_passthrough_mode`、`allow_public_upstream_whitelist`、`enable_request_hmac_auth`、`request_hmac_secret`、`trusted_proxy_ips`、`xff_strict_internal`、`v2_block_internal_targets`、`local_ui_allow_internal_network`、`stream_scan_interval_chunks`。
+  控制台配置页开放其中 12 项（`gateway_key` 走密钥管理页），带 **需重启** 徽章，见 [WEBUI-QUICKSTART.md](../WEBUI-QUICKSTART.md) §4.1。
 - **注意 Web UI 也受此限制**：配置页可以编辑 `AEGIS_SECURITY_LEVEL`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_TRUSTED_PROXY_IPS`，保存会写入 `config/.env` 并提示成功，但运行时取值要到**下次重启**才更新。改完这些项请用 UI 的「重启网关」或 `docker compose restart aegisgate`。`AEGIS_XFF_STRICT_INTERNAL` 同样需重启；设了 `AEGIS_TRUSTED_PROXY_IPS` 之后，仅把该开关改回 `false` **不能**撤销可信代理对 client IP 与限流键的影响，回退办法是清空该变量并重启。
 - `config/model_map.json` **不在** watcher 监听范围内：修改模型映射或 `allowed_models` 后必须重启网关。
 - 对于长连接、流式会话或 Compose 环境，仍建议在变更后执行一次 `docker compose restart aegisgate` 作为稳妥做法。

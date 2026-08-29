@@ -208,6 +208,17 @@ class Settings(BaseSettings):
     enable_rag_poison_guard: bool = True
     enable_exact_value_redaction: bool = True
 
+    # How many content chunks between two full response-pipeline probes on the
+    # streaming path. Lower detects sooner, higher costs less CPU — but the
+    # holdback grows with it (interval * 2), so the delay before the client sees
+    # any text grows too: interval=16 means waiting for 32 frames.
+    # The upper bound is 16 rather than something larger for two reasons: past
+    # that the latency is already unacceptable, and the scan window is fixed at
+    # 8000 characters, so a larger interval moves closer to "more text arrives
+    # in one interval than the window holds" (see router._trim_stream_window).
+    # Pinned at startup — see _IMMUTABLE_FIELDS.
+    stream_scan_interval_chunks: int = Field(default=4, ge=1, le=16)
+
     risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     # Request pipeline timeout action: "block" (safe default) or "pass" (legacy)
     request_pipeline_timeout_action: str = "block"
