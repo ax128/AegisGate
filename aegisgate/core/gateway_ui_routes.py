@@ -110,6 +110,21 @@ def _panel_owned_sections() -> frozenset[str]:
     return PANEL_OWNED_RULE_SECTIONS
 
 
+# Per-rule metadata the editor may write besides id/regex. Anything else in an
+# existing rule is preserved untouched on update.
+#
+# Module-level rather than locals inside register_ui_routes, for the same reason
+# PANEL_OWNED_RULE_SECTIONS above is: a guard that cannot import the real set
+# has to restate it, and a restated copy goes stale silently. The guard here is
+# the one pinning that `validator` is not console-writable while only one of the
+# three pii_patterns compile sites reads it.
+RULE_EXTRA_STRING_FIELDS: frozenset[str] = frozenset({"kind", "category", "tool", "param"})
+# `enabled` decides whether the rule is compiled at all, so it must stay a real
+# bool: running it through the string path would write the YAML scalar "False",
+# which is a non-empty string and therefore true.
+RULE_EXTRA_BOOL_FIELDS: frozenset[str] = frozenset({"enabled"})
+
+
 _RULE_SECTION_LABELS: dict[str, str] = {
     "redaction.pii_patterns": "PII 脱敏规则",
     "restoration.suspicious_context_patterns": "还原可疑上下文",
@@ -753,13 +768,8 @@ def register_ui_routes(app: FastAPI) -> None:
     _READONLY_SECTIONS = READONLY_RULE_SECTIONS
     _PANEL_OWNED_SECTIONS = PANEL_OWNED_RULE_SECTIONS
 
-    # Per-rule metadata the editor may write besides id/regex. Anything else in an
-    # existing rule is preserved untouched on update.
-    _RULE_EXTRA_STRING_FIELDS: frozenset[str] = frozenset({"kind", "category", "tool", "param"})
-    # `enabled` decides whether the rule is compiled at all, so it must stay a
-    # real bool: running it through the string path above would write the YAML
-    # scalar "False", which is a non-empty string and therefore true.
-    _RULE_EXTRA_BOOL_FIELDS: frozenset[str] = frozenset({"enabled"})
+    _RULE_EXTRA_STRING_FIELDS = RULE_EXTRA_STRING_FIELDS
+    _RULE_EXTRA_BOOL_FIELDS = RULE_EXTRA_BOOL_FIELDS
     # ...and only these groups have a compile loop that reads it. Accepting it
     # elsewhere would write a field that either does nothing at all or — for
     # sanitizer.command_patterns, which shares V2's compile loop — switches a
