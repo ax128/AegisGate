@@ -492,6 +492,26 @@ def test_immutable_field_count_matches_config_readme() -> None:
             f"{name} is pinned at startup but config/README.md does not list it"
         )
 
+    # Appended: the sentence below the count was unguarded, and the change that
+    # added the 13th pinned field was the first to have to touch it. Derive the
+    # number from the two tables it describes rather than subtracting a
+    # hand-listed exception — today the only pinned field the console does not
+    # carry is gateway_key (it lives on the key-management page, which is why
+    # the README says so in the same breath), but that is a fact about the
+    # tables, not a constant to restate.
+    from aegisgate.core.gateway_ui_config import _UI_CONFIG_FIELDS
+
+    exposed = {str(item["field"]) for item in _UI_CONFIG_FIELDS}
+    exposed_pinned = set(_IMMUTABLE_FIELDS) & exposed
+    cited_exposed = re.search(r"控制台配置页开放其中 (\d+) 项", readme)
+    assert cited_exposed, (
+        "config/README.md no longer states how many pinned fields the console exposes"
+    )
+    assert int(cited_exposed.group(1)) == len(exposed_pinned), (
+        f"{len(exposed_pinned)} pinned fields are console-editable but "
+        f"config/README.md says {cited_exposed.group(1)}."
+    )
+
 
 def test_ui_section_count_matches_docs() -> None:
     """WEBUI-QUICKSTART cites how many panels the config page is split into."""

@@ -127,6 +127,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _strip_system_exec_runtime_lines,
 )
 from aegisgate.core.audit import write_audit
+from aegisgate.observability.metrics import inc_disposition, inc_stream_probe
 from aegisgate.core.exfil_evidence import summarize as summarize_exfil
 from aegisgate.core.block_reasons import (
     PHASE_REQUEST,
@@ -155,14 +156,36 @@ semantic_service_client = SemanticServiceClient(
     failure_threshold=settings.semantic_circuit_failure_threshold,
     open_seconds=settings.semantic_circuit_open_seconds,
 )
+# Not a setting. Detection coverage needs
+#   window_chars >= interval * (largest single content chunk)
+# and the right-hand side is chosen by the upstream, so no static validator can
+# hold that invariant. A window that could be dialled down to 500 while the
+# interval went up to 16 would be a silent way to configure text past the
+# scanner, with no error and no log line. The effective value is reported in the
+# startup log instead (gateway._log_stream_scan_config).
 _STREAM_WINDOW_MAX_CHARS = 8000
-# H-15: Holdback buffer must be >= 2 * check_interval so that frames accumulated
-# between two consecutive probes are always held back until the second probe runs.
-# With check_interval=4, at most 4 frames arrive between probes; we need 8 slots
-# to guarantee no frame escapes before the next safety check.
-_STREAM_FILTER_CHECK_INTERVAL = 4
-_STREAM_BLOCK_HOLDBACK_EVENTS = _STREAM_FILTER_CHECK_INTERVAL * 2  # = 8
 _STREAM_SEMANTIC_CHECK_INTERVAL = 4
+
+
+def _resolve_holdback(interval: int) -> int:
+    """H-15: the holdback must be >= 2 * the probe interval.
+
+    At most `interval` frames arrive between two consecutive probes, so
+    `2 * interval` slots guarantee no frame is released before the next safety
+    check has seen it. Derived rather than configurable for exactly that reason:
+    an independently settable holdback is a knob whose wrong value releases
+    frames before they are checked, and it fails silently.
+
+    Called per released frame rather than hoisted out of the four release loops,
+    and deliberately so: the guard in test_stream_scan_settings pins that each of
+    those loops derives the bound on the spot, because a hoisted local is exactly
+    where a literal 8 comes back on one protocol only. A multiply and an
+    attribute read per frame is nothing beside the full response-pipeline probe
+    the same loop triggers every interval.
+    """
+    return interval * 2
+
+
 _TRUNCATED_SUFFIX = " [TRUNCATED]"
 _GENERIC_EXTRACT_MAX_CHARS = 16000
 _CONFIRMATION_HIT_CONTEXT_CHARS = 40
@@ -2752,7 +2775,48 @@ def _build_stream_security_metadata(
     return copy.deepcopy(probe.metadata.get("aegisgate", {}))
 
 
+def _count_disposition_once(ctx: RequestContext) -> None:
+    """Increment the disposition counters at most once per request context.
+
+    _write_audit_event has 19 call sites and not all of them go through
+    audit_once: _error_response and the passthrough stream's finally both call
+    it directly, so a path that already audited and then errors writes a second
+    line. A second audit line is visible to anyone reading audit.jsonl; a
+    doubled counter on a dashboard is not, which is why the guard lives here
+    rather than being left to the call sites.
+    """
+    if ctx.disposition_counted:
+        return
+    ctx.disposition_counted = True
+    inc_disposition("request", ctx.request_disposition)
+    inc_disposition("response", ctx.response_disposition)
+
+
+_PROBE_ROUTE_LABELS = {
+    "/v1/chat/completions": "chat",
+    "/v1/responses": "responses",
+    "/v1/messages": "messages",
+}
+
+
+def _probe_route_label(route: str) -> str:
+    """Collapse ctx.route onto a bounded label set.
+
+    The three protocol entries set ctx.route from the mapper's own constants,
+    but the generic proxy builds its context with ``route=request_path``, so the
+    value is caller-controlled there. Letting it through unmapped would make the
+    label unbounded, which is the one thing the metric table forbids.
+    """
+    return _PROBE_ROUTE_LABELS.get(route, "other")
+
+
 def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> None:
+    # Counted here rather than at the 19 call sites: this is the one place every
+    # path goes through. _count_disposition_once keeps it at one increment per
+    # request even where a path writes a second audit line (an error response
+    # after audit_once already fired), because a doubled counter on a dashboard
+    # is invisible in a way a doubled audit line is not.
+    _count_disposition_once(ctx)
     write_audit(
         {
             "request_id": ctx.request_id,
@@ -2876,6 +2940,7 @@ async def _run_stream_response_probe(
     raw: dict[str, Any] | None = None,
     force_semantic: bool = False,
 ) -> str | None:
+    inc_stream_probe(_probe_route_label(ctx.route))
     ctx.report_items = list(base_reports)
     probe_resp = InternalResponse(
         request_id=request_id,
@@ -3192,8 +3257,8 @@ async def _execute_chat_stream_once(
                 should_probe = bool(tool_calls) or bool(
                     chunk_text
                     and (
-                        chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
-                        or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
+                        chunk_count <= settings.stream_scan_interval_chunks
+                        or chunk_count % settings.stream_scan_interval_chunks == 0
                     )
                 )
                 if should_probe:
@@ -3243,7 +3308,7 @@ async def _execute_chat_stream_once(
                     continue
 
                 if is_content_event:
-                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                    while len(pending_frames) > _resolve_holdback(settings.stream_scan_interval_chunks):
                         emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     continue
@@ -3814,8 +3879,8 @@ async def _execute_responses_stream_once(
                     or (
                         chunk_text
                         and (
-                            chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
-                            or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
+                            chunk_count <= settings.stream_scan_interval_chunks
+                            or chunk_count % settings.stream_scan_interval_chunks == 0
                         )
                     )
                 )
@@ -3866,7 +3931,7 @@ async def _execute_responses_stream_once(
                     continue
 
                 if is_content_event:
-                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                    while len(pending_frames) > _resolve_holdback(settings.stream_scan_interval_chunks):
                         emitted_content_chunks += 1
                         yield pending_frames.pop(0)
                     continue
@@ -5199,8 +5264,8 @@ async def _execute_messages_stream_once(
                     chunk_count += 1
 
                     if (
-                        chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
-                        or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
+                        chunk_count <= settings.stream_scan_interval_chunks
+                        or chunk_count % settings.stream_scan_interval_chunks == 0
                     ):
                         block_reason = await _run_stream_response_probe(
                             ctx=ctx,
@@ -5297,7 +5362,7 @@ async def _execute_messages_stream_once(
                         return
 
                 if event_type.startswith(("message_", "content_block_")):
-                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                    while len(pending_frames) > _resolve_holdback(settings.stream_scan_interval_chunks):
                         yield _mark_flushed_messages_frame(pending_frames.pop(0))
                     continue
 
@@ -5961,8 +6026,8 @@ async def _execute_generic_stream_once(
                     stream_window = _trim_stream_window(stream_window, chunk_text)
                     chunk_count += 1
                     if (
-                        chunk_count <= _STREAM_FILTER_CHECK_INTERVAL
-                        or chunk_count % _STREAM_FILTER_CHECK_INTERVAL == 0
+                        chunk_count <= settings.stream_scan_interval_chunks
+                        or chunk_count % settings.stream_scan_interval_chunks == 0
                     ):
                         block_reason = await _run_stream_response_probe(
                             ctx=ctx,
@@ -5983,7 +6048,7 @@ async def _execute_generic_stream_once(
 
                 if is_content_event:
                     pending_frames.append(line)
-                    while len(pending_frames) > _STREAM_BLOCK_HOLDBACK_EVENTS:
+                    while len(pending_frames) > _resolve_holdback(settings.stream_scan_interval_chunks):
                         yield pending_frames.pop(0)
                     continue
 

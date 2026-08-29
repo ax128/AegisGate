@@ -144,6 +144,11 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         "trusted_proxy_ips",
         "xff_strict_internal",
         "local_ui_allow_internal_network",
+        # Same category as security_level: it sets the streaming detection
+        # cadence, and half the reason it became configurable is so an incident
+        # review can say what it was — which an interval that can move from 4 to
+        # 16 mid-flight would defeat.
+        "stream_scan_interval_chunks",
     }
 )
 
@@ -230,7 +235,7 @@ def reload_settings() -> None:
             from aegisgate.util.logger import apply_log_level
 
             apply_log_level(settings.log_level)
-            configure_logging(settings.log_level)
+            configure_logging(settings.log_level, json_format=settings.log_json)
             from aegisgate.adapters.openai_compat.pipeline_runtime import (
                 reload_runtime_dependencies,
             )

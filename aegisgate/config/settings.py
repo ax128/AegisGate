@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     log_level: str = "info"
     # Whether DEBUG logs the full request body; False logs only method/path/route/headers + body_size.
     log_full_request_body: bool = False
+    # Structured JSON logging. Default false keeps the human-readable format; turn it on for
+    # containerised deployments feeding a log collector. Each line becomes one JSON object, and
+    # carries trace_id / span_id whenever an OTel span is active.
+    log_json: bool = False
     host: str = "127.0.0.1"
     port: int = 18080
     enable_relay_endpoint: bool = False
@@ -203,6 +207,17 @@ class Settings(BaseSettings):
     enable_tool_call_guard: bool = True
     enable_rag_poison_guard: bool = True
     enable_exact_value_redaction: bool = True
+
+    # How many content chunks between two full response-pipeline probes on the
+    # streaming path. Lower detects sooner, higher costs less CPU — but the
+    # holdback grows with it (interval * 2), so the delay before the client sees
+    # any text grows too: interval=16 means waiting for 32 frames.
+    # The upper bound is 16 rather than something larger for two reasons: past
+    # that the latency is already unacceptable, and the scan window is fixed at
+    # 8000 characters, so a larger interval moves closer to "more text arrives
+    # in one interval than the window holds" (see router._trim_stream_window).
+    # Pinned at startup — see _IMMUTABLE_FIELDS.
+    stream_scan_interval_chunks: int = Field(default=4, ge=1, le=16)
 
     risk_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     # Request pipeline timeout action: "block" (safe default) or "pass" (legacy)

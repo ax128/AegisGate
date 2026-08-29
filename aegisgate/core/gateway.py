@@ -25,6 +25,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from aegisgate.adapters.openai_compat.router import (
+    _STREAM_WINDOW_MAX_CHARS,
+    _resolve_holdback,
     close_runtime_dependencies,
     close_semantic_async_client,
     prune_expired_mappings,
@@ -176,8 +178,30 @@ def _assign_boundary_tenant_scope(
     return tenant_id
 
 
+def _log_stream_scan_config() -> None:
+    """Record the effective stream-scan cadence once per process start.
+
+    Not /ready: that path is in _PASSTHROUGH_PATHS and the security boundary
+    short-circuits GET/HEAD on it, so publishing the window, the interval and
+    the holdback there would hand an unauthenticated caller exactly the three
+    quantities this setting refuses to expose as knobs.
+
+    A log line is also the better answer to the motivation.
+    stream_scan_interval_chunks is pinned in _IMMUTABLE_FIELDS, so the startup
+    value *is* the value for this process's life and one line is complete; and
+    an incident review reads logs, which /ready cannot be asked about after the
+    fact.
+    """
+    logger.info(
+        "stream scan config: window_chars=%d interval_chunks=%d holdback_events=%d",
+        _STREAM_WINDOW_MAX_CHARS,
+        settings.stream_scan_interval_chunks,
+        _resolve_holdback(settings.stream_scan_interval_chunks),
+    )
+
+
 def _initialize_observability() -> None:
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, json_format=settings.log_json)
     init_tracing(settings.app_name)
 
 
@@ -354,6 +378,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         settings.enforce_loopback_only,
         settings.enable_v2_proxy,
     )
+    _log_stream_scan_config()
 
     # H-04: Warn loudly when HMAC auth is disabled in production.
     if not settings.enable_request_hmac_auth and settings.env.lower() in ("prod", "production"):
