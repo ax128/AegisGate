@@ -7,7 +7,6 @@ import pytest
 
 from aegisgate.adapters.openai_compat.offload import (
     shutdown_filter_pipeline_executor,
-    shutdown_payload_transform_executor,
 )
 from aegisgate.adapters.openai_compat.router import (
     close_runtime_dependencies,
@@ -38,7 +37,6 @@ def _shutdown_background_runtime_after_tests():
     close_runtime_dependencies()
     shutdown_store_io_executor()
     shutdown_filter_pipeline_executor()
-    shutdown_payload_transform_executor()
     shutdown_audit_worker()
     shutdown_dangerous_response_log_worker()
     shutdown_stats_worker()

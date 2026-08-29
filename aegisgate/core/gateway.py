@@ -33,7 +33,6 @@ from aegisgate.adapters.openai_compat.router import (
 )
 from aegisgate.adapters.openai_compat.offload import (
     shutdown_filter_pipeline_executor,
-    shutdown_payload_transform_executor,
 )
 from aegisgate.adapters.openai_compat.upstream import close_upstream_async_client
 from aegisgate.adapters.relay_compat.router import router as relay_router
@@ -434,7 +433,6 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     close_runtime_dependencies()
     shutdown_store_io_executor()
     shutdown_filter_pipeline_executor()
-    shutdown_payload_transform_executor()
     await close_upstream_async_client()
     await close_v2_async_client()
     await close_semantic_async_client()
