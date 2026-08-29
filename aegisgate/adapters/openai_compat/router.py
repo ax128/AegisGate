@@ -127,6 +127,7 @@ from aegisgate.adapters.openai_compat.sanitize import (  # noqa: F401 — re-exp
     _strip_system_exec_runtime_lines,
 )
 from aegisgate.core.audit import write_audit
+from aegisgate.observability.metrics import inc_disposition, inc_stream_probe
 from aegisgate.core.exfil_evidence import summarize as summarize_exfil
 from aegisgate.core.block_reasons import (
     PHASE_REQUEST,
@@ -2752,7 +2753,48 @@ def _build_stream_security_metadata(
     return copy.deepcopy(probe.metadata.get("aegisgate", {}))
 
 
+def _count_disposition_once(ctx: RequestContext) -> None:
+    """Increment the disposition counters at most once per request context.
+
+    _write_audit_event has 19 call sites and not all of them go through
+    audit_once: _error_response and the passthrough stream's finally both call
+    it directly, so a path that already audited and then errors writes a second
+    line. A second audit line is visible to anyone reading audit.jsonl; a
+    doubled counter on a dashboard is not, which is why the guard lives here
+    rather than being left to the call sites.
+    """
+    if ctx.disposition_counted:
+        return
+    ctx.disposition_counted = True
+    inc_disposition("request", ctx.request_disposition)
+    inc_disposition("response", ctx.response_disposition)
+
+
+_PROBE_ROUTE_LABELS = {
+    "/v1/chat/completions": "chat",
+    "/v1/responses": "responses",
+    "/v1/messages": "messages",
+}
+
+
+def _probe_route_label(route: str) -> str:
+    """Collapse ctx.route onto a bounded label set.
+
+    The three protocol entries set ctx.route from the mapper's own constants,
+    but the generic proxy builds its context with ``route=request_path``, so the
+    value is caller-controlled there. Letting it through unmapped would make the
+    label unbounded, which is the one thing the metric table forbids.
+    """
+    return _PROBE_ROUTE_LABELS.get(route, "other")
+
+
 def _write_audit_event(ctx: RequestContext, boundary: dict | None = None) -> None:
+    # Counted here rather than at the 19 call sites: this is the one place every
+    # path goes through. _count_disposition_once keeps it at one increment per
+    # request even where a path writes a second audit line (an error response
+    # after audit_once already fired), because a doubled counter on a dashboard
+    # is invisible in a way a doubled audit line is not.
+    _count_disposition_once(ctx)
     write_audit(
         {
             "request_id": ctx.request_id,
@@ -2876,6 +2918,7 @@ async def _run_stream_response_probe(
     raw: dict[str, Any] | None = None,
     force_semantic: bool = False,
 ) -> str | None:
+    inc_stream_probe(_probe_route_label(ctx.route))
     ctx.report_items = list(base_reports)
     probe_resp = InternalResponse(
         request_id=request_id,

@@ -10,6 +10,7 @@ from typing import Any
 from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
+from aegisgate.observability.metrics import inc_filter_error, inc_filter_match
 from aegisgate.util.logger import logger
 
 # Filters slower than this threshold (seconds) will emit a WARNING for diagnosis.
@@ -94,6 +95,7 @@ class Pipeline:
                     ctx.request_id,
                 )
                 ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
+                inc_filter_error(plugin.name, phase)
                 if phase == "request":
                     from aegisgate.config.settings import settings as _settings
 
@@ -129,6 +131,11 @@ class Pipeline:
             elapsed = time.monotonic() - t0
             report = plugin.report()
             ctx.add_report(report)
+            if report.get("hit"):
+                # Per pipeline run, not per request: the streaming path re-runs
+                # this whole phase every stream-scan interval. See the metric's
+                # HELP text.
+                inc_filter_match(plugin.name, phase)
             if elapsed >= _SLOW_FILTER_WARN_S:
                 extra = (
                     f" output_len={len(getattr(current, 'output_text', ''))}"

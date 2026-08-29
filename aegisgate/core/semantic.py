@@ -11,6 +11,7 @@ from threading import Lock
 
 import httpx
 
+from aegisgate.observability.metrics import inc_semantic_call
 from aegisgate.util.logger import logger
 
 
@@ -176,6 +177,7 @@ class SemanticServiceClient:
         timeout_s = max(0.001, int(timeout_ms) / 1000.0)
         norm = self._normalize_text(text)
         if not norm:
+            inc_semantic_call("empty")
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],
@@ -186,6 +188,7 @@ class SemanticServiceClient:
             )
 
         if not self.service_url:
+            inc_semantic_call("unconfigured")
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],
@@ -200,6 +203,7 @@ class SemanticServiceClient:
         cached = self._cache_get(key, now=now)
         if cached:
             logger.debug("semantic cache hit")
+            inc_semantic_call("hit")
             return SemanticResult(
                 risk_score=cached.risk_score,
                 tags=cached.tags,
@@ -212,6 +216,7 @@ class SemanticServiceClient:
         allowed, _half_open_probe = self._acquire_breaker_permission(now=now)
         if not allowed:
             logger.debug("semantic circuit open reject")
+            inc_semantic_call("circuit_open")
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],
@@ -249,11 +254,13 @@ class SemanticServiceClient:
             )
             self._cache_set(key, result, now=now)
             self._mark_success()
+            inc_semantic_call("miss")
             logger.debug("semantic service success risk=%.4f tags=%s", result.risk_score, result.tags)
             return result
         except httpx.TimeoutException:
             self._mark_failure(now=time.time())
             logger.warning("semantic service timeout timeout_ms=%d", timeout_ms)
+            inc_semantic_call("timeout")
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],
@@ -265,6 +272,7 @@ class SemanticServiceClient:
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             self._mark_failure(now=time.time())
             logger.warning("semantic service unavailable error=%s", type(exc).__name__)
+            inc_semantic_call("error")
             return SemanticResult(
                 risk_score=0.0,
                 tags=[],

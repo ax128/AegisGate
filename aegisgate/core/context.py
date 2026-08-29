@@ -42,6 +42,11 @@ class RequestContext:
     # fragment — the audit sink these reach does not redact (see exfil_evidence).
     exfil_evidence: list[dict] = field(default_factory=list)
     exfil_hit_count: int = 0
+    # Set the first time this request's disposition reaches the metrics. A
+    # declared field rather than an attribute stuck on in the router, because
+    # this dataclass uses slots=True and the assignment would otherwise raise —
+    # which, from inside a metrics guard, means the counter silently never moves.
+    disposition_counted: bool = False
 
     def add_report(self, item: dict) -> None:
         self.report_items.append(item)
