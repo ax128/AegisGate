@@ -233,7 +233,8 @@ def test_chain_rules_are_cheap_on_repeated_anchor_tokens(label: str, filler: str
     the guard passes without measuring anything. These rules are two lazy bounded gaps around
     an alternation: cost scales with how many anchor tokens the text holds, which the model
     can be made to emit. The first cut spent 188 ms here on 8 KB, and the streaming path
-    re-runs the whole response pipeline every ``_STREAM_FILTER_CHECK_INTERVAL`` chunks.
+    re-runs the whole response pipeline every
+    ``settings.stream_scan_interval_chunks`` chunks.
     """
     del label
     haystack = filler * (8192 // len(filler))
