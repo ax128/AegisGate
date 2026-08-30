@@ -374,18 +374,6 @@ def _rule_count() -> int:
     return total
 
 
-def _stream_scan_interval() -> int:
-    """The probe cadence in effect, whether it is a setting or still a constant.
-
-    Both lookups are lazy so this reports the right number on either side of the
-    change that moves the interval out of router.py and into Settings.
-    """
-    value = getattr(settings, "stream_scan_interval_chunks", None)
-    if value is None:
-        value = getattr(_router, "_STREAM_FILTER_CHECK_INTERVAL", 4)
-    return int(value)
-
-
 def _environment() -> dict[str, Any]:
     """Without these, two runs from two machines are not comparable."""
     return {
@@ -393,11 +381,12 @@ def _environment() -> dict[str, Any]:
         "cpu_count": os.cpu_count(),
         "security_level": settings.security_level,
         "rule_count": _rule_count(),
-        # Not `getattr(settings, ..., _router._STREAM_FILTER_CHECK_INTERVAL)`: a
-        # getattr default is an ordinary argument and is evaluated eagerly, so
-        # naming the constant there would raise AttributeError the moment the
-        # stream-scan task turns it into a setting and deletes it.
-        "stream_scan_interval_chunks": _stream_scan_interval(),
+        # A plain attribute read, with no getattr default behind it. The
+        # interval is a setting now and the module constant it replaced is
+        # gone, so a fallback could no longer be reached — it could only report
+        # a confident 4 if the setting were ever renamed, which is the same
+        # quietly-wrong number this script exists to avoid producing.
+        "stream_scan_interval_chunks": settings.stream_scan_interval_chunks,
     }
 
 
@@ -429,10 +418,10 @@ def _shutdown_runtime() -> None:
     then hangs at interpreter shutdown. tests/conftest.py does the same thing at
     session teardown for the same reason.
 
-    shutdown_payload_transform_executor is deliberately not called: that pool is
-    never created (run_payload_transform_offloop runs inline), so the call is a
-    no-op, and naming it here would tie this script to whether that symbol
-    survives.
+    There is no payload-transform executor to shut down. That pool was never
+    created (run_payload_transform_offloop runs inline) and its shutdown helper
+    has since been deleted outright, which is exactly why this list never named
+    it.
     """
     from aegisgate.adapters.openai_compat.offload import (
         shutdown_filter_pipeline_executor,

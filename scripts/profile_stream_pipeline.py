@@ -106,7 +106,7 @@ def _sum_bucket(stats: pstats.Stats, fragments: tuple[str, ...]) -> tuple[float,
     return seconds, calls
 
 
-def report(stats: pstats.Stats) -> None:
+def report(stats: pstats.Stats) -> int:
     wall = stats.total_tt  # type: ignore[attr-defined]
     total_self = sum(entry[2] for entry in stats.stats.values())  # type: ignore[attr-defined]
 
@@ -131,7 +131,7 @@ def report(stats: pstats.Stats) -> None:
             "entered or _run_phase has moved. Every figure below would be zero.",
             file=sys.stderr,
         )
-        return
+        return 1
     # The probe is a coroutine, and cProfile counts a frame entry per
     # resumption, so its call count is roughly twice the number of probes. Cost
     # per probe is therefore divided by the pipeline-run count, which is one per
@@ -167,6 +167,7 @@ def report(stats: pstats.Stats) -> None:
     print()
     print("top 20 by self time — where a fix would have to land")
     stats.sort_stats("tottime").print_stats(20)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,8 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.load:
-        report(pstats.Stats(args.load))
-        return 0
+        return report(pstats.Stats(args.load))
 
     import bench_gateway  # noqa: PLC0415 - imported for its side-effect-free scenario
 
@@ -189,8 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         profiler.disable()
     if args.save:
         profiler.dump_stats(args.save)
-    report(pstats.Stats(profiler))
-    return 0
+    return report(pstats.Stats(profiler))
 
 
 if __name__ == "__main__":
