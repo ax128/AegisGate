@@ -72,6 +72,71 @@ def test_filter_matches_documents_its_per_run_counting() -> None:
 
 
 @_needs_prometheus
+def test_disposition_documents_what_its_response_phase_counts() -> None:
+    """The second thing a reader gets wrong about this counter, after the
+    per-phase doubling: phase="response" is not "responses we allowed".
+
+    Pinned on the HELP text rather than in a comment, for the same reason
+    FILTER_MATCHES' counting rule is — /metrics has to say it, because the
+    person writing the PromQL is not reading this file.
+    """
+    doc = metrics.DISPOSITION._documentation
+    assert "once per request" in doc
+    assert "phase=response" in doc and "blocked" in doc
+
+
+@_needs_prometheus
+def test_a_request_phase_block_lands_in_the_response_allow_series() -> None:
+    """Executable statement of the wrinkle above, so it cannot be "tidied" away.
+
+    ctx.response_disposition is "allow" until something sets it, and a request
+    blocked in the request phase never reaches a response — so the response
+    series gains an allow for a response that was never produced. That is the
+    behaviour today; this test exists so that changing it is a decision someone
+    makes on purpose rather than a side effect.
+    """
+    from aegisgate.adapters.openai_compat import router
+    from aegisgate.core.context import RequestContext
+
+    def counts() -> dict[tuple[str, str], float]:
+        out: dict[tuple[str, str], float] = {}
+        for family in metrics.DISPOSITION.collect():
+            for sample in family.samples:
+                if sample.name.endswith("_total"):
+                    out[(sample.labels["phase"], sample.labels["disposition"])] = sample.value
+        return out
+
+    original = router.write_audit
+    router.write_audit = lambda record: None
+    try:
+        before = counts()
+        ctx = RequestContext(
+            request_id="r-block", session_id="s-block", route="/v1/chat/completions"
+        )
+        ctx.request_disposition = "block"
+        assert ctx.response_disposition == "allow", "the default this test is about"
+        router._write_audit_event(ctx)
+        after = counts()
+    finally:
+        router.write_audit = original
+
+    def delta(phase: str, disposition: str) -> float:
+        key = (phase, disposition)
+        return after.get(key, 0.0) - before.get(key, 0.0)
+
+    assert delta("request", "block") == 1.0
+    assert delta("response", "allow") == 1.0, "the wrinkle the HELP text describes"
+    # ...and the once-per-request guard still holds on a second audit line.
+    again = dict(after)
+    router.write_audit = lambda record: None
+    try:
+        router._write_audit_event(ctx)
+    finally:
+        router.write_audit = original
+    assert counts() == again, "a second audit line must not count again"
+
+
+@_needs_prometheus
 def test_no_per_filter_duration_histogram() -> None:
     """Deliberately absent: it would run thousands of times per streamed answer,
     inside the very thing it would be measuring. cProfile answers that question
