@@ -55,13 +55,27 @@ if _HAS_PROMETHEUS:
     )
     DISPOSITION = Counter(
         "aegisgate_disposition_total",
-        # Once per request *per phase*: one request advances both the
+        # Two things a reader gets wrong, both on the metric because this is the
+        # counter someone reaches for to answer "how much did we block
+        # yesterday" and those are the queries they will write.
+        #
+        # One: once per request *per phase*. A request advances both the
         # phase="request" and the phase="response" series, so a sum without a
-        # phase selector doubles the request count. Spelled out here for the
-        # same reason FILTER_MATCHES' counting rule is — this is the counter
-        # someone reaches for to answer "how much did we block yesterday", and
-        # that is the query they will write.
-        "Final disposition, counted once per request per phase",
+        # phase selector is twice the request count.
+        #
+        # Two: the response phase reports ctx.response_disposition, and that
+        # field is "allow" until something sets it. A request blocked in the
+        # request phase never reaches a response, so it lands in
+        # phase="response",disposition="allow" — the response series counts
+        # allows for responses that were never produced, inflated by exactly the
+        # number of request-phase blocks. Read blocks from phase="request".
+        # Making the response phase silent instead would be a different metric
+        # with a harder question behind it (what counts as having reached a
+        # response — an upstream 500 does), and that is a decision, not a
+        # wording fix.
+        "Disposition per phase, once per request; phase=response reports allow "
+        "when the request was blocked before any response existed, so read "
+        "blocks from phase=request",
         ["phase", "disposition"],
     )
     STREAM_PROBES = Counter(
@@ -157,7 +171,12 @@ def inc_filter_error(filter_name: str, phase: str) -> None:
 
 
 def inc_disposition(phase: str, disposition: str) -> None:
-    """Count one phase's final disposition. Once per request per phase."""
+    """Count one phase's disposition. Once per request per phase.
+
+    Callers pass ctx.response_disposition unchanged, which is "allow" on a
+    request that was blocked before any response existed — see DISPOSITION's
+    HELP text, and read blocks from phase="request".
+    """
     if DISPOSITION is not None:
         DISPOSITION.labels(phase=phase, disposition=disposition).inc()
 
