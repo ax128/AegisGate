@@ -109,7 +109,7 @@ Yes. AegisGate provides an OpenAI-compatible API (`/v1/chat/completions`, `/v1/r
 
 **What data does AegisGate redact?**
 Over 50 PII pattern categories including: API keys and tokens (OpenAI, AWS, GitHub, Slack), credit card numbers, SSNs, email addresses, phone numbers, crypto wallet addresses and seed phrases, medical record numbers, IP addresses, internal URLs, and infrastructure identifiers. Custom exact-value redaction is also supported for arbitrary secrets.
-Which of them run depends on the route. `/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured conversation payloads, so by default only the credential-only `redaction.relaxed_pii_ids` subset runs there (13 of the 56 shipped patterns — tokens, tokens in URL query strings, JWT, session cookies, PEM private keys, AWS/GitHub/Slack keys, exchange secrets, crypto WIF/xprv/seed phrases). Other `/v1/` routes run the full set, and `/v2/` runs the same relaxed set as the conversation routes. Set `redaction.relaxed_pii_ids: ["*"]` in `security_filters.yaml` to run all patterns everywhere the relaxed set applies. Full breakdown in [PII Redaction Coverage](#pii-redaction-coverage-50-categories).
+Which of them run depends on the route. `/v1/chat/completions`, `/v1/responses` and `/v1/messages` carry structured conversation payloads, so by default only the credential-only `redaction.relaxed_pii_ids` subset runs there (13 of the 59 shipped patterns — tokens, tokens in URL query strings, JWT, session cookies, PEM private keys, AWS/GitHub/Slack keys, exchange secrets, crypto WIF/xprv/seed phrases). Other `/v1/` routes run the full set, and `/v2/` runs the same relaxed set as the conversation routes. Set `redaction.relaxed_pii_ids: ["*"]` in `security_filters.yaml` to run all patterns everywhere the relaxed set applies. Full breakdown in [PII Redaction Coverage](#pii-redaction-coverage-50-categories).
 
 **Can I use AegisGate with AI coding agents like Cursor, Claude Code, or Codex?**
 Yes. AegisGate supports MCP (Model Context Protocol) and Agent SKILL integration. Point your agent's `baseUrl` to the gateway and it will transparently filter all LLM traffic. See [SKILL.md](SKILL.md) for agent-specific setup instructions.
@@ -595,9 +595,9 @@ curl http://gateway:18080/v1/__gw__/t/8317__passthrough/chat/completions ...
 ### PII Redaction Coverage (50+ categories)
 
 - **Credentials**: API keys, JWT, cookies, private keys (PEM), AWS access/secret, GitHub/Slack tokens
-- **Financial**: credit cards, IBAN, SWIFT/BIC, routing numbers, bank accounts
+- **Financial**: credit cards, IBAN, German VAT (`DE_VAT_ID`), SWIFT/BIC, routing numbers, bank accounts
 - **Network & Devices**: IPv4/IPv6, MAC, IMEI/IMSI, device serial numbers
-- **Identity & Compliance**: SSN, tax IDs, passport/driver's license, medical records
+- **Identity & Compliance**: SSN, tax IDs, German Steuernummer (`DE_STEUERNR`), Austrian SV-Nummer (`AT_SV_NR`), passport/driver's license, medical records
 - **Crypto**: BTC/ETH/SOL/TRON addresses, WIF/xprv/xpub, seed phrases, exchange API keys
 - **Infrastructure** (field-labelled only, i.e. `field: value` / `field=value` form): hostnames, OS versions, container IDs, K8s resources, internal URLs
 

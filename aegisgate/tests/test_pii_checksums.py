@@ -18,7 +18,13 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalMessage, InternalRequest
 from aegisgate.filters.redaction import RedactionFilter
 from aegisgate.storage.kv import KVStore
-from aegisgate.util.checksums import cn_id_valid, iban_mod97_valid, luhn_valid
+from aegisgate.util.checksums import (
+    at_sv_nr_valid,
+    cn_id_valid,
+    de_vat_valid,
+    iban_mod97_valid,
+    luhn_valid,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _RULES = _REPO_ROOT / "aegisgate" / "policies" / "rules" / "security_filters.yaml"
@@ -124,6 +130,52 @@ def test_iban_mod97(value: str, expected: bool) -> None:
     assert iban_mod97_valid(value) is expected
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("123456788", True),
+        ("132490588", True),
+        ("129273398", True),
+        ("115235681", True),
+        ("DE123456788", True),
+        ("DE 132490588", True),
+        ("123456789", False),
+        ("DE123456789", False),
+        ("", False),
+        ("DE12", False),
+    ],
+)
+def test_de_vat(value: str, expected: bool) -> None:
+    assert de_vat_valid(value) is expected
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("7829280755", True),  # Austrian SI worked example (Laufnummer 782, 28.07.1955)
+        ("7829 280755", True),
+        ("7829-280755", True),
+        ("7828280755", False),  # check digit flipped
+        ("0829280755", False),  # first digit must be 1-9
+        ("", False),
+        ("7829", False),
+    ],
+)
+def test_at_sv_nr(value: str, expected: bool) -> None:
+    assert at_sv_nr_valid(value) is expected
+
+
+def _mapping_kinds(out: _Redacted) -> set[str]:
+    kinds: set[str] = set()
+    for placeholder in out.ctx.redaction_mapping:
+        inner = placeholder.strip("{}")
+        parts = inner.split("_")
+        if len(parts) < 4 or parts[0] != "AG":
+            continue
+        kinds.add("_".join(parts[2:-1]))
+    return kinds
+
+
 def test_non_ascii_digits_cannot_produce_a_wrong_verdict() -> None:
     """`\\d` matches every Unicode decimal digit, so these really can arrive.
 
@@ -138,6 +190,10 @@ def test_non_ascii_digits_cannot_produce_a_wrong_verdict() -> None:
     assert luhn_valid(arabic_indic) is False
     assert cn_id_valid("\u0661" * 18) is False
     assert iban_mod97_valid("GB\u0668\u0662WEST12345698765432") is False
+    assert de_vat_valid("DE" + "\u0661" * 9) is False
+    assert at_sv_nr_valid(
+        "\u0667\u0668\u0662\u0669" + "\u0662\u0668\u0660\u0667\u0665\u0665"
+    ) is False
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +204,41 @@ def test_a_failing_checksum_is_still_redacted() -> None:
     out = _redact("order 123456789012345 shipped")
     assert "123456789012345" not in out.text
     assert out.report["validator_failed"] == {"CARD": 1}
+
+
+def test_failing_de_vat_checksum_is_still_redacted() -> None:
+    out = _redact("vat DE123456789 on the invoice")
+    assert "DE123456789" not in out.text
+    assert out.report["validator_failed"] == {"DE_VAT_ID": 1}
+    assert "DE_VAT_ID" in _mapping_kinds(out)
+
+
+def test_failing_at_sv_nr_checksum_is_still_redacted() -> None:
+    out = _redact("svnr 7828 280755 filed")
+    assert "7828 280755" not in out.text
+    assert out.report["validator_failed"] == {"AT_SV_NR": 1}
+    assert "AT_SV_NR" in _mapping_kinds(out)
+
+
+def test_spaced_iban_is_one_iban_hit_on_the_full_set() -> None:
+    """Print-style spaces must redact as IBAN, including the country prefix.
+
+    CARD used to eat the interior 13-16 digit groups and leave DE89 / AT61
+    in the clear. Compact form must still be IBAN as well.
+    """
+    cases = (
+        "DE89 3704 0044 0532 0130 00",
+        "AT61 1904 3002 3457 3201",
+        "DE89370400440532013000",
+    )
+    for sample in cases:
+        out = _redact(f"pay {sample} now")
+        assert sample not in out.text, sample
+        assert "DE89" not in out.text
+        assert "AT61" not in out.text
+        kinds = _mapping_kinds(out)
+        assert "IBAN" in kinds, (sample, kinds)
+        assert "CARD" not in kinds, (sample, kinds)
 
 
 def test_a_passing_checksum_is_redacted_without_the_marker() -> None:
@@ -267,7 +358,13 @@ def test_yaml_and_default_rules_declare_the_same_validators() -> None:
         if rule_validator(item)
     }
     assert yaml_map == default_map
-    assert yaml_map == {"CARD": "luhn", "CN_ID": "cn_id", "IBAN": "iban_mod97"}
+    assert yaml_map == {
+        "CARD": "luhn",
+        "CN_ID": "cn_id",
+        "IBAN": "iban_mod97",
+        "DE_VAT_ID": "de_vat",
+        "AT_SV_NR": "at_sv_nr",
+    }
 
 
 def test_an_unknown_validator_name_degrades_to_no_validator() -> None:
@@ -292,7 +389,9 @@ def test_the_relaxed_routes_never_reach_a_validator() -> None:
 
     flt = RedactionFilter(_MemoryKVStore())
     relaxed_ids = {rule_id for rule_id, _ in flt._responses_relaxed_pii_patterns}
-    assert relaxed_ids.isdisjoint({"CARD", "CN_ID", "IBAN"})
+    assert relaxed_ids.isdisjoint(
+        {"CARD", "CN_ID", "IBAN", "DE_VAT_ID", "AT_SV_NR", "DE_STEUERNR"}
+    )
     assert "/v1/chat/completions" in LOW_FALSE_POSITIVE_V1_ROUTES
 
     out = _redact("order 123456789012345 shipped", route="/v1/chat/completions")
@@ -301,9 +400,15 @@ def test_the_relaxed_routes_never_reach_a_validator() -> None:
 
 
 def test_every_validated_rule_runs_on_the_full_set_route() -> None:
-    """The three rules that declare a validator must actually be compiled on the
+    """The rules that declare a validator must actually be compiled on the
     route the tests above use, or those tests would be green for the wrong reason."""
     flt = RedactionFilter(_MemoryKVStore())
     full_ids = {rule_id for rule_id, _ in flt._pii_patterns}
-    assert set(flt._pii_validators) == {"CARD", "CN_ID", "IBAN"}
+    assert set(flt._pii_validators) == {
+        "CARD",
+        "CN_ID",
+        "IBAN",
+        "DE_VAT_ID",
+        "AT_SV_NR",
+    }
     assert set(flt._pii_validators).issubset(full_ids)

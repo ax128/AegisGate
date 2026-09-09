@@ -9,6 +9,35 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（空格分组 IBAN 被 CARD 切碎）
+
+- **全量 PII 集上，印刷体（空格分组）IBAN 整段标成 `IBAN`，不再被 `CARD` 吃掉中间数字。**
+  旧正则 `\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b` 匹配不到 `DE89 3704 …`，而 `CARD` 的
+  `\b(?:\d[ -]*?){13,16}\b` 会先吃掉账号里 13–16 位数字组，把 `DE89` / `AT61` 和国家码后的尾巴
+  原样转发出去。现把 IBAN 正则放宽到可选空格（最短 15 字符，不含连字符），并在 YAML 与
+  `_DEFAULT_RULES` 里把 `IBAN` 挪到 `PHONE` / `CARD` 前面。紧凑写法 `DE89370400440532013000`
+  仍是 `IBAN`。默认 relaxed 集不加 `IBAN`：对话路由上印刷体 IBAN 仍会原样转发。
+
+  **升级动作**：挂载的 `config/security_filters.yaml` 不会被覆盖。要堵住这条泄漏，必须**同时**
+  换上新 IBAN 正则并把 `IBAN` 排到 `CARD` 之前（或备份后删除该文件让 `init_config` 重新生成）。
+  升级后若启动日志出现 `IBAN:CARD`，说明仍在加载旧顺序；**只对调两个 id、不换正则，泄漏还在**。
+
+### Added（欧盟/德奥 PII：`DE_VAT_ID` / `DE_STEUERNR` / `AT_SV_NR`）
+
+- 全量集新增三条形态规则，均不进入默认 `_DEFAULT_RELAXED_PII_IDS`。对话路由要启用它们（或
+  `IBAN`）须在 `relaxed_pii_ids` 里显式列出，或设 `["*"]`。
+  - `DE_VAT_ID`：`DE` + 9 位（中间可有一个空格）。观测性校验 `de_vat`（ISO 7064 MOD 11,10）。
+  - `DE_STEUERNR`：斜杠分组的州税号（如 `11/815/08152`）；无校验位，YAML-only。
+  - `AT_SV_NR`：分组印刷体（`7829 280755` / `7829-280755` / `7829 28 07 55`），不含紧凑 10 位。
+    观测性校验 `at_sv_nr`。紧凑 `7829280755` 仍可能是 `PHONE`——本变更不改 `PHONE`。
+- `TAX_ID` / `PASSPORT_NO` 加上 `(?i)`，并增加德奥证件标签别名（`Steuernummer`、`USt-IdNr`、
+  `SV-Nummer`、`Reisepass`、`Personalausweis` 等）。标签值里允许 `/`。流水线 kind 仍按先命中：
+  自由文本规则已经吃掉的跨度不必再标成 `TAX_ID`。
+- 顺序 lint 增加 `AT_SV_NR` 先于 `PHONE`、`IBAN` 先于 `CARD`。校验位仍只由 V1 `RedactionFilter`
+  读取；V2 / `sanitize.py` 按形状脱敏、忽略 `validator`。
+
+  内置规则 56 → 59 条。
+
 ### Fixed（PII 规则顺序：具体规则先于宽规则）
 
 - **PHONE 不再切碎带 10 位数字段的 Slack token。** `redaction.pii_patterns` 按声明顺序匹配，

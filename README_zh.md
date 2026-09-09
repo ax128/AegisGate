@@ -153,9 +153,9 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 请求侧 `redaction` + `request_sanitizer` + `responses` 结构化 `input` 预转发脱敏 + 响应侧 `post_restore_guard` 已覆盖以下类别：
 
 - 凭据/密钥：`API Key`、`Bearer`、`JWT`、`Cookie/Session`、`Private Key PEM`、`AWS Access/Secret`、`GitHub/Slack token`
-- 金融标识：`银行卡`、`IBAN`、`SWIFT/BIC`、`Routing/ABA`、银行账号字段
+- 金融标识：`银行卡`、`IBAN`、德国增值税号 `DE_VAT_ID`、`SWIFT/BIC`、`Routing/ABA`、银行账号字段
 - 网络与设备：`IPv4/IPv6`、`MAC`、`IMEI/IMSI`、设备序列号
-- 证件与合规：`SSN`、`税号`、`护照/驾照`、证书/执照编号、医疗记录号、医保受益人编号
+- 证件与合规：`SSN`、`税号`、德国 Steuernummer `DE_STEUERNR`、奥地利 SV-Nummer `AT_SV_NR`、`护照/驾照`、证书/执照编号、医疗记录号、医保受益人编号
 - 人员与地理：姓名字段、地址/经纬度/邮编字段、精确日期（生日/入院/出院/死亡）、传真字段
 - 车辆与生物：`VIN`、车牌字段、生物特征模板字段（文本形态）
 - Crypto 专项：`BTC/ETH/SOL/TRON` 地址、`WIF/xprv/xpub`、助记词/seed phrase、交易所 API key/secret/passphrase
@@ -168,7 +168,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 具体启用哪些规则由路由决定，且打分流水线与转发路径使用同一判据（`is_low_false_positive_route`）：
 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 的请求体是结构化会话内容，误报会破坏提示词，
-因此只跑**低误报 id 集**（`redaction.relaxed_pii_ids`，默认仅凭据类 13 项）；其余 `/v1/` 路由（含通用代理）跑完整 56 项。
+因此只跑**低误报 id 集**（`redaction.relaxed_pii_ids`，默认仅凭据类 13 项）；其余 `/v1/` 路由（含通用代理）跑完整 59 项。
 如需在这三条路由上也跑全量规则，可配置 `redaction.relaxed_pii_ids: ["*"]`。
 
 完整口径是**六个执行面**而非两桶——打分那一遍和真正改写外发内容那一遍用的集合并不总是同一套：

@@ -73,6 +73,9 @@ _PII_SAMPLES: dict[str, str] = {
     "GITHUB_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz012345",
     "SLACK_TOKEN": "xoxb-1234567890-abcdefghij",
     "IBAN": "DE89370400440532013000",
+    "DE_VAT_ID": "DE123456788",
+    "DE_STEUERNR": "11/815/08152",
+    "AT_SV_NR": "7829 280755",
     "IPV4": "192.0.2.55",
     "IPV6": "2001:db8:85a3:0:0:8a2e:370:7334",
     "JWT": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + ("A" * 20) + "." + ("B" * 20),
@@ -382,6 +385,8 @@ def test_conversation_routes_are_the_relaxed_set() -> None:
     }
     assert "TOKEN" in DEFAULT_RELAXED_PII_IDS
     assert "EMAIL" not in DEFAULT_RELAXED_PII_IDS
+    assert "IBAN" not in DEFAULT_RELAXED_PII_IDS
+    assert {"DE_VAT_ID", "DE_STEUERNR", "AT_SV_NR"}.isdisjoint(DEFAULT_RELAXED_PII_IDS)
 
 
 # ── request-side redaction ─────────────────────────────────────────────────
@@ -487,6 +492,12 @@ def test_specific_pii_rules_precede_broad_digit_rules() -> None:
     assert index["GITHUB_TOKEN"] < index["PHONE"]
     assert index["AWS_ACCESS_KEY"] < index["PHONE"]
     assert index["CN_MOBILE"] < index["PHONE"]
+    assert index["AT_SV_NR"] < index["PHONE"]
+    assert index["DE_VAT_ID"] < index["PHONE"]
+    assert index["DE_STEUERNR"] < index["PHONE"]
+    assert index["IBAN"] < index["CARD"]
+    assert index["IBAN"] < index["PHONE"]
+    assert index["AT_SV_NR"] < index["DE_STEUERNR"] < index["DE_VAT_ID"] < index["IBAN"]
     assert index["IMEI"] < index["CARD"]
     assert index["IMSI"] < index["CARD"]
     assert index["MAC_ADDRESS"] < index["IPV6"]
@@ -503,6 +514,11 @@ def test_specific_pii_rules_precede_broad_digit_rules() -> None:
     assert fallback_index["GITHUB_TOKEN"] < fallback_index["PHONE"]
     assert fallback_index["CN_MOBILE"] < fallback_index["PHONE"]
     assert fallback_index["SSN"] < fallback_index["PHONE"]
+    assert fallback_index["AT_SV_NR"] < fallback_index["PHONE"]
+    assert fallback_index["DE_VAT_ID"] < fallback_index["PHONE"]
+    assert fallback_index["IBAN"] < fallback_index["CARD"]
+    assert fallback_index["IBAN"] < fallback_index["PHONE"]
+    assert "DE_STEUERNR" not in fallback_index
 
 
 def test_numeric_slack_token_is_redacted_as_slack_not_phone() -> None:
@@ -605,6 +621,131 @@ def test_shipped_pii_order_passes_its_own_load_time_lint() -> None:
     # IMEI is behind CARD too, but a disabled rule shadows nothing.
     assert pii_order_violations(backwards) == ["SLACK_TOKEN:PHONE"]
     assert pii_order_violations(None) == []
+    assert pii_order_violations(
+        {
+            "pii_patterns": [
+                {"id": "PHONE", "regex": r"\d{10}"},
+                {"id": "AT_SV_NR", "regex": r"\d{4} \d{6}"},
+            ]
+        }
+    ) == ["AT_SV_NR:PHONE"]
+    assert pii_order_violations(
+        {
+            "pii_patterns": [
+                {"id": "CARD", "regex": r"\d{13,16}"},
+                {"id": "IBAN", "regex": r"[A-Z]{2}\d{2}\S+"},
+            ]
+        }
+    ) == ["IBAN:CARD"]
+
+
+@pytest.mark.parametrize(
+    "sample,kind,forbidden",
+    (
+        ("DE89 3704 0044 0532 0130 00", "IBAN", ("DE89", "0130 00")),
+        ("AT61 1904 3002 3457 3201", "IBAN", ("AT61",)),
+        ("DE89370400440532013000", "IBAN", ()),
+        ("DE123456788", "DE_VAT_ID", ()),
+        ("DE 132490588", "DE_VAT_ID", ()),
+        ("11/815/08152", "DE_STEUERNR", ()),
+        ("7829 280755", "AT_SV_NR", ()),
+        ("7829-280755", "AT_SV_NR", ()),
+        ("7829 28 07 55", "AT_SV_NR", ()),
+    ),
+)
+def test_eu_pii_full_set_redacts_as_the_specific_kind(
+    sample: str, kind: str, forbidden: tuple[str, ...]
+) -> None:
+    cleaned, mapping = _redact(f"record {sample} end", route="/v1/embeddings")
+    assert sample not in cleaned, cleaned
+    for fragment in forbidden:
+        assert fragment not in cleaned, cleaned
+    kinds = _mapping_kinds(mapping)
+    assert kind in kinds, kinds
+    if kind == "IBAN":
+        assert "CARD" not in kinds
+    if kind == "AT_SV_NR":
+        assert "PHONE" not in kinds
+
+
+def test_compact_at_sv_nr_is_not_an_at_sv_nr_hit() -> None:
+    """Bare 10 digits keep the PHONE shape; this PR does not change PHONE."""
+    compact = "7829280755"
+    items = load_security_rules()["redaction"]["pii_patterns"]
+    at_sv = next(
+        item for item in items if isinstance(item, dict) and str(item["id"]).upper() == "AT_SV_NR"
+    )
+    assert re.compile(at_sv["regex"]).search(compact) is None
+    cleaned, mapping = _redact(f"call {compact} please", route="/v1/embeddings")
+    kinds = _mapping_kinds(mapping)
+    assert "AT_SV_NR" not in kinds
+    assert compact not in cleaned
+    assert "PHONE" in kinds
+
+
+def test_slash_date_is_not_a_german_steuernummer() -> None:
+    text = "due 12/03/2024"
+    cleaned, mapping = _redact(text, route="/v1/embeddings")
+    assert "12/03/2024" in cleaned
+    assert "DE_STEUERNR" not in _mapping_kinds(mapping)
+
+
+@pytest.mark.parametrize(
+    "sample",
+    (
+        _PII_SAMPLES["DE_VAT_ID"],
+        _PII_SAMPLES["DE_STEUERNR"],
+        _PII_SAMPLES["AT_SV_NR"],
+        "DE89 3704 0044 0532 0130 00",
+    ),
+)
+def test_chat_route_does_not_redact_eu_ids_or_spaced_iban_by_default(sample: str) -> None:
+    cleaned, mapping = _redact(sample, route="/v1/chat/completions")
+    assert sample in cleaned
+    assert not mapping
+
+
+def test_labelled_de_at_aliases_redact_values_on_full_set() -> None:
+    """Mixed-case document labels must not forward the value.
+
+    Kind follows first-hit: a free-text rule that already consumes the span is
+    enough. Do not require TAX_ID in those cases.
+    """
+    cases = (
+        ("Steuernummer: 12345678901", "12345678901", None),
+        ("USt-IdNr: DE123456788", "DE123456788", None),
+        ("SV-Nummer: 7829280755", "7829280755", None),
+        ("Reisepass: C01X00T47", "C01X00T47", "PASSPORT_NO"),
+    )
+    for text, value, expected_kind in cases:
+        cleaned, mapping = _redact(text, route="/v1/embeddings")
+        assert value not in cleaned, text
+        kinds = _mapping_kinds(mapping)
+        if expected_kind is not None:
+            assert expected_kind in kinds, (text, kinds)
+
+
+def test_tax_id_regex_matches_labelled_sv_nummer_in_isolation() -> None:
+    """Compact SV-Nummer is a PHONE hit on the full set; the alias must still
+    match if PHONE is not running. The same is true of an 11-digit Steuernummer:
+    PHONE consumes a 10-digit run out of it, so pipeline kind is not TAX_ID."""
+    items = load_security_rules()["redaction"]["pii_patterns"]
+    tax = next(
+        item for item in items if isinstance(item, dict) and str(item["id"]).upper() == "TAX_ID"
+    )
+    compiled = re.compile(tax["regex"])
+    assert compiled.search("SV-Nummer: 7829280755")
+    assert compiled.search("Steuernummer: 12345678901")
+
+
+def test_vat_does_not_match_as_iban() -> None:
+    items = load_security_rules()["redaction"]["pii_patterns"]
+    iban = next(
+        item for item in items if isinstance(item, dict) and str(item["id"]).upper() == "IBAN"
+    )
+    compiled = re.compile(iban["regex"])
+    assert compiled.search("DE123456788") is None
+    assert compiled.search("DE 136695976") is None
 
 
 # ── request sanitizer ──────────────────────────────────────────────────────

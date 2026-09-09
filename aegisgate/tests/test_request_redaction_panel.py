@@ -553,7 +553,7 @@ class TestMalformedEntries:
 
 
 def test_the_shipped_rules_file_renders(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A smoke test against the real 56-rule policy, not just the fixture."""
+    """A smoke test against the real 59-rule policy, not just the fixture."""
     real = Path(__file__).resolve().parents[1] / "policies" / "rules" / "security_filters.yaml"
     monkeypatch.setattr(settings, "security_rules_path", str(real), raising=False)
     monkeypatch.setattr(gw_tokens, "list_tokens", lambda: {})
