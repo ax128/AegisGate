@@ -14,10 +14,13 @@ redaction:
   # plus the relaxed responses-API roles. Everything else below is applied on
   # the remaining routes only.
   # Omit the key to keep the built-in credential-only default (TOKEN, JWT,
-  # URL_TOKEN_QUERY, PRIVATE_KEY_PEM, AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY,
-  # GITHUB_TOKEN, SLACK_TOKEN, EXCHANGE_API_SECRET, CRYPTO_WIF_KEY,
-  # CRYPTO_XPRV, CRYPTO_SEED_PHRASE). Use ["*"] to run every pattern listed
-  # below on those routes too — stricter, at the cost of more false positives.
+  # URL_TOKEN_QUERY, COOKIE_SESSION, PRIVATE_KEY_PEM, AWS_ACCESS_KEY,
+  # AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, SLACK_TOKEN, EXCHANGE_API_SECRET,
+  # CRYPTO_WIF_KEY, CRYPTO_XPRV, CRYPTO_SEED_PHRASE). Use ["*"] to run every
+  # pattern listed below on those routes too — stricter, at the cost of more
+  # false positives. EU operators who want DE_VAT_ID / DE_STEUERNR / AT_SV_NR
+  # or IBAN on /v1/chat/completions must list those ids (or "*"); they are
+  # not in the default relaxed set.
   # relaxed_pii_ids:
   #   - TOKEN
   #   - JWT
@@ -70,14 +73,30 @@ redaction:
       regex: '\b(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])\b|\b(?:[0-9A-Fa-f]{2}-){5,7}[0-9A-Fa-f]{2}(?![0-9A-Fa-f-])\b'
     - id: SSN
       regex: '\b\d{3}-\d{2}-\d{4}\b'
+    - id: AT_SV_NR
+      # Grouped print forms only. Compact 10 digits are a PHONE shape; shipping
+      # that unlabelled would relabel ordinary US numbers as AT_SV_NR.
+      regex: '(?<!\d)\d{4}(?:[ -]\d{2}){3}(?!\d)|(?<!\d)\d{4}[ -]\d{6}(?!\d)'
+      validator: at_sv_nr
+    - id: DE_STEUERNR
+      # Slash-grouped state forms (1–3 / 3–4 / 4–5). No check digit; the slashes
+      # are the distinctive shape. Dates like 12/03/2024 have a 2-digit middle.
+      regex: '(?<!\d)\d{1,3}/\d{3,4}/\d{4,5}(?!\d)'
+    - id: DE_VAT_ID
+      regex: '\bDE[ ]?\d{9}\b'
+      validator: de_vat
+    - id: IBAN
+      # Print-style spaces are allowed; hyphens are not. Floor is 15 characters
+      # (ISO 13616) so a German VAT (DE + 9 digits) is not an IBAN. Must run
+      # before CARD: spaces create word boundaries inside the account, and CARD
+      # would otherwise take 13–16 interior digits and forward the country code.
+      regex: '\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]){11,30}\b'
+      validator: iban_mod97
     - id: PHONE
       regex: '\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b'
     - id: CARD
       regex: '\b(?:\d[ -]*?){13,16}\b'
       validator: luhn
-    - id: IBAN
-      regex: '\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b'
-      validator: iban_mod97
     - id: IPV4
       regex: '\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b'
     - id: IPV6
@@ -110,11 +129,11 @@ redaction:
     - id: ROUTING_NUMBER
       regex: '\b(?:routing|aba)\b\s*[:=]\s*\d{9}\b'
     - id: PASSPORT_NO
-      regex: '\b(?:passport|护照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9]{6,12}\b'
+      regex: '(?i)\b(?:passport|护照|reisepass|personalausweis)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9]{6,12}\b'
     - id: DRIVER_LICENSE_NO
       regex: '\b(?:driver(?:[_\s-]?license)?|驾照)(?:[_\s-]?(?:no|number|号码))?\b\s*[:=]\s*[A-Z0-9\-]{5,20}\b'
     - id: TAX_ID
-      regex: '\b(?:tax[_\s-]?(?:id|no|number)|ein|ssn|tin|税号)\b\s*[:=]\s*[A-Z0-9\-]{6,20}\b'
+      regex: '(?i)\b(?:tax[_\s-]?(?:id|no|number)|ein|ssn|tin|税号|steuernummer|ust[.\s-]?id(?:nr)?\.?|identifikationsnummer|sv[_\s-]?n(?:umme)?r|sozialversicherungsnummer)\b\s*[:=]\s*[A-Z0-9\-/]{6,20}\b'
     - id: DEVICE_SERIAL
       regex: '\b(?:serial(?:[_\s-]?number)?|sn|设备序列号)\b\s*[:=]\s*[A-Za-z0-9\-]{6,40}\b'
     - id: CRYPTO_BTC_ADDR

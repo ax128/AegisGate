@@ -52,10 +52,13 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
     本目录的文件不会被升级覆盖，控制台新增规则也只能追加到末尾，因此 `load_security_rules()` 每次读盘后
     会自检一次，命中就打 `redaction.pii_patterns runs broad rules before specific ones` 并点名 id 对。
     看到这条告警时，按点名的顺序手工调整本目录的 `security_filters.yaml`，或备份后删除该文件让
-    `init_config` 从镜像重新生成。
-  - **`redaction.pii_patterns` 的可选 `validator` 字段（校验位）**：`CARD` / `CN_ID` / `IBAN` 三条规则
-    是按**形状**匹配的（`CARD` 是任意 13–16 位数字串），一个 15 位订单号照样命中。给规则加
-    `validator: luhn | cn_id | iban_mod97` 之后，命中的值会再过一次校验位。
+    `init_config` 从镜像重新生成。打印风格（空格分组）的 IBAN 还要求**加宽后的 IBAN 正则**并且
+    **把 IBAN 排到 CARD 前面**：旧文件是 `PHONE, CARD, IBAN`，升级后会出现 `IBAN:CARD` 告警。
+    只对调两个 id、不换正则，空格 IBAN 仍然匹配不上，CARD 照旧吃掉中间数字、把国家码转发出去。
+  - **`redaction.pii_patterns` 的可选 `validator` 字段（校验位）**：`CARD` / `CN_ID` / `IBAN` /
+    `DE_VAT_ID` / `AT_SV_NR` 这些规则是按**形状**匹配的（`CARD` 是任意 13–16 位数字串），一个 15 位
+    订单号照样命中。给规则加
+    `validator: luhn | cn_id | iban_mod97 | de_vat | at_sv_nr` 之后，命中的值会再过一次校验位。
     - **它只做观测，不改变任何脱敏结果**：校验失败的值**照旧脱敏**，只是在该请求的 filter report 里
       多记一笔 `validator_failed: {规则 id: 个数}`（进 `audit.jsonl` 与统计，**不回给客户端**），
       并计一个 `aegisgate_pii_validator_failures_total{validator=...}` 指标。用它先量出自己流量上的
@@ -63,7 +66,8 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
     - **生效面**：目前只有 **V1 请求 pipeline**（`filters/redaction.py`）读它；responses sanitizer 与
       V2 转发面忽略它但**继续脱敏**，所以不存在「某一面漏脱敏」的风险。无法识别的名字等同于没写。
     - **注意路由差异**：`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 使用低误报（relaxed）
-      规则集，其中**不含** `CARD` / `CN_ID` / `IBAN`，所以这三条主协议路由上校验器根本不会触发。
+      规则集，其中**不含** `CARD` / `CN_ID` / `IBAN` / `DE_VAT_ID` / `AT_SV_NR` / `DE_STEUERNR`，所以这
+      几条主协议路由上校验器根本不会触发。
       计数来自使用完整规则集的其它路由。
     - **控制台不提供该字段的编辑入口**：已有规则上的 `validator` 在控制台编辑后会**保留**（写入只拷贝
       白名单里的键），但控制台**新建**的规则不会有它，要加得手改 YAML。

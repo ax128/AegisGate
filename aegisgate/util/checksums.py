@@ -3,7 +3,7 @@
 The CARD rule matches any 13-16 digit run, so a 15-digit order number or a
 timestamp is a card as far as the regex is concerned. Rule ordering decided
 which *label* such a value got; it never decided whether the value was really
-one. These three functions answer that second question.
+one. These functions answer that second question.
 
 They are pure and dependency-free, and they only ever *observe*: the redaction
 filter still redacts a value whose checksum fails, and records that it failed.
@@ -89,10 +89,57 @@ def iban_mod97_valid(value: str) -> bool:
         return False
 
 
+def de_vat_valid(value: str) -> bool:
+    """ISO 7064 MOD 11,10 over the 9 digits of a German VAT identifier.
+
+    The last digit is the check digit. Prefix ``DE`` (and spaces) are stripped
+    so the function accepts both the regex hit and a bare 9-digit body.
+    """
+    body = _normalise(value).upper()
+    if body.startswith("DE"):
+        body = body[2:]
+    if len(body) != 9 or not body.isdigit():
+        return False
+    p = 10
+    for char in body[:8]:
+        s = (ord(char) - 48 + p) % 10
+        if s == 0:
+            s = 10
+        p = (2 * s) % 11
+    remainder = 11 - p
+    if remainder == 10:
+        remainder = 0
+    return remainder == (ord(body[8]) - 48)
+
+
+_AT_SV_NR_WEIGHTS = (3, 7, 9, 0, 5, 8, 4, 2, 1, 6)
+
+
+def at_sv_nr_valid(value: str) -> bool:
+    """Austrian SV-Nummer: 10 digits ``LLLP TTMMJJ``, modulo 11.
+
+    Weights ``3,7,9,0,5,8,4,2,1,6`` (the 0 sits on the check-digit position).
+    The sum modulo 11 must equal the fourth digit. Remainder 10 is never
+    issued. The first digit must be 1–9.
+    """
+    digits = _normalise(value)
+    if len(digits) != 10 or not digits.isdigit() or digits[0] == "0":
+        return False
+    total = sum(
+        (ord(char) - 48) * weight for char, weight in zip(digits, _AT_SV_NR_WEIGHTS)
+    )
+    remainder = total % 11
+    if remainder == 10:
+        return False
+    return remainder == (ord(digits[3]) - 48)
+
+
 VALIDATORS = {
     "luhn": luhn_valid,
     "cn_id": cn_id_valid,
     "iban_mod97": iban_mod97_valid,
+    "de_vat": de_vat_valid,
+    "at_sv_nr": at_sv_nr_valid,
 }
 """Name -> function. The keys are the only values a rule's ``validator`` may
 take; anything else reads as "no validator", so a typo degrades to today's

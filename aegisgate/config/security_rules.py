@@ -31,9 +31,19 @@ _DEFAULT_RULES: dict[str, Any] = {
             {"id": "CN_MOBILE", "regex": r"(?<!\d)1[3-9]\d{9}(?!\d)"},
             {"id": "CN_ID", "regex": r"(?<!\d)\d{17}[\dXx](?!\d)", "validator": "cn_id"},
             {"id": "SSN", "regex": r"\b\d{3}-\d{2}-\d{4}\b"},
+            {
+                "id": "AT_SV_NR",
+                "regex": r"(?<!\d)\d{4}(?:[ -]\d{2}){3}(?!\d)|(?<!\d)\d{4}[ -]\d{6}(?!\d)",
+                "validator": "at_sv_nr",
+            },
+            {"id": "DE_VAT_ID", "regex": r"\bDE[ ]?\d{9}\b", "validator": "de_vat"},
+            {
+                "id": "IBAN",
+                "regex": r"\b[A-Z]{2}[0-9]{2}(?:[ ]?[A-Z0-9]){11,30}\b",
+                "validator": "iban_mod97",
+            },
             {"id": "PHONE", "regex": r"\b(?:\+?1[-.\s]?)?(?:[(]?\d{3}[)]?[-.\s]?)\d{3}[-.\s]?\d{4}\b"},
             {"id": "CARD", "regex": r"\b(?:\d[ -]*?){13,16}\b", "validator": "luhn"},
-            {"id": "IBAN", "regex": r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b", "validator": "iban_mod97"},
         ],
     },
     "restoration": {
@@ -938,9 +948,11 @@ _PII_ORDER_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("GITHUB_TOKEN", "PHONE"),
     ("AWS_ACCESS_KEY", "PHONE"),
     ("CN_MOBILE", "PHONE"),
+    ("AT_SV_NR", "PHONE"),
     ("CN_ID", "CARD"),
     ("IMEI", "CARD"),
     ("IMSI", "CARD"),
+    ("IBAN", "CARD"),
     ("MAC_ADDRESS", "IPV6"),
     ("CRYPTO_TRON_ADDR", "CRYPTO_SOL_ADDR"),
 )
