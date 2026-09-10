@@ -109,8 +109,20 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 另有两条与 R3 重叠、不重复展开：不可变规则快照 + 请求级 generation 绑定（V2 侧目前没有等价的请求
 上下文，需新建一套），以及带运行时超时保证的正则引擎。
 
+### R9 — 请求侧脱敏 / 响应侧过滤：写回与相位对齐（M–L）
+
+审查结论：规则经常只改了展平副本，出站 JSON 和回客户端 JSON 仍是原文。已锁定规格与分阶段计划，不在本文件展开：
+
+- 规格：[docs/superpowers/specs/2026-08-27-request-response-filter-optimization-design.md](docs/superpowers/specs/2026-08-27-request-response-filter-optimization-design.md)
+- 计划：[docs/superpowers/plans/2026-08-27-request-response-filter-optimization.md](docs/superpowers/plans/2026-08-27-request-response-filter-optimization.md)
+
+与 R8 的关系：R8.1/R8.2 已完成；R8.3 的**精确值扩到结构化叶子**收进该计划最后一阶段（field 规则语义统一仍留在 R8.3，不宣称本计划做完整条）。E1 可逆占位符与 E3 不可逆标记的语法统一**仍留在 R8**，不进 R9。`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，均不进本计划（见规格 D7/D8）。
+
 ## 单点待办
 
+- **请求相位 AnomalyDetector**：要挂必须先把请求分数从响应门控用的 `risk_score` 里隔离（独立字段或封顶到 OutputSanitizer sanitize 门以下）。共享分数会让 `should_sanitize` 给干净回答打上 sanitize、流式被掐。
+- **PrivilegeGuard 请求相位**：先给请求侧接上 `action_map`（默认 review）并评估误报面，不要硬 `request_disposition=block`。编码 Agent 的 system / `instructions` 常声明「可执行 shell」。
+- **typoglycemia 的 review 位**：`PromptInjectionDetector` 响应侧 benign 降级后仍用 `contextual_discussion` 决定 `requires_human_review` 和分数。若要「仅 typoglycemia 不整段混淆」，须改认 `effective_discussion` 并把分数压到 sanitize 门以下。不进 R9 当前计划。
 - **messages / generic 的 EOF 恢复**：上游 EOF 且无 `[DONE]` 时，chat / responses 会补一条断开提示，messages / generic 没有该分支（见 CHANGELOG 中「EOF 无 `[DONE]`」条目，这是记录在案的当前行为）。补上属于**新增行为**而非缺陷修复，要单独评估客户端兼容性，不要混进 bug 修复 PR。
 - **TF-IDF 资产去留**：`aegisgate/models/tfidf/` 目前定位是「保留的离线实验资产」。这是产品决策 —— 要么接回主链路并给出评估口径，要么整体下架，不要长期挂在中间态。
 - ~~**README 与 UPSTREAM-QUICKSTART 的上游章节仍有重复**~~ **已完成**：`README_zh.md §上游接入`
