@@ -109,14 +109,11 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 另有两条与 R3 重叠、不重复展开：不可变规则快照 + 请求级 generation 绑定（V2 侧目前没有等价的请求
 上下文，需新建一套），以及带运行时超时保证的正则引擎。
 
-### R9 — 请求侧脱敏 / 响应侧过滤：写回与相位对齐（M–L）
+### R9 — 请求侧脱敏 / 响应侧过滤：写回与相位对齐
 
-审查结论：规则经常只改了展平副本，出站 JSON 和回客户端 JSON 仍是原文。已锁定规格与分阶段计划，不在本文件展开：
+~~**已完成**~~。sanitize 走嵌套 patch、allow 叶子写回、Restoration mapping 生命周期、确认门控收窄、出站匹配口径、相位文档、精确值结构化叶子均已在 `main`。
 
-- 规格：[docs/superpowers/specs/2026-08-27-request-response-filter-optimization-design.md](docs/superpowers/specs/2026-08-27-request-response-filter-optimization-design.md)
-- 计划：[docs/superpowers/plans/2026-08-27-request-response-filter-optimization.md](docs/superpowers/plans/2026-08-27-request-response-filter-optimization.md)
-
-与 R8 的关系：R8.1/R8.2 已完成；R8.3 的**精确值扩到结构化叶子**收进该计划最后一阶段（field 规则语义统一仍留在 R8.3，不宣称本计划做完整条）。E1 可逆占位符与 E3 不可逆标记的语法统一**仍留在 R8**，不进 R9。`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，均不进本计划（见规格 D7/D8）。
+未进本项、仍开放的：R8.3 的 **field 规则语义跨 V1/V2 统一**；E1/E3 占位符语法统一仍留在 R8；`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，见下方单点待办。
 
 ## 单点待办
 
