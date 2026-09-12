@@ -1485,6 +1485,446 @@ function bindTokenModal() {
   }
 }
 
+// ─── Gateway forwarding (baseURL) ────────────
+// One rule per client-facing Host in config/gw_forwards.json. Reads and writes
+// share the rules/config ETag scheme (resource "forwards"), so two open tabs
+// cannot silently overwrite each other's edit.
+
+let forwardState = { items: [], denied: [], globalFilters: {}, gateOpen: false };
+
+const FORWARD_FILTER_LABELS = {
+  exact_value_redaction: "精确值脱敏",
+  redaction: "PII 脱敏",
+  restoration: "占位符还原",
+  injection_detector: "注入检测",
+  privilege_guard: "越权防护",
+  anomaly_detector: "异常检测",
+  request_sanitizer: "请求净化",
+  output_sanitizer: "输出净化",
+  post_restore_guard: "还原后二次检查",
+  system_prompt_guard: "系统提示词防护",
+  untrusted_content_guard: "不可信内容防护",
+  tool_call_guard: "工具调用防护",
+  rag_poison_guard: "RAG 投毒防护",
+};
+const FORWARD_BASELINE_FILTERS = ["redaction", "exact_value_redaction"];
+const FORWARD_DENIED_REASONS = {
+  forward_rule_invalid: "条目非法",
+  forward_config_invalid: "配置整体非法",
+  forward_rule_disabled: "已停用",
+};
+
+function forwardBaseUrl(host) {
+  return `${window.location.protocol}//${host}`;
+}
+
+function forwardPosture(item) {
+  const mode = item.filters && item.filters.mode;
+  if (mode === "custom") {
+    return `自定义 ${item.custom_on_count || 0}/${item.filter_total || 13}`;
+  }
+  return "策略默认";
+}
+
+async function loadForwards() {
+  const tbody = document.getElementById("forward-tbody");
+  const countEl = document.getElementById("forward-count");
+  if (!tbody) return;
+  showSkeleton(tbody, 6);
+  try {
+    const data = await fetchJson("/__ui__/api/forwards", { resource: "forwards" });
+    forwardState = {
+      items: Array.isArray(data.items) ? data.items : [],
+      denied: Array.isArray(data.denied) ? data.denied : [],
+      globalFilters: data.global_filters || {},
+      gateOpen: !!data.public_baseline_off_allowed,
+    };
+    if (countEl) {
+      const deniedNote = forwardState.denied.length ? `，${forwardState.denied.length} 条非法` : "";
+      countEl.textContent = `共 ${forwardState.items.length} 条规则${deniedNote}`;
+    }
+    if (!forwardState.items.length && !forwardState.denied.length) {
+      tbody.innerHTML = emptyStateRow(6, "还没有配置整域名转发。", {
+        id: "forward-add",
+        label: "新增转发",
+      });
+      return;
+    }
+    tbody.innerHTML = "";
+    forwardState.items.forEach((item) => tbody.appendChild(forwardRow(item)));
+    forwardState.denied.forEach((item) => tbody.appendChild(forwardDeniedRow(item)));
+  } catch (err) {
+    tbody.innerHTML = errorStateRow(6, err, "转发规则加载失败");
+    if (countEl) countEl.textContent = "加载失败";
+  }
+}
+
+function forwardRow(item) {
+  const tr = document.createElement("tr");
+  const badges = [];
+  if (item.baseline_off) badges.push('<span class="badge badge-error">基线关闭</span>');
+  if (item.whitelist_bypass) badges.push('<span class="badge badge-warning">开关不生效</span>');
+  const statusBadge = item.status === "enabled"
+    ? '<span class="badge badge-success">启用</span>'
+    : '<span class="badge badge-muted">停用</span>';
+  const exposeBadge = item.expose === "public"
+    ? '<span class="badge badge-warning">public</span>'
+    : '<span class="badge badge-muted">internal</span>';
+  tr.innerHTML = `
+    <td>${statusBadge}</td>
+    <td><button class="token-code" title="点击复制域名" data-copy="${escapeHtml(item.host)}">${escapeHtml(item.host)}</button></td>
+    <td><div class="token-upstream" title="${escapeHtml(item.upstream_base)}">${escapeHtml(item.upstream_base)}</div></td>
+    <td>${exposeBadge}</td>
+    <td><div class="forward-row-badges"><span>${escapeHtml(forwardPosture(item))}</span>${badges.join("")}</div></td>
+    <td class="u-nowrap">
+      <button class="btn-sm-ghost" data-probe-host="${escapeHtml(item.host)}">探活</button>
+      <button class="btn-edit-sm" data-edit-forward="${escapeHtml(item.host)}">编辑</button>
+      <button class="btn-danger-sm" data-del-forward="${escapeHtml(item.host)}">删除</button>
+    </td>`;
+  tr.querySelector("[data-edit-forward]").addEventListener("click", () => openForwardModal(item));
+  tr.querySelector("[data-probe-host]").addEventListener("click", (event) =>
+    probeForward(event.currentTarget.dataset.probeHost)
+  );
+  tr.querySelector("[data-del-forward]").addEventListener("click", () => deleteForward(item.host));
+  return tr;
+}
+
+function forwardDeniedRow(item) {
+  const tr = document.createElement("tr");
+  const label = FORWARD_DENIED_REASONS[item.reason] || item.reason || "非法";
+  tr.innerHTML = `
+    <td><span class="badge badge-error">非法</span></td>
+    <td><code>${escapeHtml(item.host)}</code></td>
+    <td colspan="3" class="field-note err" title="${escapeHtml(item.detail || "")}">${escapeHtml(label)}：${escapeHtml(item.detail || "")}</td>
+    <td class="u-nowrap"><button class="btn-danger-sm" data-del-forward="${escapeHtml(item.host)}">删除</button></td>`;
+  tr.querySelector("[data-del-forward]").addEventListener("click", () => deleteForward(item.host));
+  return tr;
+}
+
+async function deleteForward(host) {
+  const ok = await AegisUI.confirm({
+    title: "删除转发规则",
+    message: "删除后该域名的请求会回落到网关现有路由（不再转发到上游）。",
+    detail: host,
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await fetchJson(`/__ui__/api/forwards/${encodeURIComponent(host)}`, {
+      method: "DELETE",
+      headers: { "x-aegis-ui-csrf": uiCsrfToken },
+      resource: "forwards",
+    });
+    loadForwards();
+  } catch (err) {
+    handleWriteError(err, loadForwards, "删除失败");
+  }
+}
+
+async function probeForward(host) {
+  const item = forwardState.items.find((entry) => entry.host === host);
+  if (!item) return;
+  try {
+    const data = await fetchJson("/__ui__/api/forwards/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+      body: JSON.stringify({ upstream_base: item.upstream_base }),
+    });
+    if (!data.reachable) {
+      AegisUI.toast(`${host} 不可达：${data.detail}`, "err");
+      return;
+    }
+    AegisUI.toast(`${host} 已连通（HTTP ${data.status_code}, ${data.elapsed_ms} ms）`, "ok");
+  } catch (err) {
+    AegisUI.toast(describeWriteError(err, "探活失败"), "err");
+  }
+}
+
+// The forward upstream is a whole domain, so a /v1 suffix is the one mistake
+// worth calling out that the token validator would not.
+function forwardUpstreamFeedback(raw) {
+  const base = upstreamFeedback(raw);
+  if (base.level === "err") return base;
+  const path = String(raw || "").trim().replace(/\/+$/, "").replace(/^https?:\/\/[^/]+/i, "");
+  if (path === "/v1" || path.endsWith("/v1")) {
+    return { level: "warn", text: "转发的是整个域名，上游地址不要带 /v1" };
+  }
+  return base;
+}
+
+function renderForwardUpstreamFeedback() {
+  const note = document.getElementById("forward-upstream-note");
+  const probe = document.getElementById("forward-probe");
+  if (!note) return { level: "", text: "" };
+  const feedback = forwardUpstreamFeedback(document.getElementById("forward-upstream").value);
+  note.textContent = feedback.text;
+  note.className = `field-note ${feedback.level}`;
+  if (probe) probe.disabled = feedback.level === "err" || feedback.level === "";
+  return feedback;
+}
+
+function forwardModeValue() {
+  const checked = document.querySelector('input[name="forward-mode"]:checked');
+  return checked ? checked.value : "policy";
+}
+
+function setForwardMode(mode) {
+  document.querySelectorAll('input[name="forward-mode"]').forEach((el) => {
+    el.checked = el.value === mode;
+  });
+  const custom = document.getElementById("forward-custom");
+  if (custom) custom.classList.toggle("hidden", mode !== "custom");
+}
+
+function currentForwardFilters() {
+  const custom = {};
+  document.querySelectorAll("#forward-filter-list select").forEach((sel) => {
+    if (sel.value === "on") custom[sel.dataset.filter] = true;
+    else if (sel.value === "off") custom[sel.dataset.filter] = false;
+  });
+  return custom;
+}
+
+function renderForwardFilters(custom) {
+  const list = document.getElementById("forward-filter-list");
+  if (!list) return;
+  const selected = custom || {};
+  const expose = document.getElementById("forward-expose").value;
+  const gateBlocked = expose === "public" && !forwardState.gateOpen;
+  list.innerHTML = "";
+  Object.keys(forwardState.globalFilters)
+    .sort()
+    .forEach((name) => {
+      const globalOn = forwardState.globalFilters[name];
+      const baselineLocked = gateBlocked && FORWARD_BASELINE_FILTERS.includes(name);
+      const value = baselineLocked ? "" : selected[name] === true ? "on" : selected[name] === false ? "off" : "";
+      const row = document.createElement("div");
+      row.className = "forward-filter-item";
+      row.innerHTML = `
+        <label for="ff-${escapeHtml(name)}">${escapeHtml(FORWARD_FILTER_LABELS[name] || name)}</label>
+        <span class="forward-filter-state">全局:${globalOn ? "开" : "关"}</span>
+        <select id="ff-${escapeHtml(name)}" data-filter="${escapeHtml(name)}" ${baselineLocked ? "disabled" : ""}>
+          <option value="">跟随策略</option>
+          <option value="on" ${value === "on" ? "selected" : ""}>开</option>
+          <option value="off" ${value === "off" ? "selected" : ""}>关</option>
+        </select>`;
+      if (baselineLocked) {
+        row.title = "public 规则在 AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF 未开启时不能关闭基线脱敏";
+      }
+      row.querySelector("select").addEventListener("change", updateForwardBaselineWarning);
+      list.appendChild(row);
+    });
+  updateForwardBaselineWarning();
+}
+
+function updateForwardBaselineWarning() {
+  const warning = document.getElementById("forward-baseline-warning");
+  if (!warning) return;
+  const filterList = document.getElementById("forward-filter-list");
+  const off = filterList
+    ? Array.from(filterList.querySelectorAll("select")).filter(
+        (sel) => FORWARD_BASELINE_FILTERS.includes(sel.dataset.filter) && sel.value === "off"
+      )
+    : [];
+  if (forwardModeValue() === "custom" && off.length) {
+    warning.textContent = "已关闭基线脱敏：该域名的请求将不做任何脱敏，原文直达上游。";
+    warning.classList.remove("hidden");
+  } else {
+    warning.classList.add("hidden");
+  }
+}
+
+function updateForwardBaseUrl() {
+  const host = document.getElementById("forward-host").value.trim();
+  const node = document.getElementById("forward-baseurl");
+  if (node) node.textContent = host ? forwardBaseUrl(host) : "—";
+}
+
+function openForwardModal(item) {
+  const modal = document.getElementById("forward-modal");
+  if (!modal) return;
+  document.getElementById("forward-modal-original").value = item ? item.host : "";
+  document.getElementById("forward-modal-title").textContent = item ? "编辑转发规则" : "新增转发规则";
+  document.getElementById("forward-host").value = item ? item.host : "";
+  document.getElementById("forward-upstream").value = item ? item.upstream_base : "";
+  document.getElementById("forward-note").value = item ? item.note || "" : "";
+  document.getElementById("forward-enabled").checked = item ? !!item.enabled : true;
+  document.getElementById("forward-expose").value = item ? item.expose || "internal" : "internal";
+  const mode = item && item.filters ? item.filters.mode || "policy" : "policy";
+  setForwardMode(mode);
+  renderForwardFilters(item && item.filters ? item.filters.custom || {} : {});
+  document.getElementById("forward-modal-error").textContent = "";
+  setStatus("forward-probe-status", "");
+  renderForwardUpstreamFeedback();
+  updateForwardBaseUrl();
+  openModal(modal, document.getElementById("forward-host"));
+}
+
+function closeForwardModal() {
+  closeModal(document.getElementById("forward-modal"));
+}
+
+async function probeForwardModal() {
+  const feedback = renderForwardUpstreamFeedback();
+  if (feedback.level === "err" || !feedback.level) {
+    setStatus("forward-probe-status", "请先填写有效的上游地址", true);
+    return;
+  }
+  const button = document.getElementById("forward-probe");
+  const upstream = document.getElementById("forward-upstream").value.trim();
+  button.disabled = true;
+  setStatus("forward-probe-status", "测试中…");
+  try {
+    const data = await fetchJson("/__ui__/api/forwards/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+      body: JSON.stringify({ upstream_base: upstream }),
+    });
+    if (!data.reachable) {
+      setStatus("forward-probe-status", `不可达：${data.detail}`, true);
+      return;
+    }
+    const auth = data.status_code === 401 || data.status_code === 403;
+    setStatus(
+      "forward-probe-status",
+      `已连通，返回 HTTP ${data.status_code}（${data.elapsed_ms} ms）` + (auth ? " — 需要鉴权，属正常" : ""),
+      auth ? "warn" : "ok"
+    );
+  } catch (err) {
+    setStatus("forward-probe-status", describeWriteError(err, "测试失败"), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function submitForwardModal() {
+  const errorEl = document.getElementById("forward-modal-error");
+  errorEl.textContent = "";
+  const original = document.getElementById("forward-modal-original").value.trim();
+  const host = document.getElementById("forward-host").value.trim().toLowerCase();
+  const upstream = document.getElementById("forward-upstream").value.trim();
+  if (!host) {
+    errorEl.textContent = "请填写网关域名";
+    return;
+  }
+  if (!upstream) {
+    errorEl.textContent = "请填写上游地址";
+    return;
+  }
+  const feedback = forwardUpstreamFeedback(upstream);
+  if (feedback.level === "err") {
+    errorEl.textContent = feedback.text;
+    return;
+  }
+  const mode = forwardModeValue();
+  const filters = { mode };
+  let baselineOff = false;
+  if (mode === "custom") {
+    const custom = currentForwardFilters();
+    baselineOff = FORWARD_BASELINE_FILTERS.some((name) => custom[name] === false);
+    filters.custom = custom;
+  }
+  if (baselineOff) {
+    const ok = await AegisUI.confirm({
+      title: "确认关闭基线脱敏",
+      message: "该域名的请求将不做任何脱敏，原文直达上游。",
+      detail: host,
+      confirmLabel: "确认关闭",
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const body = {
+    host,
+    enabled: document.getElementById("forward-enabled").checked,
+    upstream_base: upstream,
+    note: document.getElementById("forward-note").value.trim(),
+    expose: document.getElementById("forward-expose").value,
+    filters,
+  };
+  const submitBtn = document.getElementById("forward-modal-submit");
+  submitBtn.disabled = true;
+  try {
+    if (original) {
+      await fetchJson(`/__ui__/api/forwards/${encodeURIComponent(original)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify(body),
+        resource: "forwards",
+      });
+    } else {
+      await fetchJson("/__ui__/api/forwards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-aegis-ui-csrf": uiCsrfToken },
+        body: JSON.stringify(body),
+        resource: "forwards",
+      });
+    }
+    closeForwardModal();
+    loadForwards();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+function bindForwardModal() {
+  const addBtn = document.getElementById("forward-add");
+  const refreshBtn = document.getElementById("forward-refresh");
+  const modal = document.getElementById("forward-modal");
+  const panel = document.getElementById("forwards");
+
+  if (addBtn) addBtn.addEventListener("click", () => openForwardModal(null));
+  if (refreshBtn) refreshBtn.addEventListener("click", loadForwards);
+  if (panel) {
+    panel.addEventListener("click", (event) => {
+      if (event.target.closest('[data-empty-action="forward-add"]')) openForwardModal(null);
+    });
+    bindCopyButtons(panel);
+  }
+  if (!modal) return;
+
+  document.getElementById("forward-modal-close").addEventListener("click", closeForwardModal);
+  document.getElementById("forward-modal-cancel").addEventListener("click", closeForwardModal);
+  document.getElementById("forward-modal-submit").addEventListener("click", submitForwardModal);
+  document.getElementById("forward-probe").addEventListener("click", probeForwardModal);
+  document.getElementById("forward-copy").addEventListener("click", async () => {
+    const value = document.getElementById("forward-baseurl").textContent || "";
+    try {
+      await navigator.clipboard.writeText(value);
+      AegisUI.toast("baseURL 已复制", "ok");
+    } catch (_error) {
+      AegisUI.toast("浏览器拒绝了剪贴板访问，请手动复制", "warn");
+    }
+  });
+  document.getElementById("forward-host").addEventListener("input", updateForwardBaseUrl);
+  document.getElementById("forward-upstream").addEventListener("input", () => {
+    renderForwardUpstreamFeedback();
+    setStatus("forward-probe-status", "");
+  });
+  document.getElementById("forward-expose").addEventListener("change", () =>
+    renderForwardFilters(currentForwardFilters())
+  );
+  document.querySelectorAll('input[name="forward-mode"]').forEach((el) =>
+    el.addEventListener("change", () => {
+      setForwardMode(forwardModeValue());
+      renderForwardFilters(currentForwardFilters());
+    })
+  );
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) closeForwardModal();
+  });
+  modal.addEventListener("keydown", (event) => {
+    trapModalFocus(modal, event);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeForwardModal();
+    }
+  });
+}
+
 // ─── Actions ─────────────────────────────────
 
 function bindActions() {
@@ -1574,6 +2014,7 @@ function bindKeyboardShortcuts() {
 
 bindActions();
 bindTokenModal();
+bindForwardModal();
 bindOnboarding();
 bindConfigSearch();
 bindOverviewLinks();
@@ -1582,6 +2023,7 @@ bindKeyboardShortcuts();
 honourInitialHash();
 initScrollSpy();
 loadTokens();
+loadForwards();
 loadBootstrap().catch((error) => {
   const output = document.getElementById("bootstrap-output");
   if (output) output.textContent = `加载失败: ${error.message}`;
