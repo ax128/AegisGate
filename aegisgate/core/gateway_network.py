@@ -83,6 +83,32 @@ def _real_client_ip(request: Request) -> str:
     return direct_ip
 
 
+def trusted_forwarded_host(request: Request) -> str:
+    """First ``X-Forwarded-Host`` value, only when the direct peer is a trusted proxy.
+
+    This is the single read point for ``X-Forwarded-Host`` in the codebase: both
+    the public-base-URL builder and the host-forwarding router go through it, so
+    the trust decision cannot drift between them.
+    """
+    direct_ip = (request.client.host if request.client else "").strip()
+    if not _is_trusted_proxy(direct_ip):
+        return ""
+    return (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+
+
+def trusted_forwarded_proto(request: Request) -> str:
+    """First ``X-Forwarded-Proto`` value (lower-cased), trusted-proxy gated."""
+    direct_ip = (request.client.host if request.client else "").strip()
+    if not _is_trusted_proxy(direct_ip):
+        return ""
+    return (
+        (request.headers.get("x-forwarded-proto") or "")
+        .split(",")[0]
+        .strip()
+        .lower()
+    )
+
+
 def _is_loopback_ip(host: str) -> bool:
     normalized = _normalize_ip_host(host)
     if not normalized:
