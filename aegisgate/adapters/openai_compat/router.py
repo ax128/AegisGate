@@ -422,10 +422,14 @@ async def _iter_forward_stream_with_pinning(
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
-    """Adjust ctx.enabled_filters from the x-aegis-filter-mode header. Returns the mode or None."""
+    """Adjust ctx.enabled_filters from the filter-mode header and the forward rule. Returns the mode.
+
+    Both switch layers are applied here and only here. The ten ``_execute_*``
+    entrypoints each call ``policy_engine.resolve`` then this function, so a
+    forward rule's per-filter overrides reach all of them without touching the
+    entrypoints; ``test_forward_filter_overrides`` pins the call-count equality.
+    """
     mode = _filter_mode_from_headers(headers)
-    if not mode:
-        return None
     if mode == "redact":
         ctx.enabled_filters = ctx.enabled_filters & _REDACT_ONLY_FILTERS
         ctx.security_tags.add("filter_mode:redact")
@@ -441,7 +445,41 @@ def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str |
             "filter_mode=passthrough applied request_id=%s (all filters skipped)",
             ctx.request_id,
         )
+    _apply_forward_filter_overrides(ctx, headers)
     return mode
+
+
+def _apply_forward_filter_overrides(
+    ctx: RequestContext, headers: Mapping[str, str]
+) -> None:
+    """Apply a forward rule's explicit filter switches on top of the policy result.
+
+    A rule can turn a globally disabled filter back on and a globally enabled one
+    off. The rule is looked up by host at request time, so deleting it on hot
+    reload makes an in-flight request fall back to "no overrides" without
+    crashing or leaking a stale switch.
+    """
+    forward_host = (
+        headers.get("x-aegis-forward-host")
+        or headers.get("X-Aegis-Forward-Host")
+        or ""
+    ).strip()
+    if not forward_host:
+        return
+    from aegisgate.core import gw_forwards
+
+    rule = gw_forwards.get(forward_host)
+    overrides = rule.resolved_filter_overrides() if rule is not None else {}
+    if overrides:
+        ctx.forward_filter_overrides = overrides
+        for name, enabled in overrides.items():
+            if enabled:
+                ctx.enabled_filters.add(name)
+            else:
+                ctx.enabled_filters.discard(name)
+    ctx.security_tags.add(f"forward_rule:{forward_host}")
+    if rule is not None and rule.baseline_off:
+        ctx.security_tags.add(f"forward_rule:{forward_host}:baseline_off")
 
 
 def _forwarding_kernel_rollout_is_live(route_key: str) -> bool:

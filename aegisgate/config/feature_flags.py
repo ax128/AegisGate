@@ -30,22 +30,72 @@ class FeatureFlags:
     exact_value_redaction: bool = settings.enable_exact_value_redaction
 
 
+def _forward_override_counts() -> tuple[dict[str, int], dict[str, int]]:
+    """How many enabled forward rules turn each critical filter on / off.
+
+    Reported alongside the global state because with rule-level switches a
+    globally-all-off configuration can still be fully protected on the forwarded
+    hosts (and the opposite: globally on but switched off per rule).
+    """
+    turned_on: dict[str, int] = {}
+    turned_off: dict[str, int] = {}
+    try:
+        from aegisgate.core import gw_forwards
+
+        rules = gw_forwards.list_rules()
+    except Exception:  # pragma: no cover - defensive, must not break flag checks
+        return turned_on, turned_off
+    for rule in rules:
+        if not rule.enabled:
+            continue
+        for name, value in rule.resolved_filter_overrides().items():
+            if name not in _SECURITY_CRITICAL_FLAGS:
+                continue
+            bucket = turned_on if value else turned_off
+            bucket[name] = bucket.get(name, 0) + 1
+    return turned_on, turned_off
+
+
+def _override_note(
+    names: tuple[str, ...],
+    turned_on: dict[str, int],
+    turned_off: dict[str, int],
+) -> str:
+    parts = []
+    for name in names:
+        on = turned_on.get(name, 0)
+        off = turned_off.get(name, 0)
+        if on or off:
+            parts.append(f"{name}(on:{on}/off:{off})")
+    if not parts:
+        return ""
+    return "; forward-rule overrides: " + ", ".join(parts)
+
+
 def _check_disabled_filters(flags: FeatureFlags) -> None:
     from aegisgate.util.logger import logger
 
     disabled = [name for name in _SECURITY_CRITICAL_FLAGS if not getattr(flags, name)]
+    turned_on, turned_off = _forward_override_counts()
+    note = _override_note(_SECURITY_CRITICAL_FLAGS, turned_on, turned_off)
     if len(disabled) == len(_SECURITY_CRITICAL_FLAGS):
         logger.error(
             "SECURITY CRITICAL: ALL security-critical filters are disabled (%s). "
             "The gateway provides NO security protection. "
-            "Set at least one AEGIS_ENABLE_* flag to true.",
+            "Set at least one AEGIS_ENABLE_* flag to true.%s",
             ", ".join(disabled),
+            note,
         )
     elif disabled:
         logger.warning(
             "Security filters disabled: %s. "
-            "Review AEGIS_ENABLE_* settings to ensure this is intentional.",
+            "Review AEGIS_ENABLE_* settings to ensure this is intentional.%s",
             ", ".join(disabled),
+            note,
+        )
+    elif any(turned_off.get(name) for name in _SECURITY_CRITICAL_FLAGS):
+        logger.warning(
+            "Security filters are globally on but turned off by forward rules.%s", note
         )
 
 
@@ -74,3 +124,12 @@ def refresh_feature_flags() -> None:
     _check_disabled_filters(new)
     global feature_flags
     feature_flags = new
+
+
+def recheck_disabled_filters() -> None:
+    """Re-emit the disabled-filter report against the current flags and forward rules.
+
+    Called after a gw_forwards hot reload: the global flags did not move, but the
+    per-rule overrides counted in the message did.
+    """
+    _check_disabled_filters(feature_flags)

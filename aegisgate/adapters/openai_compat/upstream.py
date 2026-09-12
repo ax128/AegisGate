@@ -173,9 +173,18 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
         "x_aegis_filter_mode",
         "x-aegis-token-hint",
         "x_aegis_token_hint",
+        "x-aegis-forward-host",
+        "x_aegis_forward_host",
     }
     _strip_lower = {name.lower() for name in _strip}
     headers = {k: v for k, v in headers.items() if k.lower() not in _strip_lower}
+    # A host-forwarding rule's filter switches travel the same way the filter mode
+    # does: only the scope may inject them.
+    injected_forward_rule = request.scope.get("aegis_forward_rule")
+    if injected_forward_rule is not None:
+        forward_host = str(getattr(injected_forward_rule, "host", "") or "").strip()
+        if forward_host:
+            headers["x-aegis-forward-host"] = forward_host
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()
