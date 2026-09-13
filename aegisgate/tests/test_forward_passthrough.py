@@ -30,8 +30,10 @@ class _FakeResponse:
         self._chunks = chunks
         self.closed = False
 
-    async def aiter_bytes(self):
+    async def aiter_raw(self):
         for chunk in self._chunks:
+            if isinstance(chunk, Exception):
+                raise chunk
             yield chunk
 
     async def aclose(self) -> None:
@@ -56,6 +58,11 @@ class _FakeClient:
 
     async def send(self, request, stream: bool = False):
         self.captured["stream"] = stream
+        content = self.captured.get("content")
+        if content is not None and not isinstance(content, (bytes, bytearray)):
+            # A streamed upload: drain it the way httpx would.
+            self.captured["streamed"] = True
+            self.captured["content"] = b"".join([chunk async for chunk in content])
         if self.error is not None:
             raise self.error
         return self.response
@@ -218,6 +225,188 @@ class TestForwarding:
             response = client.get("/v1/models", headers={"Host": "api.ag.com"})
         assert response.status_code == 502
         assert response.json()["error"]["code"] == "upstream_unreachable"
+        # The exception text (addresses, errno) stays in the log.
+        assert "refused" not in response.text
+
+    def test_encoded_path_reaches_upstream_encoded(self, forward_env, monkeypatch) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.get("/files/a%2Fb%3Fx%23y?q=1", headers={"Host": "api.ag.com"})
+        assert fake.captured["url"] == "https://api.xxx.com/files/a%2Fb%3Fx%23y?q=1"
+
+    def test_content_length_upload_is_streamed(self, forward_env, monkeypatch) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.put("/v1/files/x", headers={"Host": "api.ag.com"}, content=b"0123456789")
+        assert fake.captured["streamed"] is True
+        assert fake.captured["content"] == b"0123456789"
+        assert fake.captured["headers"]["Content-Length"] == "10"
+
+    def test_request_without_body_sends_none(self, forward_env, monkeypatch) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.get("/v1/models", headers={"Host": "api.ag.com"})
+        assert fake.captured["content"] == b""
+
+    def test_chunked_body_over_the_cap_is_413(self, forward_env, monkeypatch) -> None:
+        for name, value in (
+            ("max_request_body_bytes", 8),
+            ("v2_max_request_body_bytes", 0),
+            ("forward_max_request_body_bytes", 8),
+        ):
+            monkeypatch.setattr(settings_module.settings, name, value, raising=False)
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+
+        def chunks():
+            yield b"0123456789"
+            yield b"0123456789"
+
+        with _client() as client:
+            # DELETE: the boundary does not read the body of this method itself.
+            response = client.request(
+                "DELETE", "/v1/things/1", headers={"Host": "api.ag.com"}, content=chunks()
+            )
+        assert response.status_code == 413
+        assert "url" not in fake.captured
+
+    def test_spoofed_forwarding_headers_are_replaced(self, forward_env, monkeypatch) -> None:
+        monkeypatch.setattr(settings_module.settings, "enforce_loopback_only", False, raising=False)
+        forward_env({"api.ag.com": _entry(expose="public")})
+        fake = _install_client(monkeypatch, _FakeClient())
+        from aegisgate.core.gateway import app
+
+        with TestClient(app, client=("8.8.8.8", 50000)) as client:
+            client.get(
+                "/admin",
+                headers={
+                    "Host": "api.ag.com",
+                    "X-Forwarded-For": "127.0.0.1",
+                    "X-Real-IP": "127.0.0.1",
+                    "Forwarded": "for=127.0.0.1",
+                },
+            )
+        sent = {k.lower(): v for k, v in fake.captured["headers"].items()}
+        assert sent["x-forwarded-for"] == "8.8.8.8"
+        assert sent["x-forwarded-host"] == "api.ag.com"
+        assert "x-real-ip" not in sent
+        assert "forwarded" not in sent
+
+    def test_gateway_console_cookie_is_not_forwarded(self, forward_env, monkeypatch) -> None:
+        from aegisgate.core.gateway_auth import _UI_SESSION_COOKIE
+
+        assert _UI_SESSION_COOKIE.startswith(forward_routes._GATEWAY_COOKIE_PREFIX)
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.get(
+                "/admin",
+                headers={"Host": "api.ag.com", "Cookie": f"{_UI_SESSION_COOKIE}=s3cr3t; theirs=1"},
+            )
+        assert fake.captured["headers"]["cookie"] == "theirs=1"
+
+
+class TestRawRelay:
+    def test_encoding_and_length_travel_with_the_raw_body(self) -> None:
+        out = forward_routes._build_client_response_headers(
+            {
+                "content-type": "text/html",
+                "content-encoding": "br",
+                "content-length": "42",
+                "transfer-encoding": "chunked",
+            }
+        )
+        assert out["content-encoding"] == "br"
+        assert out["content-length"] == "42"
+        assert "transfer-encoding" not in out
+
+    async def test_mid_stream_error_still_closes_the_upstream(self) -> None:
+        upstream = _FakeResponse(chunks=(b"data: a\n\n", httpx.ReadError("reset")))
+        received = [chunk async for chunk in forward_routes._relay_body(upstream)]
+        assert received == [b"data: a\n\n"]
+        assert upstream.closed is True
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("/a/../b", "/b"),
+            ("/../../etc/x", "/etc/x"),
+            ("/a/./b/.", "/a/b/"),
+            ("/a/%2e%2e/b", "/a/%2e%2e/b"),
+            ("/", "/"),
+        ],
+    )
+    def test_dot_segments_are_clamped_at_the_root(self, raw: str, expected: str) -> None:
+        assert forward_routes._remove_dot_segments(raw) == expected
+
+
+class TestRejectReasons:
+    """§12.5: each forward reject reason, with the metric label recorded."""
+
+    @pytest.fixture()
+    def recorded(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str | None]]:
+        from aegisgate.core import gateway
+
+        calls: list[tuple[int, str | None]] = []
+        original = gateway._record_request_observability
+
+        def spy(**kwargs):
+            calls.append((kwargs["status_code"], kwargs["reject_reason"]))
+            return original(**kwargs)
+
+        monkeypatch.setattr(gateway, "_record_request_observability", spy)
+        return calls
+
+    @pytest.mark.parametrize(
+        ("entry", "reason"),
+        [
+            (_entry(enabled=False), "forward_rule_disabled"),
+            (_entry(filters={"mode": "custom", "custom": {"nope": True}}), "forward_rule_invalid"),
+        ],
+    )
+    def test_rule_state_reasons(self, forward_env, recorded, entry, reason) -> None:
+        forward_env({"api.ag.com": entry})
+        with _client() as client:
+            response = client.get("/v1/models", headers={"Host": "api.ag.com"})
+        assert response.status_code == 403
+        assert response.json()["error_code"] == reason
+        assert (403, reason) in recorded
+
+    def test_config_invalid(self, forward_env, recorded, tmp_path) -> None:
+        forward_env({"api.ag.com": _entry()})
+        from aegisgate.config import settings as settings_module
+
+        Path(settings_module.settings.gw_forwards_path).write_text("{ broken", encoding="utf-8")
+        gw_forwards.load(replace=True)
+        with _client() as client:
+            response = client.get("/v1/models", headers={"Host": "api.ag.com"})
+        assert response.json()["error_code"] == "forward_config_invalid"
+        assert (403, "forward_config_invalid") in recorded
+
+    def test_expose_internal(self, forward_env, recorded, monkeypatch) -> None:
+        monkeypatch.setattr(settings_module.settings, "enforce_loopback_only", False, raising=False)
+        forward_env({"api.ag.com": _entry(expose="internal")})
+        fake = _install_client(monkeypatch, _FakeClient())
+        from aegisgate.core.gateway import app
+
+        with TestClient(app, client=("8.8.8.8", 50000)) as client:
+            response = client.get("/v1/models", headers={"Host": "api.ag.com"})
+        assert response.json()["error_code"] == "forward_expose_internal"
+        assert (403, "forward_expose_internal") in recorded
+        assert "url" not in fake.captured
+
+    def test_duplicate_host_header(self, forward_env, recorded) -> None:
+        forward_env({"api.ag.com": _entry()})
+        with _client() as client:
+            response = client.get(
+                "/v1/models", headers=[("Host", "api.ag.com"), ("Host", "api.ag.com")]
+            )
+        assert response.status_code == 400
+        assert response.json()["error_code"] == "duplicate_host_header"
+        assert (400, "duplicate_host_header") in recorded
 
 
 class TestStreaming:
