@@ -147,6 +147,7 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 会强制所有非 passthrough 请求带签名，浏览器无法提供；两者同开时转发表拒绝加载并在日志打 ERROR，控制台也拒绝修改转发表（409）。
 - `public` 规则关闭基线脱敏需要启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true`，否则该条目直接判为非法（`_denied`，请求 403），并在日志打 ERROR。关闭 `redaction` 只停管线层 PII 脱敏，发往上游前的转发层 PII 清洗是强制基线、仍然生效；关闭 `exact_value_redaction` 则两层都不再替换精确值。
 - 上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志打 WARNING，控制台行内标「开关不生效」。
+- 三条 LLM 路由的流式响应要经过安全扫描，滞后 `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS × 2`（默认 8）个事件转发：受滞后的事件（chat completions / responses 上带文本的事件，messages 上全部 `message_*` / `content_block_*` 事件）要等上游再发出 8 个同类事件或回复结束才放行。首个受滞后事件要等到上游第 9 个这类事件，之后按上游节奏逐条到达，短回复基本整段到达；启动日志 `stream scan config: ... holdback_events=8` 给出当前值。其他路径上的 SSE（透传面）不缓冲。调低 `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS`（1–16，需重启）可缩短等待，代价是扫描更频繁。
 - 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**网关已知的全部 host（生效的与已被拒绝的）一律 403**（`forward_config_invalid`），连续多次保存坏文件也不会放行，不会静默回落到默认上游；单条非法只影响该 host。重启同样不会放行：每次成功加载后，网关把域名清单记在规则文件旁的 `config/.gw_forwards.json.hosts`（0600），启动时文件已坏也按这份清单拒绝；文件能解析但 `version` 不对时，文件里列出的域名同样拒绝。删除规则文件即表示不再转发，清单随之删除。文件修好（或删除）之前，控制台拒绝写入，避免覆盖正在修改的文件。
 - 保留路径（`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应。
 - **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，若与控制台同源，上游脚本可以读取控制台的 CSRF token、带着会话 cookie 调用管理接口，或注册 Service Worker 截获登录表单。因此任何命中的转发域名（包括停用、非法、文件损坏时）上的 `/__ui__*` 一律 403 `forward_console_blocked`。请用网关自身地址打开控制台，例如 `http://127.0.0.1:18080/__ui__`；转发域名不能是 IP，所以用 IP 访问始终可达。

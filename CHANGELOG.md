@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Documentation（整域名转发：LLM 路由流式滞后）
+
+- README、README_zh 与 UPSTREAM-QUICKSTART 的整域名转发小节补充流式延迟说明：三条 LLM 路由的
+  SSE 按 `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS × 2`（默认 8）个事件滞后放行（chat completions /
+  responses 为带文本的事件，messages 为全部 `message_*` / `content_block_*` 事件），首个受滞后事件要等到
+  上游第 9 个这类事件，短回复基本整段到达；透传面的 SSE 不缓冲。行为未改动。
+
 ### Changed（R8.3：field 规则语义跨三层统一）
 
 - **`field_value_patterns` 三层共用一份编译器**（`aegisgate/config/field_patterns.py`）。

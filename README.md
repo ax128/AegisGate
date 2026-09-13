@@ -391,6 +391,15 @@ Security boundaries worth knowing before enabling it:
 - **An upstream on `AEGIS_UPSTREAM_WHITELIST_URL_LIST` skips both pipelines** on
   the three LLM routes, so that rule's filter switches have no effect. The
   startup log and the console flag such rules.
+- **Streaming on the three LLM routes is held back for scanning**: a held SSE
+  event is released only once `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS × 2` (default 8)
+  further held events have arrived, or the reply ends. Held events are the
+  text-carrying ones on chat completions and responses, and every `message_*` /
+  `content_block_*` event on messages. The first held event therefore waits for the
+  upstream's ninth such event, later ones follow at the upstream's pace, and a
+  short reply arrives nearly whole. SSE on any other path (the passthrough face)
+  is relayed as it comes. A lower interval shortens the wait at the cost of more
+  frequent scans (restart required).
 - **Fail-closed.** A broken `gw_forwards.json` (unparseable, `version` not `1`)
   answers 403 `forward_config_invalid` for every host the gateway knew,
   however many broken saves follow, and the console will not overwrite the file
