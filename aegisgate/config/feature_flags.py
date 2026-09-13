@@ -39,6 +39,10 @@ def _forward_override_counts() -> tuple[dict[str, int], dict[str, int]]:
     """
     turned_on: dict[str, int] = {}
     turned_off: dict[str, int] = {}
+    if not settings.enable_gateway_forward:
+        # Rules on disk do nothing while forwarding is off; counting them would
+        # report protection (or exposure) that is not there.
+        return turned_on, turned_off
     try:
         from aegisgate.core import gw_forwards
 
@@ -72,11 +76,16 @@ def _override_note(
     return "; forward-rule overrides: " + ", ".join(parts)
 
 
-def _check_disabled_filters(flags: FeatureFlags) -> None:
+def _check_disabled_filters(
+    flags: FeatureFlags, *, count_forward_overrides: bool = True
+) -> None:
     from aegisgate.util.logger import logger
 
     disabled = [name for name in _SECURITY_CRITICAL_FLAGS if not getattr(flags, name)]
-    turned_on, turned_off = _forward_override_counts()
+    if count_forward_overrides:
+        turned_on, turned_off = _forward_override_counts()
+    else:
+        turned_on, turned_off = {}, {}
     note = _override_note(_SECURITY_CRITICAL_FLAGS, turned_on, turned_off)
     if len(disabled) == len(_SECURITY_CRITICAL_FLAGS):
         logger.error(
@@ -100,7 +109,12 @@ def _check_disabled_filters(flags: FeatureFlags) -> None:
 
 
 feature_flags = FeatureFlags()
-_check_disabled_filters(feature_flags)
+# Import time is too early to count forward rules, and reading them here is not
+# safe either: gw_forwards imports this module for the first time from inside its
+# locked load (validate_rule → _allowed_filter_names), so calling back into
+# gw_forwards.list_rules() would wait on that same lock forever. The startup
+# lifespan re-runs the report with the counts once the table has loaded.
+_check_disabled_filters(feature_flags, count_forward_overrides=False)
 
 
 def refresh_feature_flags() -> None:
@@ -129,7 +143,8 @@ def refresh_feature_flags() -> None:
 def recheck_disabled_filters() -> None:
     """Re-emit the disabled-filter report against the current flags and forward rules.
 
-    Called after a gw_forwards hot reload: the global flags did not move, but the
-    per-rule overrides counted in the message did.
+    Called once the forward table has loaded at startup and after every
+    gw_forwards hot reload: the global flags did not move, but the per-rule
+    overrides counted in the message did.
     """
     _check_disabled_filters(feature_flags)

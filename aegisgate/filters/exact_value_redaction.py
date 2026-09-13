@@ -5,7 +5,10 @@ request messages and response output text.
 
 The filter bypasses the normal ``ctx.enabled_filters`` check: it is controlled by
 the global setting ``enable_exact_value_redaction``, unless a host-forwarding
-rule explicitly overrides it through ``ctx.forward_filter_overrides``.
+rule explicitly overrides it through ``ctx.forward_filter_overrides``. The same
+rule switch reaches the V1 transport layer (``openai_compat.sanitize`` /
+``renderers``) through ``redact_values.exact_value_redaction_active``, so "on"
+and "off" mean the same thing on both layers.
 """
 
 from __future__ import annotations

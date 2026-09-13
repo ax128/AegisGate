@@ -100,6 +100,8 @@ def _trust_header_names() -> set[bytes]:
         b"x_aegis_redaction_whitelist",
         b"x-aegis-forward-host",
         b"x_aegis_forward_host",
+        b"x-aegis-forward-overrides",
+        b"x_aegis_forward_overrides",
     }
 
 

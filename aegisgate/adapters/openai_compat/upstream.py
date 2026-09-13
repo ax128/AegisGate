@@ -41,6 +41,12 @@ _HOP_BY_HOP_HEADERS = {
 _REDACTION_WHITELIST_HEADER = "x-aegis-redaction-whitelist"
 _TRACE_REQUEST_ID_HEADER = "x-aegis-request-id"
 _UPSTREAM_SOURCE_HEADER = "x-aegis-upstream-source"
+# Host-forwarding switches, injected from the middleware scope only (the client's
+# own copies are stripped below): the rule's host, and a snapshot of the per-filter
+# overrides of the rule the request was admitted under.
+_FORWARD_HOST_HEADER = "x-aegis-forward-host"
+_FORWARD_OVERRIDES_HEADER = "x-aegis-forward-overrides"
+_NO_FORWARD_OVERRIDES = "-"
 _SCOPE_UPSTREAM_SOURCE = "scope"
 _CLIENT_UPSTREAM_SOURCE = "client"
 _upstream_async_client: httpx.AsyncClient | None = None
@@ -159,6 +165,29 @@ def _trace_request_id(headers: Mapping[str, str]) -> str:
     return request_id or "-"
 
 
+def encode_forward_overrides(overrides: Mapping[str, bool]) -> str:
+    """``name=1;name=0`` (sorted), or ``-`` for "the rule overrides nothing"."""
+    if not overrides:
+        return _NO_FORWARD_OVERRIDES
+    return ";".join(f"{name}={int(bool(value))}" for name, value in sorted(overrides.items()))
+
+
+def decode_forward_overrides(raw: str) -> dict[str, bool] | None:
+    """Inverse of :func:`encode_forward_overrides`; ``None`` when no snapshot was sent."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value == _NO_FORWARD_OVERRIDES:
+        return {}
+    overrides: dict[str, bool] = {}
+    for item in value.split(";"):
+        name, sep, flag = item.partition("=")
+        name = name.strip()
+        if sep and name and flag.strip() in {"0", "1"}:
+            overrides[name] = flag.strip() == "1"
+    return overrides
+
+
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
     """Take the headers from the request for gateway validation and forwarding (headers only, no query)."""
     headers = dict(request.headers)
@@ -173,8 +202,10 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
         "x_aegis_filter_mode",
         "x-aegis-token-hint",
         "x_aegis_token_hint",
-        "x-aegis-forward-host",
-        "x_aegis_forward_host",
+        _FORWARD_HOST_HEADER,
+        _FORWARD_HOST_HEADER.replace("-", "_"),
+        _FORWARD_OVERRIDES_HEADER,
+        _FORWARD_OVERRIDES_HEADER.replace("-", "_"),
     }
     _strip_lower = {name.lower() for name in _strip}
     headers = {k: v for k, v in headers.items() if k.lower() not in _strip_lower}
@@ -184,7 +215,11 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     if injected_forward_rule is not None:
         forward_host = str(getattr(injected_forward_rule, "host", "") or "").strip()
         if forward_host:
-            headers["x-aegis-forward-host"] = forward_host
+            headers[_FORWARD_HOST_HEADER] = forward_host
+            resolve = getattr(injected_forward_rule, "resolved_filter_overrides", None)
+            headers[_FORWARD_OVERRIDES_HEADER] = encode_forward_overrides(
+                resolve() if callable(resolve) else {}
+            )
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()
