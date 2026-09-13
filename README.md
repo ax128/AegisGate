@@ -375,14 +375,38 @@ Security boundaries worth knowing before enabling it:
   credential is the client's own `Authorization` header, passed through to the
   upstream. `expose: "internal"` (the default) restricts a rule to internal
   clients; `expose: "public"` opens it to anyone who can set `Host`.
+- **Every client on one forward domain shares one tenant and one session/tool
+  cache namespace**, exactly like clients sharing one gateway token. Isolation
+  per client is the token path's job.
+- **Prerequisites.** With the default `AEGIS_ENFORCE_LOOPBACK_ONLY=true` the
+  boundary rejects every non-loopback peer, so set it to `false` unless the only
+  peer is a reverse proxy on the same host. Behind a proxy,
+  `AEGIS_TRUSTED_PROXY_IPS` must list it, or every forwarded request looks
+  public.
 - **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` and forwarding are mutually
-exclusive**: HMAC forces signatures on every non-passthrough request, which a
+  exclusive**: HMAC forces signatures on every non-passthrough request, which a
   browser hitting a forwarded domain cannot provide. Enabling both refuses to
-  load the forward table.
+  load the forward table, and the console refuses to edit it.
+- **An upstream on `AEGIS_UPSTREAM_WHITELIST_URL_LIST` skips both pipelines** on
+  the three LLM routes, so that rule's filter switches have no effect. The
+  startup log and the console flag such rules.
+- **Fail-closed.** A broken `gw_forwards.json` (unparseable, `version` not `1`)
+  answers 403 `forward_config_invalid` for every host the gateway knew,
+  however many broken saves follow, and the console will not overwrite the file
+  until it is fixed or deleted. A single invalid entry only denies that host.
 - Reserved paths are shadowed on a forward host — an upstream that also serves
-  `/metrics` or `/health` will not see them.
-- Uploads without `Content-Length` are buffered up to
-  `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`; large file uploads need the header.
+  `/metrics` or `/health` will not see them. They keep answering even when the
+  rule is disabled or invalid.
+- Uploads with `Content-Length` are streamed through; uploads without it are
+  buffered up to `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`.
+- Only response **headers** are rewritten (`Location`, `Set-Cookie` domain,
+  `Access-Control-Allow-Origin`); HTML/JS/JSON bodies that hard-code the
+  upstream's own URL are not. WebSocket is not supported, and methods other than
+  GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS answer 405.
+- From a peer that is not a trusted proxy, `X-Forwarded-For` / `X-Real-IP` /
+  `Forwarded` are replaced with the real peer before reaching the upstream, and
+  the console's own `aegis_ui_*` cookies are never forwarded (nor accepted from
+  the upstream).
 - `/v2/*` and `/relay/*` on a forward domain are passed through, not handled by
   the gateway's own v2/relay routes.
 

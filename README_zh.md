@@ -610,9 +610,15 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 启用前需要知道的边界：
 
 - **本层不鉴权，只选目的地。** 真实凭据是客户端自带、透传给上游的 `Authorization`。`expose: "internal"`（默认）只允许内网客户端；`expose: "public"` 对任何能设置 `Host` 的客户端开放。
-- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 对所有非 passthrough 请求强制签名，浏览器访问转发域名无法提供签名；两者同开时转发表拒绝加载。
-- 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游。
-- 无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`；大文件上传需客户端带该头。
+- **同一转发域名上的所有客户端共享一个 tenant 与会话 / 工具缓存命名空间**，等同于一群客户端共用一个 token。需要按客户端隔离，请用 token 路径。
+- **前置条件**：`AEGIS_ENFORCE_LOOPBACK_ONLY` 默认 `true`，boundary 会拒绝所有非本机对端；除非唯一对端是同机反代，否则需设为 `false`。经反代时 `AEGIS_TRUSTED_PROXY_IPS` 必须包含该反代，否则所有转发请求都会被判为公网客户端。
+- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 对所有非 passthrough 请求强制签名，浏览器访问转发域名无法提供签名；两者同开时转发表拒绝加载，控制台也拒绝修改转发表。
+- **上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时**，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志与控制台会标出。
+- **fail-closed**：`gw_forwards.json` 解析失败或 `version` 不是 `1` 时，网关已知的全部域名一律 403 `forward_config_invalid`（连续多次保存坏文件也不会放行），控制台在文件修好或删除前不会覆盖它；单条非法只影响该域名。
+- 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游；规则停用或非法时保留路径照常由网关响应。
+- 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`。
+- 只改写响应**头**（`Location`、`Set-Cookie` 的 Domain、`Access-Control-Allow-Origin`），不改写响应体：上游 HTML / JS / JSON 里写死的自身地址不会被替换。不支持 WebSocket；GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 以外的方法返回 405。
+- 对端不是可信代理时，`X-Forwarded-For` / `X-Real-IP` / `Forwarded` 会被替换为真实对端后再发给上游；控制台自己的 `aegis_ui_*` cookie 既不转发给上游，也不接受上游下发。
 - 转发域名上的 `/v2/*` 与 `/relay/*` 一律透传，不进网关自己的 v2 / relay 路由。
 
 ## 3. 本地开发与本地 UI

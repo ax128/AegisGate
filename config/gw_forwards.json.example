@@ -8,13 +8,15 @@
     "expose       (public|internal)     internal = internal clients only (default); public = any client",
     "filters.mode (policy|custom)       policy = keep the normal filter resolution (default)",
     "filters.custom                     only with mode=custom: filter name -> bool. A missing name means",
-    "                                   'no override'; the keys are the AEGIS_ENABLE_* flag names."
+    "                                   'no override'. Keys are the filter names (redaction, exact_value_redaction,",
+    "                                   injection_detector, ...), i.e. the AEGIS_ENABLE_* flags without the prefix."
   ],
   "_security_notes": [
     "This layer does not authenticate; it only picks a destination. The client's Authorization header is the credential.",
     "A public rule may not turn off the baseline filters (redaction / exact_value_redaction) unless AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true is pinned at startup.",
     "AEGIS_ENABLE_REQUEST_HMAC_AUTH=true and forwarding are mutually exclusive: the forward table refuses to load.",
-    "A broken file denies every previously known host (403 forward_config_invalid) instead of falling back to the default upstream."
+    "A broken file denies every host the gateway knew (403 forward_config_invalid), however many broken saves follow, instead of falling back to the default upstream; the console will not write until the file is fixed or deleted.",
+    "Behind a reverse proxy, AEGIS_TRUSTED_PROXY_IPS must list it; clients reaching the gateway directly need AEGIS_ENFORCE_LOOPBACK_ONLY=false."
   ],
   "version": 1,
   "forwards": {

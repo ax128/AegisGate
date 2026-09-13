@@ -141,10 +141,17 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 ### 5. 安全前提（必读）
 
 - **本层不鉴权，只选目的地。** 网关只是把请求送到规则指定的上游；真实凭据是客户端的 `Authorization`。`expose` 默认 `internal`（仅内网客户端）；要开放公网必须显式写 `public`。
-- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 会强制所有非 passthrough 请求带签名，浏览器无法提供；两者同开时转发表拒绝加载并在日志打 ERROR。
-- `public` 规则关闭基线脱敏需要启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true`，否则该条目直接判为非法（`_denied`，请求 403），并在日志打 ERROR。
-- 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**上一份有效规则的全部 host 一律 403**（`forward_config_invalid`），不会静默回落到默认上游；单条非法只影响该 host。
-- 无 `Content-Length` 的上传会被 boundary 缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB）；大文件上游需客户端带 `Content-Length`。
+- **隔离粒度**：同一转发域名上的所有客户端共享一个 tenant 与会话 / 工具缓存命名空间，等同于共用一个 token；需要按客户端隔离请用 token 路径。
+- **`AEGIS_ENFORCE_LOOPBACK_ONLY`**：默认 `true` 时 boundary 拒绝所有非本机对端。网关只由同机 Caddy/Nginx 访问时可以保持默认；客户端直连网关时必须设为 `false`。
+- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 会强制所有非 passthrough 请求带签名，浏览器无法提供；两者同开时转发表拒绝加载并在日志打 ERROR，控制台也拒绝修改转发表（409）。
+- `public` 规则关闭基线脱敏需要启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true`，否则该条目直接判为非法（`_denied`，请求 403），并在日志打 ERROR。关闭 `redaction` 只停管线层 PII 脱敏，发往上游前的转发层 PII 清洗是强制基线、仍然生效；关闭 `exact_value_redaction` 则两层都不再替换精确值。
+- 上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志打 WARNING，控制台行内标「开关不生效」。
+- 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**网关已知的全部 host（生效的与已被拒绝的）一律 403**（`forward_config_invalid`），连续多次保存坏文件也不会放行，不会静默回落到默认上游；单条非法只影响该 host。文件修好（或删除）之前，控制台拒绝写入，避免覆盖正在修改的文件。
+- 保留路径（`/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应，便于通过同一域名打开控制台修复配置。
+- 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB），超过返回 413。
+- 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
+- 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host` 再发给上游；控制台的 `aegis_ui_*` cookie 不会转发给上游，上游下发的同名 cookie 也会被丢弃。
+- 路径按客户端发送的原样（保留百分号编码）拼到 `upstream_base` 后面；字面 `.` / `..` 段在网关侧解析且不会越过根。
 - 转发域名上的 `/v2/*`、`/relay/*` 一律透传，**不**进入网关自己的 v2/relay 路由，也不受本面板开关控制。
 
 ### 6. Caddy 示例（泛域名）

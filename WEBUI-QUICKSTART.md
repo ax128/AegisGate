@@ -263,10 +263,10 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
 编辑抽屉三块：
 
 1. **基本**：网关域名、上游地址、备注、启用、暴露面。
-2. **安检开关**：`policy`（不覆盖）或 `custom`。选 `custom` 后展开 13 项，每项是**三态**下拉（跟随策略 / 开 / 关），并标出该过滤器当前全局态；只有显式选「开 / 关」才会写入 `filters.custom`，因此「缺项 = 不覆盖」在界面上可直接表达。关掉基线两项（`redaction`、`exact_value_redaction`）会弹二次确认；`public` 规则在 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` 未开时这两项被禁用并给出原因。
-3. **对外 baseURL**：一键复制，客户端只需把 baseUrl 指向它。
+2. **安检开关**：`policy`（不覆盖）或 `custom`。选 `custom` 后展开 13 项，每项是**三态**下拉（跟随策略 / 开 / 关），并标出该过滤器当前全局态；只有显式选「开 / 关」才会写入 `filters.custom`，因此「缺项 = 不覆盖」在界面上可直接表达。关掉基线两项（`redaction`、`exact_value_redaction`）会弹二次确认，文案写明实际去掉的是什么（`redaction` 只停管线层 PII 脱敏，转发层强制 PII 清洗仍保留；`exact_value_redaction` 关后精确值原文直达上游）；`public` 规则在 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` 未开时这两项只禁用「关」，「开」与「跟随策略」照常可选，已显式开启的不会在编辑时被清掉。
+3. **对外 baseURL**：`https://<网关域名>`，一键复制，客户端只需把 baseUrl 指向它。
 
-API：`GET/POST /__ui__/api/forwards`、`PATCH/DELETE /__ui__/api/forwards/{host}`、`POST /__ui__/api/forwards/probe`。写入走与规则 / 配置相同的 ETag 乐观并发（§3.2）、CSRF 与审计；校验与加载调用同一个 `validate_rule()`，所以控制台不会存进一个加载时会被拒的条目。
+API：`GET/POST /__ui__/api/forwards`、`PATCH/DELETE /__ui__/api/forwards/{host}`、`POST /__ui__/api/forwards/probe`。写入走 ETag 乐观并发（§3.2）、CSRF 与审计；`If-Match` 在写锁内对着磁盘上的文件校验，改名是一次原子写入。规则文件无法解析、或 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发同开时，写接口返回 `409 forward_table_locked`，需先手工修好或删除文件。校验与加载调用同一个 `validate_rule()`，所以控制台不会存进一个加载时会被拒的条目。
 
 注意：**本层不鉴权，只选目的地**——真实凭据是客户端自带、透传给上游的 `Authorization`；转发域名上的 `/v2/*`、`/relay/*` 一律透传，不受本面板开关控制。安全边界与 Caddy 示例见 [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md)。
 
