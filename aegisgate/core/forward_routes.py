@@ -46,6 +46,9 @@ _PATH_SAFE = "/:@!$&'()*+,;=-._~"
 # Request methods whose body the security boundary already sizes against its cap.
 _BOUNDARY_SIZED_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
+# Response headers the serving stack writes itself; see _build_client_response_headers.
+_SERVER_OWNED_RESPONSE_HEADERS = frozenset({"date", "server"})
+
 
 def _build_forward_headers(request: Request) -> dict[str, str]:
     from aegisgate.adapters.v2_proxy.router import _build_forward_headers as build
@@ -54,6 +57,12 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
     headers = build(request)
     rewrite_forwarding_headers_for_upstream(request, headers)
     strip_gateway_cookies(headers)
+    # The body is relayed raw (aiter_raw), so the encoding the upstream picks is
+    # the one the client gets. Without a value of its own httpx would ask for
+    # gzip/deflate on the client's behalf, handing compressed bytes to a client
+    # that never said it could decode them.
+    if not any(name.lower() == "accept-encoding" for name in headers):
+        headers["Accept-Encoding"] = "identity"
     return headers
 
 
@@ -89,6 +98,11 @@ def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]
         value = headers.get(name)
         if value is not None:
             out[name] = value
+    # The server in front of this app writes its own Date and Server (uvicorn
+    # prepends both to every response), so relaying the upstream's sent each of
+    # them twice. Dropped the way nginx's proxy_pass hides them by default.
+    for key in [name for name in out if name.lower() in _SERVER_OWNED_RESPONSE_HEADERS]:
+        del out[key]
     return out
 
 
