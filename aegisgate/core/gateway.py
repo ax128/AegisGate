@@ -122,9 +122,13 @@ from aegisgate.core.gw_tokens import (
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
 )
+from aegisgate.config.feature_flags import recheck_disabled_filters
 from aegisgate.core.gw_forwards import load as gw_forwards_load
 from aegisgate.core.forward_middleware import HostForwardMiddleware
-from aegisgate.core.forward_routes import register_forward_routes
+from aegisgate.core.forward_routes import (
+    audit_boundary_rejection as audit_forward_boundary_rejection,
+    register_forward_routes,
+)
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.observability.logging import configure_logging
 from aegisgate.observability.metrics import inc_request, observe_request_duration
@@ -430,6 +434,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gw_forwards_load()
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_forwards load on startup failed: %s", exc)
+    if settings.enable_gateway_forward:
+        # The import-time filter report could not count per-rule overrides yet.
+        try:
+            recheck_disabled_filters()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("disabled-filter recheck after gw_forwards load failed: %s", exc)
     try:
         gw_tokens_inject_builtin_compat()
     except Exception as exc:  # pragma: no cover
@@ -1020,6 +1030,10 @@ async def security_boundary_middleware(request: Request, call_next):
 
         def finish(response: Response) -> Response:
             reject_reason = boundary.get("rejected_reason")
+            if isinstance(reject_reason, str) and is_forward_request:
+                # A passthrough request refused here never reaches the route that
+                # writes its audit record; no-op for the LLM branch (V1 audits it).
+                audit_forward_boundary_rejection(request, response.status_code)
             return _observe_response(
                 response,
                 method=method,
