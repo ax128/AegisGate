@@ -204,6 +204,7 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - `flush_interval -1` 必须设置，否则 SSE 流式会被缓冲。
 - `response_header_timeout 660s`：长时间推理不超时。
 - 同时在网关侧设 `AEGIS_TRUSTED_PROXY_IPS=127.0.0.1`（或你的 Caddy 地址）。默认 `AEGIS_XFF_STRICT_INTERNAL=true` 下，可信代理列表为空时任何 `X-Forwarded-For` 都会让请求被当成公网客户端。
+- 自己启动 uvicorn 时带上 `--no-proxy-headers`（`aegisgate-local.py` 与 Dockerfile 已带）。uvicorn 默认信任 127.0.0.1 的 `X-Forwarded-For` / `X-Forwarded-Proto`，会先把同机 Caddy 这个对端换成客户端地址：`AEGIS_ENFORCE_LOOPBACK_ONLY=true` 下请求全部被拒，`AEGIS_TRUSTED_PROXY_IPS=127.0.0.1` 也永远匹配不到。
 - 对公网暴露时使用随机注册 token；纯数字端口 token 与 `__passthrough` 默认会被公网/非内网客户端拒绝。
 - Caddy 只做 TLS + 转发，路由逻辑全在网关内部。
 - 上游自己的管理后台建议用单独域名直连上游（CLIProxyAPI 8317 / Sub2API 8080 / AIClient-2-API 3000），不经网关。

@@ -115,7 +115,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     run_init()
     host, port = resolve_runtime_host_port(args.host, args.port)
     env = build_runtime_env(host, port)
-    cmd = [str(venv_python()), "-m", "uvicorn", "aegisgate.core.gateway:app", "--host", host, "--port", str(port)]
+    # --no-proxy-headers: the gateway decides whom to trust (AEGIS_TRUSTED_PROXY_IPS) from
+    # the real peer. uvicorn's default trusts 127.0.0.1 and swaps the peer and scheme for
+    # X-Forwarded-For / -Proto first, so a same-host proxy looked like its client.
+    cmd = [str(venv_python()), "-m", "uvicorn", "aegisgate.core.gateway:app", "--host", host, "--port", str(port), "--no-proxy-headers"]
     if args.foreground:
         print(f"Starting foreground gateway on http://{display_host(host)}:{port}")
         return subprocess.call(cmd, cwd=str(ROOT), env=env)

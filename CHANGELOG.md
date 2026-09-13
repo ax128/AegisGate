@@ -9,6 +9,20 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（uvicorn 启动参数：关闭它自己的 proxy-headers）
+
+- **launcher、Dockerfile 与文档里的 uvicorn 启动命令都加上 `--no-proxy-headers`。**
+  网关的信任判断（`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_TRUSTED_PROXY_IPS`、XFF 降级、发往上游的
+  转发头）都假定 `request.client` / `request.url.scheme` 是直连对端。uvicorn 默认开启 proxy-headers
+  并信任 127.0.0.1（或 `FORWARDED_ALLOW_IPS`），会先用 `X-Forwarded-For` / `X-Forwarded-Proto` 改写它们：
+  - 同机 Caddy（`Caddyfile.example` 的写法）被当成它的客户端：`AEGIS_ENFORCE_LOOPBACK_ONLY=true`
+    下全部 403 `loopback_only_reject`，`AEGIS_TRUSTED_PROXY_IPS=127.0.0.1` 永远匹配不到；
+  - 本机客户端可以伪造 `X-Forwarded-Proto: https`，整域名转发时上游收到的协议与 `Location` 回写随之改变。
+
+  **升级动作**：自己写 uvicorn 命令或 systemd unit 的部署需手动加 `--no-proxy-headers`。
+  加上后同机反代的对端是 127.0.0.1，客户端 IP 取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代。
+  Docker 默认部署的对端是 bridge 地址，uvicorn 本就不信任，行为不变。
+
 ### Changed（R8.3：field 规则语义跨三层统一）
 
 - **`field_value_patterns` 三层共用一份编译器**（`aegisgate/config/field_patterns.py`）。

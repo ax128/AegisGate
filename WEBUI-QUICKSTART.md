@@ -51,7 +51,7 @@ python aegisgate-local.py open-ui      # 在浏览器中打开本地 UI
 如果你使用手动开发方式，也可以直接运行：
 
 ```bash
-uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
+uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --reload --no-proxy-headers
 ```
 
 ## 3. 登录方式
