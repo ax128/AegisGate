@@ -1,9 +1,14 @@
 """Exact-value redaction filter (highest priority, V1 pipeline).
 
 Replaces configured sensitive strings with ``[REDACTED:EXACT_VALUE]`` in both
-request messages and response output text.  The filter bypasses the normal
-``ctx.enabled_filters`` check and is controlled solely by the global setting
-``enable_exact_value_redaction``.
+request messages and response output text.
+
+The filter bypasses the normal ``ctx.enabled_filters`` check: it is controlled by
+the global setting ``enable_exact_value_redaction``, unless a host-forwarding
+rule explicitly overrides it through ``ctx.forward_filter_overrides``. The same
+rule switch reaches the V1 transport layer (``openai_compat.sanitize`` /
+``renderers``) through ``redact_values.exact_value_redaction_active``, so "on"
+and "off" mean the same thing on both layers.
 """
 
 from __future__ import annotations
@@ -30,7 +35,12 @@ class ExactValueRedactionFilter(BaseFilter):
             "replacements": 0,
         }
 
-    def enabled(self, ctx: RequestContext) -> bool:  # noqa: ARG002
+    def enabled(self, ctx: RequestContext) -> bool:
+        # A forward rule's explicit switch wins; without one the historical
+        # global-only behaviour (and the passthrough-immune baseline) stands.
+        override = ctx.forward_filter_overrides.get(self.name)
+        if override is not None:
+            return override
         return settings.enable_exact_value_redaction
 
     def _record(self, replacements: int) -> None:

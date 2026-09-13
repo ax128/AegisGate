@@ -122,6 +122,7 @@ from aegisgate.core.gw_tokens import (
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
 )
+from aegisgate.config.feature_flags import recheck_disabled_filters
 from aegisgate.core.gw_forwards import load as gw_forwards_load
 from aegisgate.core.forward_middleware import HostForwardMiddleware
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
@@ -429,6 +430,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gw_forwards_load()
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_forwards load on startup failed: %s", exc)
+    if settings.enable_gateway_forward:
+        # The import-time filter report could not count per-rule overrides yet.
+        try:
+            recheck_disabled_filters()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("disabled-filter recheck after gw_forwards load failed: %s", exc)
     try:
         gw_tokens_inject_builtin_compat()
     except Exception as exc:  # pragma: no cover
