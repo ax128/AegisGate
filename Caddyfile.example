@@ -96,7 +96,8 @@ api.example.com {
 # Differences from the token block that matter here:
 #   - The WHOLE domain is proxied: the upstream's own console, OAuth callbacks and static assets
 #     come through this domain too, so there is no @not_api 404 filter. Keep /__gw__ and /__ui__
-#     blocked at the edge as well as inside the gateway.
+#     blocked at the edge as well; the gateway itself refuses /__ui__ on a forward host (403
+#     forward_console_blocked), so open the console on the gateway's own address.
 #   - header_up Host {host} is what the gateway routes on; X-Forwarded-Host is what a trusted
 #     proxy (AEGIS_TRUSTED_PROXY_IPS) is allowed to override it with. Set both.
 #   - AEGIS_TRUSTED_PROXY_IPS must list this proxy, or every forwarded request looks public.
@@ -113,6 +114,7 @@ api.example.com {
 #         header_up X-Forwarded-Proto {scheme}
 #         header_up X-Forwarded-For {remote_host}
 #         header_up X-Real-IP {remote_host}
+#         header_up -Forwarded
 #         flush_interval -1
 #         transport http {
 #             response_header_timeout 660s

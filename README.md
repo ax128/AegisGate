@@ -362,7 +362,8 @@ How traffic splits on a matched host:
 |---------|---------------|---------|
 | `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | the V1 pipeline | per the rule's `filters` |
 | every other path and method (including other `/v1` POSTs, `/v2/*`, `/relay/*`, the upstream's own console, OAuth callbacks, static assets) | forwarded verbatim to `upstream_base` | none |
-| `/__ui__`, `/__gw__`, `/metrics`, `/health`, `/ready`, `/`, `/robots.txt`, `/favicon.ico` | the gateway itself (never forwarded) | n/a |
+| `/__gw__`, `/metrics`, `/health`, `/ready`, `/`, `/robots.txt`, `/favicon.ico` | the gateway itself (never forwarded) | n/a |
+| `/__ui__` (console) | never forwarded, and **not served** on a forward host: 403 `forward_console_blocked` | n/a |
 
 Each rule owns a full set of filter switches (`filters.mode: "custom"`), which
 can turn a globally disabled filter back on and vice versa. `redaction` and
@@ -393,24 +394,39 @@ Security boundaries worth knowing before enabling it:
 - **Fail-closed.** A broken `gw_forwards.json` (unparseable, `version` not `1`)
   answers 403 `forward_config_invalid` for every host the gateway knew,
   however many broken saves follow, and the console will not overwrite the file
-  until it is fixed or deleted. A single invalid entry only denies that host.
+  until it is fixed or deleted. A restart does not release them either: the
+  hosts of the last table that loaded are recorded in
+  `config/.gw_forwards.json.hosts` (0600), and a file that still parses denies
+  the hosts it names. Deleting the rule file means "stop forwarding" and drops
+  the record. A single invalid entry only denies that host.
 - Reserved paths are shadowed on a forward host — an upstream that also serves
   `/metrics` or `/health` will not see them. They keep answering even when the
   rule is disabled or invalid.
+- **The console is not served on a forward host.** That origin runs the
+  upstream's own pages and scripts, which would otherwise share it with the
+  console (its CSRF token, its session-cookie API, its login form). `/__ui__*`
+  answers 403 `forward_console_blocked` on every matched host; open the console
+  on the gateway's own address, e.g. `http://127.0.0.1:18080/__ui__`.
 - Uploads with `Content-Length` are streamed through; uploads without it are
-  buffered up to `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`.
+  buffered. Both are capped at the larger of `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`,
+  `AEGIS_V2_MAX_REQUEST_BODY_BYTES` and `AEGIS_MAX_REQUEST_BODY_BYTES`, for every
+  method.
 - Only response **headers** are rewritten (`Location`, `Set-Cookie` domain,
   `Access-Control-Allow-Origin`); HTML/JS/JSON bodies that hard-code the
   upstream's own URL are not. WebSocket is not supported, and methods other than
   GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS answer 405.
-- From a peer that is not a trusted proxy, `X-Forwarded-For` / `X-Real-IP` /
-  `Forwarded` are replaced with the real peer before reaching the upstream, and
-  the console's own `aegis_ui_*` cookies are never forwarded (nor accepted from
-  the upstream).
+- Outbound forwarding headers, on the passthrough face and the three LLM routes
+  alike: from a peer that is not a trusted proxy, `X-Forwarded-For` /
+  `X-Real-IP` / `Forwarded` are replaced with the real peer; behind a trusted
+  proxy `X-Forwarded-*` stay the proxy's, while `X-Real-IP` is restated from the
+  resolved client IP and `Forwarded` is dropped. The console's own `aegis_ui_*`
+  cookies are never forwarded (nor accepted from the upstream).
 - Audit: LLM-route records carry `forward_host` / `forward_mode` /
   `forward_branch` under `security_boundary`; every passthrough request writes
   an `event: forward_passthrough` record (host, filter mode, method, path without
-  the query string, status, client IP).
+  the query string, status, client IP), including requests the boundary refuses
+  before the route. Console edits record the old and new `upstream_base`,
+  exposure and filter switches.
 - `/v2/*` and `/relay/*` on a forward domain are passed through, not handled by
   the gateway's own v2/relay routes.
 
@@ -773,7 +789,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_ENABLE_GATEWAY_FORWARD` | `false` | Enable whole-domain (Host-based) forwarding via `config/gw_forwards.json`. Restart required |
 | `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` | `false` | Allow an `expose: public` forward rule to turn the baseline redaction filters off. Restart required |
 | `AEGIS_GW_FORWARDS_PATH` | `config/gw_forwards.json` | Forward-rule file path |
-| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | `64000000` | Request-body cap for forwarded requests (the boundary uses the larger of this and the v2 limit) |
+| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | `64000000` | Request-body cap for forwarded requests (the larger of this, the v2 limit and `AEGIS_MAX_REQUEST_BODY_BYTES` applies) |
 | `AEGIS_MAX_MESSAGES_COUNT` | `500` | Maximum number of messages allowed in `/v1/chat/completions` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |

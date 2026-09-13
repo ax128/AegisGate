@@ -134,7 +134,8 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 |------|------|
 | `POST /v1/chat/completions`、`/v1/responses`、`/v1/messages` | 网关 V1 管线，按规则的过滤开关处理 |
 | 其余全部路径与方法（含其它 `/v1` POST、`/v2/*`、`/relay/*`、上游管理台、OAuth 回调、静态资源） | 原样转发到 `upstream_base`，不过滤 |
-| `/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身，永不转发（上游同名路径会被遮蔽） |
+| `/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身，永不转发（上游同名路径会被遮蔽） |
+| `/__ui__`（控制台） | 永不转发，且在转发域名上**不提供**：返回 403 `forward_console_blocked`，控制台请从网关自身地址访问 |
 
 每条规则可单独开关 13 个过滤器（`filters.mode: "custom"`），能打开全局关掉的、也能关掉全局开着的。基线是 `redaction` 与 `exact_value_redaction`。
 
@@ -146,13 +147,20 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 会强制所有非 passthrough 请求带签名，浏览器无法提供；两者同开时转发表拒绝加载并在日志打 ERROR，控制台也拒绝修改转发表（409）。
 - `public` 规则关闭基线脱敏需要启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true`，否则该条目直接判为非法（`_denied`，请求 403），并在日志打 ERROR。关闭 `redaction` 只停管线层 PII 脱敏，发往上游前的转发层 PII 清洗是强制基线、仍然生效；关闭 `exact_value_redaction` 则两层都不再替换精确值。
 - 上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志打 WARNING，控制台行内标「开关不生效」。
-- 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**网关已知的全部 host（生效的与已被拒绝的）一律 403**（`forward_config_invalid`），连续多次保存坏文件也不会放行，不会静默回落到默认上游；单条非法只影响该 host。文件修好（或删除）之前，控制台拒绝写入，避免覆盖正在修改的文件。
-- 保留路径（`/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应，便于通过同一域名打开控制台修复配置。
-- 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB），超过返回 413。
+- 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**网关已知的全部 host（生效的与已被拒绝的）一律 403**（`forward_config_invalid`），连续多次保存坏文件也不会放行，不会静默回落到默认上游；单条非法只影响该 host。重启同样不会放行：每次成功加载后，网关把域名清单记在规则文件旁的 `config/.gw_forwards.json.hosts`（0600），启动时文件已坏也按这份清单拒绝；文件能解析但 `version` 不对时，文件里列出的域名同样拒绝。删除规则文件即表示不再转发，清单随之删除。文件修好（或删除）之前，控制台拒绝写入，避免覆盖正在修改的文件。
+- 保留路径（`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应。
+- **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，若与控制台同源，上游脚本可以读取控制台的 CSRF token、带着会话 cookie 调用管理接口，或注册 Service Worker 截获登录表单。因此任何命中的转发域名（包括停用、非法、文件损坏时）上的 `/__ui__*` 一律 403 `forward_console_blocked`。请用网关自身地址打开控制台，例如 `http://127.0.0.1:18080/__ui__`；转发域名不能是 IP，所以用 IP 访问始终可达。
+- 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会先缓冲。两种情况都受同一上限约束：取 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB）、`AEGIS_V2_MAX_REQUEST_BODY_BYTES` 与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值，所以调低前者不会低于后两者。超过上限返回 413，所有方法都适用。
 - 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
-- 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host` 再发给上游；控制台的 `aegis_ui_*` cookie 不会转发给上游，上游下发的同名 cookie 也会被丢弃。
+- 转发类请求头（透传路径与三条 LLM 路由规则相同）：
+  - 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host`。
+  - 对端是可信代理时，`X-Forwarded-*` 保留代理写入的值；`X-Real-IP` 改为网关解析出的客户端 IP，`Forwarded` 删除，因为反代通常不接管这两个头。
+  - 控制台的 `aegis_ui_*` cookie 不会转发给上游，上游下发的同名 cookie 也会被丢弃。
 - 路径按客户端发送的原样（保留百分号编码）拼到 `upstream_base` 后面；字面 `.` / `..` 段在网关侧解析且不会越过根。
-- 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP）。
+- 审计：
+  - 三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`。
+  - 透传请求每次写一条 `event: forward_passthrough` 记录，内容为域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP；被 boundary 在路由之前拒绝的（例如声明体积超限）也会记录。
+  - 控制台修改规则的审计记录带新旧 `upstream_base`、暴露面与过滤开关。
 - 转发域名上的 `/v2/*`、`/relay/*` 一律透传，**不**进入网关自己的 v2/relay 路由，也不受本面板开关控制。
 
 ### 6. Caddy 示例（泛域名）
@@ -168,6 +176,8 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
         header_up X-Forwarded-Host {host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Forwarded-For {remote_host}
+        header_up X-Real-IP {remote_host}
+        header_up -Forwarded
         flush_interval -1
         transport http {
             response_header_timeout 660s

@@ -603,7 +603,8 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 |------|------|------|
 | `POST /v1/chat/completions`、`/v1/responses`、`/v1/messages` | V1 对应 handler | 按规则的 `filters` |
 | 其余路径与方法（含其它 `/v1` POST、`/v2/*`、`/relay/*`、上游自己的管理台 / OAuth 回调 / 静态资源） | 原样转发到 `upstream_base` | 无 |
-| `/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身（永不转发） | — |
+| `/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身（永不转发） | — |
+| `/__ui__`（控制台） | 永不转发，且在转发域名上**不提供**：403 `forward_console_blocked` | — |
 
 每条规则带一整套过滤开关（`filters.mode: "custom"`），可打开全局关掉的过滤器，也可关掉全局开着的。`redaction` 与 `exact_value_redaction` 是基线：`public` 规则要关它们，必须启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true` 显式授权，否则该条目拒载。
 
@@ -614,12 +615,13 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 - **前置条件**：`AEGIS_ENFORCE_LOOPBACK_ONLY` 默认 `true`，boundary 会拒绝所有非本机对端；除非唯一对端是同机反代，否则需设为 `false`。经反代时 `AEGIS_TRUSTED_PROXY_IPS` 必须包含该反代，否则所有转发请求都会被判为公网客户端。
 - **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 对所有非 passthrough 请求强制签名，浏览器访问转发域名无法提供签名；两者同开时转发表拒绝加载，控制台也拒绝修改转发表。
 - **上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时**，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志与控制台会标出。
-- **fail-closed**：`gw_forwards.json` 解析失败或 `version` 不是 `1` 时，网关已知的全部域名一律 403 `forward_config_invalid`（连续多次保存坏文件也不会放行），控制台在文件修好或删除前不会覆盖它；单条非法只影响该域名。
+- **fail-closed**：`gw_forwards.json` 解析失败或 `version` 不是 `1` 时，网关已知的全部域名一律 403 `forward_config_invalid`（连续多次保存坏文件也不会放行），控制台在文件修好或删除前不会覆盖它；单条非法只影响该域名。重启也不会放行：上次成功加载的域名清单记在 `config/.gw_forwards.json.hosts`（0600），文件能解析时也会拒绝其中列出的域名；删除规则文件表示不再转发，清单随之删除。
 - 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游；规则停用或非法时保留路径照常由网关响应。
-- 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`。
+- **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，与控制台同源会让上游脚本读取 CSRF token、带会话 cookie 调管理接口或截获登录表单。任何命中的转发域名上 `/__ui__*` 一律 403 `forward_console_blocked`，请用网关自身地址（如 `http://127.0.0.1:18080/__ui__`）打开控制台。
+- 带 `Content-Length` 的上传流式透传，无 `Content-Length` 的上传会被缓冲；两者上限都取 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`、`AEGIS_V2_MAX_REQUEST_BODY_BYTES` 与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值，对所有方法生效。
 - 只改写响应**头**（`Location`、`Set-Cookie` 的 Domain、`Access-Control-Allow-Origin`），不改写响应体：上游 HTML / JS / JSON 里写死的自身地址不会被替换。不支持 WebSocket；GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 以外的方法返回 405。
-- 对端不是可信代理时，`X-Forwarded-For` / `X-Real-IP` / `Forwarded` 会被替换为真实对端后再发给上游；控制台自己的 `aegis_ui_*` cookie 既不转发给上游，也不接受上游下发。
-- 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP）。
+- 转发类请求头（透传路径与三条 LLM 路由相同）：对端不是可信代理时，`X-Forwarded-For` / `X-Real-IP` / `Forwarded` 会被替换为真实对端；对端是可信代理时，`X-Forwarded-*` 沿用代理的值，`X-Real-IP` 按解析出的客户端 IP 重写，`Forwarded` 删除。控制台自己的 `aegis_ui_*` cookie 既不转发给上游，也不接受上游下发。
+- 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP），被 boundary 在路由前拒绝的也会记录；控制台修改规则的审计记录带新旧 `upstream_base`、暴露面与过滤开关。
 - 转发域名上的 `/v2/*` 与 `/relay/*` 一律透传，不进网关自己的 v2 / relay 路由。
 
 ## 3. 本地开发与本地 UI
@@ -820,7 +822,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_ENABLE_GATEWAY_FORWARD` | 开启整域名（按 Host）转发，规则在 `config/gw_forwards.json`。需重启 | `false` |
 | `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` | 是否允许 `expose: public` 规则关闭基线脱敏。需重启 | `false` |
 | `AEGIS_GW_FORWARDS_PATH` | 转发规则文件路径 | `config/gw_forwards.json` |
-| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | 转发请求体上限（boundary 取本值与 v2 上限的较大者） | `64000000` |
+| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | 转发请求体上限（实际取本值、v2 上限与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值） | `64000000` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
 | `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |
