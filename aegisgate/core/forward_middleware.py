@@ -30,10 +30,11 @@ from aegisgate.core import gw_forwards
 from aegisgate.core.gw_forwards import route_host
 from aegisgate.util.logger import logger
 
-# Paths that always stay on the gateway, even on a forwarded host. Serving the
-# console or the admin API from a public forward domain would be a privilege
-# escalation; the cost is that an upstream with a colliding path (/metrics,
-# /health) is shadowed. See docs/UPSTREAM-QUICKSTART.md.
+# Paths that are never forwarded, even on a forwarded host. Forwarding the
+# console or the admin API to an upstream would hand it the gateway's own
+# surface; the cost is that an upstream with a colliding path (/metrics,
+# /health) is shadowed. See UPSTREAM-QUICKSTART.md. On a forward host the
+# console part is refused outright rather than served (_CONSOLE_PREFIX).
 _RESERVED_PATHS: frozenset[str] = frozenset(
     {
         "/",
@@ -55,6 +56,19 @@ _LLM_ROUTES: frozenset[str] = frozenset(
 )
 
 _ROUTE_LABEL = "forward"
+
+
+# The console is reserved (never forwarded) but also never *served* on a forward
+# host: that origin runs the upstream's own pages and scripts, which would share
+# it with the console — reading its CSRF token, calling its API with the session
+# cookie, or registering a service worker over its login form. A forward host is
+# never an IP literal, so the gateway's own address always reaches the console.
+_CONSOLE_PREFIX = "/__ui__"
+REASON_CONSOLE_BLOCKED = "forward_console_blocked"
+
+
+def _is_console_path(path: str) -> bool:
+    return path == _CONSOLE_PREFIX or path.startswith(_CONSOLE_PREFIX + "/")
 
 
 def _is_reserved_path(path: str) -> bool:
@@ -176,13 +190,10 @@ class HostForwardMiddleware:
             )
             return
 
-        from aegisgate.core.gateway_network import trusted_forwarded_host
+        from aegisgate.core.gateway_network import client_facing_host
 
         request = Request(scope)
-        raw_host = trusted_forwarded_host(request) or (
-            request.headers.get("host") or ""
-        )
-        host = route_host(raw_host)
+        host = route_host(client_facing_host(request))
         if not host:
             await self.app(scope, receive, send)
             return
@@ -195,10 +206,26 @@ class HostForwardMiddleware:
             return
 
         path = str(scope.get("path") or "/")
-        # Reserved paths are resolved before any rule-state answer: /health, the
-        # console and the admin API must keep answering the way they do today on
-        # an internal-only, disabled or invalid forward domain — the last being
-        # exactly when the operator needs the console to fix the file.
+        # Reserved paths are resolved before any rule-state answer: /health and
+        # the admin API keep answering the way they do today on an internal-only,
+        # disabled or invalid forward domain. The console is refused on every
+        # matched host, whatever the rule state (see _CONSOLE_PREFIX).
+        if _is_console_path(path):
+            logger.warning(
+                "forward reject host=%s reason=%s path=%s",
+                host,
+                REASON_CONSOLE_BLOCKED,
+                path,
+            )
+            await _reject(
+                scope,
+                receive,
+                send,
+                status_code=403,
+                reason=REASON_CONSOLE_BLOCKED,
+                detail="控制台不在转发域名上提供，请从网关自身地址访问",
+            )
+            return
         if _is_reserved_path(path):
             await self.app(scope, receive, send)
             return
