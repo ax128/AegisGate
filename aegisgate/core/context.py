@@ -29,6 +29,10 @@ class RequestContext:
     # never plaintext.
     restored_placeholders: set[str] = field(default_factory=set)
     security_tags: set[str] = field(default_factory=set)
+    # Explicit per-filter switches from a host-forwarding rule. Empty means "no
+    # rule is overriding anything", so every existing branch behaves exactly as
+    # before. Applied at one point: ``_apply_filter_mode``.
+    forward_filter_overrides: dict[str, bool] = field(default_factory=dict)
     enforcement_actions: list[str] = field(default_factory=list)
     request_disposition: str = "allow"
     response_disposition: str = "allow"

@@ -351,9 +351,17 @@ def reload_gw_tokens() -> None:
 def reload_gw_forwards() -> None:
     """Reload gw_forwards.json into memory (disk wins, including deletion)."""
     try:
+        from aegisgate.config.settings import settings
         from aegisgate.core.gw_forwards import load
 
         load(replace=True)
+        # The global flags did not move, but the per-rule override counts in the
+        # disabled-filter report did, so re-emit it. With forwarding off there
+        # are no counts to report, only the unchanged global state again.
+        if settings.enable_gateway_forward:
+            from aegisgate.config.feature_flags import recheck_disabled_filters
+
+            recheck_disabled_filters()
         logger.info("hot_reload gw_forwards reloaded")
     except Exception:
         logger.exception("hot_reload gw_forwards reload failed")

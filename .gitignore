@@ -44,6 +44,8 @@ config/*.yaml.bak-*
 config/aegis_fernet.key
 config/aegis_gateway.key
 config/gw_tokens.json
+config/gw_forwards.json
+config/.gw_forwards.json.hosts
 config/.admin_initialized
 config/stats.json
 *.key
