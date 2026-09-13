@@ -8,9 +8,10 @@ the console.
 Security posture — the same one ``gw_tokens`` established:
 
 * the file is fail-closed. A parse failure, an invalid ``version`` or a broken
-  top-level structure clears the live table and parks every previously known host
-  in ``_denied`` so it answers 403 rather than silently falling back to the
-  default-upstream branch. A single invalid entry only denies that host.
+  top-level structure clears the live table and parks every host the gateway
+  knew about — live *and* already denied — in ``_denied`` so it answers 403
+  rather than silently falling back to the default-upstream branch. A second
+  broken save keeps them there. A single invalid entry only denies that host.
 * ``expose: "public"`` rules that turn the baseline redaction filters off are
   refused unless the startup-pinned ``AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF``
   authorises it. Weakening the public surface may not come from a hot-editable
@@ -18,11 +19,13 @@ Security posture — the same one ``gw_tokens`` established:
 * ``AEGIS_ENABLE_REQUEST_HMAC_AUTH`` and forwarding are mutually exclusive: HMAC
   forces signatures on every non-passthrough request, which a browser hitting a
   forwarded domain cannot provide. Enabling both refuses to load the table.
+* console writes re-read the file under the lock and merge onto what is on
+  disk, never onto an in-memory copy: a write can therefore neither resurrect a
+  table the HMAC gate refused nor overwrite a file the operator is still fixing.
 """
 
 from __future__ import annotations
 
-import copy
 import ipaddress
 import json
 import os
@@ -55,12 +58,40 @@ _HOST_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 # Derived tables (guarded by ``_lock``):
 #   ``_forwards``  every valid rule, enabled or disabled
 #   ``_denied``    host -> {"reason", "detail"} for entries that must answer 403
-# ``_document`` is the raw JSON document the console edits, so an entry the
-# operator is still fixing is preserved verbatim across console writes.
 _forwards: dict[str, "ForwardRule"] = {}
 _denied: dict[str, dict[str, str]] = {}
-_document: dict[str, Any] = {"version": _VERSION, _DOCUMENT_KEY: {}}
 _lock = threading.Lock()
+
+
+class ForwardWriteRefused(RuntimeError):
+    """A console write the current file state does not allow.
+
+    Raised while the file cannot be parsed or the HMAC gate refuses the table:
+    merging a change onto an unreadable file would throw the operator's pending
+    edit away, and writing through the HMAC gate would load a table the gate
+    exists to refuse.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
+
+
+class ForwardEtagMismatch(RuntimeError):
+    """``If-Match`` named a version of the file that is no longer on disk."""
+
+    def __init__(self, current_etag: str) -> None:
+        super().__init__("etag_mismatch")
+        self.current_etag = current_etag
+
+
+class ForwardNotFound(LookupError):
+    """The host to update is not in the file."""
+
+
+class ForwardHostExists(ValueError):
+    """The host to create (or rename to) is already in the file."""
 
 
 @dataclass(frozen=True)
@@ -88,6 +119,21 @@ class ForwardRule:
             or self.custom_filters.get("exact_value_redaction") is False
         )
 
+    @property
+    def llm_upstream_base(self) -> str:
+        """The base the V1 pipeline branch forwards to.
+
+        A rule stores the upstream *root* (the whole domain is forwarded, so the
+        passthrough face appends the original path verbatim). The V1 forwarder
+        instead strips the ``/v1`` gateway prefix from the request path before
+        appending it (``_build_upstream_url``), so the prefix is put back here —
+        otherwise ``/v1/chat/completions`` would reach the upstream as
+        ``/chat/completions``.
+        """
+        from aegisgate.adapters.openai_compat.upstream import GATEWAY_PREFIX
+
+        return f"{self.upstream_base}{GATEWAY_PREFIX}"
+
     def resolved_filter_overrides(self) -> dict[str, bool]:
         """Explicit per-filter overrides, or an empty mapping for ``mode: policy``."""
         if self.filters_mode != "custom":
@@ -114,6 +160,30 @@ def _path() -> Path:
 
 def _normalize_host(value: object) -> str:
     return str(value or "").strip().lower().rstrip(".")
+
+
+def route_host(raw_host: str) -> str:
+    """Normalize a client-facing host to the routing key.
+
+    Lowercased, trailing-dot stripped, port removed. IPv6 literals keep their
+    inner address (brackets removed) so a ``[::1]:8080`` address cannot masquerade
+    as a hostname rule. The deny table is keyed the same way, so an entry the
+    operator wrote as ``api.ag.com:443`` still denies requests for ``api.ag.com``.
+    """
+    value = (raw_host or "").strip().lower()
+    if not value:
+        return ""
+    if value.startswith("["):
+        end = value.find("]")
+        if end != -1:
+            value = value[1:end]
+    elif ":" in value:
+        value = value.rsplit(":", 1)[0]
+    return value.rstrip(".")
+
+
+def _deny_key(host_raw: object) -> str:
+    return route_host(str(host_raw)) or str(host_raw)
 
 
 def host_error(value: object) -> str | None:
@@ -189,8 +259,10 @@ def validate_rule(
     if not isinstance(note, str):
         return None, "note 必须是字符串"
 
+    # Type before membership: an unhashable value (a list, an object) would make
+    # ``in frozenset`` raise and abort the whole load instead of denying one host.
     expose = raw.get("expose", "internal")
-    if expose not in _EXPOSE_VALUES:
+    if not isinstance(expose, str) or expose not in _EXPOSE_VALUES:
         return None, "expose 必须是 public 或 internal"
 
     filters = raw.get("filters", {})
@@ -199,7 +271,7 @@ def validate_rule(
     if not isinstance(filters, dict):
         return None, "filters 必须是对象"
     mode = filters.get("mode", "policy")
-    if mode not in _FILTER_MODES:
+    if not isinstance(mode, str) or mode not in _FILTER_MODES:
         return None, "filters.mode 必须是 policy 或 custom"
 
     custom_raw = filters.get("custom", {})
@@ -240,6 +312,14 @@ def validate_rule(
     return rule, None
 
 
+def _document_is_valid(document: object) -> bool:
+    return (
+        isinstance(document, dict)
+        and document.get("version") == _VERSION
+        and isinstance(document.get(_DOCUMENT_KEY), dict)
+    )
+
+
 def _derive_tables(
     document: object,
 ) -> tuple[dict[str, ForwardRule], dict[str, dict[str, str]]]:
@@ -251,23 +331,34 @@ def _derive_tables(
     raw_forwards = document.get(_DOCUMENT_KEY)
     if not isinstance(raw_forwards, dict):
         return forwards, denied
+
+    key_counts: dict[str, int] = {}
+    for host_raw in raw_forwards:
+        key = _deny_key(host_raw)
+        key_counts[key] = key_counts.get(key, 0) + 1
+
     for host_raw, entry in raw_forwards.items():
-        rule, reason = validate_rule(host_raw, entry)
-        if rule is None:
-            host = _normalize_host(host_raw) or str(host_raw)
-            denied[host] = {"reason": REASON_RULE_INVALID, "detail": reason or ""}
-            logger.error(
-                "gw_forwards entry invalid host=%s reason=%s", host, reason
-            )
-            continue
-        if rule.host in forwards:
-            # Two raw keys that normalize to the same host. The later one loses;
-            # ignoring it silently would hide an operator typo.
-            denied[rule.host] = {
+        key = _deny_key(host_raw)
+        if key_counts[key] > 1:
+            # Two raw keys that route to the same host. Whichever JSON key came
+            # first would otherwise win and the other's posture would silently
+            # not apply, so neither is loaded.
+            if key not in denied:
+                logger.error("gw_forwards duplicate host after normalization host=%s", key)
+            denied[key] = {
                 "reason": REASON_RULE_INVALID,
                 "detail": "重复的网关域名（规范化后冲突）",
             }
-            logger.error("gw_forwards duplicate host after normalization host=%s", rule.host)
+            continue
+        try:
+            rule, reason = validate_rule(host_raw, entry)
+        except Exception as exc:  # defensive: one odd entry denies, never aborts the load
+            rule, reason = None, f"规则校验异常: {type(exc).__name__}"
+        if rule is None:
+            denied[key] = {"reason": REASON_RULE_INVALID, "detail": reason or ""}
+            logger.error(
+                "gw_forwards entry invalid host=%s reason=%s", key, reason
+            )
             continue
         forwards[rule.host] = rule
     return forwards, denied
@@ -277,14 +368,17 @@ def _hmac_conflict() -> bool:
     return bool(settings.enable_gateway_forward and settings.enable_request_hmac_auth)
 
 
-def _deny_all_current(reason: str, detail: str) -> None:
-    """Move every currently live host into ``_denied`` and clear the live table."""
-    denied = {
-        host: {"reason": reason, "detail": detail} for host in _forwards
-    }
+def _deny_all_known(reason: str, detail: str, extra_hosts: set[str] | None = None) -> None:
+    """Park every host the gateway knows about in ``_denied``. Caller holds ``_lock``.
+
+    Known means live rules *and* hosts that were already denied: a failed load
+    after a failed load (or after a load that denied one entry) must not release
+    anything back to the default stack.
+    """
+    hosts = set(_forwards) | set(_denied) | set(extra_hosts or ())
     _forwards.clear()
     _denied.clear()
-    _denied.update(denied)
+    _denied.update({host: {"reason": reason, "detail": detail} for host in hosts})
 
 
 def load(*, replace: bool = False) -> None:
@@ -300,8 +394,6 @@ def load(*, replace: bool = False) -> None:
             if replace:
                 _forwards.clear()
                 _denied.clear()
-                _document.clear()
-                _document.update({"version": _VERSION, _DOCUMENT_KEY: {}})
                 logger.info(
                     "gw_forwards file missing path=%s, cleared forward table", path
                 )
@@ -309,45 +401,44 @@ def load(*, replace: bool = False) -> None:
                 logger.debug("gw_forwards file not found path=%s, skip load", path)
             return
 
+        data: object = None
+        parse_error: Exception | None = None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            parse_error = exc
+
         if _hmac_conflict():
             # Refuse to load, but surface the hosts the operator configured so the
             # console shows *why* nothing is forwarding.
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError, ValueError):
-                data = None
-            parsed, _ignored_denied = _derive_tables(data)
-            _forwards.update(parsed)
-            _deny_all_current(
+            parsed, parsed_denied = _derive_tables(data if parse_error is None else None)
+            _deny_all_known(
                 REASON_CONFIG_INVALID,
                 "AEGIS_ENABLE_REQUEST_HMAC_AUTH=true 与网关转发互斥；转发表未加载",
+                extra_hosts=set(parsed) | set(parsed_denied),
             )
             logger.error(
                 "gw_forwards not loaded: AEGIS_ENABLE_REQUEST_HMAC_AUTH=true is mutually "
                 "exclusive with AEGIS_ENABLE_GATEWAY_FORWARD=true"
             )
+            _log_posture()
             return
 
-        try:
-            raw = path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-        except (json.JSONDecodeError, OSError, ValueError) as exc:
-            _deny_all_current(REASON_CONFIG_INVALID, f"配置文件解析失败: {exc}")
-            logger.error("gw_forwards load failed path=%s error=%s", path, exc)
+        if parse_error is not None:
+            _deny_all_known(REASON_CONFIG_INVALID, f"配置文件解析失败: {parse_error}")
+            logger.error("gw_forwards load failed path=%s error=%s", path, parse_error)
+            _log_posture()
             return
 
-        if (
-            not isinstance(data, dict)
-            or data.get("version") != _VERSION
-            or not isinstance(data.get(_DOCUMENT_KEY), dict)
-        ):
-            _deny_all_current(
+        if not _document_is_valid(data):
+            _deny_all_known(
                 REASON_CONFIG_INVALID,
                 f"顶层结构非法（需要 version={_VERSION} 与 forwards 对象）",
             )
             logger.error(
                 "gw_forwards load failed path=%s error=invalid top-level structure", path
             )
+            _log_posture()
             return
 
         forwards, denied = _derive_tables(data)
@@ -355,40 +446,33 @@ def load(*, replace: bool = False) -> None:
         _forwards.update(forwards)
         _denied.clear()
         _denied.update(denied)
-        _document.clear()
-        _document.update(copy.deepcopy(data))
         logger.info(
             "gw_forwards loaded path=%s count=%d denied=%d", path, len(_forwards), len(_denied)
         )
         _log_posture()
 
 
-def _build_document() -> dict[str, Any]:
-    return {
-        "version": _VERSION,
-        _DOCUMENT_KEY: {
-            host: rule.to_payload() for host, rule in _forwards.items()
-        },
-    }
+def _serialize(document: dict[str, Any]) -> bytes:
+    return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def _atomic_write(document: dict[str, Any]) -> None:
+def _atomic_write(payload: bytes) -> None:
+    """Temp file + fsync + replace, mode 0600 (the file holds internal addresses)."""
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
+            "wb",
             delete=False,
             dir=str(path.parent),
             prefix=f".{path.name}.",
             suffix=".tmp",
         ) as tmp:
-            tmp.write(json.dumps(document, ensure_ascii=False, indent=2))
+            tmp_path = Path(tmp.name)
+            tmp.write(payload)
             tmp.flush()
             os.fsync(tmp.fileno())
-            tmp_path = Path(tmp.name)
         tmp_path.replace(path)
         try:
             os.chmod(path, 0o600)
@@ -403,62 +487,121 @@ def _atomic_write(document: dict[str, Any]) -> None:
         raise
 
 
-def _save() -> None:
-    """Atomically persist the editable document, mode 0600.
+def _read_document_for_write(if_match: str | None) -> dict[str, Any]:
+    """The on-disk document a console write merges onto. Caller holds ``_lock``.
 
-    The document is the source of truth the console mutates, so entries the
-    operator has not fixed yet survive a write of an unrelated rule.
+    ``If-Match`` is checked here, against the bytes actually being replaced, so
+    the check and the write cannot be separated by another request or by an
+    operator's hand edit that the watcher has not picked up yet.
     """
-    _atomic_write(copy.deepcopy(_document))
+    from aegisgate.core.ui_etag import ABSENT_ETAG, etag_for_bytes, if_match_is_stale
+
+    if _hmac_conflict():
+        raise ForwardWriteRefused(
+            REASON_CONFIG_INVALID,
+            "AEGIS_ENABLE_REQUEST_HMAC_AUTH=true 与网关转发互斥，转发表不能修改",
+        )
+    path = _path()
+    try:
+        payload: bytes | None = path.read_bytes()
+    except FileNotFoundError:
+        payload = None
+    current_etag = ABSENT_ETAG if payload is None else etag_for_bytes(payload)
+    if if_match_is_stale(if_match, current_etag):
+        raise ForwardEtagMismatch(current_etag)
+    if payload is None:
+        return {"version": _VERSION, _DOCUMENT_KEY: {}}
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        document = None
+    if not _document_is_valid(document):
+        raise ForwardWriteRefused(
+            REASON_CONFIG_INVALID,
+            "规则文件无法解析或结构非法；请先修复或删除该文件，再通过控制台修改",
+        )
+    return document
 
 
-def upsert(rule: ForwardRule) -> None:
-    """Insert or replace one rule and persist the document."""
-    with _lock:
-        document = copy.deepcopy(_document)
-        raw_forwards = document.get(_DOCUMENT_KEY)
-        if not isinstance(raw_forwards, dict):
-            raw_forwards = {}
-        raw_forwards[rule.host] = rule.to_payload()
-        document["version"] = _VERSION
-        document[_DOCUMENT_KEY] = raw_forwards
-        _save_document_locked(document)
+def _raw_keys_for(raw_forwards: dict[str, Any], host: str) -> list[str]:
+    return [key for key in raw_forwards if _deny_key(key) == host]
 
 
-def delete(host: str) -> bool:
-    """Remove one host from the editable document. Returns False when absent."""
-    normalized = _normalize_host(host)
-    with _lock:
-        document = copy.deepcopy(_document)
-        raw_forwards = document.get(_DOCUMENT_KEY)
-        if not isinstance(raw_forwards, dict):
-            return False
-        if normalized in raw_forwards:
-            del raw_forwards[normalized]
-        else:
-            # The raw key may differ in case / trailing dot.
-            matches = [
-                key for key in raw_forwards if _normalize_host(key) == normalized
-            ]
-            if not matches:
-                return False
-            for key in matches:
-                del raw_forwards[key]
-        _save_document_locked(document)
-        return True
+def _save_document_locked(document: dict[str, Any]) -> str:
+    """Persist *document*, rebuild the derived tables, return the new ETag.
 
+    Caller holds ``_lock``.
+    """
+    from aegisgate.core.ui_etag import etag_for_bytes
 
-def _save_document_locked(document: dict[str, Any]) -> None:
-    """Persist *document* and rebuild the derived tables. Caller holds ``_lock``."""
-    _atomic_write(document)
+    payload = _serialize(document)
+    _atomic_write(payload)
     forwards, denied = _derive_tables(document)
-    _document.clear()
-    _document.update(copy.deepcopy(document))
     _forwards.clear()
     _forwards.update(forwards)
     _denied.clear()
     _denied.update(denied)
     _log_posture()
+    return etag_for_bytes(payload)
+
+
+def upsert(rule: ForwardRule, *, if_match: str | None = None) -> str:
+    """Insert or replace one rule and persist the file. Returns the new ETag.
+
+    Any raw key that routes to the same host (different case, trailing dot, a
+    port) is replaced in the same write, so a stale invalid entry cannot end up
+    next to the new rule and deny both.
+    """
+    with _lock:
+        document = _read_document_for_write(if_match)
+        raw_forwards = document[_DOCUMENT_KEY]
+        for key in _raw_keys_for(raw_forwards, rule.host):
+            del raw_forwards[key]
+        raw_forwards[rule.host] = rule.to_payload()
+        return _save_document_locked(document)
+
+
+def create(rule: ForwardRule, *, if_match: str | None = None) -> str:
+    """Add a rule for a host that is not in the file yet. Returns the new ETag."""
+    with _lock:
+        document = _read_document_for_write(if_match)
+        raw_forwards = document[_DOCUMENT_KEY]
+        if _raw_keys_for(raw_forwards, rule.host):
+            raise ForwardHostExists(rule.host)
+        raw_forwards[rule.host] = rule.to_payload()
+        return _save_document_locked(document)
+
+
+def replace(old_host: str, rule: ForwardRule, *, if_match: str | None = None) -> str:
+    """Replace the entry for *old_host* with *rule* (possibly renamed) in one write."""
+    old = _deny_key(old_host)
+    with _lock:
+        document = _read_document_for_write(if_match)
+        raw_forwards = document[_DOCUMENT_KEY]
+        old_keys = _raw_keys_for(raw_forwards, old)
+        if not old_keys:
+            raise ForwardNotFound(old)
+        if rule.host != old and _raw_keys_for(raw_forwards, rule.host):
+            raise ForwardHostExists(rule.host)
+        for key in old_keys:
+            del raw_forwards[key]
+        raw_forwards[rule.host] = rule.to_payload()
+        return _save_document_locked(document)
+
+
+def delete(host: str, *, if_match: str | None = None) -> bool:
+    """Remove one host from the file. Returns False when absent."""
+    normalized = _deny_key(host)
+    with _lock:
+        document = _read_document_for_write(if_match)
+        raw_forwards = document[_DOCUMENT_KEY]
+        keys = _raw_keys_for(raw_forwards, normalized)
+        if not keys:
+            return False
+        for key in keys:
+            del raw_forwards[key]
+        _save_document_locked(document)
+        return True
 
 
 def get(host: str) -> ForwardRule | None:
@@ -485,7 +628,7 @@ def list_rules() -> list[ForwardRule]:
 
 def list_denied() -> dict[str, dict[str, str]]:
     with _lock:
-        return copy.deepcopy(_denied)
+        return {host: dict(item) for host, item in _denied.items()}
 
 
 def _whitelist_bypass_hosts(bases: list[tuple[str, str]]) -> set[str]:
@@ -504,13 +647,14 @@ def _whitelist_bypass_hosts(bases: list[tuple[str, str]]) -> set[str]:
 
 
 def whitelist_bypass_hosts() -> set[str]:
-    """Hosts whose upstream base is on ``AEGIS_UPSTREAM_WHITELIST_URL_LIST``.
+    """Hosts whose V1 upstream base is on ``AEGIS_UPSTREAM_WHITELIST_URL_LIST``.
 
     Those upstreams skip both pipelines inside the V1 handler, so a rule's filter
-    switches cannot take effect. Reported, never used to change behaviour.
+    switches cannot take effect. Compared with the base the V1 branch actually
+    uses (``llm_upstream_base``). Reported, never used to change behaviour.
     """
     with _lock:
-        bases = [(host, rule.upstream_base) for host, rule in _forwards.items()]
+        bases = [(host, rule.llm_upstream_base) for host, rule in _forwards.items()]
     return _whitelist_bypass_hosts(bases)
 
 
@@ -539,7 +683,9 @@ def _log_posture() -> None:
             logger.warning(
                 "gw_forwards public rule with every custom filter off host=%s", rule.host
             )
-    affected = _whitelist_bypass_hosts([(rule.host, rule.upstream_base) for rule in rules])
+    affected = _whitelist_bypass_hosts(
+        [(rule.host, rule.llm_upstream_base) for rule in rules]
+    )
     for host in sorted(affected):
         logger.warning(
             "gw_forwards rule upstream is on AEGIS_UPSTREAM_WHITELIST_URL_LIST and bypasses "
