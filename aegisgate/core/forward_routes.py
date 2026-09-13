@@ -177,10 +177,11 @@ def _client_netloc(request: Request, rule_host: str) -> str:
     routes to this rule's host (so it is the name the request was matched on) and
     is a plain host[:port]; otherwise the rule host stands.
     """
-    from aegisgate.core.gateway_network import trusted_forwarded_host
+    from aegisgate.core.gateway_network import client_facing_host
     from aegisgate.core.gw_forwards import route_host
 
-    raw = (trusted_forwarded_host(request) or request.headers.get("host") or "").strip()
+    # The same host resolution the middleware routed this request on.
+    raw = client_facing_host(request).strip()
     if raw and _CLIENT_NETLOC_RE.match(raw) and route_host(raw) == rule_host:
         return raw.lower()
     return rule_host

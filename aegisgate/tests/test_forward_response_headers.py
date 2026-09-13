@@ -283,3 +283,15 @@ class TestIntegration:
         with _client() as client:
             response = client.get("/x", headers={"Host": "api.ag.com"})
         assert response.headers.get_list("set-cookie") == ["theirs=1; Path=/"]
+
+
+def test_client_host_fallback_has_one_implementation() -> None:
+    # §12.1: routing and URL writeback resolve the client-facing host the same way.
+    package_root = Path(__file__).resolve().parents[1]
+    offenders = sorted(
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*.py")
+        if "tests" not in path.parts
+        and "trusted_forwarded_host(request) or" in path.read_text(encoding="utf-8")
+    )
+    assert offenders == ["core/gateway_network.py"]
