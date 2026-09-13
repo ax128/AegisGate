@@ -9,6 +9,20 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（R8.3：field 规则语义跨三层统一）
+
+- **`field_value_patterns` 三层共用一份编译器**（`aegisgate/config/field_patterns.py`）。
+  此前 V1 管道层用显式列表替换代码 fallback，V2 把 fallback **叠加**在显式列表上；
+  `field_value_min_len` 下限 V1 为 `max(8,…)`、V2 为 `max(12,…)`；V1 转发层把 field
+  规则与 PII 拼在一起再过 `relaxed_pii_ids`，默认集不含 `FIELD_SECRET` / `AUTH_BEARER`，
+  对话路由转发因此漏掉 `api_key:` / `Authorization: Bearer`。
+  现在三层都是：显式 YAML **替换** fallback、下限 `max(8, 配置值)`、field 层不经 relaxed 过滤。
+  ID 一律大写；缺 id 的映射与 legacy 字符串为 `FIELD_SECRET_{idx}`。
+  V2 占位符由 `[REDACTED:field_secret]` 变为 `[REDACTED:FIELD_SECRET]`（PII 仍小写）。
+  `sanitizer.command_patterns` 仍走 V2 自己的 `_compile_patterns`（always-fallback），未改。
+- 控制台覆盖面表与精确值说明与 R9 叶子写回对齐：V1 结构化内容、通用 JSON、multipart
+  **表单字段**的精确值脱敏为「生效」；multipart **文件内容**仍不扫描。
+
 ### Fixed（空格分组 IBAN 被 CARD 切碎）
 
 - **全量 PII 集上，印刷体（空格分组）IBAN 整段标成 `IBAN`，不再被 `CARD` 吃掉中间数字。**

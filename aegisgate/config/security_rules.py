@@ -1012,16 +1012,12 @@ def _configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:
     for item in rules.get("pii_patterns", []) or []:
         if isinstance(item, dict) and item.get("regex"):
             ids.add(str(item.get("id", "PII")).upper())
-    field_patterns = rules.get("field_value_patterns", []) or []
-    if field_patterns:
-        for idx, item in enumerate(field_patterns, start=1):
-            if isinstance(item, dict):
-                if item.get("regex"):
-                    ids.add(str(item.get("id", f"FIELD_SECRET_{idx}")).upper())
-            elif item:
-                ids.add(f"FIELD_SECRET_{idx}")
-    else:
-        ids.update({"FIELD_SECRET", "AUTH_BEARER"})
+    from aegisgate.config.field_patterns import field_pattern_entries
+
+    ids.update(
+        pattern_id
+        for pattern_id, _ in field_pattern_entries(rules, honour_enabled=False)
+    )
     return ids
 
 

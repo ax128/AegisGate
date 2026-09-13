@@ -186,7 +186,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 两点需要在评估暴露面时特别注意：
 
 - 每个执行面都**按路由**决定用哪套集合，打分与改写用同一条判据，因此两层不会分歧。此前转发层是按消息**角色**推导的，而所有真实角色都在"relaxed 角色集"里——等价于"永远 relaxed"，与路由无关。
-- `field_value_patterns` 是**另一层**，V1 管道层与 V2 恒跑；但 V1 **转发层**会把它和 PII 规则合并后一起过 relaxed 集，默认集不含这两个 ID，因此在转发层默认不生效。这处不对称记录在 [ROADMAP.md](ROADMAP.md) R8 第 3 条。
+- `field_value_patterns` 是**另一层**，三个执行层共用同一份编译器：显式 YAML 替换代码 fallback，不受 `relaxed_pii_ids` 增删影响。
 - multipart 的**文件内容**在任何执行面上都不参与请求侧脱敏，只有同请求里的表单字段参与。
 
 控制台会按规则逐条渲染这六个执行面（服务端计算后下发），见 [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) §4.3。

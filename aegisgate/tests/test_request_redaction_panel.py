@@ -267,36 +267,31 @@ class TestEnabledSemantics:
 
 
 class TestFieldRules:
-    def test_the_three_layers_report_their_own_floor(self, payload: dict) -> None:
+    def test_the_three_layers_share_one_floor(self, payload: dict) -> None:
         floors = {layer["id"]: layer["floor"] for layer in payload["field"]["layers"]}
-        assert floors == {"v1_pipeline": 8, "v1_forward": 8, "v2_request": 12}
+        assert floors == {"v1_pipeline": 8, "v1_forward": 8, "v2_request": 8}
 
-    def test_the_layers_report_their_differing_fallback_ids(self, payload: dict) -> None:
+    def test_the_layers_report_the_same_ids(self, payload: dict) -> None:
         by_id = {layer["id"]: layer for layer in payload["field"]["layers"]}
-        assert by_id["v1_pipeline"]["explicit_default_id"] == "FIELD_SECRET"
-        assert by_id["v1_forward"]["explicit_default_id"] == "FIELD_SECRET_{idx}"
-        assert by_id["v2_request"]["fallback_ids"] == ["field_secret", "auth_bearer"]
-        # V2 compiles field entries through the same loop as pii_patterns, so a
-        # mapping without an id gets that loop's default rather than a
-        # FIELD_SECRET one; only the legacy bare-string form is numbered.
-        assert by_id["v2_request"]["explicit_default_id"] == "rule"
-        assert by_id["v2_request"]["legacy_string_id"] == "field_secret_{idx}"
+        for layer in by_id.values():
+            assert layer["fallback_ids"] == ["FIELD_SECRET", "AUTH_BEARER"]
+            assert layer["explicit_default_id"] == "FIELD_SECRET_{idx}"
+            assert layer["legacy_string_id"] == "FIELD_SECRET_{idx}"
+            assert layer["relaxed_filtered"] is False
 
-    def test_the_v2_layer_states_that_its_fallback_is_not_an_alternative(
-        self, payload: dict
-    ) -> None:
-        """V1 uses the fallback instead of an explicit list; V2 uses both."""
+    def test_an_explicit_list_replaces_the_code_fallback(self, payload: dict) -> None:
         by_id = {layer["id"]: layer for layer in payload["field"]["layers"]}
-        assert "同时" in by_id["v2_request"]["note"]
+        assert "替换" in by_id["v2_request"]["note"]
+        assert "同时" not in by_id["v2_request"]["note"]
 
-    def test_relaxed_filtering_differs_across_layers(self, payload: dict) -> None:
+    def test_no_layer_filters_field_rules_through_relaxed(self, payload: dict) -> None:
         by_id = {layer["id"]: layer for layer in payload["field"]["layers"]}
         assert by_id["v1_pipeline"]["relaxed_filtered"] is False
-        assert by_id["v1_forward"]["relaxed_filtered"] is True
+        assert by_id["v1_forward"]["relaxed_filtered"] is False
+        assert by_id["v2_request"]["relaxed_filtered"] is False
 
     def test_the_section_offers_no_toggle(self, payload: dict) -> None:
-        """A per-rule switch here would be a lie: disabling a YAML field rule
-        does not stop the V2 fallback from running."""
+        """Field rules are edited in the YAML workbench, not this panel."""
         assert payload["field"]["editable"] is False
 
     def test_an_explicit_list_is_flagged_as_disabling_min_len(
@@ -326,6 +321,16 @@ class TestCoverageMatrix:
         assert row["pii_form"] == "不脱敏、不扫描"
         assert row["exact_value"] == "不生效"
         assert "[BINARY_CONTENT]" in row["note"]
+
+    def test_structured_and_form_exact_values_are_in_coverage(self, payload: dict) -> None:
+        """R9 wired exact values onto sanitize leaves; the matrix must not lag."""
+        for surface in (
+            "V1 对话路由的结构化内容、instructions、工具定义",
+            "V1 通用 /v1/<subpath> JSON",
+            "V1 multipart 表单字段",
+        ):
+            row = next(row for row in payload["coverage_matrix"] if row["surface"] == surface)
+            assert row["exact_value"] == "生效"
 
     def test_generic_json_and_multipart_fields_are_not_restorable(self, payload: dict) -> None:
         for surface in ("V1 通用 /v1/<subpath> JSON", "V1 multipart 表单字段"):

@@ -19,6 +19,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from aegisgate.config.field_patterns import compile_field_value_patterns
 from aegisgate.config.security_rules import (
     load_security_rules,
     rule_enabled,
@@ -74,25 +75,15 @@ _DEBUG_HEADERS_REDACT = frozenset(
         "x-aegis-nonce",
     }
 )
-_DEFAULT_FIELD_VALUE_MIN_LEN = 12
-_DEFAULT_FIELD_PATTERNS: tuple[tuple[str, str], ...] = (
-    (
-        "FIELD_SECRET",
-        rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{_DEFAULT_FIELD_VALUE_MIN_LEN},}}",
-    ),
-    (
-        "AUTH_BEARER",
-        rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{_DEFAULT_FIELD_VALUE_MIN_LEN},}}",
-    ),
-)
 # The V2 PII id set is no longer declared here. It was a hard-coded frozenset of
 # 15 ids that shadowed ``redaction.relaxed_pii_ids``: editing the YAML changed
 # V1 and left V2 alone, with nothing in the config surface to reveal it. The
 # split turned out to be one id wide on the PII layer — V2 additionally ran
 # COOKIE_SESSION, and V1 ran nothing V2 did not — plus FIELD_SECRET/AUTH_BEARER,
-# which are ``field_value_patterns`` ids that both sides run unconditionally.
-# COOKIE_SESSION moved into the shared default so the convergence cost no
-# coverage on either side. See _v2_relaxed_redaction_patterns.
+# which are ``field_value_patterns`` ids that all three layers now compile from
+# ``aegisgate.config.field_patterns``. COOKIE_SESSION moved into the shared
+# default so the convergence cost no coverage on either side. See
+# _v2_relaxed_redaction_patterns.
 _V2_NON_CONTENT_KEYS = frozenset(
     {"id", "call_id", "tool_call_id", "type", "role", "name", "status"}
 )
@@ -395,16 +386,15 @@ def _compile_patterns(
     function used to call ``item.get("regex")`` unconditionally, so one such
     entry raised ``AttributeError`` out of ``_v2_redaction_patterns()`` — and
     because ``lru_cache`` does not cache a raising call, it raised again on every
-    single V2 request instead of failing once. Non-mapping entries are now
-    handled the same way the other two layers handle them: compiled with a
-    positional ``field_secret_{idx}`` id where the caller says the legacy form is
-    meaningful (matching ``sanitize.py``'s ``FIELD_SECRET_{idx}``), skipped
-    otherwise.
+    single V2 request instead of failing once. Field compilation now lives in
+    ``aegisgate.config.field_patterns``; this loop still compiles PII (and
+    ``sanitizer.command_patterns``) and keeps the bare-string branch for any
+    caller that sets ``legacy_string_ids``.
 
     ``honour_enabled`` is opt-in for the same reason: the redaction lists have a
     runtime ``enabled`` flag and the caller that compiles them says so, while
     ``sanitizer.command_patterns`` shares this loop and has no such flag on the
-    V1 side.
+    V1 side. Field lists no longer go through this function.
     """
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for pattern_id, regex in fallback:
@@ -445,29 +435,7 @@ def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
         fallback=(),
         honour_enabled=True,
     )
-    field_min_len = max(
-        _DEFAULT_FIELD_VALUE_MIN_LEN,
-        int(rules.get("field_value_min_len", _DEFAULT_FIELD_VALUE_MIN_LEN)),
-    )
-    field_patterns = rules.get("field_value_patterns")
-    fallback_field_patterns = (
-        (
-            "field_secret",
-            rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{field_min_len},}}",
-        ),
-        (
-            "auth_bearer",
-            rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{field_min_len},}}",
-        ),
-    )
-    compiled.extend(
-        _compile_patterns(
-            field_patterns if isinstance(field_patterns, list) else None,
-            fallback=fallback_field_patterns,
-            legacy_string_ids=True,
-            honour_enabled=True,
-        )
-    )
+    compiled.extend(compile_field_value_patterns(rules))
     return compiled
 
 
@@ -487,9 +455,7 @@ def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
       nothing on V2 and the docs' "every other route runs the full set" was
       wrong in a way an operator could not discover from configuration.
     * ``field_value_patterns`` always run, matching ``RedactionFilter`` and
-      ``sanitize``. V2 expressed the same thing by parking ``FIELD_SECRET`` and
-      ``AUTH_BEARER`` inside its "pii id" set, which read as a pattern-id
-      allow-list but behaved as an always-on flag for a different layer.
+      ``sanitize``. The three layers share ``compile_field_value_patterns``.
     """
     pii_ids = _pii_pattern_ids()
     pii_layer: list[tuple[str, re.Pattern[str]]] = []

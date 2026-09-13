@@ -234,7 +234,7 @@ MASTER_SWITCH_SCOPES: dict[str, str] = {
 
 
 def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
-    """Field rules, told as the three layers actually behave (v4 §2.5)."""
+    """Field rules, told as the three layers actually behave."""
     raw = rules.get("field_value_patterns")
     items = raw if isinstance(raw, list) else []
     configured_min_len = rules.get("field_value_min_len", 12)
@@ -248,7 +248,7 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item, dict):
             explicit.append({
                 "index": index,
-                "id": str(item.get("id", f"FIELD_SECRET_{index}")),
+                "id": str(item.get("id") or f"FIELD_SECRET_{index}"),
                 "regex": str(item.get("regex", "")),
                 "legacy_string": False,
             })
@@ -260,51 +260,36 @@ def _field_section(rules: dict[str, Any]) -> dict[str, Any]:
                 "legacy_string": True,
             })
 
+    unified_note = (
+        "三层共用同一份编译器：显式 YAML 替换代码 fallback；"
+        "下限 max(8, 配置值)；不受 relaxed 集过滤"
+    )
+    layers = [
+        {
+            "id": layer_id,
+            "label": label,
+            "floor": 8,
+            "effective_min_len": max(8, parsed_min_len),
+            "fallback_ids": ["FIELD_SECRET", "AUTH_BEARER"],
+            "explicit_default_id": "FIELD_SECRET_{idx}",
+            "legacy_string_id": "FIELD_SECRET_{idx}",
+            "relaxed_filtered": False,
+            "note": unified_note,
+        }
+        for layer_id, label in (
+            ("v1_pipeline", "V1 管道层"),
+            ("v1_forward", "V1 转发层"),
+            ("v2_request", "V2 请求"),
+        )
+    ]
+
     return {
         "mode": "explicit_yaml" if items else "code_default",
         "field_value_min_len_configured": configured_min_len,
         "editable": False,
         "explicit_rules": explicit,
         "explicit_disables_min_len": bool(items),
-        "layers": [
-            {
-                "id": "v1_pipeline",
-                "label": "V1 管道层",
-                "floor": 8,
-                "effective_min_len": max(8, parsed_min_len),
-                "fallback_ids": ["FIELD_SECRET", "AUTH_BEARER"],
-                "explicit_default_id": "FIELD_SECRET",
-                "legacy_string_id": "FIELD_SECRET",
-                "relaxed_filtered": False,
-                "note": "field 规则无视路由恒跑，不受 relaxed 集过滤",
-            },
-            {
-                "id": "v1_forward",
-                "label": "V1 转发层",
-                "floor": 8,
-                "effective_min_len": max(8, parsed_min_len),
-                "fallback_ids": ["FIELD_SECRET", "AUTH_BEARER"],
-                "explicit_default_id": "FIELD_SECRET_{idx}",
-                "legacy_string_id": "FIELD_SECRET_{idx}",
-                "relaxed_filtered": True,
-                "note": "与 PII 规则合并后整体被 relaxed 过滤；默认集不含这两个 ID，因此默认不生效——与 V1 管道层和 V2 都不一致，收敛记录在 ROADMAP R8",
-            },
-            {
-                "id": "v2_request",
-                "label": "V2 请求",
-                "floor": 12,
-                "effective_min_len": max(12, parsed_min_len),
-                "fallback_ids": ["field_secret", "auth_bearer"],
-                # V2 compiles field entries through the same loop as pii_patterns,
-                # so a mapping without an id gets that loop's default, not a
-                # FIELD_SECRET one. Only the legacy bare-string form is numbered.
-                "explicit_default_id": "rule",
-                "legacy_string_id": "field_secret_{idx}",
-                "relaxed_filtered": False,
-                "note": "两条 fallback 与显式列表**同时**编译（V1 只在列表为空时才用 fallback）；"
-                        "field 层不经 relaxed 过滤，与 V1 管道层一致恒生效",
-            },
-        ],
+        "layers": layers,
     }
 
 
@@ -320,19 +305,19 @@ COVERAGE_MATRIX: tuple[dict[str, Any], ...] = (
     },
     {
         "surface": "V1 对话路由的结构化内容、instructions、工具定义",
-        "exact_value": "不生效",
+        "exact_value": "生效",
         "pii_form": "[REDACTED:ID]",
         "restorable": False,
     },
     {
         "surface": "V1 通用 /v1/<subpath> JSON",
-        "exact_value": "不生效",
+        "exact_value": "生效",
         "pii_form": "[REDACTED:ID]",
         "restorable": False,
     },
     {
         "surface": "V1 multipart 表单字段",
-        "exact_value": "不生效",
+        "exact_value": "生效",
         "pii_form": "[REDACTED:ID]",
         "restorable": False,
     },

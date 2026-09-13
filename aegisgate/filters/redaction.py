@@ -11,6 +11,7 @@ import time
 import unicodedata
 from typing import Any
 
+from aegisgate.config.field_patterns import compile_field_value_patterns
 from aegisgate.config.security_rules import (
     is_low_false_positive_route,
     load_security_rules,
@@ -77,7 +78,6 @@ class RedactionFilter(BaseFilter):
         self._strip_invisible_chars = bool(redaction_rules.get("strip_invisible_chars", True))
         self._invisible_chars = set(redaction_rules.get("unicode_invisible_chars", [])) or set(_DEFAULT_INVISIBLE_CHARS)
         self._bidi_chars = set(redaction_rules.get("unicode_bidi_chars", [])) or set(_DEFAULT_BIDI_CHARS)
-        self._field_value_min_len = max(8, int(redaction_rules.get("field_value_min_len", 12)))
 
         compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
         # rule id -> validator name. Keyed by id, so it serves both compiled
@@ -122,52 +122,12 @@ class RedactionFilter(BaseFilter):
 
         self._strip_table = str.maketrans("", "", "".join(self._invisible_chars | self._bidi_chars))
 
-        self._field_patterns = self._build_field_patterns(redaction_rules.get("field_value_patterns", []))
+        self._field_patterns = compile_field_value_patterns(redaction_rules)
 
         self._placeholder_kinds = {
             pattern_id: placeholder_kind(pattern_id)
             for pattern_id, _ in (*self._pii_patterns, *self._field_patterns)
         }
-
-    def _build_field_patterns(self, items: list[dict] | list[str]) -> list[tuple[str, re.Pattern[str]]]:
-        compiled: list[tuple[str, re.Pattern[str]]] = []
-        if items:
-            for item in items:
-                if isinstance(item, dict):
-                    if not rule_enabled(item):
-                        continue
-                    pattern_id = str(item.get("id", "FIELD_SECRET")).upper()
-                    regex = item.get("regex")
-                else:
-                    pattern_id = "FIELD_SECRET"
-                    regex = item
-                if not regex:
-                    continue
-                try:
-                    compiled.append((pattern_id, re.compile(str(regex), re.IGNORECASE)))
-                except re.error as e:
-                    logger.warning(
-                        "redaction field_pattern skipped (invalid regex) id=%s error=%s regex_excerpt=%s",
-                        pattern_id,
-                        e,
-                        (str(regex)[:80] + "…") if len(str(regex)) > 80 else regex,
-                    )
-            return compiled
-
-        min_len = self._field_value_min_len
-        defaults: list[tuple[str, str]] = [
-            (
-                "FIELD_SECRET",
-                rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{min_len},}}",
-            ),
-            (
-                "AUTH_BEARER",
-                rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{min_len},}}",
-            ),
-        ]
-        for pattern_id, regex in defaults:
-            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
-        return compiled
 
     def _normalize_input(self, text: str) -> str:
         normalized = text
