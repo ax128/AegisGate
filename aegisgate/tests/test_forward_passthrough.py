@@ -279,3 +279,73 @@ def test_forward_prefix_has_its_own_route_label() -> None:
     from aegisgate.core.gateway import _observability_route_label
 
     assert _observability_route_label("/__fwd__/v1/models") == "forward"
+
+
+class TestBoundaryBodyCap:
+    """§12.5: forwarded requests use forward_max_request_body_bytes; others keep 12MB."""
+
+    @staticmethod
+    def _request(path: str, *, content_length: int, forward_rule=None, token_auth: bool = False):
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "root_path": "",
+            "query_string": b"",
+            "headers": [
+                (b"content-length", str(content_length).encode()),
+                (b"content-type", b"application/json"),
+            ],
+            "client": ("127.0.0.1", 5000),
+            "server": ("127.0.0.1", 18080),
+        }
+        if forward_rule is not None:
+            scope["aegis_forward_rule"] = forward_rule
+        if token_auth:
+            scope["aegis_token_authenticated"] = True
+        return scope
+
+    async def test_forward_request_gets_the_forward_cap(
+        self, forward_env, monkeypatch
+    ) -> None:
+        from aegisgate.config import settings as settings_module
+        from aegisgate.core import gateway
+        from starlette.responses import JSONResponse
+
+        monkeypatch.setattr(
+            settings_module.settings, "max_request_body_bytes", 12_000_000, raising=False
+        )
+        # Isolate the forward bump from the v2 bump.
+        monkeypatch.setattr(
+            settings_module.settings, "v2_max_request_body_bytes", 0, raising=False
+        )
+        monkeypatch.setattr(
+            settings_module.settings, "forward_max_request_body_bytes", 64_000_000, raising=False
+        )
+        forward_env({"api.ag.com": _entry()})
+        rule = gw_forwards.get("api.ag.com")
+
+        async def _allow(_request) -> JSONResponse:
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        async def _receive() -> dict:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        forwarded = await gateway.security_boundary_middleware(
+            Request(
+                self._request("/__fwd__/v1/embeddings", content_length=20_000_000, forward_rule=rule),
+                _receive,
+            ),
+            _allow,
+        )
+        assert forwarded.status_code == 200
+
+        # A non-forwarded path keeps the 12MB default and is rejected.
+        plain = await gateway.security_boundary_middleware(
+            Request(self._request("/foo", content_length=20_000_000), _receive), _allow
+        )
+        assert plain.status_code == 413
