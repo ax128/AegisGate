@@ -42,17 +42,26 @@ _GATEWAY_COOKIE_PREFIX = "aegis_ui_"
 _PATH_SAFE = "/:@!$&'()*+,;=-._~"
 
 
+# Request methods whose body the security boundary already sizes against its cap.
+_BOUNDARY_SIZED_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
 def _build_forward_headers(request: Request) -> dict[str, str]:
     from aegisgate.adapters.v2_proxy.router import _build_forward_headers as build
     from aegisgate.core.gateway_network import rewrite_forwarding_headers_for_upstream
 
     headers = build(request)
     rewrite_forwarding_headers_for_upstream(request, headers)
-    _strip_gateway_cookies(headers)
+    strip_gateway_cookies(headers)
     return headers
 
 
-def _strip_gateway_cookies(headers: dict[str, str]) -> None:
+def strip_gateway_cookies(headers: dict[str, str]) -> None:
+    """Drop the console's ``aegis_ui_*`` cookies from an outbound ``Cookie`` header.
+
+    Used by both forward branches: the LLM routes share the forward host (and the
+    browser's cookie jar for it) with this face.
+    """
     for key in [name for name in headers if name.lower() == "cookie"]:
         kept = [
             part.strip()
@@ -162,21 +171,34 @@ async def _request_content(
 
     With ``Content-Length`` the body is streamed straight through under that
     length, so a large upload is never held in memory. A chunked body without a
-    length is buffered, bounded by the boundary's cap for this request — the
-    boundary itself only reads POST/PUT/PATCH bodies. Anything else has no body.
+    length is buffered, bounded by the boundary's cap for this request. The
+    boundary only sizes POST/PUT/PATCH bodies itself, so for every other method
+    both the declared length and the chunked body are held to that cap here.
+    Anything else has no body.
     """
+    from aegisgate.core.gateway_auth import _blocked_response
+
+    cap = _body_cap(request)
     content_length = (request.headers.get("content-length") or "").strip()
     if content_length:
+        if request.method.upper() not in _BOUNDARY_SIZED_METHODS:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                return None, {}, _blocked_response(
+                    status_code=400, reason="invalid_content_length"
+                )
+            if cap > 0 and declared > cap:
+                return None, {}, _blocked_response(
+                    status_code=413, reason="request_body_too_large"
+                )
         return request.stream(), {"Content-Length": content_length}, None
     if "chunked" not in (request.headers.get("transfer-encoding") or "").lower():
         return b"", {}, None
-    cap = _body_cap(request)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
         if cap > 0 and len(body) > cap:
-            from aegisgate.core.gateway_auth import _blocked_response
-
             return None, {}, _blocked_response(status_code=413, reason="request_body_too_large")
     return bytes(body), {}, None
 
@@ -229,6 +251,20 @@ def _audit_passthrough(request: Request, rule: Any, path: str, status_code: int)
         write_audit(record)
     except Exception as exc:  # pragma: no cover - operational guard
         logger.warning("forward passthrough audit write failed error=%s", exc)
+
+
+def audit_boundary_rejection(request: Request, status_code: int) -> None:
+    """Audit a passthrough request the security boundary answered itself.
+
+    The route audits what reaches it. What the boundary refuses first — a
+    declared body over the cap, a loopback-only or header-smuggling reject, an
+    exception while the upload was still being relayed — never does, so the
+    boundary calls this to keep "one record per passthrough request" true.
+    """
+    rule = request.scope.get("aegis_forward_rule")
+    if rule is None or request.scope.get("aegis_forward_path") is None:
+        return
+    _audit_passthrough(request, rule, _upstream_path(request), status_code)
 
 
 async def _forward_request(request: Request, rule: Any) -> Response:
@@ -323,11 +359,24 @@ class _ForwardPassthroughApp:
 
 
 def register_forward_routes(app: FastAPI) -> None:
+    endpoint = _ForwardPassthroughApp()
     app.router.routes.append(
         Route(
             "/__fwd__/{_ignored:path}",
-            endpoint=_ForwardPassthroughApp(),
+            endpoint=endpoint,
             name="forward-passthrough",
+            include_in_schema=False,
+        )
+    )
+    # The bare prefix never comes out of the middleware (a forwarded path always
+    # starts with "/__fwd__/"). It is registered so that, without a rule, it
+    # keeps today's 404: otherwise the router's redirect_slashes finds the route
+    # above for "/__fwd__/" and answers "/__fwd__" with a 307.
+    app.router.routes.append(
+        Route(
+            "/__fwd__",
+            endpoint=endpoint,
+            name="forward-passthrough-prefix",
             include_in_schema=False,
         )
     )

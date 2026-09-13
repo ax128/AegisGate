@@ -135,19 +135,90 @@ class TestZeroChangeSnapshot:
         # Any method, not only the seven the forward face serves.
         ("TRACE", "/__fwd__/x", 404, '{"detail":"Not Found"}'),
         ("PROPFIND", "/__fwd__/x", 404, '{"detail":"Not Found"}'),
+        # The bare prefix: without its own route, redirect_slashes would 307 it.
+        ("GET", "/__fwd__", 404, '{"detail":"Not Found"}'),
+        ("POST", "/__fwd__", 404, '{"detail":"Not Found"}'),
     )
+
+    @pytest.mark.parametrize(("method", "path", "status", "body"), SNAPSHOT)
+    def test_snapshot_holds_with_forwarding_off(
+        self, forward_env, monkeypatch, method: str, path: str, status: int, body: str
+    ) -> None:
+        monkeypatch.setattr(
+            settings_module.settings, "enable_gateway_forward", False, raising=False
+        )
+        with _client() as client:
+            response = client.request(method, path, follow_redirects=False)
+        assert response.status_code == status
+        assert response.text == body
 
     @pytest.mark.parametrize(("method", "path", "status", "body"), SNAPSHOT)
     def test_snapshot_matches_baseline(
         self, forward_env, method: str, path: str, status: int, body: str
     ) -> None:
         with _client() as client:
-            response = client.request(method, path)
+            response = client.request(method, path, follow_redirects=False)
         assert response.status_code == status
         assert response.text == body
 
 
 class TestForwarding:
+    def test_relay_path_is_forwarded(self, forward_env, monkeypatch) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            response = client.post(
+                "/relay/generate", headers={"Host": "api.ag.com"}, json={"x": 1}
+            )
+        assert response.status_code == 200
+        assert fake.captured["url"] == "https://api.xxx.com/relay/generate"
+
+    def test_non_body_method_over_the_declared_cap_is_413(
+        self, forward_env, monkeypatch
+    ) -> None:
+        for name, value in (
+            ("max_request_body_bytes", 8),
+            ("v2_max_request_body_bytes", 0),
+            ("forward_max_request_body_bytes", 8),
+        ):
+            monkeypatch.setattr(settings_module.settings, name, value, raising=False)
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            # DELETE with Content-Length: the boundary only sizes POST/PUT/PATCH.
+            response = client.request(
+                "DELETE", "/v1/things/1", headers={"Host": "api.ag.com"}, content=b"x" * 20
+            )
+        assert response.status_code == 413
+        assert "url" not in fake.captured
+
+    def test_trusted_proxy_keeps_its_forwarded_for_but_not_client_real_ip(
+        self, forward_env, monkeypatch
+    ) -> None:
+        from aegisgate.core import gateway_network
+
+        monkeypatch.setattr(settings_module.settings, "trusted_proxy_ips", "127.0.0.1", raising=False)
+        monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
+        monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
+        forward_env({"api.ag.com": _entry(expose="public")})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.get(
+                "/admin",
+                headers={
+                    "Host": "api.ag.com",
+                    # What a proxy such as Caddy sets …
+                    "X-Forwarded-For": "203.0.113.9",
+                    # … and what it relays from the client untouched.
+                    "X-Real-IP": "127.0.0.1",
+                    "Forwarded": "for=127.0.0.1",
+                },
+            )
+        sent = {k.lower(): v for k, v in fake.captured["headers"].items()}
+        assert sent["x-forwarded-for"] == "203.0.113.9"
+        assert sent["x-real-ip"] == "203.0.113.9"
+        assert "forwarded" not in sent
+
     def test_get_is_forwarded_to_upstream(self, forward_env, monkeypatch) -> None:
         forward_env({"api.ag.com": _entry()})
         fake = _install_client(monkeypatch, _FakeClient())
@@ -362,6 +433,99 @@ class TestPassthroughAudit:
         assert "GET" in response.headers["allow"]
         assert "url" not in fake.captured
         assert any(item.get("status_code") == 405 for item in audits)
+
+    def test_request_the_boundary_refuses_is_audited(
+        self, forward_env, monkeypatch, audits
+    ) -> None:
+        for name, value in (
+            ("max_request_body_bytes", 8),
+            ("v2_max_request_body_bytes", 0),
+            ("forward_max_request_body_bytes", 8),
+        ):
+            monkeypatch.setattr(settings_module.settings, name, value, raising=False)
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            # Declared length over the cap: answered by the boundary, not the route.
+            response = client.post(
+                "/upload?sig=secret", headers={"Host": "api.ag.com"}, content=b"x" * 20
+            )
+        assert response.status_code == 413
+        assert "url" not in fake.captured
+        records = [item for item in audits if item.get("event") == "forward_passthrough"]
+        assert len(records) == 1
+        assert records[0]["status_code"] == 413
+        assert records[0]["path"] == "/upload"
+        assert records[0]["security_boundary"]["rejected_reason"] == "request_body_too_large"
+        assert "secret" not in json.dumps(records[0])
+
+    def test_boundary_rejects_on_other_hosts_write_no_forward_record(
+        self, forward_env, monkeypatch, audits
+    ) -> None:
+        monkeypatch.setattr(settings_module.settings, "max_request_body_bytes", 8, raising=False)
+        monkeypatch.setattr(settings_module.settings, "v2_max_request_body_bytes", 0, raising=False)
+        forward_env({"api.ag.com": _entry()})
+        with _client() as client:
+            response = client.post("/foo", content=b"x" * 20)
+        assert response.status_code == 413
+        assert not [item for item in audits if item.get("event") == "forward_passthrough"]
+
+
+class TestLlmBranchOutboundHeaders:
+    """The LLM routes share the forward host with this face; they get the same hygiene."""
+
+    def test_spoofed_forwarding_headers_and_console_cookie_stay_home(
+        self, forward_env, monkeypatch
+    ) -> None:
+        from aegisgate.adapters.openai_compat import router as openai_router
+        from aegisgate.core.gateway import app
+        from aegisgate.core.gateway_auth import _UI_SESSION_COOKIE
+
+        monkeypatch.setattr(settings_module.settings, "enforce_loopback_only", False, raising=False)
+        forward_env({"api.ag.com": _entry(expose="public")})
+        captured: dict[str, Any] = {}
+
+        async def fake_forward_json(*, url, payload, headers, connect_urls, host_header):
+            captured["headers"] = dict(headers)
+            return 200, {
+                "id": "chat-1",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        async def passthrough_pipeline(_pipeline, item, _ctx):
+            return item
+
+        async def no_semantic(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(openai_router, "_forward_json_with_pinning", fake_forward_json)
+        monkeypatch.setattr(openai_router, "_run_request_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(openai_router, "_run_response_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(openai_router, "_apply_semantic_review", no_semantic)
+        monkeypatch.setattr(openai_router, "_write_audit_event", lambda *a, **k: None)
+        monkeypatch.setattr(openai_router, "debug_log_original", lambda *a, **k: None)
+
+        with TestClient(app, client=("8.8.8.8", 50000)) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Host": "api.ag.com",
+                    "Authorization": "Bearer client-key",
+                    "X-Forwarded-For": "127.0.0.1",
+                    "X-Real-IP": "127.0.0.1",
+                    "Forwarded": "for=127.0.0.1",
+                    "Cookie": f"{_UI_SESSION_COOKIE}=s3cr3t; theirs=1",
+                },
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        assert response.status_code == 200, response.text
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        assert sent["x-forwarded-for"] == "8.8.8.8"
+        assert "x-real-ip" not in sent
+        assert "forwarded" not in sent
+        assert sent["cookie"] == "theirs=1"
+        # The credential the upstream actually needs still travels.
+        assert sent["authorization"] == "Bearer client-key"
 
 
 class TestRawRelay:
