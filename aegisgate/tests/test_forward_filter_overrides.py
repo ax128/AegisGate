@@ -281,6 +281,157 @@ class TestTransportLayerExactValues:
         assert redact_values_module.active_exact_values() == ("SECRET-VALUE-123",)
 
 
+class TestOverridesThroughTheApp:
+    """HostForward → header injection → _execute_* → what the upstream receives."""
+
+    SECRET = "SECRET-VALUE-123"
+
+    @pytest.fixture()
+    def upstream(self, rules, monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+        captured: dict[str, list] = {"payloads": []}
+
+        async def fake_forward_json(*, url, payload, headers, connect_urls, host_header):
+            captured["payloads"].append(payload)
+            return 200, {
+                "id": "chat-1",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        async def fake_iter_stream(*, url, payload, headers, connect_urls, host_header):
+            captured["payloads"].append(payload)
+            yield b'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        async def passthrough_pipeline(_pipeline, item, _ctx):
+            return item
+
+        async def no_semantic(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(router_module, "_forward_json_with_pinning", fake_forward_json)
+        monkeypatch.setattr(router_module, "_iter_forward_stream_with_pinning", fake_iter_stream)
+        monkeypatch.setattr(router_module, "_run_request_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(router_module, "_run_response_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(router_module, "_apply_semantic_review", no_semantic)
+        monkeypatch.setattr(router_module, "_write_audit_event", lambda *a, **k: None)
+        monkeypatch.setattr(router_module, "debug_log_original", lambda *a, **k: None)
+        monkeypatch.setattr(redact_values_module, "load_redact_values", lambda: [self.SECRET])
+        return captured
+
+    def _message(self) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": f"my key is {self.SECRET}"}],
+        }
+
+    def _post(self, *, stream: bool) -> int:
+        from fastapi.testclient import TestClient
+
+        from aegisgate.core.gateway import app
+
+        # Structured content: plain-string content reaches the upstream through the
+        # filter pipeline (stubbed here, covered above), structured parts through
+        # the transport-layer walk that only the context switch can reach.
+        body = {
+            "model": "m",
+            "stream": stream,
+            "messages": [self._message()],
+        }
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
+            response = client.post(
+                "/v1/chat/completions", headers={"host": "api.ag.com"}, json=body
+            )
+            response.read()
+        return response.status_code
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_rule_on_redacts_what_the_upstream_receives_when_global_is_off(
+        self, rules, upstream, monkeypatch: pytest.MonkeyPatch, stream: bool
+    ) -> None:
+        monkeypatch.setattr(
+            settings_module.settings, "enable_exact_value_redaction", False, raising=False
+        )
+        rules(
+            {
+                "api.ag.com": _entry(
+                    filters={"mode": "custom", "custom": {"exact_value_redaction": True}}
+                )
+            }
+        )
+        assert self._post(stream=stream) == 200
+        assert upstream["payloads"], "the request never reached the upstream"
+        assert self.SECRET not in json.dumps(upstream["payloads"][-1])
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_rule_off_lets_the_value_through_when_global_is_on(
+        self, rules, upstream, monkeypatch: pytest.MonkeyPatch, stream: bool
+    ) -> None:
+        monkeypatch.setattr(
+            settings_module.settings, "enable_exact_value_redaction", True, raising=False
+        )
+        rules(
+            {
+                "api.ag.com": _entry(
+                    filters={"mode": "custom", "custom": {"exact_value_redaction": False}}
+                )
+            }
+        )
+        assert self._post(stream=stream) == 200
+        assert self.SECRET in json.dumps(upstream["payloads"][-1])
+
+    def test_request_without_a_rule_keeps_the_global_switch(
+        self, rules, upstream, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            settings_module.settings, "enable_exact_value_redaction", True, raising=False
+        )
+        rules(
+            {
+                "api.ag.com": _entry(
+                    filters={"mode": "custom", "custom": {"exact_value_redaction": False}}
+                )
+            }
+        )
+        from fastapi.testclient import TestClient
+
+        from aegisgate.core.gateway import app
+
+        monkeypatch.setattr(
+            settings_module.settings, "upstream_base_url", "http://127.0.0.1:9/v1", raising=False
+        )
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
+            # Same process, a host without a rule: the other request's "off" must not stick.
+            response = client.post(
+                "/v1/chat/completions",
+                headers={"host": "other.test"},
+                json={"model": "m", "messages": [self._message()]},
+            )
+        assert response.status_code == 200
+        assert self.SECRET not in json.dumps(upstream["payloads"][-1])
+
+
+class TestReloadReport:
+    def test_reload_skips_the_report_while_forwarding_is_off(
+        self, rules, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aegisgate.core import hot_reload
+
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            feature_flags_module, "recheck_disabled_filters", lambda: calls.append(True)
+        )
+        monkeypatch.setattr(
+            settings_module.settings, "enable_gateway_forward", False, raising=False
+        )
+        hot_reload.reload_gw_forwards()
+        assert calls == []
+        monkeypatch.setattr(
+            settings_module.settings, "enable_gateway_forward", True, raising=False
+        )
+        hot_reload.reload_gw_forwards()
+        assert calls == [True]
+
+
 class TestAdmittedRuleSnapshot:
     def test_rule_edited_mid_flight_keeps_the_admitted_switches(self, rules) -> None:
         # Admitted under a rule that keeps redaction on …
