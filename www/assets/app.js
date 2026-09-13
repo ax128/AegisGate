@@ -1514,8 +1514,24 @@ const FORWARD_DENIED_REASONS = {
   forward_rule_disabled: "已停用",
 };
 
+// Always https: the console may well be open over http on 127.0.0.1, which says
+// nothing about how clients reach the forward domain (the field hint says https).
 function forwardBaseUrl(host) {
-  return `${window.location.protocol}//${host}`;
+  return `https://${host}`;
+}
+
+// What turning a baseline filter off actually removes. Transport-layer PII
+// redaction before the upstream is a mandatory baseline with no switch, so "no
+// redaction at all" would overstate it.
+function forwardBaselineOffMessage(offNames) {
+  const parts = [];
+  if (offNames.includes("redaction")) {
+    parts.push("管线层 PII 脱敏（占位符替换与还原）不再执行，转发层的强制 PII 清洗仍保留");
+  }
+  if (offNames.includes("exact_value_redaction")) {
+    parts.push("配置的精确值（密钥、口令等）不再替换，原文直达上游");
+  }
+  return `该域名上：${parts.join("；")}。`;
 }
 
 function forwardPosture(item) {
@@ -1697,20 +1713,24 @@ function renderForwardFilters(custom) {
     .sort()
     .forEach((name) => {
       const globalOn = forwardState.globalFilters[name];
-      const baselineLocked = gateBlocked && FORWARD_BASELINE_FILTERS.includes(name);
-      const value = baselineLocked ? "" : selected[name] === true ? "on" : selected[name] === false ? "off" : "";
+      // The gate only forbids turning a baseline filter *off*. An explicit "on"
+      // (re-enabling redaction the global flag turned off) must survive an edit,
+      // so only the "off" choice is locked, never the whole select.
+      const offLocked = gateBlocked && FORWARD_BASELINE_FILTERS.includes(name);
+      let value = selected[name] === true ? "on" : selected[name] === false ? "off" : "";
+      if (offLocked && value === "off") value = "";
       const row = document.createElement("div");
       row.className = "forward-filter-item";
       row.innerHTML = `
         <label for="ff-${escapeHtml(name)}">${escapeHtml(FORWARD_FILTER_LABELS[name] || name)}</label>
         <span class="forward-filter-state">全局:${globalOn ? "开" : "关"}</span>
-        <select id="ff-${escapeHtml(name)}" data-filter="${escapeHtml(name)}" ${baselineLocked ? "disabled" : ""}>
+        <select id="ff-${escapeHtml(name)}" data-filter="${escapeHtml(name)}">
           <option value="">跟随策略</option>
           <option value="on" ${value === "on" ? "selected" : ""}>开</option>
-          <option value="off" ${value === "off" ? "selected" : ""}>关</option>
+          <option value="off" ${value === "off" ? "selected" : ""} ${offLocked ? "disabled" : ""}>关</option>
         </select>`;
-      if (baselineLocked) {
-        row.title = "public 规则在 AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF 未开启时不能关闭基线脱敏";
+      if (offLocked) {
+        row.title = "public 规则在 AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF 未开启时不能关闭基线脱敏（可以显式开启）";
       }
       row.querySelector("select").addEventListener("change", updateForwardBaselineWarning);
       list.appendChild(row);
@@ -1723,12 +1743,12 @@ function updateForwardBaselineWarning() {
   if (!warning) return;
   const filterList = document.getElementById("forward-filter-list");
   const off = filterList
-    ? Array.from(filterList.querySelectorAll("select")).filter(
-        (sel) => FORWARD_BASELINE_FILTERS.includes(sel.dataset.filter) && sel.value === "off"
-      )
+    ? Array.from(filterList.querySelectorAll("select"))
+        .filter((sel) => FORWARD_BASELINE_FILTERS.includes(sel.dataset.filter) && sel.value === "off")
+        .map((sel) => sel.dataset.filter)
     : [];
   if (forwardModeValue() === "custom" && off.length) {
-    warning.textContent = "已关闭基线脱敏：该域名的请求将不做任何脱敏，原文直达上游。";
+    warning.textContent = `已关闭基线脱敏。${forwardBaselineOffMessage(off)}`;
     warning.classList.remove("hidden");
   } else {
     warning.classList.add("hidden");
@@ -1819,16 +1839,16 @@ async function submitForwardModal() {
   }
   const mode = forwardModeValue();
   const filters = { mode };
-  let baselineOff = false;
+  let baselineOffNames = [];
   if (mode === "custom") {
     const custom = currentForwardFilters();
-    baselineOff = FORWARD_BASELINE_FILTERS.some((name) => custom[name] === false);
+    baselineOffNames = FORWARD_BASELINE_FILTERS.filter((name) => custom[name] === false);
     filters.custom = custom;
   }
-  if (baselineOff) {
+  if (baselineOffNames.length) {
     const ok = await AegisUI.confirm({
       title: "确认关闭基线脱敏",
-      message: "该域名的请求将不做任何脱敏，原文直达上游。",
+      message: forwardBaselineOffMessage(baselineOffNames),
       detail: host,
       confirmLabel: "确认关闭",
       danger: true,

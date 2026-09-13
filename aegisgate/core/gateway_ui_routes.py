@@ -64,6 +64,7 @@ from aegisgate.core.rules_write import (
     write_rules_file,
 )
 from aegisgate.core.ui_etag import (
+    etag_conflict_response,
     etag_for_file,
     if_match_conflict,
     if_match_header,
@@ -349,6 +350,45 @@ def _invalid_forward_response(reason: str | None) -> JSONResponse:
         status_code=400,
         content={"error": "invalid_forward_rule", "detail": reason or "转发规则非法"},
     )
+
+
+async def _forward_request_body(request: Request) -> dict | JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400, content={"error": "invalid_json", "detail": "请求体必须是 JSON 对象"}
+        )
+    return body
+
+
+def _forward_write_error(exc: Exception) -> JSONResponse | None:
+    """Map a refused gw_forwards write to a response; ``None`` for anything else.
+
+    The If-Match check runs inside the write, under the table lock and against
+    the bytes being replaced, so a 409 here is authoritative.
+    """
+    from aegisgate.core import gw_forwards
+
+    if isinstance(exc, gw_forwards.ForwardEtagMismatch):
+        return etag_conflict_response(exc.current_etag)
+    if isinstance(exc, gw_forwards.ForwardWriteRefused):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "forward_table_locked", "reason": exc.reason, "detail": exc.detail},
+        )
+    if isinstance(exc, gw_forwards.ForwardHostExists):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "forward_host_exists", "detail": f"网关域名已存在：{exc}"},
+        )
+    if isinstance(exc, gw_forwards.ForwardNotFound):
+        return JSONResponse(status_code=404, content={"error": "forward_not_found"})
+    if isinstance(exc, OSError):
+        return JSONResponse(status_code=500, content={"error": "forward_persistence_failed"})
+    return None
 
 
 def register_ui_routes(app: FastAPI) -> None:
@@ -1953,32 +1993,22 @@ def register_ui_routes(app: FastAPI) -> None:
     async def local_ui_forwards_create(request: Request) -> JSONResponse:
         from aegisgate.core import gw_forwards
 
-        conflict = if_match_conflict(request, _forwards_etag())
-        if conflict is not None:
-            return conflict
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
         host = _string_field(body.get("host"))
         if not host:
             return JSONResponse(status_code=400, content={"error": "missing_host", "detail": "网关域名为必填"})
-        normalized = gw_forwards._normalize_host(host)
-        if (
-            gw_forwards.get(normalized) is not None
-            or gw_forwards.denied_reason(normalized) is not None
-        ):
-            return JSONResponse(status_code=409, content={"error": "forward_host_exists"})
-        rule, reason = _forward_rule_from_body(normalized, body)
+        rule, reason = _forward_rule_from_body(host, body)
         if rule is None:
             return _invalid_forward_response(reason)
         try:
-            # Drop any raw key that normalizes to this host before writing, so a
-            # stale invalid entry cannot shadow the new rule.
-            gw_forwards.delete(rule.host)
-            gw_forwards.upsert(rule)
-        except OSError:
-            return JSONResponse(status_code=500, content={"error": "forward_persistence_failed"})
+            etag = gw_forwards.create(rule, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
         write_audit({
             "event": "ui_forward_create",
             "route": "/__ui__/api/forwards",
@@ -1988,72 +2018,59 @@ def register_ui_routes(app: FastAPI) -> None:
             "baseline_off": rule.baseline_off,
         })
         return with_etag(
-            JSONResponse(status_code=201, content={"ok": True, "host": rule.host}),
-            _forwards_etag(),
+            JSONResponse(status_code=201, content={"ok": True, "host": rule.host}), etag
         )
 
     @app.patch("/__ui__/api/forwards/{host}")
     async def local_ui_forwards_update(host: str, request: Request) -> JSONResponse:
         from aegisgate.core import gw_forwards
 
-        conflict = if_match_conflict(request, _forwards_etag())
-        if conflict is not None:
-            return conflict
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(status_code=400, content={"error": "invalid_json"})
-        normalized = gw_forwards._normalize_host(host)
-        if (
-            gw_forwards.get(normalized) is None
-            and gw_forwards.denied_reason(normalized) is None
-        ):
-            return JSONResponse(status_code=404, content={"error": "forward_not_found"})
-        new_host = _string_field(body.get("host")) or normalized
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        previous_host = gw_forwards.route_host(host)
+        new_host = _string_field(body.get("host")) or previous_host
         rule, reason = _forward_rule_from_body(new_host, body)
         if rule is None:
             return _invalid_forward_response(reason)
-        if rule.host != normalized and (
-            gw_forwards.get(rule.host) is not None
-            or gw_forwards.denied_reason(rule.host) is not None
-        ):
-            return JSONResponse(status_code=409, content={"error": "forward_host_exists"})
         try:
-            gw_forwards.delete(normalized)
-            gw_forwards.upsert(rule)
-        except OSError:
-            return JSONResponse(status_code=500, content={"error": "forward_persistence_failed"})
+            # One write: the old entry (and any raw key routing to it) goes and the
+            # new one lands together, so a failed save cannot leave the host unset.
+            etag = gw_forwards.replace(host, rule, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
         write_audit({
             "event": "ui_forward_update",
             "route": "/__ui__/api/forwards/{host}",
             "actor_ip": request.client.host if request.client else "unknown",
             "forward_host": rule.host,
-            "previous_host": normalized,
+            "previous_host": previous_host,
             "expose": rule.expose,
             "baseline_off": rule.baseline_off,
         })
-        return with_etag(
-            JSONResponse(content={"ok": True, "host": rule.host}), _forwards_etag()
-        )
+        return with_etag(JSONResponse(content={"ok": True, "host": rule.host}), etag)
 
     @app.delete("/__ui__/api/forwards/{host}")
     async def local_ui_forwards_delete(host: str, request: Request) -> JSONResponse:
         from aegisgate.core import gw_forwards
 
-        conflict = if_match_conflict(request, _forwards_etag())
-        if conflict is not None:
-            return conflict
         try:
-            removed = gw_forwards.delete(host)
-        except OSError:
-            return JSONResponse(status_code=500, content={"error": "forward_persistence_failed"})
+            removed = gw_forwards.delete(host, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
         if not removed:
             return JSONResponse(status_code=404, content={"error": "forward_not_found"})
         write_audit({
             "event": "ui_forward_delete",
             "route": "/__ui__/api/forwards/{host}",
             "actor_ip": request.client.host if request.client else "unknown",
-            "forward_host": gw_forwards._normalize_host(host),
+            "forward_host": gw_forwards.route_host(host),
         })
         return with_etag(JSONResponse(content={"ok": True}), _forwards_etag())
 
@@ -2065,10 +2082,9 @@ def register_ui_routes(app: FastAPI) -> None:
                 status_code=429,
                 content={"error": "probe_rate_limited", "detail": "连通性测试过于频繁，请稍后再试"},
             )
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(status_code=400, content={"error": "invalid_json"})
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
         upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
         probe_error = _probe_request_error(upstream_base)
         if probe_error is not None:

@@ -114,6 +114,56 @@ class TestCreate:
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_forward_rule"
 
+    @pytest.mark.parametrize("body", [["not", "an", "object"], "text", 3])
+    def test_non_object_body_is_400(self, ctx, body) -> None:
+        client, _path, _audits = ctx
+        response = client.post("/__ui__/api/forwards", json=body)
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_json"
+
+    def test_unhashable_field_is_400_not_500(self, ctx) -> None:
+        client, _path, _audits = ctx
+        response = client.post("/__ui__/api/forwards", json=_rule_body(expose=["public"]))
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_forward_rule"
+
+    def test_internal_baseline_off_is_audited(self, ctx) -> None:
+        client, _path, audits = ctx
+        response = client.post(
+            "/__ui__/api/forwards",
+            json=_rule_body(filters={"mode": "custom", "custom": {"redaction": False}}),
+        )
+        assert response.status_code == 201
+        assert audits[-1]["event"] == "ui_forward_create"
+        assert audits[-1]["baseline_off"] is True
+
+    def test_create_refused_under_hmac_conflict_keeps_the_file(
+        self, ctx, monkeypatch
+    ) -> None:
+        client, path, _audits = ctx
+        path.write_text(
+            json.dumps({"version": 1, "forwards": {"old.ag.com": _rule_body(host="old.ag.com")}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            settings_module.settings, "enable_request_hmac_auth", True, raising=False
+        )
+        gw_forwards.load(replace=True)
+        before = path.read_bytes()
+        response = client.post("/__ui__/api/forwards", json=_rule_body())
+        assert response.status_code == 409
+        assert response.json()["error"] == "forward_table_locked"
+        assert path.read_bytes() == before
+
+    def test_create_refused_while_file_is_unparseable(self, ctx) -> None:
+        client, path, _audits = ctx
+        path.write_text("{ half-edited", encoding="utf-8")
+        gw_forwards.load(replace=True)
+        response = client.post("/__ui__/api/forwards", json=_rule_body())
+        assert response.status_code == 409
+        assert response.json()["error"] == "forward_table_locked"
+        assert path.read_text(encoding="utf-8") == "{ half-edited"
+
     def test_public_baseline_off_is_400_and_points_at_the_flag(self, ctx) -> None:
         client, _path, _audits = ctx
         response = client.post(
@@ -151,6 +201,47 @@ class TestUpdateDelete:
         )
         assert response.status_code == 409
         assert response.json()["error"] == "etag_mismatch"
+
+    def test_rename_moves_the_rule_in_one_write(self, ctx) -> None:
+        client, path, audits = ctx
+        client.post("/__ui__/api/forwards", json=_rule_body())
+        response = client.patch(
+            "/__ui__/api/forwards/api.ag.com", json=_rule_body(host="new.ag.com")
+        )
+        assert response.status_code == 200
+        assert response.headers["ETag"]
+        assert set(json.loads(path.read_text(encoding="utf-8"))["forwards"]) == {"new.ag.com"}
+        assert audits[-1]["previous_host"] == "api.ag.com"
+
+    def test_rename_onto_an_existing_host_is_409(self, ctx) -> None:
+        client, _path, _audits = ctx
+        client.post("/__ui__/api/forwards", json=_rule_body())
+        client.post("/__ui__/api/forwards", json=_rule_body(host="taken.ag.com"))
+        response = client.patch(
+            "/__ui__/api/forwards/api.ag.com", json=_rule_body(host="taken.ag.com")
+        )
+        assert response.status_code == 409
+        assert response.json()["error"] == "forward_host_exists"
+        assert gw_forwards.get("api.ag.com") is not None
+
+    def test_update_of_missing_host_is_404(self, ctx) -> None:
+        client, _path, _audits = ctx
+        response = client.patch("/__ui__/api/forwards/missing.ag.com", json=_rule_body())
+        assert response.status_code == 404
+
+    def test_failed_write_leaves_the_old_rule_in_place(self, ctx, monkeypatch) -> None:
+        client, _path, _audits = ctx
+        client.post("/__ui__/api/forwards", json=_rule_body())
+
+        def disk_full(_payload: bytes) -> None:
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(gw_forwards, "_atomic_write", disk_full)
+        response = client.patch(
+            "/__ui__/api/forwards/api.ag.com", json=_rule_body(upstream_base="https://api2.xxx.com")
+        )
+        assert response.status_code == 500
+        assert gw_forwards.get("api.ag.com").upstream_base == "https://api.xxx.com"
 
     def test_delete_removes(self, ctx) -> None:
         client, _path, _audits = ctx
@@ -229,6 +320,13 @@ class TestConsoleMarkup:
         assert "FORWARD_BASELINE_FILTERS" in js
         assert "确认关闭基线脱敏" in js
         assert "原文直达上游" in js
+
+    def test_public_gate_locks_only_the_off_choice(self) -> None:
+        js = _APP_JS.read_text(encoding="utf-8")
+        body = js.split("function renderForwardFilters", 1)[1].split("\nfunction ", 1)[0]
+        # Disabling the whole select dropped an explicit "on" from the saved rule.
+        assert '${offLocked ? "disabled" : ""}>关</option>' in body
+        assert 'data-filter="${escapeHtml(name)}" ${' not in body
 
     def test_filter_choices_are_tri_state(self) -> None:
         js = _APP_JS.read_text(encoding="utf-8")

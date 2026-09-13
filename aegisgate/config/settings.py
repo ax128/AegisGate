@@ -108,7 +108,8 @@ class Settings(BaseSettings):
     gw_tokens_path: str = "config/gw_tokens.json"
     # Host-forwarding table (config/gw_forwards.json): forwards a whole client-facing
     # hostname to an operator-written upstream base URL. Loaded at startup, watched for
-    # hot reload, written by the console. Pinned at startup — see _IMMUTABLE_FIELDS.
+    # hot reload, written by the console. The watcher follows the path resolved at
+    # startup, so restart after pointing this somewhere else.
     gw_forwards_path: str = "config/gw_forwards.json"
     # Master switch for host forwarding. Safe default: off, pinned at startup.
     enable_gateway_forward: bool = False
