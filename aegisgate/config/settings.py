@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # Token-routed generic-proxy requests (CLIProxyAPI etc.) may carry large
     # multimodal payloads (inline image/video) above the 12MB text JSON limit.
     v2_max_request_body_bytes: int = 64_000_000
+    # Host-forwarded (baseUrl) requests are a true reverse proxy and may carry
+    # the same large payloads; the boundary raises its cap to the larger of this
+    # and the v2 limit for requests carrying aegis_forward_rule.
+    forward_max_request_body_bytes: int = 64_000_000
     max_messages_count: int = 500
     max_content_length_per_message: int = 250_000
     max_response_length: int = 2_000_000
@@ -102,6 +106,13 @@ class Settings(BaseSettings):
     # Path to the token mapping table (config/gw_tokens.json); loaded at startup, written on
     # register/delete.
     gw_tokens_path: str = "config/gw_tokens.json"
+    # Host-forwarding table (config/gw_forwards.json): forwards a whole client-facing
+    # hostname to an operator-written upstream base URL. Loaded at startup, watched for
+    # hot reload, written by the console. The watcher follows the path resolved at
+    # startup, so restart after pointing this somewhere else.
+    gw_forwards_path: str = "config/gw_forwards.json"
+    # Master switch for host forwarding. Safe default: off, pinned at startup.
+    enable_gateway_forward: bool = False
     # Automatic local-port routing: a purely numeric token (1024-65535) is forwarded to
     # host.docker.internal:{port}/v1.
     # Once on, /v1/__gw__/t/8080/chat/completions → http://host.docker.internal:8080/v1/chat/completions
@@ -122,6 +133,11 @@ class Settings(BaseSettings):
     # Allow `token__passthrough` mode from public/non-internal clients.
     # Default: False (internal-only) because passthrough disables all security filters.
     allow_public_passthrough_mode: bool = False
+    # Allow a `public` forward rule to turn the baseline redaction filters off.
+    # Default: False, because weakening the public surface may not come from a
+    # hot-editable JSON file — the same posture as allow_public_passthrough_mode.
+    # Pinned at startup — see _IMMUTABLE_FIELDS.
+    forward_allow_public_baseline_off: bool = False
     # Allow ``AEGIS_UPSTREAM_WHITELIST_URL_LIST`` bypass from public/non-internal
     # clients. Default False: whitelist still skips both pipelines (including PII
     # redaction) for internal clients, but public clients fall back to the normal

@@ -122,6 +122,8 @@ from aegisgate.core.gw_tokens import (
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
 )
+from aegisgate.core.gw_forwards import load as gw_forwards_load
+from aegisgate.core.forward_middleware import HostForwardMiddleware
 from aegisgate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from aegisgate.observability.logging import configure_logging
 from aegisgate.observability.metrics import inc_request, observe_request_duration
@@ -215,6 +217,10 @@ def _observability_route_label(path: str) -> str:
     matched = _GW_TOKEN_PATH_RE.match(path)
     if matched:
         return f"token_{matched.group(1)}"
+    if path.startswith("/__fwd__"):
+        # Forwarded (non-LLM) traffic gets one label of its own instead of the
+        # upstream path, which would explode label cardinality.
+        return "forward"
     if path == "/":
         return "root"
     if path == "/health":
@@ -419,6 +425,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gw_tokens_load()
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_tokens load on startup failed: %s", exc)
+    try:
+        gw_forwards_load()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("gw_forwards load on startup failed: %s", exc)
     try:
         gw_tokens_inject_builtin_compat()
     except Exception as exc:  # pragma: no cover
@@ -977,11 +987,31 @@ async def security_boundary_middleware(request: Request, call_next):
         # openai-compatible JSON routes. aegis_gateway_token is set only by the
         # gw-token rewrite; /v2 is the direct generic-proxy path.
         v2_max_body_bytes = int(settings.v2_max_request_body_bytes)
-        is_generic_proxy = bool(
-            request.scope.get("aegis_gateway_token")
-        ) or normalized_path.startswith("/v2")
+        forward_rule = request.scope.get("aegis_forward_rule")
+        is_forward_request = forward_rule is not None
+        if is_forward_request:
+            # Rides into the audit record (security_boundary) so a forwarded
+            # request says which rule and filter mode it went through.
+            boundary["forward_host"] = str(getattr(forward_rule, "host", "") or "")
+            boundary["forward_mode"] = str(getattr(forward_rule, "filters_mode", "") or "")
+            boundary["forward_branch"] = (
+                "passthrough"
+                if request.scope.get("aegis_forward_path") is not None
+                else "llm"
+            )
+        is_generic_proxy = (
+            bool(request.scope.get("aegis_gateway_token"))
+            or normalized_path.startswith("/v2")
+            or is_forward_request
+        )
         if v2_max_body_bytes > 0 and is_generic_proxy:
             effective_max_body_bytes = max(effective_max_body_bytes, v2_max_body_bytes)
+        if is_forward_request:
+            forward_max_body_bytes = int(settings.forward_max_request_body_bytes)
+            if forward_max_body_bytes > 0:
+                effective_max_body_bytes = max(
+                    effective_max_body_bytes, forward_max_body_bytes
+                )
         boundary["max_request_body_bytes"] = effective_max_body_bytes
 
         def finish(response: Response) -> Response:
@@ -1925,5 +1955,9 @@ def favicon() -> Response:
     return Response(status_code=204)
 
 
+# Host forwarding runs inside the token rewrite (the token path is the more
+# specific routing key) and outside the security boundary, so every forwarded
+# request still passes the boundary checks.
+app.add_middleware(HostForwardMiddleware)
 # Token rewriting must run first: an ASGI middleware rewrites scope.path before route matching.
 app.add_middleware(GWTokenRewriteMiddleware)
