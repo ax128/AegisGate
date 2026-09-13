@@ -169,6 +169,7 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 列表直接给出**客户端 Base URL**（`<origin>/v1/__gw__/t/<token>`）并支持一键复制
   - 上游地址即时校验：缺 `http(s)://`、缺主机名、带查询参数或 `#` 片段会当场拦下，填成 `/chat/completions` 这类具体端点会提示改回 base URL
   - 「测试连通性」按钮，见 §4.2
+- 网关转发：按域名（Host）转发，客户端 baseUrl 直接用网关域名，见 §4.4
 - 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
   - 读写位置与运行时加载密钥的位置是同一个：设了 `AEGIS_CONFIG_DIR` 就用它，否则用 `<工作目录>/config`。轮换 `aegis_fernet.key` 时旧密钥会存到 `aegis_fernet_prev.key`，旧密文在过渡窗口内仍可解
 - Docker Compose 配置文件在线编辑
@@ -179,7 +180,7 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 
 保存配置会写入 `config/.env` 并触发热更新，但安全关键项在启动时固定（`hot_reload._IMMUTABLE_FIELDS`），热更新不会生效。这类字段在配置页上带 **需重启** 徽章，保存后页面会给出提示条和「重启网关」按钮，不再报告一次并未发生的热重载。
 
-配置页上可编辑、需要重启才生效的字段（即 `_IMMUTABLE_FIELDS` 的 12 项减去不在配置页开放的 `gateway_key`）：
+配置页上可编辑、需要重启才生效的字段（即 `_IMMUTABLE_FIELDS` 的 15 项减去不在配置页开放的 `gateway_key`，共 14 项）：
 
 - `AEGIS_SECURITY_LEVEL`（安全级别）
 - `AEGIS_ENFORCE_LOOPBACK_ONLY`（仅本机访问）
@@ -188,6 +189,8 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 - `AEGIS_V2_BLOCK_INTERNAL_TARGETS`（v2 SSRF 防护）
 - `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS`、`AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE`、`AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（公网闸门）
 - `AEGIS_ENABLE_REQUEST_HMAC_AUTH`、`AEGIS_REQUEST_HMAC_SECRET`（请求签名）
+- `AEGIS_ENABLE_GATEWAY_FORWARD`、`AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF`（整域名转发，见 §4.4）
+- `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS`（流式探测间隔）
 - `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK`（控制台内网访问）
 
 已写入 `.env` 但当前进程尚未采用的字段，会额外带 **待生效** 徽章，并显示 `.env` 中的新值而不是进程里的旧值。
@@ -250,6 +253,22 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/tokens/probe \
 `field_value_patterns` 是独立于 relaxed 集的一层：只要该执行面跑脱敏，field 规则就跑，不受 `relaxed_pii_ids` 增删影响。
 
 写接口是 `PATCH /__ui__/api/request_redaction/settings`，只接受具名的领域操作（`set_mode`、`set_membership`、`materialize_custom`、`remove_unresolved`）加三个标量值，不接受任意 key path；每个操作都在写事务内、对着锁下读到的那份文档重新校验。该端点**强制** `If-Match`，见 §3.2。
+
+### 4.4 网关转发面板
+
+按**域名**（而非 URL 路径）转发的规则面板，底层是 `config/gw_forwards.json`。开启需启动态 `AEGIS_ENABLE_GATEWAY_FORWARD=true`；规则文件本身在热重载范围内，保存即生效。
+
+列表每行：**状态**（启用 / 停用 / 非法（原因））、网关域名、上游地址、暴露面（`public` / `internal`）、过滤姿态（`策略默认` 或 `自定义 N/13`）与操作（探活 / 编辑 / 删除）。基线脱敏被关的行内红色标记；上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 的标注「开关不生效」。
+
+编辑抽屉三块：
+
+1. **基本**：网关域名、上游地址、备注、启用、暴露面。
+2. **安检开关**：`policy`（不覆盖）或 `custom`。选 `custom` 后展开 13 项，每项是**三态**下拉（跟随策略 / 开 / 关），并标出该过滤器当前全局态；只有显式选「开 / 关」才会写入 `filters.custom`，因此「缺项 = 不覆盖」在界面上可直接表达。关掉基线两项（`redaction`、`exact_value_redaction`）会弹二次确认，文案写明实际去掉的是什么（`redaction` 只停管线层 PII 脱敏，转发层强制 PII 清洗仍保留；`exact_value_redaction` 关后精确值原文直达上游）；`public` 规则在 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` 未开时这两项只禁用「关」，「开」与「跟随策略」照常可选，已显式开启的不会在编辑时被清掉。
+3. **对外 baseURL**：`https://<网关域名>`，一键复制，客户端只需把 baseUrl 指向它。
+
+API：`GET/POST /__ui__/api/forwards`、`PATCH/DELETE /__ui__/api/forwards/{host}`、`POST /__ui__/api/forwards/probe`。写入走 ETag 乐观并发（§3.2）、CSRF 与审计；`If-Match` 在写锁内对着磁盘上的文件校验，改名是一次原子写入。规则文件无法解析、或 `AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发同开时，写接口返回 `409 forward_table_locked`，需先手工修好或删除文件。校验与加载调用同一个 `validate_rule()`，所以控制台不会存进一个加载时会被拒的条目。
+
+注意：**本层不鉴权，只选目的地**——真实凭据是客户端自带、透传给上游的 `Authorization`；转发域名上的 `/v2/*`、`/relay/*` 一律透传，不受本面板开关控制。安全边界与 Caddy 示例见 [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md)。
 
 ## 5. 安全说明
 

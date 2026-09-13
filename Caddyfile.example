@@ -87,6 +87,41 @@ api.example.com {
     }
 }
 
+# ─── Whole-domain (baseUrl) forwarding ──────────────────────────────────────
+#
+# The block above routes on the URL path (`/v1/__gw__/t/<token>/...`). If you want clients to
+# change only the domain — baseUrl = the gateway domain — enable AEGIS_ENABLE_GATEWAY_FORWARD=true
+# and add a rule per host in config/gw_forwards.json (or via the console).
+#
+# Differences from the token block that matter here:
+#   - The WHOLE domain is proxied: the upstream's own console, OAuth callbacks and static assets
+#     come through this domain too, so there is no @not_api 404 filter. Keep /__gw__ and /__ui__
+#     blocked at the edge as well as inside the gateway.
+#   - header_up Host {host} is what the gateway routes on; X-Forwarded-Host is what a trusted
+#     proxy (AEGIS_TRUSTED_PROXY_IPS) is allowed to override it with. Set both.
+#   - AEGIS_TRUSTED_PROXY_IPS must list this proxy, or every forwarded request looks public.
+#   - The gateway still answers /metrics, /health, /ready, /robots.txt and /favicon.ico itself,
+#     shadowing an upstream with the same paths.
+#
+# *.gw.example.com {
+#     @gw_admin path /__gw__ /__gw__/* /__ui__ /__ui__/*
+#     respond @gw_admin "forbidden" 403
+#
+#     reverse_proxy 127.0.0.1:18080 {
+#         header_up Host {host}
+#         header_up X-Forwarded-Host {host}
+#         header_up X-Forwarded-Proto {scheme}
+#         header_up X-Forwarded-For {remote_host}
+#         header_up X-Real-IP {remote_host}
+#         flush_interval -1
+#         transport http {
+#             response_header_timeout 660s
+#             read_timeout 660s
+#             write_timeout 660s
+#         }
+#     }
+# }
+
 # Upstream admin console (optional): connects straight to the upstream, bypassing the gateway.
 # Replace with your real upstream address and port (CLIProxyAPI=8317, Sub2API=8080, AIClient-2-API=3000).
 # In production, add an IP allowlist to restrict public access.

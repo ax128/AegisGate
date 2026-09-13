@@ -115,6 +115,21 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 
 未进本项、仍开放的：R8.3 的 **field 规则语义跨 V1/V2 统一**；E1/E3 占位符语法统一仍留在 R8；`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，见下方单点待办。
 
+### R10 — 整域名转发的后续面（M–L，**需先决策**）
+
+整域名转发（Host 路由、逐规则过滤开关、`/__fwd__/` 透传、响应头回写、控制台面板）已落地；以下几项刻意没有进首版，
+每项都改变安全面或回归面，须单独立项：
+
+1. **后缀 / 通配域名匹配**：目前只有精确表，上游全部是 operator 手写常量。若由客户端 Host 派生上游，
+   必须自带标签白名单与带 IP 绑定、私网拒绝的上游解析，不得复用 V1 scope 上游的免校验通路。
+   验收：伪造 Host 无法构造规则表以外的目标。
+2. **WebSocket 转发**：ASGI `websocket` scope 现在原样交给现有栈。上游管理台依赖 ws 时需要独立实现，
+   并沿用同一套 `expose` 门与保留路径。
+3. **响应体改写**：只改写 `Location` / `Set-Cookie` / `Access-Control-Allow-Origin`，上游 HTML / JS 里写死的自身地址会露出。
+   是否改写、改写哪些内容类型，需要先评估对流式与二进制响应的影响。
+4. **V2 逐规则开关**：转发域名上的 `/v2/*` 一律透传，不进 V2 链路；V2 自身开关与 V1 的分裂归入 R8 的执行面收敛。
+5. **无 `Content-Length` 上传**：仍会被缓冲到请求体上限；流式化需要与 boundary 的体积检查一起改。
+
 ## 单点待办
 
 - **请求相位 AnomalyDetector**：要挂必须先把请求分数从响应门控用的 `risk_score` 里隔离（独立字段或封顶到 OutputSanitizer sanitize 门以下）。共享分数会让 `should_sanitize` 给干净回答打上 sanitize、流式被掐。

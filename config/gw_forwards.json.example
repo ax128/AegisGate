@@ -1,0 +1,49 @@
+{
+  "_description": "Whole-domain (Host-based) forwarding rules. Save as config/gw_forwards.json; the gateway loads it at startup and hot-reloads on change (AEGIS_ENABLE_GATEWAY_FORWARD is a startup switch).",
+  "_format": "Each key under `forwards` is the client-facing hostname the gateway routes on. upstream_base is the upstream ROOT and must NOT include /v1: the whole domain is forwarded verbatim.",
+  "_fields": [
+    "enabled      (bool, default true)  false keeps the rule but answers 403 forward_rule_disabled",
+    "upstream_base(string, required)    http(s)://host[:port]; operator constant, not client-derived",
+    "note         (string, optional)    free-form label shown in the console",
+    "expose       (public|internal)     internal = internal clients only (default); public = any client",
+    "filters.mode (policy|custom)       policy = keep the normal filter resolution (default)",
+    "filters.custom                     only with mode=custom: filter name -> bool. A missing name means",
+    "                                   'no override'. Keys are the filter names (redaction, exact_value_redaction,",
+    "                                   injection_detector, ...), i.e. the AEGIS_ENABLE_* flags without the prefix."
+  ],
+  "_security_notes": [
+    "This layer does not authenticate; it only picks a destination. The client's Authorization header is the credential.",
+    "A public rule may not turn off the baseline filters (redaction / exact_value_redaction) unless AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true is pinned at startup.",
+    "AEGIS_ENABLE_REQUEST_HMAC_AUTH=true and forwarding are mutually exclusive: the forward table refuses to load.",
+    "A broken file denies every host the gateway knew (403 forward_config_invalid), however many broken saves follow, instead of falling back to the default upstream; the console will not write until the file is fixed or deleted.",
+    "Behind a reverse proxy, AEGIS_TRUSTED_PROXY_IPS must list it; clients reaching the gateway directly need AEGIS_ENFORCE_LOOPBACK_ONLY=false."
+  ],
+  "version": 1,
+  "forwards": {
+    "api.ag.example.com": {
+      "enabled": false,
+      "upstream_base": "http://127.0.0.1:8317",
+      "note": "同机 CLIProxyAPI；启用后客户端 baseUrl 用 https://api.ag.example.com",
+      "expose": "internal",
+      "filters": {
+        "mode": "policy"
+      }
+    },
+    "chat.ag.example.com": {
+      "enabled": false,
+      "upstream_base": "https://api.example.com",
+      "note": "示例：整域名转发；只覆盖部分过滤器，其余沿用策略结果",
+      "expose": "internal",
+      "filters": {
+        "mode": "custom",
+        "custom": {
+          "redaction": true,
+          "exact_value_redaction": true,
+          "restoration": true,
+          "injection_detector": true,
+          "anomaly_detector": false
+        }
+      }
+    }
+  }
+}

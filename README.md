@@ -320,6 +320,96 @@ For public access, prefer a random registered token. Numeric port tokens and `__
 
 See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 
+### Scenario 4: Domain Forwarding (whole-domain `baseUrl`)
+
+Instead of putting the routing key in the path, forward a whole client-facing
+hostname. The client's `baseUrl` becomes the gateway domain itself, so a tool
+that only lets you change the domain (sub2api, CLIProxyAPI, AIClient-2-API) works
+unchanged:
+
+```
+Client → https://api.ag.example.com/v1/chat/completions → AegisGate → http://127.0.0.1:8317/v1/chat/completions
+```
+
+1. Enable it at startup (both switches are pinned until restart):
+
+```bash
+AEGIS_ENABLE_GATEWAY_FORWARD=true
+AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # when a reverse proxy sits in front
+```
+
+2. Add a rule in `config/gw_forwards.json` (or through the console's **网关转发 / Gateway Forwarding** panel). `upstream_base` is the upstream **root**, without `/v1`: the whole domain is forwarded verbatim. See [config/gw_forwards.json.example](config/gw_forwards.json.example).
+
+```json
+{
+  "version": 1,
+  "forwards": {
+    "api.ag.example.com": {
+      "enabled": true,
+      "upstream_base": "http://127.0.0.1:8317",
+      "expose": "internal",
+      "filters": { "mode": "policy" }
+    }
+  }
+}
+```
+
+3. Point the client at `https://api.ag.example.com`.
+
+How traffic splits on a matched host:
+
+| Request | Where it goes | Filters |
+|---------|---------------|---------|
+| `POST /v1/chat/completions`, `/v1/responses`, `/v1/messages` | the V1 pipeline | per the rule's `filters` |
+| every other path and method (including other `/v1` POSTs, `/v2/*`, `/relay/*`, the upstream's own console, OAuth callbacks, static assets) | forwarded verbatim to `upstream_base` | none |
+| `/__ui__`, `/__gw__`, `/metrics`, `/health`, `/ready`, `/`, `/robots.txt`, `/favicon.ico` | the gateway itself (never forwarded) | n/a |
+
+Each rule owns a full set of filter switches (`filters.mode: "custom"`), which
+can turn a globally disabled filter back on and vice versa. `redaction` and
+`exact_value_redaction` are the baseline; a `public` rule may not turn them off
+unless `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true` is pinned at startup.
+
+Security boundaries worth knowing before enabling it:
+
+- **This layer does not authenticate.** It only picks a destination. The real
+  credential is the client's own `Authorization` header, passed through to the
+  upstream. `expose: "internal"` (the default) restricts a rule to internal
+  clients; `expose: "public"` opens it to anyone who can set `Host`.
+- **Every client on one forward domain shares one tenant and one session/tool
+  cache namespace**, exactly like clients sharing one gateway token. Isolation
+  per client is the token path's job.
+- **Prerequisites.** With the default `AEGIS_ENFORCE_LOOPBACK_ONLY=true` the
+  boundary rejects every non-loopback peer, so set it to `false` unless the only
+  peer is a reverse proxy on the same host. Behind a proxy,
+  `AEGIS_TRUSTED_PROXY_IPS` must list it, or every forwarded request looks
+  public.
+- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` and forwarding are mutually
+  exclusive**: HMAC forces signatures on every non-passthrough request, which a
+  browser hitting a forwarded domain cannot provide. Enabling both refuses to
+  load the forward table, and the console refuses to edit it.
+- **An upstream on `AEGIS_UPSTREAM_WHITELIST_URL_LIST` skips both pipelines** on
+  the three LLM routes, so that rule's filter switches have no effect. The
+  startup log and the console flag such rules.
+- **Fail-closed.** A broken `gw_forwards.json` (unparseable, `version` not `1`)
+  answers 403 `forward_config_invalid` for every host the gateway knew,
+  however many broken saves follow, and the console will not overwrite the file
+  until it is fixed or deleted. A single invalid entry only denies that host.
+- Reserved paths are shadowed on a forward host — an upstream that also serves
+  `/metrics` or `/health` will not see them. They keep answering even when the
+  rule is disabled or invalid.
+- Uploads with `Content-Length` are streamed through; uploads without it are
+  buffered up to `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`.
+- Only response **headers** are rewritten (`Location`, `Set-Cookie` domain,
+  `Access-Control-Allow-Origin`); HTML/JS/JSON bodies that hard-code the
+  upstream's own URL are not. WebSocket is not supported, and methods other than
+  GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS answer 405.
+- From a peer that is not a trusted proxy, `X-Forwarded-For` / `X-Real-IP` /
+  `Forwarded` are replaced with the real peer before reaching the upstream, and
+  the console's own `aegis_ui_*` cookies are never forwarded (nor accepted from
+  the upstream).
+- `/v2/*` and `/relay/*` on a forward domain are passed through, not handled by
+  the gateway's own v2/relay routes.
+
 ## Core Capabilities
 
 ### API Endpoints
@@ -676,6 +766,10 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_MAX_REQUEST_BODY_BYTES` | `12000000` | Maximum JSON request body size in bytes on v1 routes |
 | `AEGIS_MAX_MULTIPART_BODY_BYTES` | `60000000` | Maximum body size for the multipart routes (`/v1/files`, `/v1/images/edits`, `/v1/images/variations`) |
 | `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | `64000000` | Maximum request body size on v2 token routes (multimodal payloads exceed the v1 JSON limit) |
+| `AEGIS_ENABLE_GATEWAY_FORWARD` | `false` | Enable whole-domain (Host-based) forwarding via `config/gw_forwards.json`. Restart required |
+| `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` | `false` | Allow an `expose: public` forward rule to turn the baseline redaction filters off. Restart required |
+| `AEGIS_GW_FORWARDS_PATH` | `config/gw_forwards.json` | Forward-rule file path |
+| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | `64000000` | Request-body cap for forwarded requests (the boundary uses the larger of this and the v2 limit) |
 | `AEGIS_MAX_MESSAGES_COUNT` | `500` | Maximum number of messages allowed in `/v1/chat/completions` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | `90` | Filter pipeline timeout in seconds |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | `block` | Action on request pipeline timeout: `block` or `pass` |
