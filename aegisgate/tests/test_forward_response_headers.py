@@ -172,6 +172,36 @@ class TestRewriteHelpers:
             == "https://api.ag.com"
         )
 
+    def test_scheme_relative_location_mapped_to_gateway(self) -> None:
+        assert (
+            forward_routes.rewrite_location(
+                "//api.xxx.com/login",
+                upstream_host="api.xxx.com",
+                gateway_origin="https://api.ag.com:8443",
+            )
+            == "//api.ag.com:8443/login"
+        )
+
+    def test_console_cookie_name_is_dropped(self) -> None:
+        assert (
+            forward_routes.rewrite_set_cookie(
+                "aegis_ui_session=forged; Path=/",
+                upstream_host="api.xxx.com",
+                gateway_host="api.ag.com",
+            )
+            is None
+        )
+
+    def test_acao_matches_with_explicit_default_port(self) -> None:
+        assert (
+            forward_routes.rewrite_access_control_allow_origin(
+                "https://API.xxx.com",
+                upstream_origin="https://api.xxx.com:443",
+                gateway_origin="https://api.ag.com",
+            )
+            == "https://api.ag.com"
+        )
+
     def test_acao_wildcard_untouched(self) -> None:
         assert (
             forward_routes.rewrite_access_control_allow_origin(
@@ -219,3 +249,37 @@ class TestIntegration:
         assert cookies[0] == "a=1; Domain=api.ag.com; Path=/"
         assert "Domain" not in cookies[1]
         assert cookies[1].startswith("b=2;")
+
+    def test_client_port_is_kept_in_rewritten_urls(self, forward_env, monkeypatch) -> None:
+        _install(
+            monkeypatch,
+            _FakeResponse(
+                status_code=302,
+                headers=httpx.Headers(
+                    [
+                        ("location", "https://api.xxx.com/dashboard"),
+                        ("set-cookie", "sid=1; Domain=api.xxx.com; Path=/"),
+                    ]
+                ),
+            ),
+        )
+        with _client() as client:
+            response = client.get(
+                "/admin", headers={"Host": "api.ag.com:18080"}, follow_redirects=False
+            )
+        assert response.headers["location"] == "http://api.ag.com:18080/dashboard"
+        # Cookie domains never carry a port.
+        assert response.headers.get_list("set-cookie") == ["sid=1; Domain=api.ag.com; Path=/"]
+
+    def test_upstream_cannot_set_the_console_session(self, forward_env, monkeypatch) -> None:
+        headers = httpx.Headers(
+            [
+                ("content-type", "text/plain"),
+                ("set-cookie", "aegis_ui_session=forged; Path=/"),
+                ("set-cookie", "theirs=1; Path=/"),
+            ]
+        )
+        _install(monkeypatch, _FakeResponse(headers=headers))
+        with _client() as client:
+            response = client.get("/x", headers={"Host": "api.ag.com"})
+        assert response.headers.get_list("set-cookie") == ["theirs=1; Path=/"]
