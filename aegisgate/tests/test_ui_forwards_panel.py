@@ -136,6 +136,10 @@ class TestCreate:
         assert response.status_code == 201
         assert audits[-1]["event"] == "ui_forward_create"
         assert audits[-1]["baseline_off"] is True
+        # The destination and the switches are what an investigation needs.
+        assert audits[-1]["upstream_base"] == "https://api.xxx.com"
+        assert audits[-1]["custom_filters"] == {"redaction": False}
+        assert "note" not in audits[-1]
 
     def test_create_refused_under_hmac_conflict_keeps_the_file(
         self, ctx, monkeypatch
@@ -188,6 +192,9 @@ class TestUpdateDelete:
         assert response.status_code == 200
         assert gw_forwards.get("api.ag.com").upstream_base == "https://api2.xxx.com"
         assert audits[-1]["event"] == "ui_forward_update"
+        # Old and new destination both land in the record.
+        assert audits[-1]["upstream_base"] == "https://api2.xxx.com"
+        assert audits[-1]["previous"]["upstream_base"] == "https://api.xxx.com"
 
     def test_stale_if_match_is_409(self, ctx) -> None:
         client, _path, _audits = ctx
@@ -244,11 +251,13 @@ class TestUpdateDelete:
         assert gw_forwards.get("api.ag.com").upstream_base == "https://api.xxx.com"
 
     def test_delete_removes(self, ctx) -> None:
-        client, _path, _audits = ctx
+        client, _path, audits = ctx
         client.post("/__ui__/api/forwards", json=_rule_body())
         response = client.delete("/__ui__/api/forwards/api.ag.com")
         assert response.status_code == 200
         assert gw_forwards.get("api.ag.com") is None
+        assert audits[-1]["event"] == "ui_forward_delete"
+        assert audits[-1]["previous"]["upstream_base"] == "https://api.xxx.com"
         assert client.delete("/__ui__/api/forwards/api.ag.com").status_code == 404
 
 
@@ -335,3 +344,22 @@ class TestConsoleMarkup:
         # semantics would be unreachable from the console.
         assert "跟随策略" in js
         assert "forwardState.globalFilters" in js
+
+    def test_master_switch_off_is_shown(self) -> None:
+        html = _INDEX.read_text(encoding="utf-8")
+        js = _APP_JS.read_text(encoding="utf-8")
+        # Rules saved while AEGIS_ENABLE_GATEWAY_FORWARD=false do nothing; the
+        # panel has to say so instead of listing them as "启用".
+        assert 'id="forward-disabled-alert"' in html
+        assert "data.enable_gateway_forward" in js
+        assert "未生效" in js
+
+    def test_rule_dialog_fits_the_viewport(self) -> None:
+        css = (_INDEX.parent / "assets" / "app.css").read_text(encoding="utf-8")
+        card = css.split("#forward-modal .modal-card {", 1)[1].split("}", 1)[0]
+        body = css.split("#forward-modal .modal-body {", 1)[1].split("}", 1)[0]
+        # With 13 filters expanded the dialog outgrows a laptop screen; the save
+        # button must stay reachable (measured in headless Chrome at 1400x1000,
+        # 1280x720 and 420x800 when this was fixed).
+        assert "max-height: calc(100vh" in card
+        assert "overflow-y: auto" in body

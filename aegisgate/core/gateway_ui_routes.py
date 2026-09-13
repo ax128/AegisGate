@@ -345,6 +345,23 @@ def _forward_rule_from_body(host: str, body: dict) -> tuple[Any, str | None]:
     return validate_rule(host, entry)
 
 
+def _forward_rule_audit(rule: Any) -> dict[str, object]:
+    """What a forward rule decides, for the audit record of a change to it.
+
+    The destination matters most: every request on the host, and its
+    credentials, go there. ``upstream_base_error`` refuses credentials in the
+    URL, so the address is safe to record. ``note`` is free text and left out.
+    """
+    return {
+        "upstream_base": rule.upstream_base,
+        "enabled": rule.enabled,
+        "expose": rule.expose,
+        "filters_mode": rule.filters_mode,
+        "custom_filters": dict(rule.custom_filters),
+        "baseline_off": rule.baseline_off,
+    }
+
+
 def _invalid_forward_response(reason: str | None) -> JSONResponse:
     return JSONResponse(
         status_code=400,
@@ -2014,8 +2031,7 @@ def register_ui_routes(app: FastAPI) -> None:
             "route": "/__ui__/api/forwards",
             "actor_ip": request.client.host if request.client else "unknown",
             "forward_host": rule.host,
-            "expose": rule.expose,
-            "baseline_off": rule.baseline_off,
+            **_forward_rule_audit(rule),
         })
         return with_etag(
             JSONResponse(status_code=201, content={"ok": True, "host": rule.host}), etag
@@ -2033,6 +2049,8 @@ def register_ui_routes(app: FastAPI) -> None:
         rule, reason = _forward_rule_from_body(new_host, body)
         if rule is None:
             return _invalid_forward_response(reason)
+        # Live table, not the file: a denied entry has no parsed rule to diff.
+        previous = gw_forwards.get(previous_host)
         try:
             # One write: the old entry (and any raw key routing to it) goes and the
             # new one lands together, so a failed save cannot leave the host unset.
@@ -2048,8 +2066,8 @@ def register_ui_routes(app: FastAPI) -> None:
             "actor_ip": request.client.host if request.client else "unknown",
             "forward_host": rule.host,
             "previous_host": previous_host,
-            "expose": rule.expose,
-            "baseline_off": rule.baseline_off,
+            **_forward_rule_audit(rule),
+            "previous": _forward_rule_audit(previous) if previous is not None else None,
         })
         return with_etag(JSONResponse(content={"ok": True, "host": rule.host}), etag)
 
@@ -2057,6 +2075,7 @@ def register_ui_routes(app: FastAPI) -> None:
     async def local_ui_forwards_delete(host: str, request: Request) -> JSONResponse:
         from aegisgate.core import gw_forwards
 
+        previous = gw_forwards.get(gw_forwards.route_host(host))
         try:
             removed = gw_forwards.delete(host, if_match=if_match_header(request))
         except Exception as exc:
@@ -2071,6 +2090,7 @@ def register_ui_routes(app: FastAPI) -> None:
             "route": "/__ui__/api/forwards/{host}",
             "actor_ip": request.client.host if request.client else "unknown",
             "forward_host": gw_forwards.route_host(host),
+            "previous": _forward_rule_audit(previous) if previous is not None else None,
         })
         return with_etag(JSONResponse(content={"ok": True}), _forwards_etag())
 
