@@ -242,9 +242,16 @@ class TestHeaderTransport:
 
     def test_client_supplied_forward_header_is_stripped(self) -> None:
         headers = upstream_module._effective_gateway_headers(
-            self._request({"x-aegis-forward-host": "attacker.example"})
+            self._request(
+                {
+                    "x-aegis-forward-host": "attacker.example",
+                    "x-aegis-upstream-source": "scope",
+                }
+            )
         )
         assert "x-aegis-forward-host" not in headers
+        # A client cannot claim the scope upstream source either.
+        assert headers.get("x-aegis-upstream-source") != "scope"
 
     def test_scope_rule_injects_forward_host(self, rules) -> None:
         rules({"api.ag.com": _entry()})
