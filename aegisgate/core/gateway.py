@@ -987,7 +987,18 @@ async def security_boundary_middleware(request: Request, call_next):
         # openai-compatible JSON routes. aegis_gateway_token is set only by the
         # gw-token rewrite; /v2 is the direct generic-proxy path.
         v2_max_body_bytes = int(settings.v2_max_request_body_bytes)
-        is_forward_request = bool(request.scope.get("aegis_forward_rule"))
+        forward_rule = request.scope.get("aegis_forward_rule")
+        is_forward_request = forward_rule is not None
+        if is_forward_request:
+            # Rides into the audit record (security_boundary) so a forwarded
+            # request says which rule and filter mode it went through.
+            boundary["forward_host"] = str(getattr(forward_rule, "host", "") or "")
+            boundary["forward_mode"] = str(getattr(forward_rule, "filters_mode", "") or "")
+            boundary["forward_branch"] = (
+                "passthrough"
+                if request.scope.get("aegis_forward_path") is not None
+                else "llm"
+            )
         is_generic_proxy = (
             bool(request.scope.get("aegis_gateway_token"))
             or normalized_path.startswith("/v2")
