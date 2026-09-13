@@ -11,7 +11,9 @@ Security posture — the same one ``gw_tokens`` established:
   top-level structure clears the live table and parks every host the gateway
   knew about — live *and* already denied — in ``_denied`` so it answers 403
   rather than silently falling back to the default-upstream branch. A second
-  broken save keeps them there. A single invalid entry only denies that host.
+  broken save keeps them there, and so does a restart: the hosts of the last
+  table that loaded are recorded next to the file (``.gw_forwards.json.hosts``).
+  A single invalid entry only denies that host.
 * ``expose: "public"`` rules that turn the baseline redaction filters off are
   refused unless the startup-pinned ``AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF``
   authorises it. Weakening the public surface may not come from a hot-editable
@@ -156,6 +158,17 @@ class ForwardRule:
 def _path() -> Path:
     p = settings.gw_forwards_path
     return Path(p) if os.path.isabs(p) else Path.cwd() / p
+
+
+def _known_hosts_path() -> Path:
+    """Hosts of the last table that loaded, kept next to the rule file.
+
+    A fresh process has nothing in memory, so without this a file that is broken
+    at startup would deny no host at all and every forward domain would fall back
+    to the default stack.
+    """
+    path = _path()
+    return path.with_name(f".{path.name}.hosts")
 
 
 def _normalize_host(value: object) -> str:
@@ -368,14 +381,59 @@ def _hmac_conflict() -> bool:
     return bool(settings.enable_gateway_forward and settings.enable_request_hmac_auth)
 
 
+def _read_known_hosts() -> set[str]:
+    try:
+        data = json.loads(_known_hosts_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    hosts = data.get("hosts") if isinstance(data, dict) else None
+    if not isinstance(hosts, list):
+        return set()
+    return {_deny_key(host) for host in hosts if isinstance(host, str) and host}
+
+
+def _remember_known_hosts() -> None:
+    """Record the hosts of the table just derived. Caller holds ``_lock``.
+
+    Best effort: failing to record must not fail a load that succeeded.
+    """
+    hosts = sorted(set(_forwards) | set(_denied))
+    if not hosts:
+        _forget_known_hosts()
+        return
+    if _read_known_hosts() == set(hosts):
+        return
+    payload = json.dumps({"version": _VERSION, "hosts": hosts}, indent=2).encode("utf-8")
+    try:
+        _atomic_write(payload, _known_hosts_path())
+    except OSError as exc:
+        logger.warning("gw_forwards known-hosts record not written error=%s", exc)
+
+
+def _forget_known_hosts() -> None:
+    try:
+        _known_hosts_path().unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("gw_forwards known-hosts record not removed error=%s", exc)
+
+
+def _hosts_named_in(document: object) -> set[str]:
+    """Hosts a document names even when it is not a valid table (``version`` wrong)."""
+    raw_forwards = document.get(_DOCUMENT_KEY) if isinstance(document, dict) else None
+    if not isinstance(raw_forwards, dict):
+        return set()
+    return {_deny_key(host) for host in raw_forwards if str(host).strip()}
+
+
 def _deny_all_known(reason: str, detail: str, extra_hosts: set[str] | None = None) -> None:
     """Park every host the gateway knows about in ``_denied``. Caller holds ``_lock``.
 
-    Known means live rules *and* hosts that were already denied: a failed load
-    after a failed load (or after a load that denied one entry) must not release
-    anything back to the default stack.
+    Known means live rules, hosts that were already denied, and the hosts of the
+    last table that loaded (recorded on disk, so a restart does not forget them):
+    a failed load after a failed load, or a failed load in a fresh process, must
+    not release anything back to the default stack.
     """
-    hosts = set(_forwards) | set(_denied) | set(extra_hosts or ())
+    hosts = set(_forwards) | set(_denied) | _read_known_hosts() | set(extra_hosts or ())
     _forwards.clear()
     _denied.clear()
     _denied.update({host: {"reason": reason, "detail": detail} for host in hosts})
@@ -391,6 +449,9 @@ def load(*, replace: bool = False) -> None:
     path = _path()
     with _lock:
         if not path.is_file():
+            # A deleted file means "stop forwarding": the last table's hosts are
+            # no longer known, so a broken file created later denies none of them.
+            _forget_known_hosts()
             if replace:
                 _forwards.clear()
                 _denied.clear()
@@ -399,6 +460,11 @@ def load(*, replace: bool = False) -> None:
                 )
             else:
                 logger.debug("gw_forwards file not found path=%s, skip load", path)
+            if _hmac_conflict():
+                logger.error(
+                    "gw_forwards: AEGIS_ENABLE_REQUEST_HMAC_AUTH=true is mutually "
+                    "exclusive with AEGIS_ENABLE_GATEWAY_FORWARD=true"
+                )
             return
 
         data: object = None
@@ -411,11 +477,10 @@ def load(*, replace: bool = False) -> None:
         if _hmac_conflict():
             # Refuse to load, but surface the hosts the operator configured so the
             # console shows *why* nothing is forwarding.
-            parsed, parsed_denied = _derive_tables(data if parse_error is None else None)
             _deny_all_known(
                 REASON_CONFIG_INVALID,
                 "AEGIS_ENABLE_REQUEST_HMAC_AUTH=true 与网关转发互斥；转发表未加载",
-                extra_hosts=set(parsed) | set(parsed_denied),
+                extra_hosts=_hosts_named_in(data if parse_error is None else None),
             )
             logger.error(
                 "gw_forwards not loaded: AEGIS_ENABLE_REQUEST_HMAC_AUTH=true is mutually "
@@ -431,9 +496,12 @@ def load(*, replace: bool = False) -> None:
             return
 
         if not _document_is_valid(data):
+            # The file still parses, so the hosts it names are known even when
+            # nothing loaded before (a fresh process, a first-ever bad version).
             _deny_all_known(
                 REASON_CONFIG_INVALID,
                 f"顶层结构非法（需要 version={_VERSION} 与 forwards 对象）",
+                extra_hosts=_hosts_named_in(data),
             )
             logger.error(
                 "gw_forwards load failed path=%s error=invalid top-level structure", path
@@ -446,6 +514,7 @@ def load(*, replace: bool = False) -> None:
         _forwards.update(forwards)
         _denied.clear()
         _denied.update(denied)
+        _remember_known_hosts()
         logger.info(
             "gw_forwards loaded path=%s count=%d denied=%d", path, len(_forwards), len(_denied)
         )
@@ -456,9 +525,9 @@ def _serialize(document: dict[str, Any]) -> bytes:
     return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def _atomic_write(payload: bytes) -> None:
+def _atomic_write(payload: bytes, path: Path | None = None) -> None:
     """Temp file + fsync + replace, mode 0600 (the file holds internal addresses)."""
-    path = _path()
+    path = path or _path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
     try:
@@ -541,6 +610,7 @@ def _save_document_locked(document: dict[str, Any]) -> str:
     _forwards.update(forwards)
     _denied.clear()
     _denied.update(denied)
+    _remember_known_hosts()
     _log_posture()
     return etag_for_bytes(payload)
 

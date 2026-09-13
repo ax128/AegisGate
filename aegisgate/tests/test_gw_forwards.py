@@ -205,6 +205,80 @@ class TestLoad:
                 assert gw_forwards.denied_reason(host)[0] == gw_forwards.REASON_CONFIG_INVALID
 
 
+def _restart_process_state() -> None:
+    """What a restart leaves in memory: nothing."""
+    with gw_forwards._lock:
+        gw_forwards._forwards.clear()
+        gw_forwards._denied.clear()
+
+
+class TestStartupFailClosed:
+    def test_parse_failure_at_startup_denies_the_last_loaded_hosts(
+        self, forwards_path: Path
+    ) -> None:
+        _write(
+            forwards_path,
+            {
+                "api.ag.com": _entry(),
+                "bad.ag.com": _entry(filters={"mode": "custom", "custom": {"nope": True}}),
+            },
+        )
+        gw_forwards.load(replace=True)
+        forwards_path.write_text("{ broken while stopped", encoding="utf-8")
+        _restart_process_state()
+
+        gw_forwards.load()
+
+        for host in ("api.ag.com", "bad.ag.com"):
+            assert gw_forwards.get(host) is None
+            assert gw_forwards.denied_reason(host)[0] == gw_forwards.REASON_CONFIG_INVALID
+
+    def test_bad_version_at_startup_denies_the_hosts_the_file_names(
+        self, forwards_path: Path
+    ) -> None:
+        # Nothing ever loaded, so no record exists: the parsed document is the source.
+        forwards_path.write_text(
+            json.dumps({"version": 2, "forwards": {"API.ag.com:443": _entry()}}),
+            encoding="utf-8",
+        )
+        _restart_process_state()
+
+        gw_forwards.load()
+
+        assert gw_forwards.denied_reason("api.ag.com")[0] == gw_forwards.REASON_CONFIG_INVALID
+
+    def test_known_hosts_record_is_private_and_follows_the_table(
+        self, forwards_path: Path
+    ) -> None:
+        record = gw_forwards._known_hosts_path()
+        _write(forwards_path, {"api.ag.com": _entry(), "b.ag.com": _entry()})
+        gw_forwards.load(replace=True)
+        assert json.loads(record.read_text(encoding="utf-8"))["hosts"] == ["api.ag.com", "b.ag.com"]
+        assert stat.S_IMODE(record.stat().st_mode) == 0o600
+
+        _write(forwards_path, {"api.ag.com": _entry()})
+        gw_forwards.load(replace=True)
+        assert json.loads(record.read_text(encoding="utf-8"))["hosts"] == ["api.ag.com"]
+
+        # A broken file does not overwrite the last good record.
+        forwards_path.write_text("{ broken", encoding="utf-8")
+        gw_forwards.load(replace=True)
+        assert json.loads(record.read_text(encoding="utf-8"))["hosts"] == ["api.ag.com"]
+
+    def test_deleting_the_file_forgets_the_hosts(self, forwards_path: Path) -> None:
+        _write(forwards_path, {"api.ag.com": _entry()})
+        gw_forwards.load(replace=True)
+        forwards_path.unlink()
+        gw_forwards.load(replace=True)
+        assert not gw_forwards._known_hosts_path().exists()
+
+        # A broken file written afterwards is a new table, not the old one.
+        forwards_path.write_text("{ broken", encoding="utf-8")
+        _restart_process_state()
+        gw_forwards.load()
+        assert gw_forwards.denied_reason("api.ag.com") is None
+
+
 class TestBaselineGate:
     def test_internal_baseline_off_is_legal(self, forwards_path: Path) -> None:
         _write(

@@ -1490,7 +1490,7 @@ function bindTokenModal() {
 // share the rules/config ETag scheme (resource "forwards"), so two open tabs
 // cannot silently overwrite each other's edit.
 
-let forwardState = { items: [], denied: [], globalFilters: {}, gateOpen: false };
+let forwardState = { items: [], denied: [], globalFilters: {}, gateOpen: false, forwardOn: true };
 
 const FORWARD_FILTER_LABELS = {
   exact_value_redaction: "精确值脱敏",
@@ -1554,7 +1554,11 @@ async function loadForwards() {
       denied: Array.isArray(data.denied) ? data.denied : [],
       globalFilters: data.global_filters || {},
       gateOpen: !!data.public_baseline_off_allowed,
+      // Rules can be prepared with the master switch off; say plainly that they do nothing yet.
+      forwardOn: data.enable_gateway_forward !== false,
     };
+    const disabledAlert = document.getElementById("forward-disabled-alert");
+    if (disabledAlert) disabledAlert.classList.toggle("hidden", forwardState.forwardOn);
     if (countEl) {
       const deniedNote = forwardState.denied.length ? `，${forwardState.denied.length} 条非法` : "";
       countEl.textContent = `共 ${forwardState.items.length} 条规则${deniedNote}`;
@@ -1580,9 +1584,12 @@ function forwardRow(item) {
   const badges = [];
   if (item.baseline_off) badges.push('<span class="badge badge-error">基线关闭</span>');
   if (item.whitelist_bypass) badges.push('<span class="badge badge-warning">开关不生效</span>');
-  const statusBadge = item.status === "enabled"
+  let statusBadge = item.status === "enabled"
     ? '<span class="badge badge-success">启用</span>'
     : '<span class="badge badge-muted">停用</span>';
+  if (item.status === "enabled" && !forwardState.forwardOn) {
+    statusBadge = '<span class="badge badge-muted" title="AEGIS_ENABLE_GATEWAY_FORWARD=false">未生效</span>';
+  }
   const exposeBadge = item.expose === "public"
     ? '<span class="badge badge-warning">public</span>'
     : '<span class="badge badge-muted">internal</span>';
