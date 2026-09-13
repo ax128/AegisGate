@@ -2890,3 +2890,82 @@ tr.search-hidden { display: none; }
 }
 
 .rr-heading .btn-sm { margin-left: auto; }
+
+/* ─── Host forwarding (baseURL) panel ─────────────────────────────── */
+/* In custom mode the rule dialog lists all 13 filters and outgrows a laptop
+   screen. The overlay centres the card with no scroll, so its header and the
+   save button ended up off-screen: cap the card at the viewport and scroll the
+   body between a fixed header and footer. Wider, so a filter row fits on a line. */
+#forward-modal .modal-card {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 2 * var(--sp-5));
+  max-height: calc(100dvh - 2 * var(--sp-5));
+  display: flex;
+  flex-direction: column;
+}
+
+#forward-modal .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.forward-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.forward-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--type-footnote);
+  color: var(--label-1);
+}
+
+.forward-filter-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  margin-top: 10px;
+}
+
+.forward-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--type-footnote);
+  color: var(--label-1);
+}
+
+.forward-filter-item .forward-filter-state {
+  margin-left: auto;
+  color: var(--label-3);
+  font-size: var(--type-caption);
+  white-space: nowrap;
+}
+
+.forward-filter-item label { white-space: nowrap; }
+
+.forward-filter-item select {
+  width: auto;
+  flex: 0 0 auto;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--label-1);
+  padding: 2px 6px;
+}
+
+@media (max-width: 580px) {
+  .forward-filter-list { grid-template-columns: minmax(0, 1fr); }
+}
+
+.forward-row-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
