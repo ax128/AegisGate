@@ -17,9 +17,10 @@ answering directly from the middleware would bypass all of it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Mapping
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 from fastapi import FastAPI, Request
@@ -144,6 +145,178 @@ def _unreachable_response(exc: httpx.HTTPError) -> JSONResponse:
     )
 
 
+# host or host:port, as a client (or a trusted proxy on its behalf) sends it.
+_CLIENT_NETLOC_RE = re.compile(r"^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$")
+
+
+def _client_scheme(request: Request) -> str:
+    """The scheme the client saw, trusting X-Forwarded-Proto only from a trusted proxy."""
+    from aegisgate.core.gateway_network import trusted_forwarded_proto
+
+    proto = trusted_forwarded_proto(request)
+    if proto in {"http", "https"}:
+        return proto
+    return request.url.scheme or "http"
+
+
+def _client_netloc(request: Request, rule_host: str) -> str:
+    """The ``host[:port]`` the client addressed, for URLs handed back to it.
+
+    The rule host has no port by definition, so using it alone sends a client on
+    ``api.ag.com:18080`` to port 80/443. The client's value is taken only when it
+    routes to this rule's host (so it is the name the request was matched on) and
+    is a plain host[:port]; otherwise the rule host stands.
+    """
+    from aegisgate.core.gateway_network import trusted_forwarded_host
+    from aegisgate.core.gw_forwards import route_host
+
+    raw = (trusted_forwarded_host(request) or request.headers.get("host") or "").strip()
+    if raw and _CLIENT_NETLOC_RE.match(raw) and route_host(raw) == rule_host:
+        return raw.lower()
+    return rule_host
+
+
+def rewrite_location(
+    value: str, *, upstream_host: str, gateway_origin: str
+) -> str:
+    """Map an upstream Location back onto the gateway. Relative stays put.
+
+    Absolute (``https://up/x``) and scheme-relative (``//up/x``) URLs naming the
+    upstream host are both rewritten; the latter stays scheme-relative.
+    """
+    if not value:
+        return value
+    parsed = urlparse(value)
+    scheme_relative = not parsed.scheme and value.startswith("//")
+    if not parsed.netloc or not (scheme_relative or parsed.scheme in {"http", "https"}):
+        return value
+    if (parsed.hostname or "").strip().lower().rstrip(".") != upstream_host:
+        return value
+    gateway = urlparse(gateway_origin)
+    netloc = gateway.netloc or gateway.path
+    return urlunparse(
+        (
+            "" if scheme_relative else gateway.scheme,
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def rewrite_set_cookie(
+    value: str, *, upstream_host: str, gateway_host: str
+) -> str | None:
+    """Rewrite ``Domain=`` on one Set-Cookie; ``None`` means drop the whole cookie.
+
+    A ``Domain`` naming the upstream host (or a parent of it) maps onto the
+    gateway host. Anything else is removed rather than passed through, so the
+    cookie degrades to a host-only cookie for the gateway instead of leaking the
+    upstream domain to the client.
+
+    A cookie named like the console's own (``aegis_ui_*``) is dropped whole: on a
+    forward domain the upstream shares the gateway's host, and letting it set one
+    would overwrite (or plant) the console session.
+    """
+    if not value:
+        return value
+    parts = value.split(";")
+    name = parts[0].split("=", 1)[0].strip()
+    if name.startswith(_GATEWAY_COOKIE_PREFIX):
+        return None
+    out = [parts[0]]
+    for attribute in parts[1:]:
+        stripped = attribute.strip()
+        if stripped.lower().startswith("domain="):
+            domain = stripped[len("domain=") :].strip().lstrip(".").lower()
+            if domain and (domain == upstream_host or upstream_host.endswith(f".{domain}")):
+                out.append(f" Domain={gateway_host}")
+            continue
+        out.append(attribute)
+    return ";".join(out)
+
+
+def _normalized_origin(value: str) -> str:
+    """``scheme://host[:port]`` lower-cased, default port dropped; other values as-is."""
+    candidate = value.strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return candidate
+    try:
+        port = parsed.port
+    except ValueError:
+        return candidate
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if scheme == "https" else 80
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{host}{suffix}"
+
+
+def rewrite_access_control_allow_origin(
+    value: str, *, upstream_origin: str, gateway_origin: str
+) -> str:
+    """Replace an ACAO naming the upstream origin; ``*`` and unrelated values stay."""
+    if _normalized_origin(value) == _normalized_origin(upstream_origin):
+        return gateway_origin
+    return value
+
+
+def build_forward_response_headers(
+    upstream_headers: Mapping[str, str],
+    *,
+    upstream_base: str,
+    gateway_host: str,
+    gateway_netloc: str,
+    gateway_scheme: str,
+) -> tuple[dict[str, str], list[str]]:
+    """Build the client-facing response headers, rewriting the three URL-bearing ones.
+
+    Unlike ``_build_client_response_headers`` (which drops ``set-cookie``) this
+    keeps every Set-Cookie as its own header: each one is rewritten separately and
+    ``dict`` cannot represent the duplicates. ``gateway_netloc`` (host[:port] the
+    client used) goes into URLs; ``gateway_host`` (no port) into cookie domains.
+    """
+    parsed_upstream = urlparse(upstream_base)
+    upstream_host = (parsed_upstream.hostname or "").strip().lower()
+    upstream_origin = f"{parsed_upstream.scheme}://{parsed_upstream.netloc}"
+    gateway_origin = f"{gateway_scheme}://{gateway_netloc}"
+
+    headers = _build_client_response_headers(upstream_headers)
+
+    location = upstream_headers.get("location")
+    if location:
+        headers["location"] = rewrite_location(
+            location, upstream_host=upstream_host, gateway_origin=gateway_origin
+        )
+    acao = upstream_headers.get("access-control-allow-origin")
+    if acao:
+        headers["access-control-allow-origin"] = rewrite_access_control_allow_origin(
+            acao,
+            upstream_origin=upstream_origin,
+            gateway_origin=gateway_origin,
+        )
+
+    get_list = getattr(upstream_headers, "get_list", None)
+    if callable(get_list):
+        raw_cookies = list(get_list("set-cookie"))
+    else:
+        raw = upstream_headers.get("set-cookie")
+        raw_cookies = [raw] if raw else []
+    cookies: list[str] = []
+    for cookie in raw_cookies:
+        rewritten = rewrite_set_cookie(
+            cookie, upstream_host=upstream_host, gateway_host=gateway_host
+        )
+        if rewritten:
+            cookies.append(rewritten)
+    return headers, cookies
+
+
 def _body_cap(request: Request) -> int:
     boundary = getattr(request.state, "security_boundary", None)
     if isinstance(boundary, dict):
@@ -229,7 +402,14 @@ async def _forward_request(request: Request, rule: Any) -> Response:
     except httpx.HTTPError as exc:
         return _unreachable_response(exc)
 
-    response_headers = _build_client_response_headers(upstream.headers)
+    rule_host = getattr(rule, "host", "") or ""
+    response_headers, cookies = build_forward_response_headers(
+        upstream.headers,
+        upstream_base=rule.upstream_base,
+        gateway_host=rule_host,
+        gateway_netloc=_client_netloc(request, rule_host),
+        gateway_scheme=_client_scheme(request),
+    )
     logger.info(
         "forward passthrough host=%s mode=%s method=%s path=%s status=%s",
         getattr(rule, "host", ""),
@@ -239,13 +419,19 @@ async def _forward_request(request: Request, rule: Any) -> Response:
         upstream.status_code,
     )
     # Streamed so SSE and long responses are not buffered; the body is relayed
-    # byte for byte (see _build_client_response_headers).
-    return StreamingResponse(
+    # byte for byte (see _build_client_response_headers). Only headers change.
+    response = StreamingResponse(
         _relay_body(upstream),
         status_code=upstream.status_code,
         headers=response_headers,
         background=BackgroundTask(upstream.aclose),
     )
+    # Set-Cookie cannot ride in the headers mapping: every value is its own header
+    # and rewriting must stay per-cookie. Deliberate divergence from the v2 path,
+    # which drops Set-Cookie entirely.
+    for cookie in cookies:
+        response.headers.append("set-cookie", cookie)
+    return response
 
 
 async def forward_passthrough(request: Request) -> Response:
