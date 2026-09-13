@@ -96,6 +96,15 @@ def trusted_forwarded_host(request: Request) -> str:
     return (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
 
 
+def client_facing_host(request: Request) -> str:
+    """The host the client addressed: trusted ``X-Forwarded-Host``, else ``Host``.
+
+    Raw value (port included). Host forwarding routes on it and writes URLs back
+    with it, so both go through here rather than repeating the fallback.
+    """
+    return trusted_forwarded_host(request) or (request.headers.get("host") or "")
+
+
 def trusted_forwarded_proto(request: Request) -> str:
     """First ``X-Forwarded-Proto`` value (lower-cased), trusted-proxy gated."""
     direct_ip = (request.client.host if request.client else "").strip()

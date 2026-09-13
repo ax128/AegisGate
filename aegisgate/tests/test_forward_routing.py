@@ -247,7 +247,7 @@ class TestMatching:
 class TestReservedPaths:
     @pytest.mark.parametrize(
         "path",
-        ["/", "/metrics", "/health", "/ready", "/robots.txt", "/favicon.ico", "/__ui__", "/__ui__/assets/app.js", "/__gw__/register"],
+        ["/", "/metrics", "/health", "/ready", "/robots.txt", "/favicon.ico", "/__gw__/register"],
     )
     def test_reserved_paths_never_forward(self, rules, monkeypatch, path: str) -> None:
         load, _ = rules
@@ -270,7 +270,7 @@ class TestReservedPaths:
             _entry(filters={"mode": "custom", "custom": {"nope": True}}),
         ],
     )
-    @pytest.mark.parametrize("path", ["/health", "/__ui__/api/forwards"])
+    @pytest.mark.parametrize("path", ["/health", "/metrics"])
     def test_reserved_paths_survive_a_disabled_or_invalid_rule(
         self, rules, entry: dict, path: str
     ) -> None:
@@ -287,11 +287,56 @@ class TestReservedPaths:
         path.write_text("{ broken", encoding="utf-8")
         gw_forwards.load(replace=True)
         recorder = _Recorder()
-        status, _ = _invoke(HostForwardMiddleware(recorder), _scope("/__ui__"))
+        status, _ = _invoke(HostForwardMiddleware(recorder), _scope("/health"))
         assert status == 200
         status, body = _invoke(HostForwardMiddleware(recorder), _scope("/v1/models"))
         assert status == 403
         assert body["error_code"] == "forward_config_invalid"
+
+
+class TestConsoleNotOnForwardHosts:
+    """The console never shares an origin with the pages an upstream serves."""
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            _entry(expose="public"),
+            _entry(enabled=False),
+            _entry(filters={"mode": "custom", "custom": {"nope": True}}),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "path", ["/__ui__", "/__ui__/login", "/__ui__/api/bootstrap", "/__ui__/assets/app.js"]
+    )
+    def test_console_is_refused_on_a_matched_host(self, rules, entry: dict, path: str) -> None:
+        load, _ = rules
+        load({"api.ag.com": entry})
+        recorder = _Recorder()
+        status, body = _invoke(
+            HostForwardMiddleware(recorder), _scope(path, client=("127.0.0.1", 40000))
+        )
+        assert status == 403
+        assert body["error_code"] == "forward_console_blocked"
+        assert recorder.scopes == []
+
+    def test_console_is_refused_while_the_file_is_broken(self, rules) -> None:
+        load, path = rules
+        load({"api.ag.com": _entry()})
+        path.write_text("{ broken", encoding="utf-8")
+        gw_forwards.load(replace=True)
+        status, body = _invoke(HostForwardMiddleware(_Recorder()), _scope("/__ui__"))
+        assert status == 403
+        assert body["error_code"] == "forward_console_blocked"
+
+    @pytest.mark.parametrize("host", ["127.0.0.1:18080", "gateway.internal", None])
+    def test_console_is_served_on_the_gateway_address(self, rules, host) -> None:
+        load, _ = rules
+        load({"api.ag.com": _entry()})
+        recorder = _Recorder()
+        status, _ = _invoke(HostForwardMiddleware(recorder), _scope("/__ui__/login", host=host))
+        assert status == 200
+        assert recorder.scopes[0]["path"] == "/__ui__/login"
+        assert "aegis_forward_rule" not in recorder.scopes[0]
 
     def test_lookalike_prefix_is_not_reserved(self, rules) -> None:
         load, _ = rules
@@ -373,6 +418,7 @@ class TestBranchMatrix:
             ("GET", "/v1/messages"),
             ("POST", "/v2/x"),
             ("GET", "/relay/generate"),
+            ("POST", "/relay/generate"),
             ("GET", "/admin"),
             ("DELETE", "/anything"),
         ],
