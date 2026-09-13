@@ -59,7 +59,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 
 > 请先按上游官方文档完成安装和配置，确认上游本身可用后再接入网关。
 
-### 三种接入场景
+### 四种接入场景
 
 完整步骤（含 Docker 服务名、网络连通性排查、Caddy 要点）见 [UPSTREAM-QUICKSTART.md](UPSTREAM-QUICKSTART.md)。这里只留判断依据：
 
@@ -68,8 +68,9 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 | **同机部署** | 网关与上游在同一台机器 | 客户端 Base URL 直接用 `/v1/__gw__/t/<端口号>`，无需注册 token。需 `AEGIS_ENABLE_LOCAL_PORT_ROUTING=true`；上游在 Docker 里时改用 `AEGIS_DOCKER_UPSTREAMS` 的服务名映射 |
 | **远程上游** | 上游不在本机 | 端口路由不可用，用 `POST /__gw__/register` 注册 token 绑定远程地址，或直接编辑 `config/gw_tokens.json`（热重载，无需重启） |
 | **公网暴露** | 需要域名 + TLS | 前置 Caddy 做 TLS 终结，见 [Caddyfile.example](Caddyfile.example)。`flush_interval -1` 必须设置，否则 SSE 会被缓冲 |
+| **整域名转发** | 只想改域名，不想改 URL 路径 | 启动态 `AEGIS_ENABLE_GATEWAY_FORWARD=true`，在 `config/gw_forwards.json` 按 Host 配规则，客户端 Base URL 直接用网关域名，见 [§ 2.5](#25-整域名转发baseurl--网关域名) |
 
-两条贯穿三个场景的安全默认：
+两条贯穿各场景的安全默认：
 
 - 纯数字端口 token（1024–65535，如 `8317`）默认按**仅内网**处理。对公网暴露请注册随机 token（推荐）、启用请求 HMAC，或显式设置 `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS=true`。
 - `token__passthrough` 会禁用全部过滤器，同样默认**仅内网**；如需放开设 `AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE=true`（危险）。
@@ -563,6 +564,57 @@ curl -N -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages' \
 1. 可走 `v1`：`/v1/__gw__/t/<TOKEN>/...`（推荐，检查链路更完整）。
 2. 可走 `v2`：`/v2/__gw__/t/<TOKEN>/...`（通用 HTTP 代理模式，需 `x-target-url`，且目标主机需加入 `AEGIS_V2_TARGET_ALLOWLIST`）。
 
+### 2.5 整域名转发（baseUrl = 网关域名）
+
+不想把路由键塞进 URL 路径时，可以按**客户端域名**路由：客户端 baseUrl 直接用网关域名，形状与上游原始地址一致，只改域名即可接入（sub2api / CLIProxyAPI / AIClient-2-API 等）。
+
+```
+客户端 → https://api.ag.example.com/v1/chat/completions → AegisGate → http://127.0.0.1:8317/v1/chat/completions
+```
+
+1. 启动态打开开关（两项均为启动时固定）：
+
+```bash
+AEGIS_ENABLE_GATEWAY_FORWARD=true
+AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
+```
+
+2. 在 `config/gw_forwards.json`（或控制台「网关转发」面板）添加规则。`upstream_base` 填上游**根地址，不带 `/v1`**，整域名路径原样透传；模板见 [config/gw_forwards.json.example](config/gw_forwards.json.example)。
+
+```json
+{
+  "version": 1,
+  "forwards": {
+    "api.ag.example.com": {
+      "enabled": true,
+      "upstream_base": "http://127.0.0.1:8317",
+      "expose": "internal",
+      "filters": { "mode": "policy" }
+    }
+  }
+}
+```
+
+3. 客户端 baseUrl 指向 `https://api.ag.example.com`。
+
+命中域名后的分流：
+
+| 请求 | 落点 | 过滤 |
+|------|------|------|
+| `POST /v1/chat/completions`、`/v1/responses`、`/v1/messages` | V1 对应 handler | 按规则的 `filters` |
+| 其余路径与方法（含其它 `/v1` POST、`/v2/*`、`/relay/*`、上游自己的管理台 / OAuth 回调 / 静态资源） | 原样转发到 `upstream_base` | 无 |
+| `/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身（永不转发） | — |
+
+每条规则带一整套过滤开关（`filters.mode: "custom"`），可打开全局关掉的过滤器，也可关掉全局开着的。`redaction` 与 `exact_value_redaction` 是基线：`public` 规则要关它们，必须启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true` 显式授权，否则该条目拒载。
+
+启用前需要知道的边界：
+
+- **本层不鉴权，只选目的地。** 真实凭据是客户端自带、透传给上游的 `Authorization`。`expose: "internal"`（默认）只允许内网客户端；`expose: "public"` 对任何能设置 `Host` 的客户端开放。
+- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 对所有非 passthrough 请求强制签名，浏览器访问转发域名无法提供签名；两者同开时转发表拒绝加载。
+- 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游。
+- 无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`；大文件上传需客户端带该头。
+- 转发域名上的 `/v2/*` 与 `/relay/*` 一律透传，不进网关自己的 v2 / relay 路由。
+
 ## 3. 本地开发与本地 UI
 
 本节保留本地开发启动命令；Web UI 的单独说明见 `WEBUI-QUICKSTART.md`。
@@ -758,6 +810,10 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_STORAGE_FAILURE_ACTION` | 存储后端故障时的行为：`block`（安全默认，拒绝请求）或 `forward`（**仅**豁免映射/审计的持久化失败，不改变过滤判定与响应侧 block；未登记的请求侧过滤器仍 fail-closed） | `block` |
 | `AEGIS_MAX_MULTIPART_BODY_BYTES` | multipart 请求体上限（`/v1/files`、`/v1/images/edits`、`/v1/images/variations`） | `60000000` |
 | `AEGIS_V2_MAX_REQUEST_BODY_BYTES` | v2 token 路由请求体上限（多模态负载会超过 v1 的 JSON 上限） | `64000000` |
+| `AEGIS_ENABLE_GATEWAY_FORWARD` | 开启整域名（按 Host）转发，规则在 `config/gw_forwards.json`。需重启 | `false` |
+| `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` | 是否允许 `expose: public` 规则关闭基线脱敏。需重启 | `false` |
+| `AEGIS_GW_FORWARDS_PATH` | 转发规则文件路径 | `config/gw_forwards.json` |
+| `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES` | 转发请求体上限（boundary 取本值与 v2 上限的较大者） | `64000000` |
 | `AEGIS_FILTER_PIPELINE_TIMEOUT_S` | 过滤管道超时（秒） | `90.0` |
 | `AEGIS_REQUEST_PIPELINE_TIMEOUT_ACTION` | 请求过滤超时动作：`block`（安全默认）或 `pass`（兼容旧行为） | `block` |
 | `AEGIS_ADMIN_RATE_LIMIT_PER_MINUTE` | 管理端点每 IP 每分钟最大请求数 | `30` |

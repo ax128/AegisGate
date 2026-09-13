@@ -82,6 +82,96 @@ curl -X POST http://127.0.0.1:18080/__gw__/register \
 
 该文件在热重载 watcher 的监听范围内，保存后即时生效，**无需重启网关**。命名 token 的优先级高于数字端口回退。
 
+## 整域名转发（baseUrl = 网关域名）
+
+前面两节都把路由键放在 URL 路径里（`/v1/__gw__/t/...`）。如果客户端只允许改域名，可以用**按域名（Host）路由**：客户端 baseUrl 直接用网关域名，形状与上游原始地址一致。
+
+```
+客户端 → https://api.ag.example.com/v1/chat/completions → AegisGate:18080 → http://127.0.0.1:8317/v1/chat/completions
+```
+
+### 1. 启动态开关
+
+```bash
+# config/.env
+AEGIS_ENABLE_GATEWAY_FORWARD=true
+# 前面有 Caddy/Nginx 时必填，否则任何 X-Forwarded-For 都会被当成公网客户端
+AEGIS_TRUSTED_PROXY_IPS=127.0.0.1
+# 可选：允许 public 规则关闭基线脱敏（默认 false）
+AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=false
+```
+
+`AEGIS_ENABLE_GATEWAY_FORWARD` 与 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF` 在启动时固定，改完需重启。
+
+### 2. 规则文件（或控制台面板）
+
+`config/gw_forwards.json`（模板：`config/gw_forwards.json.example`），或直接使用控制台「网关转发」面板。`upstream_base` 填上游**根地址，不带 `/v1`**；整个域名的路径原样透传。
+
+```json
+{
+  "version": 1,
+  "forwards": {
+    "api.ag.example.com": {
+      "enabled": true,
+      "upstream_base": "http://127.0.0.1:8317",
+      "note": "CLIProxyAPI 同机",
+      "expose": "internal",
+      "filters": { "mode": "policy" }
+    }
+  }
+}
+```
+
+该文件也在热重载监听范围内，保存即生效（无需重启）；启动开关除外。
+
+### 3. 客户端
+
+Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://api.ag.example.com:18080`）。`Authorization` 仍由客户端自带并透传给上游。
+
+### 4. 分流规则
+
+| 请求 | 落点 |
+|------|------|
+| `POST /v1/chat/completions`、`/v1/responses`、`/v1/messages` | 网关 V1 管线，按规则的过滤开关处理 |
+| 其余全部路径与方法（含其它 `/v1` POST、`/v2/*`、`/relay/*`、上游管理台、OAuth 回调、静态资源） | 原样转发到 `upstream_base`，不过滤 |
+| `/__ui__`、`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico` | 网关自身，永不转发（上游同名路径会被遮蔽） |
+
+每条规则可单独开关 13 个过滤器（`filters.mode: "custom"`），能打开全局关掉的、也能关掉全局开着的。基线是 `redaction` 与 `exact_value_redaction`。
+
+### 5. 安全前提（必读）
+
+- **本层不鉴权，只选目的地。** 网关只是把请求送到规则指定的上游；真实凭据是客户端的 `Authorization`。`expose` 默认 `internal`（仅内网客户端）；要开放公网必须显式写 `public`。
+- **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 会强制所有非 passthrough 请求带签名，浏览器无法提供；两者同开时转发表拒绝加载并在日志打 ERROR。
+- `public` 规则关闭基线脱敏需要启动态 `AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF=true`，否则该条目直接判为非法（`_denied`，请求 403），并在日志打 ERROR。
+- 配置文件解析失败 / `version` 不是 `1` / 顶层结构非法时，**上一份有效规则的全部 host 一律 403**（`forward_config_invalid`），不会静默回落到默认上游；单条非法只影响该 host。
+- 无 `Content-Length` 的上传会被 boundary 缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB）；大文件上游需客户端带 `Content-Length`。
+- 转发域名上的 `/v2/*`、`/relay/*` 一律透传，**不**进入网关自己的 v2/relay 路由，也不受本面板开关控制。
+
+### 6. Caddy 示例（泛域名）
+
+```caddyfile
+*.gw.example.com {
+    # 管理面永不出网
+    @gw_admin path /__gw__ /__gw__/* /__ui__ /__ui__/*
+    respond @gw_admin "forbidden" 403
+
+    reverse_proxy 127.0.0.1:18080 {
+        header_up Host {host}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-For {remote_host}
+        flush_interval -1
+        transport http {
+            response_header_timeout 660s
+            read_timeout 660s
+            write_timeout 660s
+        }
+    }
+}
+```
+
+注意这里是**整域名转发**，所以不能像 [Caddyfile.example](Caddyfile.example) 的 token 场景那样只放行 `/v1/*` 与 `/v2/*`——上游管理台、OAuth 回调、静态资源都要能到达网关。完整的两种形态对照见 [Caddyfile.example](Caddyfile.example)。
+
 ## Caddy 对外暴露
 
 形态：
