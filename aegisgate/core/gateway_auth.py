@@ -13,7 +13,11 @@ from fastapi.responses import JSONResponse, Response
 
 from aegisgate.config.settings import settings
 from aegisgate.core.gateway_keys import _ensure_gateway_key
-from aegisgate.core.gateway_network import _real_client_ip, _is_trusted_proxy
+from aegisgate.core.gateway_network import (
+    _real_client_ip,
+    trusted_forwarded_host,
+    trusted_forwarded_proto,
+)
 
 
 _UI_SESSION_COOKIE = "aegis_ui_session"
@@ -176,13 +180,8 @@ def _sanitize_public_host(raw_host: str) -> str:
 
 
 def _public_base_url(request: Request) -> str:
-    direct_ip = (request.client.host if request.client else "").strip()
-    if _is_trusted_proxy(direct_ip):
-        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-        forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
-    else:
-        forwarded_proto = ""
-        forwarded_host = ""
+    forwarded_proto = trusted_forwarded_proto(request)
+    forwarded_host = trusted_forwarded_host(request)
     scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme or "http"
     host_header = (request.headers.get("host") or "").strip()
     host = _sanitize_public_host(forwarded_host or host_header or f"{settings.host}:{settings.port}")

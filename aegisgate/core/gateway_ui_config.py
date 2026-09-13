@@ -180,6 +180,8 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
        "开启后样本文件里保留原始响应文本；关闭只留结构化证据。注意原文可能含敏感内容"),
     _f("AEGIS_SECURITY_RULES_PATH", "security_rules_path", "安全规则 YAML 路径", "string", "general", "路径"),
     _f("AEGIS_GW_TOKENS_PATH", "gw_tokens_path", "Token 映射表路径", "string", "general", "路径"),
+    _f("AEGIS_GW_FORWARDS_PATH", "gw_forwards_path", "网关转发表路径", "string", "general", "路径",
+       "整域名转发的规则文件；留空路径按工作目录解析"),
     _f("AEGIS_COMPOSE_DIR", "compose_dir", "Compose 文件目录", "string", "general", "路径",
        "留空则使用 config/compose/"),
 
@@ -225,6 +227,9 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
     _f("AEGIS_MAX_CONTENT_LENGTH_PER_MESSAGE", "max_content_length_per_message", "单条消息最大字符", "int",
        "limits", "消息", min=1),
     _f("AEGIS_MAX_RESPONSE_LENGTH", "max_response_length", "最大响应字符", "int", "limits", "消息", min=1),
+    _f("AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES", "forward_max_request_body_bytes",
+       "转发请求最大请求体（字节）", "int", "limits", "请求体",
+       "整域名转发是真正的反代，大文件上传可适当调高", min=1),
 
     # ---- security ----
     _f("AEGIS_SECURITY_LEVEL", "security_level", "安全等级", "enum", "security", "等级",
@@ -263,6 +268,11 @@ _UI_CONFIG_FIELDS: tuple[dict[str, object], ...] = (
        "security", "过滤器开关"),
     _f("AEGIS_ENABLE_SYSTEM_PROMPT_GUARD", "enable_system_prompt_guard", "系统提示词防护", "bool",
        "security", "过滤器开关"),
+    _f("AEGIS_ENABLE_GATEWAY_FORWARD", "enable_gateway_forward", "启用整域名转发", "bool",
+       "security", "网关转发", "开启后按 Host 匹配 config/gw_forwards.json；启动时固定，需重启"),
+    _f("AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF", "forward_allow_public_baseline_off",
+       "允许 public 规则关闭基线脱敏", "bool", "security", "网关转发",
+       "关闭 public 规则的脱敏可能让原文直达上游；启动时固定，需重启"),
     _f("AEGIS_ENABLE_SEMANTIC_MODULE", "enable_semantic_module", "启用语义复核", "bool",
        "security", "语义复核"),
     _f("AEGIS_STREAM_SCAN_INTERVAL_CHUNKS", "stream_scan_interval_chunks", "流式探测间隔(块)", "int",

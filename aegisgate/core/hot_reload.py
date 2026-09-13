@@ -138,6 +138,11 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         "allow_public_numeric_tokens",
         "allow_public_passthrough_mode",
         "allow_public_upstream_whitelist",
+        # Host forwarding changes the routing surface: which hostnames the
+        # gateway accepts and whether the public face may drop baseline redaction
+        # must be decided at startup, not by a hot-editable JSON file.
+        "enable_gateway_forward",
+        "forward_allow_public_baseline_off",
         "enable_request_hmac_auth",
         "request_hmac_secret",
         "v2_block_internal_targets",
@@ -343,6 +348,17 @@ def reload_gw_tokens() -> None:
         logger.exception("hot_reload gw_tokens reload failed")
 
 
+def reload_gw_forwards() -> None:
+    """Reload gw_forwards.json into memory (disk wins, including deletion)."""
+    try:
+        from aegisgate.core.gw_forwards import load
+
+        load(replace=True)
+        logger.info("hot_reload gw_forwards reloaded")
+    except Exception:
+        logger.exception("hot_reload gw_forwards reload failed")
+
+
 def reload_policy_cache() -> None:
     """Clear policy engine mtime cache so next resolve re-reads YAML."""
     try:
@@ -465,6 +481,13 @@ def build_watcher() -> HotReloader:
     if not tokens_path.is_absolute():
         tokens_path = Path.cwd() / tokens_path
     watcher.watch(tokens_path, "gw_tokens.json", reload_gw_tokens)
+
+    # gw_forwards.json — watched even when forwarding is disabled so enabling it
+    # later (restart) picks up whatever the operator prepared.
+    forwards_path = Path(settings.gw_forwards_path)
+    if not forwards_path.is_absolute():
+        forwards_path = Path.cwd() / forwards_path
+    watcher.watch(forwards_path, "gw_forwards.json", reload_gw_forwards)
 
     # policy YAML files
     policies_dir = rules_path.parent
