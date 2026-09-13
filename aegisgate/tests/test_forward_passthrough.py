@@ -132,6 +132,9 @@ class TestZeroChangeSnapshot:
         ("GET", "/v1/models", 405, '{"detail":"Method Not Allowed"}'),
         ("OPTIONS", "/health", 405, '{"detail":"Method Not Allowed"}'),
         ("GET", "/__fwd__/x", 404, '{"detail":"Not Found"}'),
+        # Any method, not only the seven the forward face serves.
+        ("TRACE", "/__fwd__/x", 404, '{"detail":"Not Found"}'),
+        ("PROPFIND", "/__fwd__/x", 404, '{"detail":"Not Found"}'),
     )
 
     @pytest.mark.parametrize(("method", "path", "status", "body"), SNAPSHOT)
@@ -307,6 +310,58 @@ class TestForwarding:
                 headers={"Host": "api.ag.com", "Cookie": f"{_UI_SESSION_COOKIE}=s3cr3t; theirs=1"},
             )
         assert fake.captured["headers"]["cookie"] == "theirs=1"
+
+
+class TestPassthroughAudit:
+    @pytest.fixture()
+    def audits(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        from aegisgate.core import audit as audit_module
+
+        records: list[dict[str, Any]] = []
+        monkeypatch.setattr(audit_module, "write_audit", records.append)
+        return records
+
+    def test_forwarded_request_is_audited_without_query(
+        self, forward_env, monkeypatch, audits
+    ) -> None:
+        forward_env({"api.ag.com": _entry()})
+        _install_client(monkeypatch, _FakeClient(response=_FakeResponse(status_code=201)))
+        with _client() as client:
+            client.post(
+                "/oauth/callback?code=secret", headers={"Host": "api.ag.com"}, content=b"x"
+            )
+        record = next(item for item in audits if item.get("event") == "forward_passthrough")
+        assert record["forward_host"] == "api.ag.com"
+        assert record["forward_mode"] == "policy"
+        assert record["forward_branch"] == "passthrough"
+        assert record["method"] == "POST"
+        assert record["path"] == "/oauth/callback"
+        assert record["status_code"] == 201
+        assert record["security_boundary"]["forward_host"] == "api.ag.com"
+        assert "secret" not in json.dumps(record)
+
+    def test_unreachable_upstream_is_audited(self, forward_env, monkeypatch, audits) -> None:
+        forward_env({"api.ag.com": _entry()})
+        _install_client(monkeypatch, _FakeClient(error=httpx.ConnectError("refused")))
+        with _client() as client:
+            client.get("/v1/models", headers={"Host": "api.ag.com"})
+        assert any(
+            item.get("event") == "forward_passthrough" and item["status_code"] == 502
+            for item in audits
+        )
+
+    def test_unsupported_method_on_a_forward_domain_is_405(
+        self, forward_env, monkeypatch, audits
+    ) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            response = client.request("TRACE", "/x", headers={"Host": "api.ag.com"})
+        assert response.status_code == 405
+        assert response.json() == {"detail": "Method Not Allowed"}
+        assert "GET" in response.headers["allow"]
+        assert "url" not in fake.captured
+        assert any(item.get("status_code") == 405 for item in audits)
 
 
 class TestRawRelay:

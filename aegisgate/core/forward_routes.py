@@ -26,6 +26,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.routing import Route
 
 from aegisgate.config.settings import settings
 from aegisgate.util.ip_safety import request_host_header
@@ -369,6 +370,40 @@ async def _relay_body(upstream: Any) -> AsyncIterator[bytes]:
         await upstream.aclose()
 
 
+def _audit_passthrough(request: Request, rule: Any, path: str, status_code: int) -> None:
+    """One audit record per passthrough request (§10).
+
+    The LLM branch is audited by the V1 pipeline; this face has no request
+    context, so it writes its own record with the same forward fields. The path
+    is the upstream path without the query string, which is where OAuth codes
+    and signed-URL tokens live.
+    """
+    from aegisgate.core.audit import write_audit
+    from aegisgate.core.gateway_network import _real_client_ip
+
+    boundary = getattr(request.state, "security_boundary", None)
+    boundary = dict(boundary) if isinstance(boundary, dict) else {}
+    record: dict[str, Any] = {
+        "event": "forward_passthrough",
+        "route": "forward",
+        "forward_host": str(getattr(rule, "host", "") or ""),
+        "forward_mode": str(getattr(rule, "filters_mode", "") or ""),
+        "forward_branch": "passthrough",
+        "method": request.method,
+        "path": path,
+        "status_code": status_code,
+        "client_ip": _real_client_ip(request),
+        "security_boundary": boundary,
+    }
+    tenant_id = boundary.get("tenant_id")
+    if tenant_id:
+        record["tenant_id"] = tenant_id
+    try:
+        write_audit(record)
+    except Exception as exc:  # pragma: no cover - operational guard
+        logger.warning("forward passthrough audit write failed error=%s", exc)
+
+
 async def _forward_request(request: Request, rule: Any) -> Response:
     path = _upstream_path(request)
     # From the scope, not request.url: Starlette rebuilds request.url from the
@@ -387,6 +422,7 @@ async def _forward_request(request: Request, rule: Any) -> Response:
 
     content, body_headers, rejected = await _request_content(request)
     if rejected is not None:
+        _audit_passthrough(request, rule, path, rejected.status_code)
         return rejected
     headers.update(body_headers)
     client = await _upstream_client()
@@ -400,8 +436,10 @@ async def _forward_request(request: Request, rule: Any) -> Response:
         )
         upstream = await client.send(upstream_request, stream=True)
     except httpx.HTTPError as exc:
+        _audit_passthrough(request, rule, path, 502)
         return _unreachable_response(exc)
 
+    _audit_passthrough(request, rule, path, upstream.status_code)
     rule_host = getattr(rule, "host", "") or ""
     response_headers, cookies = build_forward_response_headers(
         upstream.headers,
@@ -438,20 +476,44 @@ async def forward_passthrough(request: Request) -> Response:
     """Serve ``/__fwd__/<path>``; 404 when no forward rule is active.
 
     Without a rule this is the same 404 body a client gets for any unknown path
-    today. A client that requests ``/__fwd__/x`` directly on a forward domain is
-    forwarded with the original path ``/__fwd__/x`` (the middleware rewrites it
-    once more), so the route never self-references.
+    today — for every method, which is why the route accepts all of them and
+    narrows to the forwarded seven itself: a method-restricted route would turn
+    ``TRACE /__fwd__/x`` from today's 404 into a 405. A client that requests
+    ``/__fwd__/x`` directly on a forward domain is forwarded with the original
+    path ``/__fwd__/x`` (the middleware rewrites it once more), so the route
+    never self-references.
     """
     rule = request.scope.get("aegis_forward_rule")
     if rule is None:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    if request.method.upper() not in _FORWARD_METHODS:
+        _audit_passthrough(request, rule, _upstream_path(request), 405)
+        return JSONResponse(
+            status_code=405,
+            content={"detail": "Method Not Allowed"},
+            headers={"Allow": ", ".join(_FORWARD_METHODS)},
+        )
     return await _forward_request(request, rule)
 
 
+class _ForwardPassthroughApp:
+    """ASGI wrapper so the route accepts every method (see forward_passthrough).
+
+    Starlette gives a plain *function* endpoint an implicit ``methods=["GET"]``;
+    only a non-function ASGI endpoint with ``methods=None`` matches any method.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        response = await forward_passthrough(Request(scope, receive, send))
+        await response(scope, receive, send)
+
+
 def register_forward_routes(app: FastAPI) -> None:
-    app.add_api_route(
-        "/__fwd__/{_ignored:path}",
-        forward_passthrough,
-        methods=_FORWARD_METHODS,
-        name="forward-passthrough",
+    app.router.routes.append(
+        Route(
+            "/__fwd__/{_ignored:path}",
+            endpoint=_ForwardPassthroughApp(),
+            name="forward-passthrough",
+            include_in_schema=False,
+        )
     )
