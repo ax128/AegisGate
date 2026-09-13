@@ -220,6 +220,15 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
             headers[_FORWARD_OVERRIDES_HEADER] = encode_forward_overrides(
                 resolve() if callable(resolve) else {}
             )
+        # The same outbound hygiene as the passthrough face: the LLM routes share
+        # the forward host with it, so neither a client-typed X-Forwarded-For /
+        # X-Real-IP / Forwarded nor the console's session cookie may reach the
+        # upstream through them. Nothing in the V1 handlers reads these headers.
+        from aegisgate.core.forward_routes import strip_gateway_cookies
+        from aegisgate.core.gateway_network import rewrite_forwarding_headers_for_upstream
+
+        rewrite_forwarding_headers_for_upstream(request, headers)
+        strip_gateway_cookies(headers)
     injected_upstream_base = request.scope.get("aegis_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
         headers[settings.upstream_base_header] = injected_upstream_base.strip()

@@ -118,6 +118,56 @@ def trusted_forwarded_proto(request: Request) -> str:
     )
 
 
+_CLIENT_FORWARDING_HEADERS = frozenset(
+    {
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-port",
+        "x-forwarded-proto",
+        "x-real-ip",
+    }
+)
+_PROXY_UNOWNED_HEADERS = frozenset({"forwarded", "x-real-ip"})
+
+
+def rewrite_forwarding_headers_for_upstream(
+    request: Request, headers: dict[str, str]
+) -> None:
+    """Make the forwarding headers an upstream receives ones the gateway vouches for.
+
+    From an untrusted peer they are whatever the client typed: an upstream on the
+    same host sees the gateway as 127.0.0.1 and commonly trusts
+    ``X-Forwarded-For``, so passing them along would let a public client claim to
+    be local there. Those are dropped and replaced with the direct peer, scheme
+    and ``Host``.
+
+    Behind a trusted proxy the ``X-Forwarded-*`` set is the proxy's and passes
+    through. ``X-Real-IP`` and ``Forwarded`` are not reliably the proxy's — Caddy,
+    for one, relays both exactly as the client sent them — so they are dropped
+    and ``X-Real-IP`` is restated from the client IP the gateway resolved.
+
+    Lives next to ``trusted_forwarded_host`` so every ``X-Forwarded-Host``
+    decision stays in this module.
+    """
+    direct_ip = (request.client.host if request.client else "").strip()
+    if _is_trusted_proxy(direct_ip):
+        for key in [name for name in headers if name.lower() in _PROXY_UNOWNED_HEADERS]:
+            del headers[key]
+        client_ip = _real_client_ip(request)
+        if client_ip:
+            headers["X-Real-IP"] = client_ip
+        return
+    for key in [name for name in headers if name.lower() in _CLIENT_FORWARDING_HEADERS]:
+        del headers[key]
+    if direct_ip:
+        headers["X-Forwarded-For"] = direct_ip
+    headers["X-Forwarded-Proto"] = request.url.scheme or "http"
+    host = (request.headers.get("host") or "").strip()
+    if host:
+        headers["X-Forwarded-Host"] = host
+
+
 def _is_loopback_ip(host: str) -> bool:
     normalized = _normalize_ip_host(host)
     if not normalized:
