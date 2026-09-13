@@ -205,6 +205,22 @@ class TestMatching:
         status, body = _invoke(HostForwardMiddleware(recorder), _scope("/v1/models"))
         assert status == 403
         assert body["error_code"] == "forward_rule_invalid"
+        # The validation reason is for the operator, not for the client.
+        assert "nope" not in json.dumps(body, ensure_ascii=False)
+
+    def test_public_baseline_gate_reason_is_not_echoed(self, rules) -> None:
+        load, _ = rules
+        load(
+            {
+                "api.ag.com": _entry(
+                    expose="public",
+                    filters={"mode": "custom", "custom": {"redaction": False}},
+                )
+            }
+        )
+        status, body = _invoke(HostForwardMiddleware(_Recorder()), _scope("/v1/models"))
+        assert status == 403
+        assert "AEGIS_FORWARD_ALLOW_PUBLIC_BASELINE_OFF" not in json.dumps(body)
 
     def test_forward_switch_off_passes_through(self, rules, monkeypatch) -> None:
         load, _ = rules
@@ -246,6 +262,36 @@ class TestReservedPaths:
         assert status == 200
         assert recorder.scopes[0]["path"] == path
         assert "aegis_forward_rule" not in recorder.scopes[0]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            _entry(enabled=False),
+            _entry(filters={"mode": "custom", "custom": {"nope": True}}),
+        ],
+    )
+    @pytest.mark.parametrize("path", ["/health", "/__ui__/api/forwards"])
+    def test_reserved_paths_survive_a_disabled_or_invalid_rule(
+        self, rules, entry: dict, path: str
+    ) -> None:
+        load, _ = rules
+        load({"api.ag.com": entry})
+        recorder = _Recorder()
+        status, _ = _invoke(HostForwardMiddleware(recorder), _scope(path))
+        assert status == 200
+        assert recorder.scopes[0]["path"] == path
+
+    def test_reserved_paths_survive_a_broken_file(self, rules) -> None:
+        load, path = rules
+        load({"api.ag.com": _entry()})
+        path.write_text("{ broken", encoding="utf-8")
+        gw_forwards.load(replace=True)
+        recorder = _Recorder()
+        status, _ = _invoke(HostForwardMiddleware(recorder), _scope("/__ui__"))
+        assert status == 200
+        status, body = _invoke(HostForwardMiddleware(recorder), _scope("/v1/models"))
+        assert status == 403
+        assert body["error_code"] == "forward_config_invalid"
 
     def test_lookalike_prefix_is_not_reserved(self, rules) -> None:
         load, _ = rules
@@ -312,7 +358,8 @@ class TestBranchMatrix:
         assert scope["aegis_token_authenticated"] is True
         assert scope["aegis_gateway_token"] == "forward:api.ag.com"
         assert scope["aegis_tenant_id"].startswith("forward:")
-        assert scope["aegis_upstream_base"] == "http://127.0.0.1:8317"
+        # Root in the rule, /v1 for the V1 forwarder (which strips it from the path).
+        assert scope["aegis_upstream_base"] == "http://127.0.0.1:8317/v1"
         assert scope["aegis_filter_mode"] is None
         assert scope["aegis_forward_rule"].host == "api.ag.com"
 
@@ -342,6 +389,26 @@ class TestBranchMatrix:
         assert scope["aegis_forward_path"] == path
         assert "aegis_token_authenticated" not in scope
         assert scope["aegis_forward_rule"].host == "api.ag.com"
+
+    def test_passthrough_keeps_the_encoded_path(self, rules) -> None:
+        load, _ = rules
+        load({"api.ag.com": _entry()})
+        recorder = _Recorder()
+        scope = _scope("/files/a/b?x=1#frag")
+        scope["raw_path"] = b"/files/a%2Fb%3Fx=1%23frag"
+        _invoke(HostForwardMiddleware(recorder), scope)
+        forwarded = recorder.scopes[0]
+        assert forwarded["aegis_forward_raw_path"] == "/files/a%2Fb%3Fx=1%23frag"
+        assert forwarded["raw_path"] == b"/__fwd__/files/a%2Fb%3Fx=1%23frag"
+
+    def test_passthrough_reencodes_when_raw_path_is_missing(self, rules) -> None:
+        load, _ = rules
+        load({"api.ag.com": _entry()})
+        recorder = _Recorder()
+        scope = _scope("/a b?c#d")
+        del scope["raw_path"]
+        _invoke(HostForwardMiddleware(recorder), scope)
+        assert recorder.scopes[0]["aegis_forward_raw_path"] == "/a%20b%3Fc%23d"
 
     def test_trailing_slash_still_llm(self, rules) -> None:
         load, _ = rules
@@ -402,8 +469,60 @@ class TestBranchMatrix:
         )
         injected = recorder.scopes[0]
         headers = _effective_gateway_headers(Request(injected))
-        assert headers["x-upstream-base"] == "http://127.0.0.1:8317"
+        assert headers["x-upstream-base"] == "http://127.0.0.1:8317/v1"
         assert headers["x-aegis-upstream-source"] == "scope"
+
+
+class TestLlmBranchThroughTheApp:
+    """The whole stack: token rewrite → HostForward → boundary → V1 handler."""
+
+    def test_chat_completions_reaches_upstream_with_v1_and_audits_the_rule(
+        self, rules, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from aegisgate.adapters.openai_compat import router as openai_router
+        from aegisgate.core.gateway import app
+
+        load, _ = rules
+        load({"api.ag.com": _entry(upstream_base="http://127.0.0.1:8317")})
+        captured: dict[str, Any] = {}
+
+        async def fake_forward_json(*, url, payload, headers, connect_urls, host_header):
+            captured["url"] = url
+            return 200, {
+                "id": "chat-1",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        async def passthrough_pipeline(_pipeline, item, _ctx):
+            return item
+
+        async def no_semantic(*_args, **_kwargs):
+            return None
+
+        def capture_audit(ctx, boundary=None):
+            captured["boundary"] = dict(boundary or {})
+            captured["tags"] = set(ctx.security_tags)
+
+        monkeypatch.setattr(openai_router, "_forward_json_with_pinning", fake_forward_json)
+        monkeypatch.setattr(openai_router, "_run_request_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(openai_router, "_run_response_pipeline", passthrough_pipeline)
+        monkeypatch.setattr(openai_router, "_apply_semantic_review", no_semantic)
+        monkeypatch.setattr(openai_router, "_write_audit_event", capture_audit)
+        monkeypatch.setattr(openai_router, "debug_log_original", lambda *a, **k: None)
+
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                headers={"host": "api.ag.com"},
+                json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        assert response.status_code == 200, response.text
+        assert captured["url"] == "http://127.0.0.1:8317/v1/chat/completions"
+        assert captured["boundary"]["forward_host"] == "api.ag.com"
+        assert captured["boundary"]["forward_mode"] == "policy"
+        assert captured["boundary"]["forward_branch"] == "llm"
 
 
 class TestCopyConsistencyGuards:
