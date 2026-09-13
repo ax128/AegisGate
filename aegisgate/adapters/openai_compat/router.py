@@ -85,9 +85,13 @@ from aegisgate.adapters.openai_compat.stream_utils import (
     _stream_messages_message_stop_sse_chunk,
 )
 from aegisgate.adapters.openai_compat.upstream import (
+    _FORWARD_HOST_HEADER,
+    _FORWARD_OVERRIDES_HEADER,
     _build_forward_headers,
     _build_upstream_url,
     _effective_gateway_headers,
+    _header_value,
+    decode_forward_overrides,
     _forward_json,
     _forward_json_pinned,
     _forward_multipart,
@@ -422,10 +426,14 @@ async def _iter_forward_stream_with_pinning(
 
 
 def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str | None:
-    """Adjust ctx.enabled_filters from the x-aegis-filter-mode header. Returns the mode or None."""
+    """Adjust ctx.enabled_filters from the filter-mode header and the forward rule. Returns the mode.
+
+    Both switch layers are applied here and only here. The nine ``_execute_*``
+    entrypoints each call ``policy_engine.resolve`` then this function, so a
+    forward rule's per-filter overrides reach all of them without touching the
+    entrypoints; ``test_forward_filter_overrides`` pins the call count and order.
+    """
     mode = _filter_mode_from_headers(headers)
-    if not mode:
-        return None
     if mode == "redact":
         ctx.enabled_filters = ctx.enabled_filters & _REDACT_ONLY_FILTERS
         ctx.security_tags.add("filter_mode:redact")
@@ -441,7 +449,59 @@ def _apply_filter_mode(ctx: RequestContext, headers: Mapping[str, str]) -> str |
             "filter_mode=passthrough applied request_id=%s (all filters skipped)",
             ctx.request_id,
         )
+    _apply_forward_filter_overrides(ctx, headers)
     return mode
+
+
+def _apply_forward_filter_overrides(
+    ctx: RequestContext, headers: Mapping[str, str]
+) -> None:
+    """Apply a forward rule's explicit filter switches on top of the policy result.
+
+    A rule can turn a globally disabled filter back on and a globally enabled one
+    off. Which switches apply:
+
+    * the rule was deleted by a hot reload while the request was in flight → no
+      overrides, without crashing or leaking a stale switch;
+    * otherwise the switches of the rule the request was *admitted* under, which
+      the middleware snapshot carries in ``x-aegis-forward-overrides``. A rule
+      edited mid-flight (say, made internal-only with baseline redaction off)
+      must not hand its weaker posture to a request that passed the old rule's
+      expose gate.
+
+    The exact-value switch is also pinned for the transport layer
+    (``redact_values.set_exact_value_override``), which resolves the value list
+    without a context in reach.
+    """
+    from aegisgate.config.redact_values import set_exact_value_override
+
+    forward_host = _header_value(headers, _FORWARD_HOST_HEADER).strip()
+    if not forward_host:
+        set_exact_value_override(None)
+        return
+    from aegisgate.core import gw_forwards
+
+    rule = gw_forwards.get(forward_host)
+    overrides: dict[str, bool] = {}
+    if rule is not None:
+        snapshot = decode_forward_overrides(
+            _header_value(headers, _FORWARD_OVERRIDES_HEADER)
+        )
+        overrides = snapshot if snapshot is not None else rule.resolved_filter_overrides()
+    if overrides:
+        ctx.forward_filter_overrides = overrides
+        for name, enabled in overrides.items():
+            if enabled:
+                ctx.enabled_filters.add(name)
+            else:
+                ctx.enabled_filters.discard(name)
+    set_exact_value_override(overrides.get("exact_value_redaction"))
+    ctx.security_tags.add(f"forward_rule:{forward_host}")
+    if (
+        overrides.get("redaction") is False
+        or overrides.get("exact_value_redaction") is False
+    ):
+        ctx.security_tags.add(f"forward_rule:{forward_host}:baseline_off")
 
 
 def _forwarding_kernel_rollout_is_live(route_key: str) -> bool:

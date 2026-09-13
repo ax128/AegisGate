@@ -354,6 +354,11 @@ def reload_gw_forwards() -> None:
         from aegisgate.core.gw_forwards import load
 
         load(replace=True)
+        # The global flags did not move, but the per-rule override counts in the
+        # disabled-filter report did, so re-emit it.
+        from aegisgate.config.feature_flags import recheck_disabled_filters
+
+        recheck_disabled_filters()
         logger.info("hot_reload gw_forwards reloaded")
     except Exception:
         logger.exception("hot_reload gw_forwards reload failed")

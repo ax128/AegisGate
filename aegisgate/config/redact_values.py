@@ -13,6 +13,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Iterable, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 
 from cryptography.fernet import InvalidToken
@@ -205,6 +206,32 @@ def save_redact_values(values: Iterable[object]) -> None:
     logger.info("redact_values: saved %d values to %s", len(clean), path)
 
 
+# A host-forwarding rule may switch exact-value redaction on or off for its own
+# domain. The V1 transport layer (openai_compat.sanitize / renderers) resolves the
+# value list without a RequestContext in reach, so the rule's switch reaches it
+# through the request task's context instead: ``_apply_filter_mode`` sets it for
+# every V1 request (``None`` when no rule overrides), and each request runs in its
+# own task, so the value never outlives the request that set it.
+_exact_value_override: ContextVar[bool | None] = ContextVar(
+    "aegis_exact_value_override", default=None
+)
+
+
+def set_exact_value_override(value: bool | None) -> None:
+    """Pin the current request's exact-value switch; ``None`` means the global one."""
+    _exact_value_override.set(value)
+
+
+def exact_value_redaction_active() -> bool:
+    """The effective switch: a forward rule's override, else the global setting."""
+    override = _exact_value_override.get()
+    if override is not None:
+        return override
+    from aegisgate.config.settings import settings
+
+    return bool(settings.enable_exact_value_redaction)
+
+
 def active_exact_values() -> tuple[str, ...]:
     """The configured values, snapshotted once for one payload/body walk.
 
@@ -214,11 +241,9 @@ def active_exact_values() -> tuple[str, ...]:
     down; an empty tuple turns the per-leaf step into a single truth test.
 
     Returns an empty tuple when the feature is off, so callers do not have to
-    check the flag separately.
+    check the flag separately. "Off" follows :func:`exact_value_redaction_active`.
     """
-    from aegisgate.config.settings import settings
-
-    if not settings.enable_exact_value_redaction:
+    if not exact_value_redaction_active():
         return ()
     return tuple(load_redact_values())
 
