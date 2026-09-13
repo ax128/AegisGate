@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from urllib.parse import quote
 
 from starlette.requests import Request
 
 from aegisgate.config.settings import settings
 from aegisgate.core import gw_forwards
+from aegisgate.core.gw_forwards import route_host
 from aegisgate.util.logger import logger
 
 # Paths that always stay on the gateway, even on a forwarded host. Serving the
@@ -72,23 +74,18 @@ def _raw_header_count(scope: dict[str, Any], name: bytes) -> int:
     )
 
 
-def route_host(raw_host: str) -> str:
-    """Normalize a client-facing host to the routing key.
+def _original_raw_path(scope: dict[str, Any], path: str) -> bytes:
+    """The request path exactly as the client sent it (still percent-encoded).
 
-    Lowercased, trailing-dot stripped, port removed. IPv6 literals keep their
-    inner address (brackets removed) so a ``[::1]:8080`` address cannot masquerade
-    as a hostname rule.
+    ``scope["path"]`` is already decoded, so rebuilding the upstream URL from it
+    would turn ``%2F`` into a separator, ``%3F`` into the start of the query and
+    ``%23`` into a fragment. Without a ``raw_path`` the decoded path is
+    re-encoded, which keeps ``?`` / ``#`` / ``%`` from changing the URL shape.
     """
-    value = (raw_host or "").strip().lower()
-    if not value:
-        return ""
-    if value.startswith("["):
-        end = value.find("]")
-        if end != -1:
-            value = value[1:end]
-    elif ":" in value:
-        value = value.rsplit(":", 1)[0]
-    return value.rstrip(".")
+    raw_path = scope.get("raw_path")
+    if isinstance(raw_path, (bytes, bytearray)) and raw_path.startswith(b"/"):
+        return bytes(raw_path)
+    return quote(path, safe="/:@!$&'()*+,;=-._~").encode("ascii")
 
 
 def _trust_header_names() -> set[bytes]:
@@ -191,26 +188,40 @@ class HostForwardMiddleware:
             return
 
         rule = gw_forwards.get(host)
-        if rule is None:
-            denied = gw_forwards.denied_reason(host)
-            if denied is None:
-                # Not a forward domain: unchanged behaviour, no injection.
-                await self.app(scope, receive, send)
-                return
-            reason, detail = denied
+        denied = gw_forwards.denied_reason(host) if rule is None else None
+        if rule is None and denied is None:
+            # Not a forward domain: unchanged behaviour, no injection.
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path") or "/")
+        # Reserved paths are resolved before any rule-state answer: /health, the
+        # console and the admin API must keep answering the way they do today on
+        # an internal-only, disabled or invalid forward domain — the last being
+        # exactly when the operator needs the console to fix the file.
+        if _is_reserved_path(path):
+            await self.app(scope, receive, send)
+            return
+
+        if denied is not None:
+            reason, _detail = denied
             logger.warning(
-                "forward reject host=%s reason=%s path=%s", host, reason, scope.get("path")
+                "forward reject host=%s reason=%s path=%s", host, reason, path
             )
+            # The validation detail stays in the log and the console: it names
+            # startup flags and the rule's posture, which an unauthenticated
+            # client has no business reading.
             await _reject(
                 scope,
                 receive,
                 send,
                 status_code=403,
                 reason=reason,
-                detail=detail or None,
+                detail="该网关域名的转发规则当前不可用",
             )
             return
 
+        assert rule is not None
         if not rule.enabled:
             logger.warning("forward reject host=%s reason=forward_rule_disabled", host)
             await _reject(
@@ -221,13 +232,6 @@ class HostForwardMiddleware:
                 reason=gw_forwards.REASON_RULE_DISABLED,
                 detail="该网关域名的转发规则已停用",
             )
-            return
-
-        path = str(scope.get("path") or "/")
-        # Reserved paths must be resolved before the expose gate: /health on an
-        # internal-only domain still has to answer the way it does today.
-        if _is_reserved_path(path):
-            await self.app(scope, receive, send)
             return
 
         if rule.expose == "internal":
@@ -269,7 +273,9 @@ class HostForwardMiddleware:
         # apply; H-21 namespacing needs a stable value per forward domain.
         new_scope["aegis_gateway_token"] = f"forward:{host}"
         new_scope["aegis_tenant_id"] = _trusted_scope_id("forward", host)
-        new_scope["aegis_upstream_base"] = rule.upstream_base
+        # The rule stores the upstream root; the V1 forwarder drops /v1 from the
+        # request path, so the base it gets must carry it.
+        new_scope["aegis_upstream_base"] = rule.llm_upstream_base
         new_scope["aegis_redaction_whitelist_keys"] = []
         new_scope["aegis_filter_mode"] = None
         new_scope["aegis_forward_rule"] = rule
@@ -281,15 +287,18 @@ class HostForwardMiddleware:
         self, scope, path: str, rule: gw_forwards.ForwardRule
     ) -> dict[str, Any]:
         new_scope = dict(scope)
+        original_raw = _original_raw_path(scope, path)
         new_path = f"/__fwd__{path}"
         new_scope["path"] = new_path
-        new_scope["raw_path"] = new_path.encode("utf-8")
+        new_scope["raw_path"] = b"/__fwd__" + original_raw
         new_scope["root_path"] = ""
         # Note the absence of aegis_token_authenticated on purpose: the
         # passthrough face is not an authenticated route, and /v2/* must not fall
         # into the gateway's own v2 proxy.
         new_scope["aegis_forward_rule"] = rule
         new_scope["aegis_forward_path"] = path
+        # What the upstream URL is built from: the path as sent, still encoded.
+        new_scope["aegis_forward_raw_path"] = original_raw.decode("latin-1")
         new_scope["headers"] = strip_client_trust_headers(scope)
         logger.debug("forward passthrough host=%s path=%s -> %s", rule.host, path, new_path)
         return new_scope
