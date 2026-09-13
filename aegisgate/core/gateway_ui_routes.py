@@ -64,6 +64,7 @@ from aegisgate.core.rules_write import (
     write_rules_file,
 )
 from aegisgate.core.ui_etag import (
+    etag_conflict_response,
     etag_for_file,
     if_match_conflict,
     if_match_header,
@@ -159,6 +160,235 @@ _RULE_SECTION_LABELS: dict[str, str] = {
     "post_restore_guard.lure_patterns": "还原后诱导规则",
     "post_restore_guard.secret_patterns": "还原后密钥规则",
 }
+
+
+# ---------------------------------------------------------------------------
+# Upstream reachability probe
+# ---------------------------------------------------------------------------
+# Registering a token used to tell the operator nothing about whether the address
+# works; the first real client request was the first feedback. This makes the
+# gateway issue that one request instead, and is deliberately narrow about it:
+# the same validation the forwarder applies, cloud metadata endpoints refused
+# outright, one request carrying no credentials, no redirects, a hard 3s ceiling,
+# and only the status line comes back — never a response body.
+#
+# Private targets stay allowed. A local Ollama / vLLM / LM Studio upstream is the
+# most common thing this page exists to configure, and the operator can already
+# register that address and drive a request through it. Every probe is audited
+# like the other admin actions in this module.
+#
+# Module-level (not a closure inside register_ui_routes) because the host-forward
+# panel probes upstreams too.
+_PROBE_TIMEOUT_SECONDS = 3.0
+_probe_limiter_slot: list[Any] = []
+
+
+def _probe_limiter() -> Any:
+    """Reuse the admin limiter, built lazily to avoid a startup import cycle."""
+    if not _probe_limiter_slot:
+        from aegisgate.core.gateway import _AdminRateLimiter
+
+        _probe_limiter_slot.append(
+            _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
+        )
+    return _probe_limiter_slot[0]
+
+
+def _probe_request_error(upstream_base: str) -> JSONResponse | None:
+    """400 for an unusable or forbidden probe target, else ``None``."""
+    from aegisgate.util.ip_safety import SSRF_METADATA_HOSTS
+
+    format_error = upstream_base_error(upstream_base)
+    if format_error is not None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_upstream_base", "detail": format_error},
+        )
+    hostname = (urlparse(upstream_base).hostname or "").strip().lower().strip(".")
+    # Only the metadata endpoints are refused by name. ip_safety's broader
+    # ".internal" rule guards client-supplied targets on the forwarding path;
+    # applying it here would reject host.docker.internal, which is the upstream
+    # host the Docker deployment documents.
+    if hostname in SSRF_METADATA_HOSTS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "probe_target_forbidden",
+                "detail": "该地址指向云元数据服务，不能作为上游",
+            },
+        )
+    return None
+
+
+async def _probe_upstream(upstream_base: str) -> dict[str, object]:
+    import httpx
+
+    started = time.monotonic()
+
+    def elapsed_ms() -> int:
+        return int((time.monotonic() - started) * 1000)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=_PROBE_TIMEOUT_SECONDS, follow_redirects=False
+        ) as client:
+            response = await client.request("HEAD", upstream_base)
+            # Plenty of API roots answer HEAD with 405/501 while GET works.
+            if response.status_code in {405, 501}:
+                response = await client.request("GET", upstream_base)
+    except httpx.TimeoutException:
+        return {
+            "reachable": False,
+            "reason": "timeout",
+            "detail": f"{_PROBE_TIMEOUT_SECONDS:g} 秒内没有响应，请检查地址、端口与网络可达性",
+            "elapsed_ms": elapsed_ms(),
+        }
+    except httpx.HTTPError as exc:
+        # Covers DNS failure, refused connections and TLS errors alike; the
+        # message is the operator's own target, not third-party data.
+        return {
+            "reachable": False,
+            "reason": "connect_error",
+            "detail": str(exc)[:200] or exc.__class__.__name__,
+            "elapsed_ms": elapsed_ms(),
+        }
+    except Exception as exc:
+        # A host that urlparse accepts can still be rejected deeper down —
+        # "https://xn--/" raises idna.IDNAError, which is not an HTTPError.
+        # A probe is a diagnostic; reporting the failure beats a 500.
+        logger.warning("ui upstream probe failed unexpectedly error=%s", exc)
+        return {
+            "reachable": False,
+            "reason": "invalid_host",
+            "detail": f"无法解析该地址：{str(exc)[:160] or exc.__class__.__name__}",
+            "elapsed_ms": elapsed_ms(),
+        }
+    return {
+        "reachable": True,
+        "status_code": response.status_code,
+        "elapsed_ms": elapsed_ms(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Host forwarding (config/gw_forwards.json)
+# ---------------------------------------------------------------------------
+
+
+def _forwards_file_path() -> Path:
+    path = Path(settings.gw_forwards_path)
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _forwards_etag() -> str:
+    return etag_for_file(_forwards_file_path())
+
+
+def _global_filter_state() -> dict[str, bool]:
+    from aegisgate.config.feature_flags import feature_flags
+    from aegisgate.core.gw_forwards import _allowed_filter_names
+
+    return {
+        name: bool(getattr(feature_flags, name))
+        for name in sorted(_allowed_filter_names())
+    }
+
+
+def _forwards_payload() -> dict[str, object]:
+    """List payload: every rule, the deny table, and the global flag baseline."""
+    from aegisgate.core import gw_forwards
+
+    global_filters = _global_filter_state()
+    bypass = gw_forwards.whitelist_bypass_hosts()
+    items = []
+    for rule in sorted(gw_forwards.list_rules(), key=lambda item: item.host):
+        items.append(
+            {
+                "host": rule.host,
+                **rule.to_payload(),
+                "status": "enabled" if rule.enabled else "disabled",
+                "baseline_off": rule.baseline_off,
+                "whitelist_bypass": rule.host in bypass,
+                "custom_on_count": sum(
+                    1 for value in rule.custom_filters.values() if value
+                ),
+                "filter_total": len(global_filters),
+            }
+        )
+    denied = [
+        {
+            "host": host,
+            "reason": entry.get("reason", ""),
+            "detail": entry.get("detail", ""),
+        }
+        for host, entry in sorted(gw_forwards.list_denied().items())
+    ]
+    return {
+        "items": items,
+        "denied": denied,
+        "global_filters": global_filters,
+        "enable_gateway_forward": bool(settings.enable_gateway_forward),
+        "public_baseline_off_allowed": bool(settings.forward_allow_public_baseline_off),
+    }
+
+
+def _forward_rule_from_body(host: str, body: dict) -> tuple[Any, str | None]:
+    from aegisgate.core.gw_forwards import validate_rule
+
+    entry = {
+        "enabled": body.get("enabled", True),
+        "upstream_base": body.get("upstream_base"),
+        "note": body.get("note", ""),
+        "expose": body.get("expose", "internal"),
+        "filters": body.get("filters", {"mode": "policy"}),
+    }
+    return validate_rule(host, entry)
+
+
+def _invalid_forward_response(reason: str | None) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"error": "invalid_forward_rule", "detail": reason or "转发规则非法"},
+    )
+
+
+async def _forward_request_body(request: Request) -> dict | JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400, content={"error": "invalid_json", "detail": "请求体必须是 JSON 对象"}
+        )
+    return body
+
+
+def _forward_write_error(exc: Exception) -> JSONResponse | None:
+    """Map a refused gw_forwards write to a response; ``None`` for anything else.
+
+    The If-Match check runs inside the write, under the table lock and against
+    the bytes being replaced, so a 409 here is authoritative.
+    """
+    from aegisgate.core import gw_forwards
+
+    if isinstance(exc, gw_forwards.ForwardEtagMismatch):
+        return etag_conflict_response(exc.current_etag)
+    if isinstance(exc, gw_forwards.ForwardWriteRefused):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "forward_table_locked", "reason": exc.reason, "detail": exc.detail},
+        )
+    if isinstance(exc, gw_forwards.ForwardHostExists):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "forward_host_exists", "detail": f"网关域名已存在：{exc}"},
+        )
+    if isinstance(exc, gw_forwards.ForwardNotFound):
+        return JSONResponse(status_code=404, content={"error": "forward_not_found"})
+    if isinstance(exc, OSError):
+        return JSONResponse(status_code=500, content={"error": "forward_persistence_failed"})
+    return None
 
 
 def register_ui_routes(app: FastAPI) -> None:
@@ -438,84 +668,8 @@ def register_ui_routes(app: FastAPI) -> None:
     # Upstream reachability probe
     # ------------------------------------------------------------------
 
-    # Registering a token used to tell the operator nothing about whether the
-    # address works; the first real client request was the first feedback. This
-    # makes the gateway issue that one request instead, and is deliberately
-    # narrow about it: the same validation the forwarder applies, cloud metadata
-    # endpoints refused outright, one request carrying no credentials, no
-    # redirects, a hard 3s ceiling, and only the status line comes back — never
-    # a response body.
-    #
-    # Private targets stay allowed. A local Ollama / vLLM / LM Studio upstream is
-    # the most common thing this page exists to configure, and the operator can
-    # already register that address and drive a request through it. Every probe
-    # is audited like the other admin actions in this module.
-    _PROBE_TIMEOUT_SECONDS = 3.0
-    _probe_limiter_slot: list[Any] = []
-
-    def _probe_limiter() -> Any:
-        """Reuse the admin limiter, built lazily to avoid a startup import cycle."""
-        if not _probe_limiter_slot:
-            from aegisgate.core.gateway import _AdminRateLimiter
-
-            _probe_limiter_slot.append(
-                _AdminRateLimiter(max_per_minute=settings.admin_rate_limit_per_minute)
-            )
-        return _probe_limiter_slot[0]
-
-    async def _probe_upstream(upstream_base: str) -> dict[str, object]:
-        import httpx
-
-        started = time.monotonic()
-
-        def elapsed_ms() -> int:
-            return int((time.monotonic() - started) * 1000)
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=_PROBE_TIMEOUT_SECONDS, follow_redirects=False
-            ) as client:
-                response = await client.request("HEAD", upstream_base)
-                # Plenty of API roots answer HEAD with 405/501 while GET works.
-                if response.status_code in {405, 501}:
-                    response = await client.request("GET", upstream_base)
-        except httpx.TimeoutException:
-            return {
-                "reachable": False,
-                "reason": "timeout",
-                "detail": f"{_PROBE_TIMEOUT_SECONDS:g} 秒内没有响应，请检查地址、端口与网络可达性",
-                "elapsed_ms": elapsed_ms(),
-            }
-        except httpx.HTTPError as exc:
-            # Covers DNS failure, refused connections and TLS errors alike; the
-            # message is the operator's own target, not third-party data.
-            return {
-                "reachable": False,
-                "reason": "connect_error",
-                "detail": str(exc)[:200] or exc.__class__.__name__,
-                "elapsed_ms": elapsed_ms(),
-            }
-        except Exception as exc:
-            # A host that urlparse accepts can still be rejected deeper down —
-            # "https://xn--/" raises idna.IDNAError, which is not an HTTPError.
-            # A probe is a diagnostic; reporting the failure beats a 500.
-            logger.warning("ui upstream probe failed unexpectedly error=%s", exc)
-            return {
-                "reachable": False,
-                "reason": "invalid_host",
-                "detail": f"无法解析该地址：{str(exc)[:160] or exc.__class__.__name__}",
-                "elapsed_ms": elapsed_ms(),
-            }
-        return {
-            "reachable": True,
-            "status_code": response.status_code,
-            "elapsed_ms": elapsed_ms(),
-        }
-
     @app.post("/__ui__/api/tokens/probe")
     async def local_ui_tokens_probe(request: Request) -> JSONResponse:
-        from aegisgate.util.ip_safety import SSRF_METADATA_HOSTS
-
         actor_ip = request.client.host if request.client else "unknown"
         if not _probe_limiter().is_allowed(actor_ip):
             return JSONResponse(
@@ -527,25 +681,10 @@ def register_ui_routes(app: FastAPI) -> None:
         except Exception:
             return JSONResponse(status_code=400, content={"error": "invalid_json"})
         upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
-        format_error = upstream_base_error(upstream_base)
-        if format_error is not None:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_upstream_base", "detail": format_error},
-            )
+        probe_error = _probe_request_error(upstream_base)
+        if probe_error is not None:
+            return probe_error
         hostname = (urlparse(upstream_base).hostname or "").strip().lower().strip(".")
-        # Only the metadata endpoints are refused by name. ip_safety's broader
-        # ".internal" rule guards client-supplied targets on the forwarding path;
-        # applying it here would reject host.docker.internal, which is the
-        # upstream host the Docker deployment documents.
-        if hostname in SSRF_METADATA_HOSTS:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "probe_target_forbidden",
-                    "detail": "该地址指向云元数据服务，不能作为上游",
-                },
-            )
         write_audit({
             "event": "ui_upstream_probe",
             "route": "/__ui__/api/tokens/probe",
@@ -1841,6 +1980,123 @@ def register_ui_routes(app: FastAPI) -> None:
             "budget_exhausted": result.budget_exhausted,
             "file_size": result.file_size,
         })
+
+    # ------------------------------------------------------------------
+    # Gateway forwarding (config/gw_forwards.json)
+    # ------------------------------------------------------------------
+
+    @app.get("/__ui__/api/forwards")
+    async def local_ui_forwards_list() -> JSONResponse:
+        return with_etag(JSONResponse(content=_forwards_payload()), _forwards_etag())
+
+    @app.post("/__ui__/api/forwards")
+    async def local_ui_forwards_create(request: Request) -> JSONResponse:
+        from aegisgate.core import gw_forwards
+
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        host = _string_field(body.get("host"))
+        if not host:
+            return JSONResponse(status_code=400, content={"error": "missing_host", "detail": "网关域名为必填"})
+        rule, reason = _forward_rule_from_body(host, body)
+        if rule is None:
+            return _invalid_forward_response(reason)
+        try:
+            etag = gw_forwards.create(rule, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
+        write_audit({
+            "event": "ui_forward_create",
+            "route": "/__ui__/api/forwards",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "forward_host": rule.host,
+            "expose": rule.expose,
+            "baseline_off": rule.baseline_off,
+        })
+        return with_etag(
+            JSONResponse(status_code=201, content={"ok": True, "host": rule.host}), etag
+        )
+
+    @app.patch("/__ui__/api/forwards/{host}")
+    async def local_ui_forwards_update(host: str, request: Request) -> JSONResponse:
+        from aegisgate.core import gw_forwards
+
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        previous_host = gw_forwards.route_host(host)
+        new_host = _string_field(body.get("host")) or previous_host
+        rule, reason = _forward_rule_from_body(new_host, body)
+        if rule is None:
+            return _invalid_forward_response(reason)
+        try:
+            # One write: the old entry (and any raw key routing to it) goes and the
+            # new one lands together, so a failed save cannot leave the host unset.
+            etag = gw_forwards.replace(host, rule, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
+        write_audit({
+            "event": "ui_forward_update",
+            "route": "/__ui__/api/forwards/{host}",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "forward_host": rule.host,
+            "previous_host": previous_host,
+            "expose": rule.expose,
+            "baseline_off": rule.baseline_off,
+        })
+        return with_etag(JSONResponse(content={"ok": True, "host": rule.host}), etag)
+
+    @app.delete("/__ui__/api/forwards/{host}")
+    async def local_ui_forwards_delete(host: str, request: Request) -> JSONResponse:
+        from aegisgate.core import gw_forwards
+
+        try:
+            removed = gw_forwards.delete(host, if_match=if_match_header(request))
+        except Exception as exc:
+            response = _forward_write_error(exc)
+            if response is None:
+                raise
+            return response
+        if not removed:
+            return JSONResponse(status_code=404, content={"error": "forward_not_found"})
+        write_audit({
+            "event": "ui_forward_delete",
+            "route": "/__ui__/api/forwards/{host}",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "forward_host": gw_forwards.route_host(host),
+        })
+        return with_etag(JSONResponse(content={"ok": True}), _forwards_etag())
+
+    @app.post("/__ui__/api/forwards/probe")
+    async def local_ui_forwards_probe(request: Request) -> JSONResponse:
+        actor_ip = request.client.host if request.client else "unknown"
+        if not _probe_limiter().is_allowed(actor_ip):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "probe_rate_limited", "detail": "连通性测试过于频繁，请稍后再试"},
+            )
+        body = await _forward_request_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        upstream_base = _normalize_input_upstream_base(body.get("upstream_base"))
+        probe_error = _probe_request_error(upstream_base)
+        if probe_error is not None:
+            return probe_error
+        hostname = (urlparse(upstream_base).hostname or "").strip().lower().strip(".")
+        write_audit({
+            "event": "ui_forward_probe",
+            "route": "/__ui__/api/forwards/probe",
+            "actor_ip": actor_ip,
+            "upstream_host": hostname,
+        })
+        return JSONResponse(content={"ok": True, **await _probe_upstream(upstream_base)})
 
     # ------------------------------------------------------------------
     # Gateway restart

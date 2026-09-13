@@ -126,6 +126,14 @@
               </svg>
               Token 管理
             </a>
+            <a href="#forwards" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+              网关转发
+            </a>
             <a href="#docs" class="nav-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
@@ -567,6 +575,59 @@
             </div>
           </section>
 
+          <!-- Gateway forwarding (baseURL) -->
+          <section id="forwards" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="2" y1="12" x2="22" y2="12"/>
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>网关转发</h2>
+                <p class="panel-desc">按域名转发：客户端 baseUrl 直接用本网关域名，整域名全路径透传给上游；三条已知 LLM 路由仍走过滤管线。<strong class="u-required">本层不鉴权，只选目的地。</strong>/v2/* 与 /relay/* 在本域名上一律透传，不受本面板开关控制。</p>
+              </div>
+            </div>
+
+            <div class="token-toolbar">
+              <span id="forward-count" class="u-note">加载中…</span>
+              <div class="u-actions">
+                <button id="forward-refresh" class="btn-sm-ghost" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-inline">
+                    <polyline points="23,4 23,10 17,10"/>
+                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                  </svg>刷新
+                </button>
+                <button id="forward-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  新增转发
+                </button>
+              </div>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead>
+                  <tr>
+                    <th scope="col">状态</th>
+                    <th scope="col">网关域名</th>
+                    <th scope="col">上游地址</th>
+                    <th scope="col">暴露面</th>
+                    <th scope="col">过滤姿态</th>
+                    <th scope="col">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="forward-tbody">
+                  <tr><td colspan="6" class="token-table-empty">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
           <!-- Docs -->
           <section id="docs" class="panel">
             <div class="panel-head">
@@ -743,6 +804,76 @@
           <span id="modal-error" class="modal-error" role="alert" aria-live="polite"></span>
           <button id="modal-cancel" class="btn-sm-ghost" type="button">取消</button>
           <button id="modal-submit" class="btn-sm" type="button" data-action="submit-token">注册</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gateway Forward Modal -->
+    <div id="forward-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">
+      <input type="hidden" id="forward-modal-original" value="">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="forward-modal-title">新增转发规则</h3>
+          <button id="forward-modal-close" class="modal-close" type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field">
+            <label for="forward-host">网关域名 <span class="u-required">*</span></label>
+            <input id="forward-host" type="text" spellcheck="false" autocomplete="off" placeholder="api.ag.com" aria-describedby="forward-host-note">
+            <p id="forward-host-note" class="field-hint">客户端 baseUrl 使用 <code>https://&lt;该域名&gt;</code>，不含端口，也不能是 IP。</p>
+          </div>
+          <div class="modal-field">
+            <label for="forward-upstream">上游地址 <span class="u-required">*</span></label>
+            <input id="forward-upstream" type="url" inputmode="url" spellcheck="false" autocomplete="off" placeholder="https://api.xxx.com" aria-describedby="forward-upstream-note">
+            <p class="field-hint">上游根地址，<strong>不含 /v1</strong>；整个域名的路径原样透传。</p>
+            <p id="forward-upstream-note" class="field-note" role="status" aria-live="polite"></p>
+            <div class="modal-field-actions">
+              <button id="forward-probe" class="btn-sm-ghost" type="button">测试连通性</button>
+              <span id="forward-probe-status" class="status-note" aria-live="polite"></span>
+            </div>
+          </div>
+          <div class="modal-field">
+            <label for="forward-note">备注（可选）</label>
+            <input id="forward-note" type="text" placeholder="sub2api 生产">
+          </div>
+          <div class="modal-field forward-inline">
+            <label class="forward-check"><input id="forward-enabled" type="checkbox" checked> 启用</label>
+            <label class="forward-check">暴露面
+              <select id="forward-expose">
+                <option value="internal">internal（仅内网）</option>
+                <option value="public">public（任意客户端）</option>
+              </select>
+            </label>
+          </div>
+          <div class="modal-field">
+            <label>安检开关</label>
+            <div class="forward-inline">
+              <label class="forward-check"><input type="radio" name="forward-mode" value="policy"> 跟随策略（policy）</label>
+              <label class="forward-check"><input type="radio" name="forward-mode" value="custom"> 自定义（custom）</label>
+            </div>
+            <div id="forward-custom" class="hidden">
+              <p class="field-hint">「跟随策略」= 不覆盖，沿用现有三层结果；选「开」/「关」才会覆盖全局。右侧标注当前全局态。</p>
+              <div id="forward-filter-list" class="forward-filter-list"></div>
+              <p id="forward-baseline-warning" class="field-note err hidden"></p>
+            </div>
+          </div>
+          <div class="modal-field">
+            <label>对外 baseURL</label>
+            <div class="token-baseurl">
+              <code id="forward-baseurl">—</code>
+              <button id="forward-copy" class="btn-sm-ghost" type="button">复制</button>
+            </div>
+            <p class="field-hint">客户端只需把 baseUrl 指向该地址；同机部署时上游可直接写 <code>http://127.0.0.1:8317</code>。</p>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span id="forward-modal-error" class="modal-error" role="alert" aria-live="polite"></span>
+          <button id="forward-modal-cancel" class="btn-sm-ghost" type="button">取消</button>
+          <button id="forward-modal-submit" class="btn-sm" type="button">保存</button>
         </div>
       </div>
     </div>
