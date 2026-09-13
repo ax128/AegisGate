@@ -27,7 +27,7 @@ class _FakeResponse:
         self.headers = headers if headers is not None else {"content-type": "text/plain"}
         self._chunks = chunks
 
-    async def aiter_bytes(self):
+    async def aiter_raw(self):
         for chunk in self._chunks:
             yield chunk
 
