@@ -41,6 +41,10 @@ from typing import Any, Callable
 
 import yaml
 
+from aegisgate.config.field_patterns import (
+    FIELD_VALUE_MIN_LEN_FLOOR,
+    field_pattern_entries,
+)
 from aegisgate.config.security_rules import resolve_rules_file, rule_enabled
 from aegisgate.core.audit import write_audit
 from aegisgate.core.regex_probe import MAX_REGEX_LEN, probe
@@ -226,27 +230,14 @@ def _verify_patch(snapshot: RulesSnapshot, change: RulesChange, after_text: str)
 
 
 # ---------------------------------------------------------------------------
-# Candidate compilation: what each layer would build from the new document
+# Candidate compilation: PII still differs by layer (V2 lowercases ids);
+# field rules share ``field_pattern_entries``.
 # ---------------------------------------------------------------------------
 
-_FIELD_FALLBACK_TEMPLATES: tuple[tuple[str, str], ...] = (
-    (
-        "FIELD_SECRET",
-        r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token"
-        r"|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*"
-        r"(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{min_len},}}",
-    ),
-    (
-        "AUTH_BEARER",
-        r"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{min_len},}}",
-    ),
-)
-
-
-def _field_min_len(rules: dict[str, Any], floor: int) -> int:
+def _field_min_len(rules: dict[str, Any]) -> int:
     raw = rules.get("field_value_min_len", 12)
     try:
-        return max(floor, int(raw))
+        return max(FIELD_VALUE_MIN_LEN_FLOOR, int(raw))
     except (TypeError, ValueError) as exc:
         raise RulesWriteError(
             "invalid_field_value_min_len",
@@ -255,39 +246,20 @@ def _field_min_len(rules: dict[str, Any], floor: int) -> int:
         ) from exc
 
 
-def _fallback_field_patterns(min_len: int, *, lowercase: bool) -> list[tuple[str, str]]:
-    return [
-        (pattern_id.lower() if lowercase else pattern_id, template.format(min_len=min_len))
-        for pattern_id, template in _FIELD_FALLBACK_TEMPLATES
-    ]
-
-
-# Each layer reads the same YAML differently, and the pre-write compile is worth
-# nothing unless it models that faithfully: the ids are cased differently, the
-# ``field_value_min_len`` floors differ, the legacy bare-string form gets a
-# positional id in two layers and a fixed one in the third, and V2 compiles its
-# two code fallbacks *in addition to* an explicit list where V1 uses them only
-# when the list is empty.
 @dataclass(frozen=True)
 class _LayerSpec:
-    """One redaction layer's reading of ``redaction.*``."""
+    """One redaction layer's reading of ``redaction.pii_patterns``."""
 
     name: str
-    field_floor: int
-    # V2 compiles pii and field entries through one shared loop that lowercases
-    # ids, defaults a missing id to ``rule`` and skips a non-string regex.
+    # V2 compiles pii entries through a loop that lowercases ids, defaults a
+    # missing id to ``rule`` and skips a non-string regex.
     lowercase: bool
-    field_default_positional: bool
-    always_fallback: bool
 
 
 _LAYER_SPECS: tuple[_LayerSpec, ...] = (
-    # filters/redaction.py
-    _LayerSpec("v1_pipeline", 8, False, False, False),
-    # adapters/openai_compat/sanitize.py
-    _LayerSpec("v1_forward", 8, False, True, False),
-    # adapters/v2_proxy/router.py
-    _LayerSpec("v2_request", 12, True, True, True),
+    _LayerSpec("v1_pipeline", False),
+    _LayerSpec("v1_forward", False),
+    _LayerSpec("v2_request", True),
 )
 
 
@@ -327,43 +299,10 @@ def _pii_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, str
     return entries
 
 
-def _field_entries(rules: dict[str, Any], spec: _LayerSpec) -> list[tuple[str, str]]:
-    items = rules.get("field_value_patterns") or []
-    fallback = _fallback_field_patterns(
-        _field_min_len(rules, spec.field_floor), lowercase=spec.lowercase
-    )
-    if not items:
-        return fallback
-    # V1 treats the code fallback as the *alternative* to an explicit list; V2
-    # compiles it either way, which is why its two fallback ids are always live.
-    entries: list[tuple[str, str]] = list(fallback) if spec.always_fallback else []
-    for index, item in enumerate(items, start=1):
-        positional_default = (
-            f"FIELD_SECRET_{index}" if spec.field_default_positional else "FIELD_SECRET"
-        )
-        if isinstance(item, dict):
-            if not rule_enabled(item):
-                continue
-            regex = item.get("regex")
-            if spec.lowercase:
-                if not isinstance(regex, str) or not regex.strip():
-                    continue
-                pattern_id = str(item.get("id") or "RULE").strip().lower() or "rule"
-            else:
-                if not regex:
-                    continue
-                pattern_id = str(item.get("id", positional_default)).upper()
-        elif isinstance(item, str) or not spec.lowercase:
-            # The V1 layers hand any non-mapping entry straight to re.compile;
-            # V2 recognises only the bare-string form.
-            regex = item
-            if not regex:
-                continue
-            pattern_id = f"field_secret_{index}" if spec.lowercase else positional_default
-        else:
-            continue
-        entries.append((pattern_id, str(regex)))
-    return entries
+def _field_entries(rules: dict[str, Any]) -> list[tuple[str, str]]:
+    # Raise on a non-integer before the shared compiler degrades it to 12.
+    _field_min_len(rules)
+    return field_pattern_entries(rules)
 
 
 def compile_redaction_layers(
@@ -372,10 +311,9 @@ def compile_redaction_layers(
     """Compile the redaction patterns of all three layers from *data*.
 
     Returns ``(signature, failures)``: the per-layer id/pattern pairs that
-    compiled, and the ones that did not. Layers mirror the live call sites —
-    ``filters/redaction.py`` (V1 pipeline), ``openai_compat/sanitize.py`` (V1
-    forward) and ``v2_proxy/router.py`` (V2) — including their differing default
-    ids, ``field_value_min_len`` floors and fallback rules (see ``_LAYER_SPECS``).
+    compiled, and the ones that did not. PII compilation still mirrors each
+    live call site (V2 lowercases ids). Field rules use the shared
+    ``field_pattern_entries`` on every layer.
     """
     rules = data.get("redaction") if isinstance(data, dict) else None
     if rules is None:
@@ -387,7 +325,7 @@ def compile_redaction_layers(
     failures: list[tuple[str, str, str]] = []
     for spec in _LAYER_SPECS:
         compiled: list[tuple[str, str]] = []
-        for pattern_id, regex in (*_pii_entries(rules, spec), *_field_entries(rules, spec)):
+        for pattern_id, regex in (*_pii_entries(rules, spec), *_field_entries(rules)):
             try:
                 re.compile(regex)
             except re.error as exc:

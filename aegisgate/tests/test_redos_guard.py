@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from aegisgate.adapters.v2_proxy.router import _DEFAULT_DANGEROUS_COMMAND_PATTERNS
+from aegisgate.config.field_patterns import FIELD_FALLBACK_TEMPLATES
 from aegisgate.config.security_rules import _DEFAULT_RULES
 from aegisgate.init_config import migrate_http_smuggling_regex
 
@@ -92,6 +93,10 @@ def _all_named_regexes() -> list[tuple[str, str]]:
     )
     collected.extend(
         (f"v2_proxy:{ident}", regex) for ident, regex in _DEFAULT_DANGEROUS_COMMAND_PATTERNS
+    )
+    collected.extend(
+        (f"field_fallback:{ident}", regex.format(min_len=12))
+        for ident, regex in FIELD_FALLBACK_TEMPLATES
     )
     # Keep order stable and drop exact duplicates of the same source+pattern.
     unique: list[tuple[str, str]] = []

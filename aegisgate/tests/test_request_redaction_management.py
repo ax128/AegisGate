@@ -637,11 +637,11 @@ class TestEnabledRuntimeSemantics:
             encoding="utf-8",
         )
         assert {pid for pid, _ in RedactionFilter(_MemoryKVStore())._field_patterns} == {
-            "FIELD_SECRET"
+            "FIELD_SECRET_1"
         }
         v2_router._v2_redaction_patterns.cache_clear()
         try:
-            assert "field_secret_1" in {pid for pid, _ in v2_router._v2_redaction_patterns()}
+            assert "FIELD_SECRET_1" in {pid for pid, _ in v2_router._v2_redaction_patterns()}
         finally:
             v2_router._v2_redaction_patterns.cache_clear()
 

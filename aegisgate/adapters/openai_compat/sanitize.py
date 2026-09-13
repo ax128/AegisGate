@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
+from aegisgate.config.field_patterns import compile_field_value_patterns
 from aegisgate.config.redact_values import (
     active_exact_values,
     replace_exact_values_from,
@@ -238,12 +239,9 @@ def _sanitize_payload_for_log(value: Any) -> Any:
     return value
 
 
-@lru_cache(maxsize=1)
-def _responses_function_output_redaction_patterns() -> tuple[
-    tuple[str, re.Pattern[str]], ...
-]:
-    rules = load_security_rules()
-    redaction_rules = rules.get("redaction", {})
+def _compile_pii_redaction_patterns(
+    redaction_rules: dict[str, Any],
+) -> list[tuple[str, re.Pattern[str]]]:
     compiled: list[tuple[str, re.Pattern[str]]] = []
     for item in redaction_rules.get("pii_patterns", []):
         if not isinstance(item, dict):
@@ -258,72 +256,40 @@ def _responses_function_output_redaction_patterns() -> tuple[
             compiled.append((pattern_id, re.compile(str(regex))))
         except re.error:
             continue
-    field_patterns = redaction_rules.get("field_value_patterns", [])
-    if field_patterns:
-        for idx, item in enumerate(field_patterns, start=1):
-            if isinstance(item, dict):
-                if not rule_enabled(item):
-                    continue
-                pattern_id = str(item.get("id", f"FIELD_SECRET_{idx}")).upper()
-                regex = item.get("regex")
-            else:
-                pattern_id = f"FIELD_SECRET_{idx}"
-                regex = item
-            if not regex:
-                continue
-            try:
-                compiled.append((pattern_id, re.compile(str(regex), re.IGNORECASE)))
-            except re.error:
-                continue
-    else:
-        min_len = max(8, int(redaction_rules.get("field_value_min_len", 12)))
-        defaults: list[tuple[str, str]] = [
-            (
-                "FIELD_SECRET",
-                rf"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|secret(?:_key)?)\b\s*[:=]\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{{{min_len},}}",
-            ),
-            (
-                "AUTH_BEARER",
-                rf"(?i)\bauthorization\b\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{{{min_len},}}",
-            ),
-        ]
-        for pattern_id, regex in defaults:
-            try:
-                compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
-            except re.error:
-                continue
-    return tuple(compiled)
+    return compiled
+
+
+@lru_cache(maxsize=1)
+def _responses_function_output_redaction_patterns() -> tuple[
+    tuple[str, re.Pattern[str]], ...
+]:
+    redaction_rules = load_security_rules().get("redaction", {})
+    return tuple(
+        _compile_pii_redaction_patterns(redaction_rules)
+        + compile_field_value_patterns(redaction_rules)
+    )
 
 
 @lru_cache(maxsize=1)
 def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
-    return tuple(select_relaxed_pii_patterns(_responses_function_output_redaction_patterns()))
+    """Relaxed PII plus the whole field layer.
+
+    Field ids are not members of the default ``relaxed_pii_ids`` set. Filtering
+    the concatenated tuple used to drop ``FIELD_SECRET`` / ``AUTH_BEARER`` on
+    the conversation forward path while the pipeline and V2 still ran them.
+    """
+    redaction_rules = load_security_rules().get("redaction", {})
+    return tuple(select_relaxed_pii_patterns(_compile_pii_redaction_patterns(redaction_rules))) + tuple(
+        compile_field_value_patterns(redaction_rules)
+    )
 
 
 @lru_cache(maxsize=1)
 def _field_value_pattern_ids() -> frozenset[str]:
-    """Ids contributed by the ``field_value_patterns`` layer.
-
-    ``_responses_function_output_redaction_patterns`` concatenates the two
-    layers into one tuple, so afterwards the only way to tell them apart is to
-    ask the rules which ids the PII list declared. Everything else came from the
-    field layer, built-in defaults included.
-    """
-    rules = load_security_rules().get("redaction", {})
-    patterns = rules.get("pii_patterns")
-    pii_ids = (
-        {
-            str(item.get("id", "")).upper()
-            for item in patterns
-            if isinstance(item, dict) and item.get("id")
-        }
-        if isinstance(patterns, list)
-        else set()
-    )
+    """Ids contributed by the ``field_value_patterns`` layer."""
+    redaction_rules = load_security_rules().get("redaction", {})
     return frozenset(
-        pattern_id
-        for pattern_id, _ in _responses_function_output_redaction_patterns()
-        if pattern_id not in pii_ids
+        pattern_id for pattern_id, _ in compile_field_value_patterns(redaction_rules)
     )
 
 

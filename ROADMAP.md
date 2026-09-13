@@ -101,8 +101,10 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
    等价于「永远 relaxed」；multipart 因此出现「全量集打分、relaxed 集改写」的分歧。
    现在五个转发入口都接收 `route` 并内部推导，`relaxed_patterns` 改为必填参数，
    角色集合已删除。守护见 `aegisgate/tests/test_forward_redaction_route_derived.py`。
-3. **field 规则语义跨 V1/V2 统一**：默认列表与显式列表的关系、`field_value_min_len` 各层下限不同；
-   顺带把精确值脱敏的覆盖面扩到 V1 结构化内容、通用 JSON 与 multipart（目前只覆盖扁平消息文本）。
+3. ~~**field 规则语义跨 V1/V2 统一**~~ **已完成**。三层共用 `config/field_patterns.py`：
+   显式 YAML 替换代码 fallback；下限一律 `max(8, 配置值)`；V1 转发层不再把 field 规则送进
+   `relaxed_pii_ids` 过滤。精确值覆盖面表已按 R9 叶子写回对齐（结构化内容 / 通用 JSON /
+   multipart 表单字段生效；文件内容仍不扫描）。
 4. **按执行层 / 规则 ID 的命中统计**。控制台现在的统计卡是去重后的唯一值数且含 field 规则，
    无法回答「哪条规则在哪一层命中了多少次」。
 
@@ -113,7 +115,7 @@ stats、LRU 缓存、后台 worker、限流窗口全是**进程内单例**，只
 
 ~~**已完成**~~。sanitize 走嵌套 patch、allow 叶子写回、Restoration mapping 生命周期、确认门控收窄、出站匹配口径、相位文档、精确值结构化叶子均已在 `main`。
 
-未进本项、仍开放的：R8.3 的 **field 规则语义跨 V1/V2 统一**；E1/E3 占位符语法统一仍留在 R8；`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，见下方单点待办。
+未进本项、仍开放的：E1/E3 占位符语法统一仍留在 R8；`block` 强制 vs 按阈值仍归 R6。请求相位挂 AnomalyDetector / PrivilegeGuard、以及用脱敏命中 id 灌回 leak_check，见下方单点待办。
 
 ### R10 — 整域名转发的后续面（M–L，**需先决策**）
 

@@ -3498,15 +3498,15 @@ function rrFieldSection(data) {
         )
         .join("") +
       `</tbody></table></div>`
-    : `<p class="u-note">当前未配置 <code>field_value_patterns</code>，三层各自使用自己的代码 fallback。</p>`;
+    : `<p class="u-note">当前未配置 <code>field_value_patterns</code>，三层共用同一套代码 fallback。</p>`;
 
   return (
     `<h3 class="rr-heading">Field 规则<span class="rr-heading-note">${
       field.mode === "explicit_yaml" ? "YAML 显式列表" : "代码默认"
     }</span></h3>` +
-    `<p class="u-note u-note-block">Field 规则不能套用 PII 的 relaxed 算法：管道层无视路由恒跑，` +
-    `转发层与 PII 合并后整体被 relaxed 过滤（默认 12 项不含这两个 ID），V2 的固定集合又恰好含它们。` +
-    `本版只读——提供逐条启停会造出「YAML 已停用但 V2 fallback 仍在跑」的假控制。</p>` +
+    `<p class="u-note u-note-block">Field 规则是独立于 <code>relaxed_pii_ids</code> 的一层：` +
+    `三个执行层共用一份编译器，显式 YAML 列表替换代码 fallback，不受 relaxed 集过滤。` +
+    `本版只读；逐条增删请走规则工作台的 <code>field_value_patterns</code>。</p>` +
     `<div class="token-table-wrap"><table class="token-table"><thead><tr>` +
     `<th scope="col">层</th><th scope="col">最小长度下限</th><th scope="col">代码 fallback ID</th>` +
     `<th scope="col">显式条目缺省 ID</th><th scope="col">受 relaxed 过滤</th><th scope="col">说明</th>` +

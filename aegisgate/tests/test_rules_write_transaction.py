@@ -295,41 +295,29 @@ class TestTypeAndBoundValidation:
         signature, failures = compile_redaction_layers(yaml.safe_load(_MINI_RULES))
         assert set(signature) == {"v1_pipeline", "v1_forward", "v2_request"}
         assert failures == []
-        # V2 lowercases ids and floors field_value_min_len at 12; V1 at 8.
+        # V2 still lowercases PII ids; field ids are shared and uppercase.
         assert ("SEED", "seed-pattern") in signature["v1_pipeline"]
         assert ("seed", "seed-pattern") in signature["v2_request"]
 
-    def test_the_candidate_mirrors_each_layer_s_own_field_rules(self) -> None:
-        """The three layers do not read ``field_value_patterns`` the same way."""
+    def test_the_candidate_uses_the_same_field_rules_on_every_layer(self) -> None:
         data = yaml.safe_load(_MINI_RULES)
         data["redaction"]["field_value_patterns"] = [{"regex": "explicit-field"}, "legacy-field"]
         signature, failures = compile_redaction_layers(data)
         assert failures == []
 
         ids = {layer: [name for name, _ in entries] for layer, entries in signature.items()}
-        # V1 pipeline: one fixed id for every explicit entry, mapping or legacy
-        # string, and no code fallback because the list is not empty.
-        assert ids["v1_pipeline"] == ["SEED", "FIELD_SECRET", "FIELD_SECRET"]
-        # V1 forward: the same entries, positionally numbered.
+        assert ids["v1_pipeline"] == ["SEED", "FIELD_SECRET_1", "FIELD_SECRET_2"]
         assert ids["v1_forward"] == ["SEED", "FIELD_SECRET_1", "FIELD_SECRET_2"]
-        # V2: the two code fallbacks are compiled *as well as* the explicit list,
-        # and a mapping without an id falls to the shared loop's own default.
-        assert ids["v2_request"] == [
-            "seed",
-            "field_secret",
-            "auth_bearer",
-            "rule",
-            "field_secret_2",
-        ]
+        assert ids["v2_request"] == ["seed", "FIELD_SECRET_1", "FIELD_SECRET_2"]
 
-    def test_the_candidate_field_floors_differ_between_v1_and_v2(self) -> None:
+    def test_the_candidate_field_floor_is_eight_on_every_layer(self) -> None:
         data = yaml.safe_load(_MINI_RULES)
         data["redaction"]["field_value_min_len"] = 4
         signature, _ = compile_redaction_layers(data)
-        pipeline = dict(signature["v1_pipeline"])["FIELD_SECRET"]
-        v2 = dict(signature["v2_request"])["field_secret"]
-        assert "{8,}" in pipeline
-        assert "{12,}" in v2
+        for layer in ("v1_pipeline", "v1_forward", "v2_request"):
+            regex = dict(signature[layer])["FIELD_SECRET"]
+            assert "{8,}" in regex
+            assert "{12,}" not in regex
 
 
 class TestServerSideProbe:
@@ -746,7 +734,7 @@ class TestV2LegacyFieldEntry:
         finally:
             v2_router._v2_redaction_patterns.cache_clear()
             v2_router._v2_relaxed_redaction_patterns.cache_clear()
-        assert compiled["field_secret_1"] == "legacy-[0-9]{4}"
+        assert compiled["FIELD_SECRET_1"] == "legacy-[0-9]{4}"
         assert compiled["email"] == "a@b"
 
     def test_the_field_layer_stays_unconditional_on_v2(self) -> None:

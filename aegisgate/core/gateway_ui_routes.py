@@ -1592,8 +1592,8 @@ def register_ui_routes(app: FastAPI) -> None:
     _REDACT_VALUES_DESCRIPTION = (
         "精确值脱敏：配置的字符串命中后替换为 [REDACTED:EXACT_VALUE]，最少 10 个字符，"
         "适合保护 API Key、密钥等敏感数据。"
-        "覆盖面：V1 仅对话路由（/v1/chat/completions、/v1/responses、/v1/messages）的扁平消息文本生效；"
-        "V1 的结构化内容、instructions、工具定义、通用 /v1/<subpath> JSON 与 multipart 均不生效；"
+        "覆盖面：V1 对话路由的扁平消息文本、结构化内容、instructions、工具定义、"
+        "通用 /v1/<subpath> JSON 与 multipart 表单字段均生效；multipart 文件内容不扫描。"
         "V2 需 enable_exact_value_redaction 与 v2_enable_request_redaction 同时为 true。"
         "替换不可还原。"
     )

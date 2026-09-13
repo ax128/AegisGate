@@ -31,10 +31,9 @@ _ROUTER_SRC = (
 # A value only the full set catches: EMAIL is a shipped pii_pattern and is not
 # in the credential-only relaxed default.
 _FULL_ONLY = "reach me at alice@example.com please"
-# A credential in the relaxed default, so both sets catch it. Deliberately a
-# pii_patterns id: field_value_patterns are a separate layer that the V1 forward
-# path filters through the relaxed set too, so AUTH_BEARER/FIELD_SECRET are off
-# there by default — a real asymmetry, but R8 item 3's, not this change's.
+# A credential in the relaxed default, so both sets catch it. Field-layer ids
+# also run on the relaxed forward path (R8.3); this sample is a pii_patterns id
+# so the assertion stays about the PII set, not FIELD_SECRET.
 _RELAXED_TOO = "token sk-abcdefghijklmnopqrstuvwxyz1234"
 
 
