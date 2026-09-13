@@ -407,6 +407,10 @@ Security boundaries worth knowing before enabling it:
   `Forwarded` are replaced with the real peer before reaching the upstream, and
   the console's own `aegis_ui_*` cookies are never forwarded (nor accepted from
   the upstream).
+- Audit: LLM-route records carry `forward_host` / `forward_mode` /
+  `forward_branch` under `security_boundary`; every passthrough request writes
+  an `event: forward_passthrough` record (host, filter mode, method, path without
+  the query string, status, client IP).
 - `/v2/*` and `/relay/*` on a forward domain are passed through, not handled by
   the gateway's own v2/relay routes.
 

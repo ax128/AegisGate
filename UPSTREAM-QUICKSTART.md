@@ -152,6 +152,7 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
 - 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host` 再发给上游；控制台的 `aegis_ui_*` cookie 不会转发给上游，上游下发的同名 cookie 也会被丢弃。
 - 路径按客户端发送的原样（保留百分号编码）拼到 `upstream_base` 后面；字面 `.` / `..` 段在网关侧解析且不会越过根。
+- 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP）。
 - 转发域名上的 `/v2/*`、`/relay/*` 一律透传，**不**进入网关自己的 v2/relay 路由，也不受本面板开关控制。
 
 ### 6. Caddy 示例（泛域名）

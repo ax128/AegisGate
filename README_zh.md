@@ -619,6 +619,7 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 - 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会被缓冲到 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`。
 - 只改写响应**头**（`Location`、`Set-Cookie` 的 Domain、`Access-Control-Allow-Origin`），不改写响应体：上游 HTML / JS / JSON 里写死的自身地址不会被替换。不支持 WebSocket；GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 以外的方法返回 405。
 - 对端不是可信代理时，`X-Forwarded-For` / `X-Real-IP` / `Forwarded` 会被替换为真实对端后再发给上游；控制台自己的 `aegis_ui_*` cookie 既不转发给上游，也不接受上游下发。
+- 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP）。
 - 转发域名上的 `/v2/*` 与 `/relay/*` 一律透传，不进网关自己的 v2 / relay 路由。
 
 ## 3. 本地开发与本地 UI
