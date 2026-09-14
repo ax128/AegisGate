@@ -185,7 +185,7 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
 - `AEGIS_SECURITY_LEVEL`（安全级别）
 - `AEGIS_ENFORCE_LOOPBACK_ONLY`（仅本机访问）
 - `AEGIS_TRUSTED_PROXY_IPS`（可信反向代理 IP）
-- `AEGIS_XFF_STRICT_INTERNAL`（默认 `true`：带 `X-Forwarded-For` 且直连不在可信代理列表时，admin / 默认 `/v1` / UI 按公网处理）
+- `AEGIS_XFF_STRICT_INTERNAL`（默认 `true`：带 `X-Forwarded-For` 且直连不在可信代理列表时，admin / 默认 `/v1` / UI / 上游白名单旁路按公网处理）
 - `AEGIS_V2_BLOCK_INTERNAL_TARGETS`（v2 SSRF 防护）
 - `AEGIS_ALLOW_PUBLIC_NUMERIC_TOKENS`、`AEGIS_ALLOW_PUBLIC_PASSTHROUGH_MODE`、`AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST`（公网闸门）
 - `AEGIS_ENABLE_REQUEST_HMAC_AUTH`、`AEGIS_REQUEST_HMAC_SECRET`（请求签名）

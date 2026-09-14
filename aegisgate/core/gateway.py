@@ -966,7 +966,11 @@ async def security_boundary_middleware(request: Request, call_next):
         "auth_verified": False,
         "replay_checked": False,
         "max_request_body_bytes": settings.max_request_body_bytes,
-        "client_is_internal": _is_internal_ip(_real_client_ip(request)),
+        # Gates the upstream-whitelist bypass (every filter, PII redaction included),
+        # so it takes the same XFF downgrade as the admin / default-/v1 / UI gates:
+        # XFF from a peer outside AEGIS_TRUSTED_PROXY_IPS means a proxy is relaying
+        # someone else, and that peer's own address says nothing about them.
+        "client_is_internal": _internal_after_xff_downgrade(request)[1],
     }
     injected_tenant_id = str(request.scope.get("aegis_tenant_id") or "").strip()
     if injected_tenant_id:
