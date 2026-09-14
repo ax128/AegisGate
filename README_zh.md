@@ -615,6 +615,7 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 - **前置条件**：`AEGIS_ENFORCE_LOOPBACK_ONLY` 默认 `true`，boundary 会拒绝所有非本机对端；除非唯一对端是同机反代，否则需设为 `false`。经反代时 `AEGIS_TRUSTED_PROXY_IPS` 必须包含该反代，否则所有转发请求都会被判为公网客户端。
 - **`AEGIS_ENABLE_REQUEST_HMAC_AUTH=true` 与转发互斥**：HMAC 对所有非 passthrough 请求强制签名，浏览器访问转发域名无法提供签名；两者同开时转发表拒绝加载，控制台也拒绝修改转发表。
 - **上游命中 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 时**，三条 LLM 路由整管线跳过，该规则的过滤开关不生效；启动日志与控制台会标出。
+- **三条 LLM 路由的流式响应会为安全扫描滞后转发**：受滞后的 SSE 事件要等上游再发出 `AEGIS_STREAM_SCAN_INTERVAL_CHUNKS × 2`（默认 8）个同类事件、或回复结束后才放行。受滞后的是 chat completions / responses 上带文本的事件，以及 messages 上全部 `message_*` / `content_block_*` 事件。所以首个受滞后事件要等到上游第 9 个这类事件，之后按上游节奏逐条到达；短回复基本整段到达。其他路径上的 SSE（透传面）不缓冲。调低该值可缩短等待，代价是扫描更频繁（需重启）。
 - **fail-closed**：`gw_forwards.json` 解析失败或 `version` 不是 `1` 时，网关已知的全部域名一律 403 `forward_config_invalid`（连续多次保存坏文件也不会放行），控制台在文件修好或删除前不会覆盖它；单条非法只影响该域名。重启也不会放行：上次成功加载的域名清单记在 `config/.gw_forwards.json.hosts`（0600），文件能解析时也会拒绝其中列出的域名；删除规则文件表示不再转发，清单随之删除。
 - 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游；规则停用或非法时保留路径照常由网关响应。
 - **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，与控制台同源会让上游脚本读取 CSRF token、带会话 cookie 调管理接口或截获登录表单。任何命中的转发域名上 `/__ui__*` 一律 403 `forward_console_blocked`，请用网关自身地址（如 `http://127.0.0.1:18080/__ui__`）打开控制台。
