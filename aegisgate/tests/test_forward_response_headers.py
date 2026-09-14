@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -270,6 +271,25 @@ class TestIntegration:
         assert response.headers["location"] == "http://api.ag.com:18080/dashboard"
         # Cookie domains never carry a port.
         assert response.headers.get_list("set-cookie") == ["sid=1; Domain=api.ag.com; Path=/"]
+
+    def test_upstream_date_and_server_are_not_relayed(self, forward_env, monkeypatch) -> None:
+        # uvicorn prepends its own Date and Server; relaying these sent both twice.
+        headers = httpx.Headers(
+            [
+                ("content-type", "text/plain"),
+                ("date", "Sun, 13 Sep 2026 14:32:52 GMT"),
+                ("server", "MockRelay/1.0"),
+                ("content-encoding", "gzip"),
+            ]
+        )
+        _install(monkeypatch, _FakeResponse(headers=headers, chunks=(gzip.compress(b"ok"),)))
+        with _client() as client:
+            response = client.get("/x", headers={"Host": "api.ag.com"})
+        assert response.text == "ok"
+        assert "MockRelay/1.0" not in response.headers.get_list("server")
+        assert "Sun, 13 Sep 2026 14:32:52 GMT" not in response.headers.get_list("date")
+        # Only the two server-owned headers go; the relayed body's encoding stays.
+        assert response.headers["content-encoding"] == "gzip"
 
     def test_upstream_cannot_set_the_console_session(self, forward_env, monkeypatch) -> None:
         headers = httpx.Headers(

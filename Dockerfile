@@ -38,4 +38,8 @@ EXPOSE 18080
 # The bind address stays 0.0.0.0: inside a container the network boundary is the
 # published port mapping, not the listener, and AEGIS_HOST defaults to 127.0.0.1
 # — honouring it here would make a stock `.env` produce an unreachable container.
-CMD ["sh", "-c", "python -m aegisgate.init_config && exec uvicorn aegisgate.core.gateway:app --host 0.0.0.0 --port \"${AEGIS_PORT:-18080}\""]
+# --no-proxy-headers: the gateway reads the real peer and applies AEGIS_TRUSTED_PROXY_IPS
+# itself. uvicorn's own handling would otherwise rewrite the peer and scheme from
+# X-Forwarded-For / -Proto for any address in FORWARDED_ALLOW_IPS (127.0.0.1 by default,
+# and settable from the compose env_file) before the gateway sees the request.
+CMD ["sh", "-c", "python -m aegisgate.init_config && exec uvicorn aegisgate.core.gateway:app --host 0.0.0.0 --port \"${AEGIS_PORT:-18080}\" --no-proxy-headers"]

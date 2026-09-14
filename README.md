@@ -208,7 +208,7 @@ Or drive uvicorn yourself:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,semantic]"
-uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
+uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 ```
 
 **One worker only.** See [Deployment Model](#deployment-model) — the gateway logs
@@ -422,7 +422,10 @@ Security boundaries worth knowing before enabling it:
   method.
 - Only response **headers** are rewritten (`Location`, `Set-Cookie` domain,
   `Access-Control-Allow-Origin`); HTML/JS/JSON bodies that hard-code the
-  upstream's own URL are not. WebSocket is not supported, and methods other than
+  upstream's own URL are not. The upstream's `Date` / `Server` are dropped (the
+  server in front of the gateway writes its own), and because the body is
+  relayed still encoded, a client that sends no `Accept-Encoding` is forwarded
+  with `Accept-Encoding: identity`. WebSocket is not supported, and methods other than
   GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS answer 405.
 - Outbound forwarding headers, on the passthrough face and the three LLM routes
   alike: from a peer that is not a trusted proxy, `X-Forwarded-For` /
@@ -808,7 +811,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_COMPAT_ALLOWED_PORTS` | _(empty)_ | Required allowlist for compat token port routing; empty = deny all compat port routing |
 | `AEGIS_ENABLE_RELAY_ENDPOINT` | `false` | Enable optional `POST /relay/generate` relay-compatible endpoint |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
-| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. Behind Caddy on localhost use `127.0.0.1`. Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it |
+| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. Behind Caddy on localhost use `127.0.0.1`. Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it. Run uvicorn with `--no-proxy-headers` (the launcher and Dockerfile do): its own default trusts 127.0.0.1 and replaces the peer with `X-Forwarded-For` before the gateway sees it |
 | `AEGIS_XFF_STRICT_INTERNAL` | `true` | Treat X-Forwarded-For from an untrusted direct peer as a public client (admin, default `/v1`, UI). Set `false` to restore the old checks without setting trusted proxies. Restart required |
 | `AEGIS_GATEWAY_KEY` | _(file)_ | Overrides `config/aegis_gateway.key` (Docker/CI). Authenticates every `/__gw__/*` admin call and the console login |
 | `AEGIS_ENCRYPTION_KEY` | _(auto)_ | Fernet key for redaction-mapping storage; generated into `config/aegis_fernet.key` (chmod 600) when empty |

@@ -152,7 +152,8 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - 保留路径（`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应。
 - **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，若与控制台同源，上游脚本可以读取控制台的 CSRF token、带着会话 cookie 调用管理接口，或注册 Service Worker 截获登录表单。因此任何命中的转发域名（包括停用、非法、文件损坏时）上的 `/__ui__*` 一律 403 `forward_console_blocked`。请用网关自身地址打开控制台，例如 `http://127.0.0.1:18080/__ui__`；转发域名不能是 IP，所以用 IP 访问始终可达。
 - 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会先缓冲。两种情况都受同一上限约束：取 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB）、`AEGIS_V2_MAX_REQUEST_BODY_BYTES` 与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值，所以调低前者不会低于后两者。超过上限返回 413，所有方法都适用。
-- 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
+- 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。上游的 `Date` / `Server` 不转发，由网关前面的服务器（uvicorn）写自己的一份，避免客户端收到两份。
+- 响应体按上游的编码原样透传，因此客户端没带 `Accept-Encoding` 时，网关向上游发送 `Accept-Encoding: identity`，不替客户端声明 gzip；客户端自己带了就原样转发。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
 - 转发类请求头（透传路径与三条 LLM 路由规则相同）：
   - 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host`。
   - 对端是可信代理时，`X-Forwarded-*` 保留代理写入的值；`X-Real-IP` 改为网关解析出的客户端 IP，`Forwarded` 删除，因为反代通常不接管这两个头。
@@ -205,6 +206,7 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - `flush_interval -1` 必须设置，否则 SSE 流式会被缓冲。
 - `response_header_timeout 660s`：长时间推理不超时。
 - 同时在网关侧设 `AEGIS_TRUSTED_PROXY_IPS=127.0.0.1`（或你的 Caddy 地址）。默认 `AEGIS_XFF_STRICT_INTERNAL=true` 下，可信代理列表为空时任何 `X-Forwarded-For` 都会让请求被当成公网客户端。
+- 自己启动 uvicorn 时带上 `--no-proxy-headers`（`aegisgate-local.py` 与 Dockerfile 已带）。uvicorn 默认信任 127.0.0.1 的 `X-Forwarded-For` / `X-Forwarded-Proto`，会先把同机 Caddy 这个对端换成客户端地址：`AEGIS_ENFORCE_LOOPBACK_ONLY=true` 下请求全部被拒，`AEGIS_TRUSTED_PROXY_IPS=127.0.0.1` 也永远匹配不到。
 - 对公网暴露时使用随机注册 token；纯数字端口 token 与 `__passthrough` 默认会被公网/非内网客户端拒绝。
 - Caddy 只做 TLS + 转发，路由逻辑全在网关内部。
 - 上游自己的管理后台建议用单独域名直连上游（CLIProxyAPI 8317 / Sub2API 8080 / AIClient-2-API 3000），不经网关。
