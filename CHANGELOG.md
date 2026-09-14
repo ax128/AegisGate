@@ -23,6 +23,16 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   加上后同机反代的对端是 127.0.0.1，客户端 IP 取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代。
   Docker 默认部署的对端是 bridge 地址，uvicorn 本就不信任，行为不变。
 
+### Fixed（整域名转发透传面：压缩协商与重复响应头）
+
+- **客户端没带 `Accept-Encoding` 时不再收到 gzip。** 透传面按上游编码原样转发响应体，
+  而 httpx 在请求没有该头时会自己补 `Accept-Encoding: gzip, deflate`；上游据此压缩后，
+  没声明解压能力的客户端（如不带 `--compressed` 的 curl）拿到的是二进制。现在缺省时显式
+  发送 `Accept-Encoding: identity`，客户端自带的值原样转发。
+- **透传面响应不再出现两份 `Date` / `Server`。** uvicorn 会给每个响应前置自己的
+  `date` / `server`，此前上游的这两个头也被转发。现在丢弃上游的这两个头（与 nginx
+  `proxy_pass` 的默认行为一致）。三条 LLM 路由与 v2 代理未改动。
+
 ### Changed（R8.3：field 规则语义跨三层统一）
 
 - **`field_value_patterns` 三层共用一份编译器**（`aegisgate/config/field_patterns.py`）。

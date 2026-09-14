@@ -369,6 +369,31 @@ class TestForwarding:
         assert "x-real-ip" not in sent
         assert "forwarded" not in sent
 
+    def test_client_without_accept_encoding_gets_no_encoding_asked_for(
+        self, forward_env, monkeypatch
+    ) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            # TestClient is an httpx client and advertises gzip itself.
+            del client.headers["accept-encoding"]
+            client.get("/v1/models", headers={"Host": "api.ag.com"})
+        sent = {k.lower(): v for k, v in fake.captured["headers"].items()}
+        # Absent, httpx's own client default (gzip, deflate) would be sent instead.
+        assert sent["accept-encoding"] == "identity"
+
+    def test_client_accept_encoding_is_forwarded_as_sent(
+        self, forward_env, monkeypatch
+    ) -> None:
+        forward_env({"api.ag.com": _entry()})
+        fake = _install_client(monkeypatch, _FakeClient())
+        with _client() as client:
+            client.get(
+                "/v1/models", headers={"Host": "api.ag.com", "Accept-Encoding": "br"}
+            )
+        sent = {k.lower(): v for k, v in fake.captured["headers"].items()}
+        assert sent["accept-encoding"] == "br"
+
     def test_gateway_console_cookie_is_not_forwarded(self, forward_env, monkeypatch) -> None:
         from aegisgate.core.gateway_auth import _UI_SESSION_COOKIE
 
