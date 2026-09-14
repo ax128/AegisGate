@@ -98,7 +98,7 @@ def _build_client_response_headers(headers: Mapping[str, str]) -> dict[str, str]
         value = headers.get(name)
         if value is not None:
             out[name] = value
-    # The server in front of this app writes its own Date and Server (uvicorn
+    # The server running this app writes its own Date and Server (uvicorn
     # prepends both to every response), so relaying the upstream's sent each of
     # them twice. Dropped the way nginx's proxy_pass hides them by default.
     for key in [name for name in out if name.lower() in _SERVER_OWNED_RESPONSE_HEADERS]:

@@ -152,7 +152,7 @@ Base URL 改为 `https://api.ag.example.com`（前缀 `http://` 则为 `http://a
 - 保留路径（`/__gw__`、`/metrics`、`/health`、`/ready`、`/`、`/robots.txt`、`/favicon.ico`）即使规则停用或非法也照常由网关响应。
 - **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，若与控制台同源，上游脚本可以读取控制台的 CSRF token、带着会话 cookie 调用管理接口，或注册 Service Worker 截获登录表单。因此任何命中的转发域名（包括停用、非法、文件损坏时）上的 `/__ui__*` 一律 403 `forward_console_blocked`。请用网关自身地址打开控制台，例如 `http://127.0.0.1:18080/__ui__`；转发域名不能是 IP，所以用 IP 访问始终可达。
 - 带 `Content-Length` 的上传流式透传；无 `Content-Length` 的上传会先缓冲。两种情况都受同一上限约束：取 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`（默认 64MB）、`AEGIS_V2_MAX_REQUEST_BODY_BYTES` 与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值，所以调低前者不会低于后两者。超过上限返回 413，所有方法都适用。
-- 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。上游的 `Date` / `Server` 不转发，由网关前面的服务器（uvicorn）写自己的一份，避免客户端收到两份。
+- 只改写响应头：绝对与协议相对的 `Location`（保留客户端访问时的端口）、`Set-Cookie` 的 `Domain`（无法映射则删除该属性）、`Access-Control-Allow-Origin`。响应体不改写，上游页面里写死的自身地址会露出。上游的 `Date` / `Server` 不转发，由运行网关的服务器（uvicorn）写自己的一份，避免客户端收到两份。
 - 响应体按上游的编码原样透传，因此客户端没带 `Accept-Encoding` 时，网关向上游发送 `Accept-Encoding: identity`，不替客户端声明 gzip；客户端自己带了就原样转发。不支持 WebSocket；TRACE / CONNECT 等方法返回 405。
 - 转发类请求头（透传路径与三条 LLM 路由规则相同）：
   - 对端不是 `AEGIS_TRUSTED_PROXY_IPS` 中的可信代理时，客户端自带的 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-Host` / `X-Forwarded-Proto` 会被替换为真实对端、协议与 `Host`。

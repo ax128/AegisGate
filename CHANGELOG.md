@@ -9,6 +9,20 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（上游白名单旁路补上 XFF 降级）
+
+- **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
+  该值决定 `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 旁路（跳过全部过滤，含 PII 脱敏）是否对当前客户端开放，
+  此前只看 `_real_client_ip`：直连对端不在 `AEGIS_TRUSTED_PROXY_IPS`、却带着 `X-Forwarded-For` 时，
+  对端自己的内网地址就让请求算作内网。
+  - 上一条（uvicorn `--no-proxy-headers`）之后，同机反代的对端是 127.0.0.1：未设
+    `AEGIS_TRUSTED_PROXY_IPS` 时，经它进来的公网客户端在 `AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST=false`
+    下仍拿到白名单旁路，请求原文（含密钥）直达上游。实测：整域名转发 public 规则、上游在白名单、
+    模拟同机 Caddy 带 `X-Forwarded-For: 8.8.8.8`，修复前密钥原文到达上游，修复后被脱敏。
+  - 同样的判定此前也适用于私网地址上未列入可信代理的反代（如 Docker 网络里的 Caddy）。
+  - 按文档设了 `AEGIS_TRUSTED_PROXY_IPS` 的部署行为不变；`AEGIS_XFF_STRICT_INTERNAL=false` 仍回到旧判定。
+    审计与响应里 `security_boundary.client_is_internal` 的取值随之变化。
+
 ### Documentation（整域名转发：LLM 路由流式滞后）
 
 - README、README_zh 与 UPSTREAM-QUICKSTART 的整域名转发小节补充流式延迟说明：三条 LLM 路由的
@@ -27,7 +41,9 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   - 本机客户端可以伪造 `X-Forwarded-Proto: https`，整域名转发时上游收到的协议与 `Location` 回写随之改变。
 
   **升级动作**：自己写 uvicorn 命令或 systemd unit 的部署需手动加 `--no-proxy-headers`。
-  加上后同机反代的对端是 127.0.0.1，客户端 IP 取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代。
+  加上后同机反代的对端是 127.0.0.1，客户端 IP 与协议都取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代：
+  没列出时，TLS 反代后面的整域名转发 `Location` 回写、控制台与 `/__gw__/register` 给出的 Base URL
+  都会从 `https://` 变成 `http://`（此前 uvicorn 替网关采信了反代的 `X-Forwarded-Proto`）。
   Docker 默认部署的对端是 bridge 地址，uvicorn 本就不信任，行为不变。
 
 ### Fixed（整域名转发透传面：压缩协商与重复响应头）

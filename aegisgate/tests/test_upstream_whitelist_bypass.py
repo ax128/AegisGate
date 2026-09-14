@@ -300,6 +300,57 @@ async def test_boundary_sets_client_is_internal_flag(
     assert public.state.security_boundary["client_is_internal"] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trusted_proxy_ips", "xff_strict_internal", "forwarded_for", "expected"),
+    [
+        # A same-host proxy that is not in AEGIS_TRUSTED_PROXY_IPS: its XFF marks
+        # the request public, as the admin / default-/v1 / UI gates already do.
+        ("", True, "8.8.8.8", False),
+        ("", True, "10.0.0.5", False),
+        # Listed proxy: the client it names decides.
+        ("127.0.0.1", True, "8.8.8.8", False),
+        ("127.0.0.1", True, "10.0.0.5", True),
+        # The rollout escape hatch keeps the old peer-only answer.
+        ("", False, "8.8.8.8", True),
+    ],
+)
+async def test_client_is_internal_applies_the_xff_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+    trusted_proxy_ips: str,
+    xff_strict_internal: bool,
+    forwarded_for: str,
+    expected: bool,
+) -> None:
+    from aegisgate.core import gateway_network
+
+    monkeypatch.setattr(gateway.settings, "enforce_loopback_only", False)
+    monkeypatch.setattr(gateway.settings, "trusted_proxy_ips", trusted_proxy_ips)
+    monkeypatch.setattr(gateway.settings, "xff_strict_internal", xff_strict_internal)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_exact", None)
+    monkeypatch.setattr(gateway_network, "_trusted_proxy_networks", None)
+
+    async def _allow(_request: Request) -> JSONResponse:
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    request = _gateway_request(
+        "/v1/responses",
+        client_host="127.0.0.1",
+        headers={"X-Forwarded-For": forwarded_for},
+    )
+    await gateway.security_boundary_middleware(request, _allow)
+    assert request.state.security_boundary["client_is_internal"] is expected
+    # What the whitelist gate decides from it.
+    monkeypatch.setattr(settings, "upstream_whitelist_url_list", _UPSTREAM)
+    monkeypatch.setattr(settings, "allow_public_upstream_whitelist", False)
+    assert (
+        _should_bypass_filters_for_whitelist(
+            _UPSTREAM, request.state.security_boundary
+        )
+        is expected
+    )
+
+
 def test_startup_warns_that_whitelist_skips_redaction() -> None:
     source = (gateway.__file__ or "")
     text = open(source, encoding="utf-8").read()
@@ -307,7 +358,9 @@ def test_startup_warns_that_whitelist_skips_redaction() -> None:
     assert "AEGIS_ALLOW_PUBLIC_UPSTREAM_WHITELIST" in text
 
 
-def _gateway_request(path: str, *, client_host: str) -> Request:
+def _gateway_request(
+    path: str, *, client_host: str, headers: dict[str, str] | None = None
+) -> Request:
     payload = json.dumps({"input": "hello"}).encode("utf-8")
     scope = {
         "type": "http",
@@ -321,6 +374,10 @@ def _gateway_request(path: str, *, client_host: str) -> Request:
         "headers": [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(payload)).encode("latin-1")),
+            *(
+                (name.lower().encode("latin-1"), value.encode("latin-1"))
+                for name, value in (headers or {}).items()
+            ),
         ],
         "client": (client_host, 50000),
         "server": ("127.0.0.1", 18080),
