@@ -70,6 +70,9 @@ api.example.com {
     # Also set AEGIS_TRUSTED_PROXY_IPS=127.0.0.1 on the gateway so X-Forwarded-For from this
     # proxy is trusted. With the default AEGIS_XFF_STRICT_INTERNAL=true, an empty trusted-proxy
     # list makes any XFF look like a public client (admin / default /v1 / UI).
+    # Start uvicorn with --no-proxy-headers (aegisgate-local.py and the Dockerfile do): its
+    # default trusts 127.0.0.1 and would replace this proxy with the client before the gateway
+    # sees it, so the trusted-proxy entry never matches and loopback-only rejects everything.
     reverse_proxy 127.0.0.1:18080 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}

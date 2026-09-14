@@ -103,7 +103,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e .
-uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080
+uvicorn aegisgate.core.gateway:app --host 127.0.0.1 --port 18080 --no-proxy-headers
 ```
 
 可选依赖组：`.[redis]` / `.[postgres]` / `.[observability]`；要跑测试用 `.[dev]`（CI 用的是
