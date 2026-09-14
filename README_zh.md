@@ -620,7 +620,7 @@ AEGIS_TRUSTED_PROXY_IPS=127.0.0.1   # 前置反代时必填
 - 保留路径会被遮蔽：上游如果也用 `/metrics`、`/health`，这些路径不会到达上游；规则停用或非法时保留路径照常由网关响应。
 - **控制台不在转发域名上提供**：转发域名承载上游自己的页面与脚本，与控制台同源会让上游脚本读取 CSRF token、带会话 cookie 调管理接口或截获登录表单。任何命中的转发域名上 `/__ui__*` 一律 403 `forward_console_blocked`，请用网关自身地址（如 `http://127.0.0.1:18080/__ui__`）打开控制台。
 - 带 `Content-Length` 的上传流式透传，无 `Content-Length` 的上传会被缓冲；两者上限都取 `AEGIS_FORWARD_MAX_REQUEST_BODY_BYTES`、`AEGIS_V2_MAX_REQUEST_BODY_BYTES` 与 `AEGIS_MAX_REQUEST_BODY_BYTES` 中的最大值，对所有方法生效。
-- 只改写响应**头**（`Location`、`Set-Cookie` 的 Domain、`Access-Control-Allow-Origin`），不改写响应体：上游 HTML / JS / JSON 里写死的自身地址不会被替换。上游的 `Date` / `Server` 不转发（网关前面的服务器会写自己的）；响应体按上游编码原样透传，所以客户端没带 `Accept-Encoding` 时，发往上游的是 `Accept-Encoding: identity`。不支持 WebSocket；GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 以外的方法返回 405。
+- 只改写响应**头**（`Location`、`Set-Cookie` 的 Domain、`Access-Control-Allow-Origin`），不改写响应体：上游 HTML / JS / JSON 里写死的自身地址不会被替换。上游的 `Date` / `Server` 不转发（运行网关的服务器 uvicorn 会写自己的）；响应体按上游编码原样透传，所以客户端没带 `Accept-Encoding` 时，发往上游的是 `Accept-Encoding: identity`。不支持 WebSocket；GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS 以外的方法返回 405。
 - 转发类请求头（透传路径与三条 LLM 路由相同）：对端不是可信代理时，`X-Forwarded-For` / `X-Real-IP` / `Forwarded` 会被替换为真实对端；对端是可信代理时，`X-Forwarded-*` 沿用代理的值，`X-Real-IP` 按解析出的客户端 IP 重写，`Forwarded` 删除。控制台自己的 `aegis_ui_*` cookie 既不转发给上游，也不接受上游下发。
 - 审计：三条 LLM 路由的审计记录在 `security_boundary` 里带 `forward_host` / `forward_mode` / `forward_branch`；透传请求每次写一条 `event: forward_passthrough` 记录（域名、过滤模式、方法、不含 query 的路径、状态码、客户端 IP），被 boundary 在路由前拒绝的也会记录；控制台修改规则的审计记录带新旧 `upstream_base`、暴露面与过滤开关。
 - 转发域名上的 `/v2/*` 与 `/relay/*` 一律透传，不进网关自己的 v2 / relay 路由。

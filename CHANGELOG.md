@@ -41,7 +41,9 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   - 本机客户端可以伪造 `X-Forwarded-Proto: https`，整域名转发时上游收到的协议与 `Location` 回写随之改变。
 
   **升级动作**：自己写 uvicorn 命令或 systemd unit 的部署需手动加 `--no-proxy-headers`。
-  加上后同机反代的对端是 127.0.0.1，客户端 IP 取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代。
+  加上后同机反代的对端是 127.0.0.1，客户端 IP 与协议都取决于 `AEGIS_TRUSTED_PROXY_IPS` 是否列出该反代：
+  没列出时，TLS 反代后面的整域名转发 `Location` 回写、控制台与 `/__gw__/register` 给出的 Base URL
+  都会从 `https://` 变成 `http://`（此前 uvicorn 替网关采信了反代的 `X-Forwarded-Proto`）。
   Docker 默认部署的对端是 bridge 地址，uvicorn 本就不信任，行为不变。
 
 ### Fixed（整域名转发透传面：压缩协商与重复响应头）

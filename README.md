@@ -423,7 +423,7 @@ Security boundaries worth knowing before enabling it:
 - Only response **headers** are rewritten (`Location`, `Set-Cookie` domain,
   `Access-Control-Allow-Origin`); HTML/JS/JSON bodies that hard-code the
   upstream's own URL are not. The upstream's `Date` / `Server` are dropped (the
-  server in front of the gateway writes its own), and because the body is
+  server running the gateway, uvicorn, writes its own), and because the body is
   relayed still encoded, a client that sends no `Accept-Encoding` is forwarded
   with `Accept-Encoding: identity`. WebSocket is not supported, and methods other than
   GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS answer 405.
