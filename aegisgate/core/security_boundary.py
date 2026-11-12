@@ -12,7 +12,6 @@ from typing import Any
 from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
-redis_module: Any
 try:
     import redis as redis_module
 except ImportError:  # pragma: no cover - optional dependency

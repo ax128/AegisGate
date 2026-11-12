@@ -16,8 +16,6 @@ from aegisgate.storage.crypto import (
 )
 from aegisgate.storage.kv import KVStore
 
-psycopg_module: Any
-psycopg_sql_module: Any
 try:
     import psycopg as psycopg_module
     from psycopg import sql as psycopg_sql_module
@@ -25,7 +23,6 @@ except ImportError:  # pragma: no cover - optional dependency
     psycopg_module = None
     psycopg_sql_module = None
 
-_ConnectionPool: Any
 try:
     from psycopg_pool import ConnectionPool as _ConnectionPool
 except ImportError:

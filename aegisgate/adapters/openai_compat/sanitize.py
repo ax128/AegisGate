@@ -1277,10 +1277,13 @@ def _sanitize_responses_input_for_upstream_with_hits(
 
 
 def _sanitize_responses_input_for_upstream(
-    value: Any, *, whitelist_keys: set[str] | None = None
+    value: Any,
+    *,
+    route: str,
+    whitelist_keys: set[str] | None = None,
 ) -> Any:
     sanitized, _ = _sanitize_responses_input_for_upstream_with_hits(
-        value, whitelist_keys=whitelist_keys
+        value, route=route, whitelist_keys=whitelist_keys
     )
     return sanitized
 

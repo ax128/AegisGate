@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（CI 质量门禁）
+
+- **覆盖率低于 75% 现在会让构建失败。** `fail_under` 从 50 调到 75，覆盖率检查不再
+  `continue-on-error`。lint（ruff，只开 `E9,F63,F7,F82`）、类型检查（mypy）、
+  依赖审计（pip-audit）和镜像构建（只构建、不推送）都是必过检查。
+  `ruff`、`mypy`、`pip-audit` 只加在 `dev` extras 里。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
