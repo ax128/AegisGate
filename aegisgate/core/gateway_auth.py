@@ -71,16 +71,28 @@ def _path_has_dot_segment(path: str) -> bool:
     return any(segment in {".", ".."} for segment in path.split("/"))
 
 
+_PUBLIC_UI_PATHS = frozenset({
+    "/__ui__/login",
+    "/__ui__/health",
+    "/__ui__/api/login",
+})
+
+
 def _is_public_ui_path(path: str) -> bool:
     # Same string the router matches. ``normpath`` would turn a path the
     # router still binds to one route into a different public page.
     if _path_has_dot_segment(path):
         return False
-    return path in {
-        "/__ui__/login",
-        "/__ui__/health",
-        "/__ui__/api/login",
-    } or path.startswith("/__ui__/assets/")
+    if path in _PUBLIC_UI_PATHS or path.startswith("/__ui__/assets/"):
+        return True
+    # One trailing slash is the public route plus the slash FastAPI's
+    # redirect_slashes removes. Internal empty segments stay on the raw path:
+    # ``/__ui__//login`` does not become ``/__ui__/login``.
+    return (
+        path.endswith("/")
+        and not path.endswith("//")
+        and path[:-1] in _PUBLIC_UI_PATHS
+    )
 
 
 def _apply_ui_security_headers(response: Response) -> Response:

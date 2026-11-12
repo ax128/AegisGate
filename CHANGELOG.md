@@ -17,6 +17,8 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   实际进入 compose 接口并返回 `not_allowed`。`POST /__ui__/../v1/chat/completions`
   则被 UI 门重定向到登录页，并不会进入 `/v1`。现在这两处看到的是同一条未折叠路径；
   含 `.` / `..` 段时在鉴权和路由之前拒绝。`//__ui__/api/...` 仍按原样 404，不会被收成 UI 接口。
+  已经是公开路径、末尾只多一个 `/` 的请求（`/__ui__/health/`、`/__ui__/api/login/`）仍交给路由，
+  由 `redirect_slashes` 跳到那条公开路径。路径中间的空段（`/__ui__//login`）仍按原始路径判断。
 
 ### Security（上游白名单旁路补上 XFF 降级）
 

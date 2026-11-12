@@ -9,6 +9,7 @@ a UI route.
 from __future__ import annotations
 
 import json
+from urllib.parse import urlsplit
 
 from aegisgate.core.gateway import app
 
@@ -105,6 +106,34 @@ async def test_plain_login_path_stays_public() -> None:
 
     assert status == 200
     assert location == ""
+
+
+def _location_path(location: str) -> str:
+    if "://" in location:
+        return urlsplit(location).path
+    return location
+
+
+async def test_public_health_with_one_trailing_slash_reaches_the_router() -> None:
+    status, body, location = await _raw("GET", "/__ui__/health/")
+
+    assert status == 307, (status, location, body)
+    assert _location_path(location) == "/__ui__/health"
+
+
+async def test_public_login_with_one_trailing_slash_reaches_the_router() -> None:
+    status, body, location = await _raw("POST", "/__ui__/api/login/")
+
+    assert status == 307, (status, location, body)
+    assert _location_path(location) == "/__ui__/api/login"
+    assert body.get("error") != "ui_auth_required"
+
+
+async def test_internal_empty_segment_stays_on_the_raw_path() -> None:
+    status, body, location = await _raw("GET", "/__ui__//login")
+
+    assert status == 303, (status, location, body)
+    assert location == "/__ui__/login"
 
 
 async def test_plain_v1_path_is_not_rejected_as_a_dot_segment() -> None:
