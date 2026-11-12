@@ -443,6 +443,10 @@ def test_pipeline_error_path_does_not_write_ctx_after_cancel(
     Pipeline(request_filters=[_Boom()], response_filters=[]).run_request(
         _request(), ctx, token
     )
+    assert ctx.request_disposition == "allow"
+    assert ctx.disposition_reasons == []
+    assert ctx.report_items == []
+    assert ctx.enforcement_actions == []
 
 
 def test_run_request_uses_submitted_token_not_the_one_later_stored_on_ctx() -> None:
@@ -476,7 +480,6 @@ def test_run_request_uses_submitted_token_not_the_one_later_stored_on_ctx() -> N
     assert ctx.risk_score == 0.0
     assert ctx.request_disposition == "allow"
     assert "queued_request_write" not in ctx.disposition_reasons
-    assert ctx.request_disposition == "allow"
     assert ctx.disposition_reasons == []
     assert ctx.report_items == []
     assert ctx.enforcement_actions == []
