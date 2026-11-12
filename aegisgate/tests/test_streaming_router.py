@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import AsyncExitStack
 
 import httpx
 import pytest
@@ -944,6 +945,120 @@ async def test_v2_stream_injects_done_for_openai_stream_missing_done(
 
     body = await _collect_execute_stream(response)
     assert b"data: [DONE]" in body
+
+
+class _TrackingUpstreamConnection:
+    """Stand-in for the httpx stream context held by the V2 exit stack."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aenter__(self) -> _TrackingUpstreamConnection:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.closed = True
+
+
+def _v2_stream_target() -> v2_router._V2ValidatedTarget:
+    return v2_router._V2ValidatedTarget(
+        original_url="https://upstream.example.com/v2",
+        connect_urls=("https://upstream.example.com/v2",),
+        request_host="upstream.example.com",
+        sni_hostname=None,
+    )
+
+
+async def _open_tracked_v2_stream(
+    chunks: list[bytes],
+    *,
+    content_type: str = "text/plain; charset=utf-8",
+) -> tuple[_TrackingUpstreamConnection, AsyncExitStack, object]:
+    connection = _TrackingUpstreamConnection()
+    exit_stack = AsyncExitStack()
+    await exit_stack.enter_async_context(connection)
+
+    async def fake_open_v2_stream(**kwargs):
+        return exit_stack, _FakeV2StreamResponse(chunks, content_type=content_type)
+
+    return connection, exit_stack, fake_open_v2_stream
+
+
+@pytest.mark.asyncio
+async def test_v2_stream_probe_error_closes_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe exception must close the upstream stream before it propagates.
+
+    The probe runs before StreamingResponse is returned. Closing only inside
+    the body iterator therefore leaks the exit stack when detection fails.
+    """
+    connection, exit_stack, fake_open_v2_stream = await _open_tracked_v2_stream(
+        [b"hello from upstream"]
+    )
+
+    def failing_probe(text: str) -> list[str]:
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(v2_router.settings, "v2_enable_response_command_filter", True)
+    monkeypatch.setattr(v2_router.settings, "v2_response_filter_bypass_hosts", "")
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+    monkeypatch.setattr(v2_router, "_detect_dangerous_commands", failing_probe)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    try:
+        with pytest.raises(RuntimeError, match="probe failed"):
+            await v2_router._proxy_v2_streaming(
+                request=request,
+                client=object(),
+                target=_v2_stream_target(),
+                forward_headers={},
+                outbound_body=b"",
+                redaction_count=0,
+            )
+        assert connection.closed, (
+            "upstream connection was not closed after the stream probe failed"
+        )
+    finally:
+        if not connection.closed:
+            await exit_stack.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filter_enabled", [True, False])
+async def test_v2_stream_probe_success_closes_upstream_only_after_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_enabled: bool,
+) -> None:
+    """A finished probe must leave the upstream open until the body ends."""
+    connection, exit_stack, fake_open_v2_stream = await _open_tracked_v2_stream(
+        [b"ok"]
+    )
+    monkeypatch.setattr(
+        v2_router.settings, "v2_enable_response_command_filter", filter_enabled
+    )
+    monkeypatch.setattr(v2_router.settings, "v2_response_filter_bypass_hosts", "")
+    monkeypatch.setattr(v2_router.settings, "enable_exact_value_redaction", False)
+    monkeypatch.setattr(v2_router, "_open_v2_stream", fake_open_v2_stream)
+
+    request = _build_v2_security_request(headers=[(b"accept", b"text/event-stream")])
+    try:
+        response = await v2_router._proxy_v2_streaming(
+            request=request,
+            client=object(),
+            target=_v2_stream_target(),
+            forward_headers={},
+            outbound_body=b"",
+            redaction_count=0,
+        )
+        assert connection.closed is False
+        body = await _collect_execute_stream(response)
+        assert body == b"ok"
+        assert connection.closed is True
+    finally:
+        if not connection.closed:
+            await exit_stack.aclose()
 
 
 def test_v2_streaming_detected_for_gemini_stream_generate_content() -> None:

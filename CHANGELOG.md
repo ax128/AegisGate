@@ -9,6 +9,10 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（V2 流式探测失败时关闭上游连接）
+
+- V2 流式代理在返回 `StreamingResponse` 之前探测响应正文。探测抛错时，原先只写在响应体迭代器里的 `aclose` 不会执行，上游 exit stack 一直占着连接。现在探测段用 `try/finally`：探测没跑完就关闭上游；探测成功时仍由响应体结束时关闭，不提前掐断流。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
