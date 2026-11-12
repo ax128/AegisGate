@@ -11,9 +11,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ### Security（chat 流式工具参数拼齐后再扫描）
 
-- **`/v1/chat/completions` 流式响应里，`tool_calls[].function.arguments` 按 `index` 拼成完整参数后再送进 `tool_call_guard`。**
-  上游把参数拆成多个 delta。此前每个 delta 单独送检：分隔符和后面的命令落在不同分片时，
-  已有的危险参数规则匹配不到完整参数。单个 delta 里已经包含完整参数时，送检内容与原来相同。
+- **`/v1/chat/completions` 流式响应里，`tool_calls[].function.arguments` 按 choice 与工具 index 拼成完整参数后再送进 `tool_call_guard`。**
+  同一条流里每个 choice 的工具 index 各自从 0 开始，参数按 `(choice index, tool index)` 分开拼接，
+  不会把两条回复拼成两边都没有的字符串。上游把参数拆成多个 delta。此前每个 delta 单独送检：
+  分隔符和后面的命令落在不同分片时，已有的危险参数规则匹配不到完整参数。
+  命中之后后续分片仍会扫描，只出现在后续分片里的规则仍会记一次；
+  已经记过的 enforcement action 和 `exfil_hit_count` 不会因为同一段已计过的文本再记一次。
+  单个 delta 里已经包含完整参数时，送检内容与原来相同。
   发给客户端的仍是原来的分片；默认 `review` 仍然不会中断这条流。messages 非流式抽取未改。
 
 ### Security（上游白名单旁路补上 XFF 降级）
