@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（精确值脱敏：规范化后再匹配）
+
+- **精确值替换先做 NFKC，并去掉零宽字符和双向控制符，再按对应的原文区间替换。**
+  此前只对原文做字面匹配，配置值中间插入 U+200B，或把值写成全角，精确值脱敏会整段漏掉。
+  折叠只用于检测：命中时只替换原文里折进这次匹配的那一段，旁边的全角标点和段外的零宽字符保持原样；
+  没有命中的文本原样返回。大小写和空白仍然敏感，PII 正则未改。纯 ASCII 的文本和配置值仍走原来的字面替换。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
