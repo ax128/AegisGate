@@ -150,3 +150,41 @@ def test_older_day_logs_are_tightened_without_touching_other_files(
         assert stat.S_IMODE(unrelated.stat().st_mode) == 0o644
     finally:
         handler.close()
+
+
+def test_scan_iteration_oserror_does_not_disable_today_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _umask_022: None
+) -> None:
+    """FileNotFoundError while walking the tree must not turn file logging off.
+
+    ``Path.rglob`` returns a generator. The error is raised on a later
+    ``next()``, not when the generator is created.
+    """
+
+    def rglob_raises_mid_walk(self: Path, pattern: str):
+        def _walk():
+            yield self / "missing.log"
+            raise FileNotFoundError("directory entry disappeared during scan")
+
+        return _walk()
+
+    monkeypatch.setattr(Path, "rglob", rglob_raises_mid_walk)
+    handler = DailyRotatingFileHandler(
+        base_dir=tmp_path,
+        max_bytes=10_000,
+        backup_count=1,
+    )
+    try:
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.emit(_record("during-scan"))
+        assert handler._use_fallback is False, "scan OSError disabled file logging"
+        handler.emit(_record("after-scan"))
+        assert handler._inner is not None
+        log_file = Path(handler._inner.baseFilename)
+        assert log_file.is_file()
+        text = log_file.read_text(encoding="utf-8")
+        assert "after-scan" in text
+        mode = stat.S_IMODE(log_file.stat().st_mode)
+        assert mode == 0o600, f"today's log mode is {oct(mode)}, expected 0o600"
+    finally:
+        handler.close()

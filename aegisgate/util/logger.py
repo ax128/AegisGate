@@ -42,20 +42,22 @@ def _restrict_existing_log_files(base_dir: Path) -> None:
 
     ``open()`` does not change the mode of an existing file, and a previous
     process may have created the active file or an older day at 0644.
-    A failure here must not turn file logging off.
+    ``rglob`` returns a generator: ``OSError`` (including ``FileNotFoundError``)
+    is raised while iterating, not when the generator is created. The whole
+    walk is guarded so a vanished directory stops the remaining chmod and
+    does not turn file logging off.
     """
     try:
-        candidates = base_dir.rglob("*")
+        for path in base_dir.rglob("*"):
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if _is_managed_log_file(path):
+                    os.chmod(path, 0o600)
+            except OSError:
+                continue
     except OSError:
         return
-    for path in candidates:
-        try:
-            if path.is_symlink() or not path.is_file():
-                continue
-            if _is_managed_log_file(path):
-                os.chmod(path, 0o600)
-        except OSError:
-            continue
 
 
 class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
@@ -125,7 +127,11 @@ class DailyRotatingFileHandler(logging.Handler):
             self._use_fallback = True
             self._inner = None
         else:
-            _restrict_existing_log_files(self._base_dir)
+            # A scan error must not close the handler opened above.
+            try:
+                _restrict_existing_log_files(self._base_dir)
+            except OSError:
+                pass
         if self.formatter and self._inner is not None:
             self._inner.setFormatter(self.formatter)
         if self._inner is not None:
