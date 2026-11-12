@@ -22,9 +22,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from aegisgate.config.field_patterns import compile_field_value_patterns
 from aegisgate.config.security_rules import (
     load_security_rules,
+    pii_validator_names,
     rule_enabled,
     select_relaxed_pii_patterns,
 )
+from aegisgate.util.checksums import enforced_validator_rejects, pattern_keeps_a_match
 from aegisgate.util.ip_safety import (
     resolve_public_ips,
     bound_connect_url,
@@ -42,7 +44,6 @@ from aegisgate.util.redaction_whitelist import (
 )
 from aegisgate.util.text_normalize import (
     build_haystacks,
-    pattern_hits_in,
     strip_invisibles,
 )
 
@@ -588,6 +589,7 @@ def _redact_text(
     # moves. Plain ASCII normalizes back to itself, so it comes out empty and no
     # rule pays for a second search.
     normalized_forms: tuple[str, ...] | None = None
+    validators = pii_validator_names()
 
     def _record(pattern_id: str, *, masked: str) -> None:
         if pattern_id in hit_set or len(hit_ids) >= _V2_MAX_MATCH_IDS:
@@ -601,8 +603,13 @@ def _redact_text(
         protected_spans = protected_spans_for_text(value, whitelist)
         matched_here = 0
         protected_here = 0
+        validator_name = validators.get(str(pattern_id).upper())
 
-        def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
+        def _repl(
+            m: re.Match[str],
+            _pid: str = pattern_id,
+            _validator: str | None = validator_name,
+        ) -> str:
             nonlocal replacement_count, matched_here, protected_here
             if protected_spans and range_overlaps_protected(
                 protected_spans,
@@ -610,6 +617,10 @@ def _redact_text(
                 end=m.end(),
             ):
                 protected_here += 1
+                return m.group(0)
+            # Same gate as the V1 filter and the forward path. Not counted, so
+            # a rejected luhn match cannot become a whole-leaf replacement.
+            if enforced_validator_rejects(_validator, m.group(0)):
                 return m.group(0)
             replacement_count += 1
             matched_here += 1
@@ -640,7 +651,7 @@ def _redact_text(
             )
         if not normalized_forms:
             continue
-        if not pattern_hits_in(pattern, normalized_forms):
+        if not pattern_keeps_a_match(pattern, validator_name, normalized_forms):
             continue
         # Not ``mask_for_log(value)``: there is no fragment to mask, and the
         # leaf is unbounded. See util.masking.NORMALIZED_MATCH_MASK.

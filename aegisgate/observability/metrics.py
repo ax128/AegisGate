@@ -104,8 +104,9 @@ if _HAS_PROMETHEUS:
         # relaxed id set, and /v1/chat/completions, /v1/responses and
         # /v1/messages run only that set — so these rules, and therefore their
         # check digits, never fire on the three protocol routes.
-        "Values redacted by a PII rule whose check digit did not validate; V1 "
-        "request pipeline only, and not on the relaxed protocol routes",
+        "Values redacted by a PII rule whose check digit did not validate. "
+        "luhn is a gate and is not counted: a failing card-shaped run is left "
+        "in place. V1 request pipeline only, and not on the relaxed protocol routes",
         ["validator"],
     )
 else:

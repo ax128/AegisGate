@@ -95,12 +95,20 @@ redaction:
     - id: PHONE
       regex: '\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b'
     - id: CARD
+      # luhn is a gate, shared by the request filter, the forward path and V2.
+      # A 13-16 digit run that fails it stays in the clear. The other validators
+      # still redact on failure and only record that they did.
       regex: '\b(?:\d[ -]*?){13,16}\b'
       validator: luhn
     - id: IPV4
       regex: '\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b'
     - id: IPV6
-      regex: '\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b'
+      # Six to eight hextets. Three is a clock time (12:34:56). An uncompressed
+      # address has eight, and six is the colon-MAC fallback described above:
+      # a label like ``mac:00:1a:2b:3c:4d:5e`` fails the MAC lookbehind and
+      # would otherwise be forwarded whole. Compressed ``::`` forms are not
+      # matched.
+      regex: '\b(?:[0-9A-Fa-f]{1,4}:){5,7}[0-9A-Fa-f]{1,4}\b'
     - id: JWT
       regex: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
     - id: URL_TOKEN_QUERY
@@ -137,7 +145,11 @@ redaction:
     - id: DEVICE_SERIAL
       regex: '\b(?:serial(?:[_\s-]?number)?|sn|设备序列号)\b\s*[:=]\s*[A-Za-z0-9\-]{6,40}\b'
     - id: CRYPTO_BTC_ADDR
-      regex: '\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b'
+      # A git object id is 40 hex characters. One in eight starts with 1 or 3,
+      # and a few start with bc1, all of which used to fit this length window.
+      # The lookahead drops that one shape. Shorter base58 addresses and the
+      # bc1 sample (it contains a non-hex letter) still match.
+      regex: '\b(?![0-9A-Fa-f]{40}\b)(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b'
     - id: CRYPTO_ETH_ADDR
       regex: '\b0x[a-fA-F0-9]{40}\b'
     - id: CRYPTO_TRON_ADDR
