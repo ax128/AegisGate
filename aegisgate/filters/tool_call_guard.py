@@ -498,7 +498,12 @@ class ToolCallGuard(BaseFilter):
                         pattern.pattern[:60],
                         matched_text,
                     )
-                    break
+                    # Same rule as the dangerous-parameter table: a streamed
+                    # probe must finish this table, because the finish probe
+                    # does not receive the accumulated tool calls. A call
+                    # without ``_stream_call_key`` still stops at the first hit.
+                    if not tool_call.get("_stream_call_key"):
+                        break
 
         if violations:
             ctx.security_tags.add("tool_call_violation")

@@ -2464,12 +2464,13 @@ def _run_chat_tool_call_stream(
     frames: list[bytes],
     *,
     keep_scanning: bool = False,
-) -> tuple[str, list[str], list[list[str]], list[int], list[list[str]]]:
+) -> tuple[str, list[str], list[list[str]], list[int], list[list[str]], list[list[str]]]:
     """Drive a chat stream with the real response pipeline.
 
     Returns the SSE text, tool_call_guard enforcement actions, the argument
-    strings submitted on each probe, ``exfil_hit_count`` after each probe, and
-    the exfil rule ids recorded so far after each probe.
+    strings submitted on each probe, ``exfil_hit_count`` after each probe, the
+    exfil rule ids recorded so far after each probe, and the counted tool-rule
+    ids (``counted_tool_arg_hits``) after each probe.
 
     ``keep_scanning`` leaves the stream open after a hit so a later tool delta
     is still probed. The default policy turns this phrase's review score into
@@ -2499,6 +2500,7 @@ def _run_chat_tool_call_stream(
     probed_arguments: list[list[str]] = []
     exfil_after_probe: list[int] = []
     exfil_rules_after_probe: list[list[str]] = []
+    counted_rules_after_probe: list[list[str]] = []
 
     async def spy_probe(**kwargs):
         arguments: list[str] = []
@@ -2519,6 +2521,9 @@ def _run_chat_tool_call_stream(
                 for item in kwargs["ctx"].exfil_evidence
                 if isinstance(item, dict) and item.get("rule_id")
             ]
+        )
+        counted_rules_after_probe.append(
+            sorted(rule_id for _call_key, rule_id in kwargs["ctx"].counted_tool_arg_hits)
         )
         return result
 
@@ -2566,6 +2571,7 @@ def _run_chat_tool_call_stream(
         probed_arguments,
         exfil_after_probe,
         exfil_rules_after_probe,
+        counted_rules_after_probe,
     )
 
 
@@ -2585,7 +2591,7 @@ def test_chat_stream_tool_call_guard_hits_arguments_split_across_deltas(
     assert "; curl" not in tail
     assert head + tail == '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
 
-    text, actions, probed, _exfil_counts, _exfil_rules = _run_chat_tool_call_stream(
+    text, actions, probed, _exfil_counts, _exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
@@ -2619,7 +2625,7 @@ def test_chat_stream_tool_call_guard_hits_arguments_in_one_delta(
     already flags. This pins the path that does not need accumulation.
     """
     arguments = '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
-    text, actions, _probed, _exfil_counts, _exfil_rules = _run_chat_tool_call_stream(
+    text, actions, _probed, _exfil_counts, _exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(arguments, name="run_task", call_id="call_1"),
@@ -2647,7 +2653,7 @@ def test_chat_stream_same_tool_index_stays_separate_per_choice(
     assert "; curl" not in tail
     assert head + tail == '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
 
-    _text, actions, probed, _exfil_counts, _exfil_rules = _run_chat_tool_call_stream(
+    _text, actions, probed, _exfil_counts, _exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_two_choice_tool_frame(head, tail),
@@ -2676,7 +2682,7 @@ def test_chat_stream_later_fragment_does_not_recount_the_same_hit(
     assert "; curl" not in extra
     joined = head + tail
 
-    _text, actions, probed, exfil_counts, _exfil_rules = _run_chat_tool_call_stream(
+    _text, actions, probed, exfil_counts, _exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
@@ -2735,7 +2741,7 @@ def test_chat_stream_growing_exfil_match_is_counted_once(
     assert short_match is not None and long_match is not None
     assert len(long_match.group(0)) > len(short_match.group(0))
 
-    _text, actions, probed, exfil_counts, exfil_rules = _run_chat_tool_call_stream(
+    _text, actions, probed, exfil_counts, exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
@@ -2776,7 +2782,7 @@ def test_chat_stream_later_rule_in_the_same_probe_is_recorded(
     assert pattern.search(head) is None
     assert pattern.search(joined) is not None
 
-    _text, actions, probed, exfil_counts, exfil_rules = _run_chat_tool_call_stream(
+    _text, actions, probed, exfil_counts, exfil_rules, _counted = _run_chat_tool_call_stream(
         monkeypatch,
         [
             _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
@@ -2793,6 +2799,51 @@ def test_chat_stream_later_rule_in_the_same_probe_is_recorded(
     assert len(param_hits) == 2, param_hits
     assert exfil_counts[-1] == 1, exfil_counts
     assert _EXFIL_URL_RULE in exfil_rules[-1], exfil_rules
+
+
+def test_chat_stream_two_semantic_rules_on_one_probe_are_both_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``approval_en`` and ``destructive_en`` first become true on the same probe.
+
+    The words are the alternatives already listed in
+    ``tool_call_guard.semantic_approval_patterns``. Neither word matches the
+    other rule. The end-of-stream probe does not see the tool call, so both
+    ids have to be recorded on this probe.
+    """
+    from aegisgate.filters.tool_call_guard import ToolCallGuard
+
+    approval = "exfiltrate"
+    destructive = "drop table"
+    arguments = f"{approval} {destructive}"
+    patterns = dict(ToolCallGuard()._semantic_patterns)
+    assert patterns["approval_en"].search(approval)
+    assert patterns["destructive_en"].search(approval) is None
+    assert patterns["destructive_en"].search(destructive)
+    assert patterns["approval_en"].search(destructive) is None
+    assert patterns["approval_en"].search(arguments)
+    assert patterns["destructive_en"].search(arguments)
+
+    _text, actions, probed, _exfil_counts, _exfil_rules, counted = _run_chat_tool_call_stream(
+        monkeypatch,
+        [
+            _chat_tool_delta_frame(arguments, name="run_task", call_id="call_1"),
+            _chat_tool_finish_frame(),
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert any(
+        approval in fragment and destructive in fragment
+        for group in probed
+        for fragment in group
+    ), probed
+    semantic_hits = [
+        action for action in actions if action.startswith("tool_call_guard:semantic_review:")
+    ]
+    assert len(semantic_hits) == 2, semantic_hits
+    assert "approval_en" in counted[-1], counted
+    assert "destructive_en" in counted[-1], counted
 
 
 def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_error(
