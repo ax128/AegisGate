@@ -9,6 +9,21 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（受信代理的 X-Forwarded-For 改为从右向左取客户端）
+
+- **直连对端在 `AEGIS_TRUSTED_PROXY_IPS` 中时，不再把 `X-Forwarded-For` 的最左值当作客户端 IP。**
+  最左值由客户端决定。nginx 常见的 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  是追加：客户端发送 `X-Forwarded-For: localhost` 或 `127.0.0.1`，修复前会被判成内网，从而打开
+  passthrough、管理端点、默认上游和控制台网络门。
+  现在把多个同名头按出现顺序拼在一起，从右向左解析每一跳（含 IPv4-mapped），跳过仍是受信代理的地址，
+  取第一跳非受信 IP。某一跳不是合法 IP 时记为 `unknown`，`_is_internal_ip` 与 `_is_loopback_ip` 都为 false；
+  登录限流和审计会共用这个键。没有 XFF，或每一跳都是受信代理时，回退到最左一跳（解析失败则用直连地址）。
+  直连对端不是受信代理时仍只返回直连地址；该地址不是合法 IP（例如测试客户端的 `testclient`）时保留原始字符串。
+  - 参考配置里的 Caddy 用 `{remote_host}` 覆盖 XFF，本来就不受影响。README 的 nginx 建议改为
+    `proxy_set_header X-Forwarded-For $remote_addr;`。已经用追加写法、且该 nginx 已列入可信代理的部署，
+    修复后取到的是右侧非受信跳，而不是客户端伪造的最左值。
+  - `X-Forwarded-Host` 仍取第一个值，本次未改。`AEGIS_XFF_STRICT_INTERNAL` 的降级逻辑未改。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
