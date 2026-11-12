@@ -9,6 +9,10 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（空还原映射不再被 TTL 判过期）
+
+- **空的还原映射不再因 TTL 被判过期。** `redaction_created_at` 默认是上下文创建时间，只在真正写入脱敏映射时重置。以前还原阶段先看这个时间戳：流持续超过 `restore_ttl_seconds`（默认 1800 秒）且 mapping 为空时，会被记上 `restoration_stale_mapping` 并把风险分抬到 0.95，长流因此被拦截。现在只在 mapping 非空时检查 TTL；非空且超过 TTL 的映射仍按 `stale_mapping` 拦截。判定放在解析 mapping 之后，过期拒绝会清掉已经取出的那份，不再把存储副本留到下一次。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
