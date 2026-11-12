@@ -7,7 +7,12 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import (
+    PipelineCancelToken,
+    RequestContext,
+    bind_pipeline_call_token,
+    unbind_pipeline_call_token,
+)
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.observability.metrics import inc_filter_error, inc_filter_match
@@ -76,8 +81,34 @@ class Pipeline:
         ctx: RequestContext,
         is_stream: bool = False,
     ) -> Any:
+        # One token for this call. A later call replaces ctx.pipeline_cancel_token;
+        # this loop must keep reading the object captured here.
+        token: PipelineCancelToken | None = ctx.pipeline_cancel_token
+        bind_pipeline_call_token(token)
+        try:
+            return self._run_filters(
+                phase=phase,
+                current=current,
+                filters=filters,
+                ctx=ctx,
+                is_stream=is_stream,
+                token=token,
+            )
+        finally:
+            unbind_pipeline_call_token()
+
+    def _run_filters(
+        self,
+        *,
+        phase: str,
+        current: Any,
+        filters: list[BaseFilter],
+        ctx: RequestContext,
+        is_stream: bool,
+        token: PipelineCancelToken | None,
+    ) -> Any:
         for plugin in filters:
-            if ctx.pipeline_cancelled:
+            if token is not None and token.cancelled:
                 break
             if not plugin.enabled(ctx):
                 continue
@@ -96,7 +127,7 @@ class Pipeline:
                     elapsed,
                     ctx.request_id,
                 )
-                if ctx.pipeline_cancelled:
+                if token is not None and token.cancelled:
                     break
                 ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
                 inc_filter_error(plugin.name, phase)
@@ -133,7 +164,7 @@ class Pipeline:
                     ctx.disposition_reasons.append("response_filter_error")
                 break
             elapsed = time.monotonic() - t0
-            if ctx.pipeline_cancelled:
+            if token is not None and token.cancelled:
                 break
             report = plugin.report()
             ctx.add_report(report)

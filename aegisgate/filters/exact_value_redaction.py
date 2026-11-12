@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from aegisgate.config.redact_values import replace_exact_values
 from aegisgate.config.settings import settings
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import RequestContext, pipeline_call_cancelled
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 
@@ -36,9 +36,8 @@ class ExactValueRedactionFilter(BaseFilter):
         }
 
     def enabled(self, ctx: RequestContext) -> bool:
-        # Timeout already abandoned this run. A forward-rule override must not
-        # keep the filter alive on a cancelled context.
-        if ctx.pipeline_cancelled:
+        # This call's token, not a flag that would also cancel the response run.
+        if pipeline_call_cancelled(ctx):
             return False
         # A forward rule's explicit switch wins; without one the historical
         # global-only behaviour (and the passthrough-immune baseline) stands.

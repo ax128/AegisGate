@@ -17,7 +17,7 @@ from aegisgate.adapters.openai_compat.router import (
     _run_request_pipeline,
     _run_response_pipeline,
 )
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import PipelineCancelToken, RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.core.pipeline import Pipeline
 from aegisgate.filters.base import BaseFilter
@@ -38,6 +38,9 @@ def _release_function_local_filter_classes():
 _TIMEOUT_S = 0.2
 _HOLD_NAME = "hold_for_timeout"
 _LATE_NAME = "late_writer"
+_INFLIGHT_REASON = "inflight_disposition"
+_RESPONSE_FILTER_NAME = "response_writer"
+_RESPONSE_REASON = "response_filter_ran"
 
 
 def _blocking_filters(
@@ -63,6 +66,9 @@ def _blocking_filters(
         ) -> InternalRequest:
             self._entered.set()
             self._release.wait(timeout=5)
+            # Already inside this call when the timeout handler stored block.
+            ctx.request_disposition = "sanitize"
+            ctx.disposition_reasons.append(_INFLIGHT_REASON)
             return req
 
         def process_response(
@@ -70,6 +76,8 @@ def _blocking_filters(
         ) -> InternalResponse:
             self._entered.set()
             self._release.wait(timeout=5)
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append(_INFLIGHT_REASON)
             return resp
 
     class _LateWriter(BaseFilter):
@@ -209,6 +217,7 @@ def test_request_pipeline_timeout_stops_worker_writing_ctx(
     if action == "block":
         assert ctx.request_disposition == "block"
         assert "request_filter_timeout" in ctx.disposition_reasons
+        assert _INFLIGHT_REASON not in ctx.disposition_reasons
 
 
 def test_response_pipeline_timeout_stops_worker_writing_ctx(
@@ -251,6 +260,98 @@ def test_response_pipeline_timeout_stops_worker_writing_ctx(
     assert "late_filter_write" not in ctx.disposition_reasons
     assert ctx.response_disposition == "block"
     assert "filter_timeout" in ctx.disposition_reasons
+    assert _INFLIGHT_REASON not in ctx.disposition_reasons
+
+
+def test_request_timeout_pass_still_runs_response_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pass releases the request. The same ctx must still filter the response."""
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class _QuietHold(BaseFilter):
+        name = _HOLD_NAME
+
+        def process_request(
+            self, req: InternalRequest, ctx: RequestContext
+        ) -> InternalRequest:
+            entered.set()
+            release.wait(timeout=5)
+            return req
+
+    request_pipeline = Pipeline(
+        request_filters=[_QuietHold()], response_filters=[]
+    )
+
+    def run_request_sync(req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+        try:
+            return request_pipeline.run_request(req, ctx)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_request_pipeline_sync",
+        run_request_sync,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.filter_pipeline_timeout_s",
+        _TIMEOUT_S,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.request_pipeline_timeout_action",
+        "pass",
+    )
+
+    ctx = _ctx()
+    asyncio.run(
+        _drive_until_timeout(
+            _run_request_pipeline,
+            _request(),
+            ctx,
+            entered=entered,
+            release=release,
+            finished=finished,
+        )
+    )
+
+    ran = threading.Event()
+
+    class _ResponseWriter(BaseFilter):
+        name = _RESPONSE_FILTER_NAME
+
+        def process_response(
+            self, resp: InternalResponse, ctx: RequestContext
+        ) -> InternalResponse:
+            ran.set()
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append(_RESPONSE_REASON)
+            return resp
+
+    ctx.enabled_filters.add(_RESPONSE_FILTER_NAME)
+    response_pipeline = Pipeline(
+        request_filters=[], response_filters=[_ResponseWriter()]
+    )
+
+    def run_response_sync(
+        resp: InternalResponse, ctx: RequestContext
+    ) -> InternalResponse:
+        return response_pipeline.run_response(resp, ctx)
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_response_pipeline_sync",
+        run_response_sync,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.filter_pipeline_timeout_s",
+        5.0,
+    )
+    asyncio.run(_run_response_pipeline(None, _response(), ctx))
+    assert ran.is_set(), "response filter did not run after request timeout action=pass"
+    assert ctx.response_disposition == "sanitize"
+    assert _RESPONSE_REASON in ctx.disposition_reasons
 
 
 def test_filter_enabled_observes_pipeline_cancelled() -> None:
@@ -261,8 +362,10 @@ def test_filter_enabled_observes_pipeline_cancelled() -> None:
         name = _LATE_NAME
 
     probe = _Probe()
+    token = PipelineCancelToken()
+    ctx.pipeline_cancel_token = token
     assert probe.enabled(ctx) is True
-    ctx.pipeline_cancelled = True
+    token.cancel()
     assert probe.enabled(ctx) is False
 
     exact = ExactValueRedactionFilter()
@@ -285,7 +388,9 @@ def test_cancelled_pipeline_skips_filter_that_ignores_enabled() -> None:
             return req
 
     ctx = _ctx()
-    ctx.pipeline_cancelled = True
+    token = PipelineCancelToken()
+    token.cancel()
+    ctx.pipeline_cancel_token = token
     Pipeline(request_filters=[_Stubborn()], response_filters=[]).run_request(
         _request(), ctx
     )
@@ -305,6 +410,8 @@ def test_pipeline_error_path_does_not_write_ctx_after_cancel(
         lambda *args, **kwargs: None,
     )
 
+    token = PipelineCancelToken()
+
     class _Boom(BaseFilter):
         name = "boom"
 
@@ -314,10 +421,11 @@ def test_pipeline_error_path_does_not_write_ctx_after_cancel(
         def process_request(
             self, req: InternalRequest, ctx: RequestContext
         ) -> InternalRequest:
-            ctx.pipeline_cancelled = True
+            token.cancel()
             raise RuntimeError("filter failed after cancel")
 
     ctx = _ctx()
+    ctx.pipeline_cancel_token = token
     Pipeline(request_filters=[_Boom()], response_filters=[]).run_request(_request(), ctx)
     assert ctx.request_disposition == "allow"
     assert ctx.disposition_reasons == []

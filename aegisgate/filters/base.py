@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC
 
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import RequestContext, pipeline_call_cancelled
 from aegisgate.core.models import InternalRequest, InternalResponse
 
 
@@ -12,7 +12,7 @@ class BaseFilter(ABC):
     name = "base"
 
     def enabled(self, ctx: RequestContext) -> bool:
-        if ctx.pipeline_cancelled:
+        if pipeline_call_cancelled(ctx):
             return False
         return self.name in ctx.enabled_filters
 

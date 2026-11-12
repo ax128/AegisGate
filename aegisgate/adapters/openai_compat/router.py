@@ -138,7 +138,7 @@ from aegisgate.core.block_reasons import (
     PHASE_RESPONSE,
     get_reason_and_summary as _flow_reason_and_summary,
 )
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import PipelineCancelToken, RequestContext
 from aegisgate.core.dangerous_response_log import (
     mark_text_with_spans,
     write_dangerous_response_sample,
@@ -1618,6 +1618,13 @@ async def _run_payload_transform(func: Any, *args: Any, **kwargs: Any) -> Any:
     return await run_payload_transform_offloop(func, *args, **kwargs)
 
 
+def _arm_pipeline_cancel_token(ctx: RequestContext) -> PipelineCancelToken:
+    """Attach this call's token before the worker is submitted."""
+    token = PipelineCancelToken()
+    ctx.pipeline_cancel_token = token
+    return token
+
+
 def _run_request_pipeline_sync(req: Any, ctx: RequestContext) -> Any:
     """Run request pipeline in pool thread (threading.local binds to THIS thread)."""
     return _get_pipeline().run_request(req, ctx)
@@ -1638,6 +1645,9 @@ async def _run_request_pipeline(
     # Always offload filter pipeline away from the event loop. Use a dedicated
     # executor so CPU-heavy regex scanning does not contend with unrelated
     # default-threadpool work under burst traffic.
+    # Arm before submit. The timeout handler cancels this object only, so a
+    # later response pipeline on the same ctx gets its own token.
+    token = _arm_pipeline_cancel_token(ctx)
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
         return await run_filter_pipeline_offloop(_run_request_pipeline_sync, req, ctx)
@@ -1650,9 +1660,7 @@ async def _run_request_pipeline(
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        # The pool thread is still inside the pipeline. Mark it before any
-        # other ctx write so later filters do not undo this decision.
-        ctx.pipeline_cancelled = True
+        token.cancel()
         logger.error(
             "request_pipeline timeout exceeded request_id=%s timeout_s=%s action=%s",
             ctx.request_id,
@@ -1677,6 +1685,7 @@ async def _run_response_pipeline(
 ) -> InternalResponse:
     # Same dedicated executor as request pipeline; keep CPU-heavy response
     # scanning isolated from the event loop and miscellaneous to_thread usage.
+    token = _arm_pipeline_cancel_token(ctx)
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
         return await run_filter_pipeline_offloop(_run_response_pipeline_sync, resp, ctx)
@@ -1686,8 +1695,7 @@ async def _run_response_pipeline(
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        # Same as the request path: stop the worker before it keeps writing ctx.
-        ctx.pipeline_cancelled = True
+        token.cancel()
         logger.error(
             "response_pipeline timeout exceeded request_id=%s timeout_s=%s output_len=%s",
             ctx.request_id,

@@ -65,8 +65,9 @@ async def run_filter_pipeline_offloop(
     fire at an ``await`` point, so a single catastrophic pattern inside one
     filter is not interruptible by it. That guarantee comes from the static
     ReDoS budget in ``tests/test_redos_guard.py``, not from this function.
-    The caller still marks ``ctx.pipeline_cancelled`` when the wait ends, and
-    the pipeline stops before the next filter writes the context.
+    The caller cancels the token it attached before submit. The pipeline keeps
+    reading that token, so a later response run is a new call. An in-flight
+    filter cannot overwrite the timeout disposition after the handler stores it.
     """
     loop = asyncio.get_running_loop()
     executor = _get_filter_pipeline_executor()
