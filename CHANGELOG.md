@@ -9,6 +9,16 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（token 路由拒绝 `.` / `..` 路径段）
+
+- **包含 `.` 或 `..` 路径段的 token 路由请求现在返回 400。**
+  `/v1/__gw__/t/<token>/...` 与 `/v2/__gw__/t/<token>/...` 在改写前拒绝路径段恰好为 `.` 或 `..` 的请求。
+  服务器已经把 `%2e` / `%2e%2e` 解码成点段时同样返回 400；路径里仍带着这两种编码时也返回 400。
+  此前剩余路径会原样拼进上游 URL，httpx 规范化点段后请求会离开 token 配置的上游 base path
+  （例如落到 `/admin`，或绕过 chat 专属过滤走到通用代理）。
+  上游 URL 拼接做了同样的检查，命中时不再拼出带点段的地址，调用方返回 400。
+  `report.pdf`、`.well-known` 这类普通路径的改写不变。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
