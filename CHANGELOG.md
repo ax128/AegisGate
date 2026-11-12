@@ -9,6 +9,19 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（示例配置不再给 Compose 已设置的键赋值）
+
+- **复制 `config/.env.example` 不再设置与 `docker-compose.yml` 的 `environment:` 冲突的键。**
+  改为注释的是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、
+  `AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、
+  `AEGIS_AUDIT_LOG_PATH`。
+  热重载会用 `config/.env` 里出现的键盖过当前进程环境。按文档把示例拷成 `.env`（或首次启动从示例自动生成）之后，
+  控制台第一次保存会把 Compose 已打开的端口路由写成 `false`，并可能把监听地址、端口、SQLite / 审计路径和端口路由 Host 钉回示例值。
+  现在复制示例不会给这些键赋值，Compose 注入的值在保存后仍然保留。已有的 `config/.env` 不会被改写。
+  裸机未取消注释时走代码默认值：`AEGIS_ENV` 因此是 `dev` 而不是示例里原先写死的 `prod`
+  （HMAC 未开启时的生产环境告警只在 `prod` / `production` 下出现；Docker Compose 仍会设置 `AEGIS_ENV=prod`）。
+  进程环境变量与 `.env` 在重载时谁优先没有改。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

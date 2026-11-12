@@ -803,6 +803,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 ## 5. 关键环境变量
 
+`docker-compose.yml` 的 `environment:` 已经设置的键在 `config/.env.example` 里保持注释，复制示例不会给它们赋值，控制台保存时也就不会盖掉 Compose。这些键是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、`AEGIS_AUDIT_LOG_PATH`。裸机需要不同取值时再取消注释。表中的默认值是键未设置时的代码默认值。`AEGIS_ENFORCE_LOOPBACK_ONLY` 启动后即固定；上面其余键若出现在 `config/.env` 里，热重载会采用文件中的值。
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
