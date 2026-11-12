@@ -1625,16 +1625,20 @@ def _arm_pipeline_cancel_token(ctx: RequestContext) -> PipelineCancelToken:
     return token
 
 
-def _run_request_pipeline_sync(req: Any, ctx: RequestContext) -> Any:
+def _run_request_pipeline_sync(
+    req: Any, ctx: RequestContext, cancel_token: PipelineCancelToken
+) -> Any:
     """Run request pipeline in pool thread (threading.local binds to THIS thread)."""
-    return _get_pipeline().run_request(req, ctx)
+    return _get_pipeline().run_request(req, ctx, cancel_token)
 
 
 def _run_response_pipeline_sync(
-    resp: InternalResponse, ctx: RequestContext
+    resp: InternalResponse,
+    ctx: RequestContext,
+    cancel_token: PipelineCancelToken,
 ) -> InternalResponse:
     """Run response pipeline in pool thread (threading.local binds to THIS thread)."""
-    return _get_pipeline().run_response(resp, ctx)
+    return _get_pipeline().run_response(resp, ctx, cancel_token)
 
 
 async def _run_request_pipeline(
@@ -1645,18 +1649,23 @@ async def _run_request_pipeline(
     # Always offload filter pipeline away from the event loop. Use a dedicated
     # executor so CPU-heavy regex scanning does not contend with unrelated
     # default-threadpool work under burst traffic.
-    # Arm before submit. The timeout handler cancels this object only, so a
-    # later response pipeline on the same ctx gets its own token.
+    # Arm before submit and pass this object into the worker. Do not let the
+    # worker read ctx.pipeline_cancel_token when a queued task later starts:
+    # a pass timeout can replace that field with the response call's token.
     token = _arm_pipeline_cancel_token(ctx)
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
-        return await run_filter_pipeline_offloop(_run_request_pipeline_sync, req, ctx)
+        return await run_filter_pipeline_offloop(
+            _run_request_pipeline_sync, req, ctx, token
+        )
     # Snapshot the request before the pipeline mutates it in-place so
     # that the "pass" timeout action can return the truly untouched original.
     original_req = copy.deepcopy(req)
     try:
         return await asyncio.wait_for(
-            run_filter_pipeline_offloop(_run_request_pipeline_sync, req, ctx),
+            run_filter_pipeline_offloop(
+                _run_request_pipeline_sync, req, ctx, token
+            ),
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
@@ -1688,10 +1697,14 @@ async def _run_response_pipeline(
     token = _arm_pipeline_cancel_token(ctx)
     timeout_s = settings.filter_pipeline_timeout_s
     if timeout_s <= 0:
-        return await run_filter_pipeline_offloop(_run_response_pipeline_sync, resp, ctx)
+        return await run_filter_pipeline_offloop(
+            _run_response_pipeline_sync, resp, ctx, token
+        )
     try:
         return await asyncio.wait_for(
-            run_filter_pipeline_offloop(_run_response_pipeline_sync, resp, ctx),
+            run_filter_pipeline_offloop(
+                _run_response_pipeline_sync, resp, ctx, token
+            ),
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:

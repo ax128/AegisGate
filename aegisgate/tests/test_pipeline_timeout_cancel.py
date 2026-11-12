@@ -182,9 +182,13 @@ def test_request_pipeline_timeout_stops_worker_writing_ctx(
     hold, late = _blocking_filters(entered, release, wrote)
     pipeline = Pipeline(request_filters=[hold, late], response_filters=[])
 
-    def run_sync(req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+    def run_sync(
+        req: InternalRequest,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
+    ) -> InternalRequest:
         try:
-            return pipeline.run_request(req, ctx)
+            return pipeline.run_request(req, ctx, cancel_token)
         finally:
             finished.set()
 
@@ -230,9 +234,13 @@ def test_response_pipeline_timeout_stops_worker_writing_ctx(
     hold, late = _blocking_filters(entered, release, wrote)
     pipeline = Pipeline(request_filters=[], response_filters=[hold, late])
 
-    def run_sync(resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+    def run_sync(
+        resp: InternalResponse,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
+    ) -> InternalResponse:
         try:
-            return pipeline.run_response(resp, ctx)
+            return pipeline.run_response(resp, ctx, cancel_token)
         finally:
             finished.set()
 
@@ -286,9 +294,13 @@ def test_request_timeout_pass_still_runs_response_filters(
         request_filters=[_QuietHold()], response_filters=[]
     )
 
-    def run_request_sync(req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+    def run_request_sync(
+        req: InternalRequest,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
+    ) -> InternalRequest:
         try:
-            return request_pipeline.run_request(req, ctx)
+            return request_pipeline.run_request(req, ctx, cancel_token)
         finally:
             finished.set()
 
@@ -336,9 +348,11 @@ def test_request_timeout_pass_still_runs_response_filters(
     )
 
     def run_response_sync(
-        resp: InternalResponse, ctx: RequestContext
+        resp: InternalResponse,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
     ) -> InternalResponse:
-        return response_pipeline.run_response(resp, ctx)
+        return response_pipeline.run_response(resp, ctx, cancel_token)
 
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_response_pipeline_sync",
@@ -392,7 +406,7 @@ def test_cancelled_pipeline_skips_filter_that_ignores_enabled() -> None:
     token.cancel()
     ctx.pipeline_cancel_token = token
     Pipeline(request_filters=[_Stubborn()], response_filters=[]).run_request(
-        _request(), ctx
+        _request(), ctx, token
     )
     assert ctx.risk_score == 0.0
     assert ctx.disposition_reasons == []
@@ -426,7 +440,42 @@ def test_pipeline_error_path_does_not_write_ctx_after_cancel(
 
     ctx = _ctx()
     ctx.pipeline_cancel_token = token
-    Pipeline(request_filters=[_Boom()], response_filters=[]).run_request(_request(), ctx)
+    Pipeline(request_filters=[_Boom()], response_filters=[]).run_request(
+        _request(), ctx, token
+    )
+
+
+def test_run_request_uses_submitted_token_not_the_one_later_stored_on_ctx() -> None:
+    """A queued call must keep the token submitted with it.
+
+    The pool does not have to be full. The token for this call is already
+    cancelled, and ctx now holds a different uncancelled token, the way a
+    later response call replaces it before the queued request task starts.
+    """
+
+    armed = PipelineCancelToken()
+    armed.cancel()
+    ctx = _ctx()
+    ctx.enabled_filters.add("queued_writer")
+    ctx.pipeline_cancel_token = PipelineCancelToken()
+
+    class _QueuedWriter(BaseFilter):
+        name = "queued_writer"
+
+        def process_request(
+            self, req: InternalRequest, ctx: RequestContext
+        ) -> InternalRequest:
+            ctx.risk_score = 4.0
+            ctx.request_disposition = "sanitize"
+            ctx.disposition_reasons.append("queued_request_write")
+            return req
+
+    Pipeline(request_filters=[_QueuedWriter()], response_filters=[]).run_request(
+        _request(), ctx, armed
+    )
+    assert ctx.risk_score == 0.0
+    assert ctx.request_disposition == "allow"
+    assert "queued_request_write" not in ctx.disposition_reasons
     assert ctx.request_disposition == "allow"
     assert ctx.disposition_reasons == []
     assert ctx.report_items == []

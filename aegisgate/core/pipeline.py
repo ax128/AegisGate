@@ -79,12 +79,12 @@ class Pipeline:
         current: Any,
         filters: list[BaseFilter],
         ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None,
         is_stream: bool = False,
     ) -> Any:
-        # One token for this call. A later call replaces ctx.pipeline_cancel_token;
-        # this loop must keep reading the object captured here.
-        token: PipelineCancelToken | None = ctx.pipeline_cancel_token
-        bind_pipeline_call_token(token)
+        # The object submitted with this call. A queued task can start after a
+        # later call has replaced ctx.pipeline_cancel_token, so do not read it.
+        bind_pipeline_call_token(cancel_token)
         try:
             return self._run_filters(
                 phase=phase,
@@ -92,7 +92,7 @@ class Pipeline:
                 filters=filters,
                 ctx=ctx,
                 is_stream=is_stream,
-                token=token,
+                token=cancel_token,
             )
         finally:
             unbind_pipeline_call_token()
@@ -199,16 +199,25 @@ class Pipeline:
                 )
         return current
 
-    def run_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+    def run_request(
+        self,
+        req: InternalRequest,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
+    ) -> InternalRequest:
         return self._run_phase(
             phase="request",
             current=req,
             filters=self.request_filters,
             ctx=ctx,
+            cancel_token=cancel_token,
         )
 
     def run_response(
-        self, resp: InternalResponse, ctx: RequestContext
+        self,
+        resp: InternalResponse,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
     ) -> InternalResponse:
         is_stream = (
             resp.raw.get("stream", False) if isinstance(resp.raw, dict) else False
@@ -218,5 +227,6 @@ class Pipeline:
             current=resp,
             filters=self.response_filters,
             ctx=ctx,
+            cancel_token=cancel_token,
             is_stream=is_stream,
         )
