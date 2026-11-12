@@ -12,7 +12,6 @@ aegisgate/tests/__pycache__/
 
 # Virtual env
 .venv/
-.venv310/
 venv/
 env/
 
