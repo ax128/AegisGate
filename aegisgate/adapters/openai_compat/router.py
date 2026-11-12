@@ -2519,6 +2519,72 @@ def _sanitize_stream_event_line(
     return output
 
 
+# A hostile index must not allocate a slot per integer. Same bound as the
+# chat→responses accumulator.
+_MAX_STREAM_TOOL_CALL_INDEX = 256
+
+
+def _argument_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _merge_chat_stream_tool_call_arguments(
+    accumulated: dict[int, dict[str, Any]],
+    deltas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Join streamed ``function.arguments`` fragments and return every call so far.
+
+    Chat deltas carry a piece of the argument string. Probing that piece alone
+    misses a match that exists only after the pieces are concatenated. The
+    objects stay in the chat delta shape (``type`` / ``function``) so the probe
+    sees the same fields a single complete delta would.
+    """
+    for ordinal, delta in enumerate(deltas):
+        if not isinstance(delta, dict):
+            continue
+        raw_index = delta.get("index")
+        try:
+            index = int(raw_index) if raw_index is not None else ordinal
+        except (TypeError, ValueError):
+            index = ordinal
+        if index < 0 or index > _MAX_STREAM_TOOL_CALL_INDEX:
+            index = ordinal
+        current = accumulated.get(index)
+        if current is None:
+            current = {
+                "index": index,
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            }
+            accumulated[index] = current
+        call_id = delta.get("id")
+        if call_id:
+            current["id"] = str(call_id)
+        item_type = delta.get("type")
+        if item_type:
+            current["type"] = str(item_type)
+        stored = current.get("function")
+        if not isinstance(stored, dict):
+            stored = {"name": "", "arguments": ""}
+            current["function"] = stored
+        function = delta.get("function")
+        source = function if isinstance(function, dict) else delta
+        name = source.get("name")
+        if name:
+            stored["name"] = str(name)
+        piece = _argument_text(source.get("arguments"))
+        if piece is not None:
+            stored["arguments"] = f"{stored.get('arguments', '')}{piece}"
+    return [copy.deepcopy(accumulated[index]) for index in sorted(accumulated)]
+
+
 def _extract_stream_tool_calls(
     payload_text: str, *, route: str
 ) -> list[dict[str, Any]]:
@@ -3225,6 +3291,7 @@ async def _execute_chat_stream_once(
         emitted_content_chunks = 0
         last_probed_chunk = 0
         saw_tool_call_chunk = False
+        accumulated_tool_calls: dict[int, dict[str, Any]] = {}
         saw_terminal_chunk = False
         saw_done = False
         last_finish_reason = ""
@@ -3310,6 +3377,10 @@ async def _execute_chat_stream_once(
 
                 if tool_calls:
                     saw_tool_call_chunk = True
+                    # Scan the joined arguments, not this delta's fragment.
+                    tool_calls = _merge_chat_stream_tool_call_arguments(
+                        accumulated_tool_calls, tool_calls
+                    )
 
                 if is_content_event:
                     pending_frames.append(line)
