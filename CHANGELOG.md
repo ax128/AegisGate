@@ -15,8 +15,8 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   同一条流里每个 choice 的工具 index 各自从 0 开始，参数按 `(choice index, tool index)` 分开拼接，
   不会把两条回复拼成两边都没有的字符串。上游把参数拆成多个 delta。此前每个 delta 单独送检：
   分隔符和后面的命令落在不同分片时，已有的危险参数规则匹配不到完整参数。
-  命中之后后续分片仍会扫描，只出现在后续分片里的规则仍会记一次；
-  已经记过的 enforcement action 和 `exfil_hit_count` 不会因为同一段已计过的文本再记一次。
+  命中之后后续分片仍会扫描。同一条流式调用上的同一条规则只记一次，即使匹配文本被后续分片拉长，
+  enforcement action 和 `exfil_hit_count` 也不再增加；同一次探针里排在后面、这时才成立的另一条规则仍会记上。
   单个 delta 里已经包含完整参数时，送检内容与原来相同。
   发给客户端的仍是原来的分片；默认 `review` 仍然不会中断这条流。messages 非流式抽取未改。
 

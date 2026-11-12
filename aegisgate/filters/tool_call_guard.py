@@ -262,16 +262,14 @@ class ToolCallGuard(BaseFilter):
         return normalized
 
     @staticmethod
-    def _claim_counted_hit(
-        ctx: RequestContext, call_key: str, rule_id: str, matched: str
-    ) -> bool:
-        """True the first time this call, rule, and matched text are seen.
+    def _claim_counted_hit(ctx: RequestContext, call_key: str, rule_id: str) -> bool:
+        """True the first time this call and rule are seen.
 
-        Later stream fragments are still scanned. A rule that shows up only in
-        a later fragment is recorded. Text already counted does not append
-        another enforcement action or exfil hit.
+        Later stream fragments are still scanned. A different ``rule_id`` that
+        shows up only in a later fragment is recorded. The same rule on the
+        same call is not recorded again when its match text grows.
         """
-        identity = (call_key, rule_id, matched)
+        identity = (call_key, rule_id)
         if identity in ctx.counted_tool_arg_hits:
             return False
         ctx.counted_tool_arg_hits.add(identity)
@@ -358,7 +356,7 @@ class ToolCallGuard(BaseFilter):
                 and tool_name
                 and tool_name not in self._tool_whitelist
             ):
-                if self._claim_counted_hit(ctx, call_key, "disallowed_tool", tool_name):
+                if self._claim_counted_hit(ctx, call_key, "disallowed_tool"):
                     violations.append(f"disallowed_tool:{tool_name}")
                     action = self._apply_action(ctx, "disallowed_tool")
                     blocked = blocked or action == "block"
@@ -375,9 +373,7 @@ class ToolCallGuard(BaseFilter):
                 lowered_name in _DANGEROUS_TOOL_NAMES or tool_norm in _DANGEROUS_TOOL_NAMES
             ):
                 if not self._tool_whitelist or tool_name not in self._tool_whitelist:
-                    if self._claim_counted_hit(
-                        ctx, call_key, "dangerous_tool_name", tool_name
-                    ):
+                    if self._claim_counted_hit(ctx, call_key, "dangerous_tool_name"):
                         violations.append(f"dangerous_tool_name:{tool_name}")
                         action = self._apply_action(ctx, "disallowed_tool")
                         blocked = blocked or action == "block"
@@ -419,9 +415,9 @@ class ToolCallGuard(BaseFilter):
                     raw_match = pattern.search(args_text)
                     match = raw_match or pattern.search(args_norm)
                     matched_full = match.group(0) if match else args_norm
-                    # Already counted on an earlier fragment of this same call.
-                    # Keep scanning later rules; do not record this one again.
-                    if not self._claim_counted_hit(ctx, call_key, rule_id, matched_full):
+                    # Same rule on this call was already recorded, even if the
+                    # match span has grown. Keep scanning later rules.
+                    if not self._claim_counted_hit(ctx, call_key, rule_id):
                         continue
                     matched_text = matched_full[:120]
                     violations.append(f"{param_key}:{tool_name or 'unknown'}")
@@ -453,7 +449,11 @@ class ToolCallGuard(BaseFilter):
                         pattern.pattern[:60],
                         matched_text,
                     )
-                    break
+                    # The finish probe does not receive the accumulated tool
+                    # calls, so a streamed call must finish this rule table now.
+                    # A call without ``_stream_call_key`` keeps the one-rule stop.
+                    if not tool_call.get("_stream_call_key"):
+                        break
 
             if isinstance(args, dict):
                 for (rule_tool, rule_param), rule_pattern in self._param_rules.items():
@@ -469,7 +469,6 @@ class ToolCallGuard(BaseFilter):
                             ctx,
                             call_key,
                             f"invalid_param:{rule_tool}.{rule_param}",
-                            value,
                         ):
                             continue
                         violations.append(f"invalid_param:{tool_name}.{rule_param}")
@@ -482,9 +481,7 @@ class ToolCallGuard(BaseFilter):
                 match = pattern.search(semantic_input) or pattern.search(semantic_norm)
                 if match:
                     matched_full = match.group(0)
-                    if not self._claim_counted_hit(
-                        ctx, call_key, "semantic_review", matched_full
-                    ):
+                    if not self._claim_counted_hit(ctx, call_key, "semantic_review"):
                         continue
                     matched_text = matched_full[:120]
                     violations.append(f"semantic_review:{tool_name or 'unknown'}")
