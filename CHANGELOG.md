@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（非流式 /v1/messages 响应与 chat 同一扫描上限）
+
+- **非流式 `/v1/messages` 响应按与 chat 相同的上限扫描，不再只扫前 16000 个字符。**
+  该路径此前走通用抽取，上限 16000 个字符；同一回答走流式是全量滑窗，走非流式时第 16000 个字符之后的正文不进响应侧过滤。
+  现在抽取 `content[]` 的 `text` 和 `tool_use.input`（JSON 序列化），再用与 chat 相同的响应长度上限截断（`max_response_length`，默认 200 万字符）。流式扫描策略未改。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
