@@ -16,6 +16,7 @@ There is no browser in CI, so the front-end half is structural, same as
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from aegisgate.core.audit_query import (
@@ -437,3 +438,90 @@ def test_audit_query_and_summary_each_walk_the_log_once(tmp_path: Path) -> None:
     assert queried.scanned_bytes == seen[0]
     assert all(0 < walked <= DEFAULT_MAX_SCAN_BYTES for walked in seen)
     assert all(walked < path.stat().st_size for walked in seen)
+
+
+# Ids the console treats as panels. Config sections such as #security are not
+# in this set; a refresh of those hashes still shows the top of the page.
+_LAZY_PANEL_IDS = frozenset(
+    {
+        "overview",
+        "stats",
+        "audit",
+        "request-redaction",
+        "rules",
+        "tokens",
+        "forwards",
+        "docs",
+        "keys",
+        "compose",
+        "logs",
+    }
+)
+
+
+def _panel_entered(top: float, bottom: float, height: float) -> bool:
+    """Evaluate ``panelIntersectsViewport``'s return expression at one rect."""
+    body = _function_body(_app_js(), "panelIntersectsViewport")
+    match = re.search(r"return ([^;]+);", body)
+    assert match, body
+    expr = match.group(1).replace("&&", " and ").replace("||", " or ")
+    expr = re.sub(r"\brect\.top\b", repr(float(top)), expr)
+    expr = re.sub(r"\brect\.bottom\b", repr(float(bottom)), expr)
+    expr = re.sub(r"\bheight\b", repr(float(height)), expr)
+    return bool(eval(expr, {"__builtins__": {}}, {}))
+
+
+def test_lower_half_of_a_desktop_window_does_not_open_audit() -> None:
+    """Stats sits near 180px; the audit heading sits near 700px.
+
+    On an 800–1400px window the heading is still inside the viewport, but it
+    is in the lower half. Loading it there scans the audit log on first paint.
+    A window tall enough that 700px is in the upper half may still load it.
+    """
+    for height in (900, 1000, 1100, 1200):
+        assert not _panel_entered(700, 1100, height), height
+    for height in (800, 1000, 1400):
+        assert _panel_entered(180, 500, height), height
+    assert _panel_entered(700, 1100, 2000)
+
+
+def _sweeps_visible_panels(hash_id: str) -> bool:
+    """Whether ``refreshLazyPanels`` calls ``loadVisiblePanels`` for this hash."""
+    body = _function_body(_app_js(), "refreshLazyPanels")
+    compact = re.sub(r"\s+", " ", body)
+    if re.search(r"if \(!panelIdFromHash\(\)\) loadVisiblePanels\(\)", compact):
+        return hash_id == ""
+    if "LAZY_PANEL_IDS.has" in body:
+        return (not hash_id) or (hash_id not in _LAZY_PANEL_IDS)
+    if "panelLoaders.has" in body:
+        registered = _LAZY_PANEL_IDS - {"logs"}
+        return (not hash_id) or (hash_id not in registered)
+    raise AssertionError(f"unrecognized refreshLazyPanels policy:\n{body}")
+
+
+def test_config_hash_still_loads_panels_already_on_screen() -> None:
+    """#security and #general are config anchors, not lazy panels.
+
+    A refresh of those hashes leaves the reader at the top of the page, so
+    the upper-half panels (stats, tokens, the onboarding card) still have to
+    load. A real panel hash such as #audit must not prefetch the panels
+    scrolled past on the way there.
+    """
+    assert _sweeps_visible_panels("")
+    assert _sweeps_visible_panels("security")
+    assert _sweeps_visible_panels("general")
+    assert not _sweeps_visible_panels("audit")
+    assert not _sweeps_visible_panels("stats")
+
+
+def test_docs_failure_is_reported_only_by_the_docs_loader() -> None:
+    """A failed docs request must not leave the placeholder in place, and an
+    overview or config failure must not write into the docs pane.
+    """
+    app_js = _app_js()
+    callback = _callback_body(app_js, 'registerPanelLoader("docs"')
+    assert "catch(showDocError)" in callback.replace(" ", "")
+    assert "showDocError" not in _function_body(app_js, "loadFirstScreen")
+    for site in re.finditer(r"loadFirstScreen\(\)\.catch", app_js):
+        handler = app_js[site.start() : site.start() + 400]
+        assert "showDocError" not in handler

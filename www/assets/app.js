@@ -2078,7 +2078,12 @@ function ensurePanelLoaded(id) {
 function panelIntersectsViewport(node) {
   const rect = node.getBoundingClientRect();
   const height = window.innerHeight || document.documentElement.clientHeight || 0;
-  return height > 0 && rect.top < height && rect.bottom > 0;
+  // Any overlap counted the audit heading (~700px) as opened on a 900–1200px
+  // desktop window, so the first screen still walked the audit log. A panel
+  // counts as reached only when its top is in the upper half. Stats (~180px)
+  // still qualifies; the audit heading does not, unless the window is tall
+  // enough that 700px really is the upper half.
+  return height > 0 && rect.top < height * 0.5 && rect.bottom > 0;
 }
 
 function panelIdFromHash() {
@@ -2112,7 +2117,12 @@ function scheduleVisiblePanelLoad() {
 
 function refreshLazyPanels() {
   activateLazyPanelFromLocation();
-  if (!panelIdFromHash()) loadVisiblePanels();
+  const id = panelIdFromHash();
+  // #audit is a lazy panel: load that panel only, not every panel scrolled
+  // past on the way. #security and #general are config anchors. A refresh of
+  // those still shows the top of the page, so the upper half (stats, tokens,
+  // the onboarding card) has to load.
+  if (!id || !LAZY_PANEL_IDS.has(id)) loadVisiblePanels();
 }
 
 function bootLazyPanels() {
@@ -2126,7 +2136,10 @@ function bootLazyPanels() {
   registerPanelLoader("forwards", loadForwards);
   registerPanelLoader("docs", function () {
     if (docsLoaded) return null;
-    return loadDocs().then(function () { docsLoaded = true; });
+    // loadDocs clears the catalogue before the request returns. A failure
+    // used to leave the placeholder up. This catch is the docs pane only;
+    // an overview or config failure must not write there.
+    return loadDocs().then(function () { docsLoaded = true; }).catch(showDocError);
   });
   registerPanelLoader("keys", loadKeys);
   registerPanelLoader("compose", loadComposeList);
