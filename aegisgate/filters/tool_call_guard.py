@@ -168,11 +168,15 @@ class ToolCallGuard(BaseFilter):
             self._dangerous_param_patterns.append((rule_id, compiled))
             if rule_id not in _PATH_REFERENCE_PATTERN_IDS:
                 self._dangerous_param_patterns_exec_only.append((rule_id, compiled))
-        self._semantic_patterns = [
-            re.compile(item.get("regex"), re.IGNORECASE)
-            for item in guard_rules.get("semantic_approval_patterns", [])
-            if item.get("regex")
-        ]
+        self._semantic_patterns: list[tuple[str, re.Pattern[str]]] = []
+        for item in guard_rules.get("semantic_approval_patterns", []):
+            regex = item.get("regex")
+            if not regex:
+                continue
+            rule_id = str(item.get("id") or "semantic_review")
+            self._semantic_patterns.append(
+                (rule_id, re.compile(regex, re.IGNORECASE))
+            )
 
     def _apply_action(
         self, ctx: RequestContext, key: str, default: str | None = None
@@ -477,11 +481,11 @@ class ToolCallGuard(BaseFilter):
 
             semantic_input = f"{tool_name} {args_text}"
             semantic_norm = normalize_for_match(semantic_input)
-            for pattern in self._semantic_patterns:
+            for rule_id, pattern in self._semantic_patterns:
                 match = pattern.search(semantic_input) or pattern.search(semantic_norm)
                 if match:
                     matched_full = match.group(0)
-                    if not self._claim_counted_hit(ctx, call_key, "semantic_review"):
+                    if not self._claim_counted_hit(ctx, call_key, rule_id):
                         continue
                     matched_text = matched_full[:120]
                     violations.append(f"semantic_review:{tool_name or 'unknown'}")
