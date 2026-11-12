@@ -12,6 +12,8 @@ class BaseFilter(ABC):
     name = "base"
 
     def enabled(self, ctx: RequestContext) -> bool:
+        if ctx.pipeline_cancelled:
+            return False
         return self.name in ctx.enabled_filters
 
     def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:

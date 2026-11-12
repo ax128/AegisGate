@@ -1650,6 +1650,9 @@ async def _run_request_pipeline(
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
+        # The pool thread is still inside the pipeline. Mark it before any
+        # other ctx write so later filters do not undo this decision.
+        ctx.pipeline_cancelled = True
         logger.error(
             "request_pipeline timeout exceeded request_id=%s timeout_s=%s action=%s",
             ctx.request_id,
@@ -1683,6 +1686,8 @@ async def _run_response_pipeline(
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
+        # Same as the request path: stop the worker before it keeps writing ctx.
+        ctx.pipeline_cancelled = True
         logger.error(
             "response_pipeline timeout exceeded request_id=%s timeout_s=%s output_len=%s",
             ctx.request_id,

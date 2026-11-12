@@ -36,6 +36,10 @@ class ExactValueRedactionFilter(BaseFilter):
         }
 
     def enabled(self, ctx: RequestContext) -> bool:
+        # Timeout already abandoned this run. A forward-rule override must not
+        # keep the filter alive on a cancelled context.
+        if ctx.pipeline_cancelled:
+            return False
         # A forward rule's explicit switch wins; without one the historical
         # global-only behaviour (and the passthrough-immune baseline) stands.
         override = ctx.forward_filter_overrides.get(self.name)

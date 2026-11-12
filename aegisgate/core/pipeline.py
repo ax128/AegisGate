@@ -77,6 +77,8 @@ class Pipeline:
         is_stream: bool = False,
     ) -> Any:
         for plugin in filters:
+            if ctx.pipeline_cancelled:
+                break
             if not plugin.enabled(ctx):
                 continue
             t0 = time.monotonic()
@@ -94,6 +96,8 @@ class Pipeline:
                     elapsed,
                     ctx.request_id,
                 )
+                if ctx.pipeline_cancelled:
+                    break
                 ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
                 inc_filter_error(plugin.name, phase)
                 if phase == "request":
@@ -129,6 +133,8 @@ class Pipeline:
                     ctx.disposition_reasons.append("response_filter_error")
                 break
             elapsed = time.monotonic() - t0
+            if ctx.pipeline_cancelled:
+                break
             report = plugin.report()
             ctx.add_report(report)
             if report.get("hit"):

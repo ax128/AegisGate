@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（过滤管道超时后工作线程不再改写上下文）
+
+- **请求/响应过滤管道超时返回后，工作线程不再跑后面的过滤器，也不再把上下文继续写下去。**
+  超时只放弃事件循环上的等待，停不掉已经在跑的线程。修复前，超时处理把处置写成阻断之后，后面的过滤器仍会改处置、风险分和审计字段，`block` 可能被改回 `allow`。
+  超时处理会先置 `ctx.pipeline_cancelled`。管道在下一次写上下文之前看到标记就停止；过滤器的 `enabled()` 对已取消的上下文返回 false。已经进入 `process_request` / `process_response` 的那一次调用仍会跑完，这次调用里面已经开始的修改停不掉。默认超时仍是 90 秒。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

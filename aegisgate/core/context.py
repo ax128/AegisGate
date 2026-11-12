@@ -51,6 +51,11 @@ class RequestContext:
     # this dataclass uses slots=True and the assignment would otherwise raise —
     # which, from inside a metrics guard, means the counter silently never moves.
     disposition_counted: bool = False
+    # Set by the pipeline timeout handler before it records the timeout
+    # disposition. wait_for cannot stop the pool thread, so the pipeline and
+    # filters observe this and refuse further ctx writes. The filter already
+    # inside process_* still finishes that one call.
+    pipeline_cancelled: bool = False
 
     def add_report(self, item: dict) -> None:
         self.report_items.append(item)
