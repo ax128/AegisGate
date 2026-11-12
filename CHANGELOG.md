@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（HMAC nonce 在验签通过后才记录）
+
+- **未签名的请求不再占用 nonce。** 此前先把 nonce 写入缓存再验签名，签名错误的请求也会占住这条 nonce：攻击者可以抢先占用合法客户端将要使用的值，或把缓存刷满挤掉真实 nonce，从而打开重放窗口。现在先校验时间戳和签名，通过后才 `check_and_store`。
+- **超过 128 个字符的 nonce 返回 400**（`hmac_nonce_too_long`）。`n-ok`、`n-replay` 这类短 nonce 的通过与重放行为不变。
+- 内存 nonce 缓存只从最旧的一端弹出已过期项，遇到未过期即停止，避免每个请求扫描整张表。容量上限仍会淘汰最旧条目。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
