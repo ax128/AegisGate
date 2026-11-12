@@ -9,6 +9,17 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（控制台轮换 proxy token 立即生效，并去掉无效的 /tmp 回退）
+
+- **控制台轮换 `proxy_token` 后，当前网关进程立刻改用新 token。** 此前只写
+  `aegis_proxy_token.key`，进程内缓存要到重启才更新，旧 token 在重启前一直有效。
+  现在写文件成功后立即生效。Caddy 仍只在启动时读一次 token，因此 Caddy 转发的请求在
+  Caddy 重载前不会自动换成新 token。
+- **密钥文件写失败不再回退到 `/tmp/aegisgate`。** 加载器不读那个目录，重启后轮换会悄悄失效。
+  现在写失败返回 500，磁盘上的密钥保持原样。
+- **Fernet 轮换在无法保存上一把密钥时中止**，当前密钥文件不变，避免旧密文立刻解不开。
+  设置了 `AEGIS_ENCRYPTION_KEY` 时拒绝轮换：运行时读的是环境变量，写文件会被盖掉。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

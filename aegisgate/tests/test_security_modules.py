@@ -574,6 +574,7 @@ def test_ui_key_rotate_rewrites_fernet_file(
     # Both resolve through aegisgate.config.paths.config_dir.
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AEGIS_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("AEGIS_ENCRYPTION_KEY", raising=False)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
@@ -608,6 +609,7 @@ def test_ui_key_rotate_honours_aegis_config_dir(
     key_dir = tmp_path / "keys"
     key_dir.mkdir()
     monkeypatch.setenv("AEGIS_CONFIG_DIR", str(key_dir))
+    monkeypatch.delenv("AEGIS_ENCRYPTION_KEY", raising=False)
 
     old_key = Fernet.generate_key().decode("utf-8")
     (key_dir / "aegis_fernet.key").write_text(old_key, encoding="utf-8")

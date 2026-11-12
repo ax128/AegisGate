@@ -40,10 +40,19 @@ def _config_dir() -> Path:
     return config_dir()
 
 
+def encryption_key_from_env() -> str:
+    """Non-empty ``AEGIS_ENCRYPTION_KEY``, or ``""`` when the key file is used.
+
+    The same strip decides both "crypto will ignore the file" and "the console
+    must refuse to rotate that file". A whitespace-only value is unset.
+    """
+    return os.environ.get("AEGIS_ENCRYPTION_KEY", "").strip()
+
+
 def _load_or_generate_key() -> bytes:
     """Return Fernet key bytes, creating a new key file if needed."""
     # 1. Prefer explicit env var
-    env_key = os.environ.get("AEGIS_ENCRYPTION_KEY", "").strip()
+    env_key = encryption_key_from_env()
     if env_key:
         return env_key.encode("utf-8")
 
@@ -105,6 +114,9 @@ def save_prev_key(key_bytes: bytes) -> None:
     """Persist the current key as the previous key before rotation.
 
     Called by the UI key-rotation endpoint before writing the new key.
+    Failures propagate. Swallowing them used to let rotation replace the
+    current key anyway, so ciphertext from the previous key would no longer
+    open.
     """
     prev_path = _config_dir() / _FERNET_PREV_KEY_FILE
     try:
@@ -116,6 +128,7 @@ def save_prev_key(key_bytes: bytes) -> None:
         logger.info("crypto: saved previous Fernet key to %s", prev_path)
     except Exception as exc:
         logger.warning("crypto: failed to save previous key: %s", exc)
+        raise
 
 
 def ensure_key() -> None:

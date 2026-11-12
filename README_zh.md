@@ -326,7 +326,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 | `x-aegis-request-id` | 网关 -> 上游 | 网关注入到上游请求中的追踪关联 ID。客户端无需设置，会出现在上游请求头和网关日志中。 |
 | `x-aegis-filter-mode` | 网关内部 | 由 token URL 后缀（`__redact` / `__passthrough`）解析后重新注入。客户端自带该 Header 会被剥离。 |
 | `x-aegis-redaction-whitelist` | 网关内部 | 由 token 绑定中的 `whitelist_key` 生成并注入。客户端自带该 Header 会被剥离或忽略。 |
-| `x-aegis-proxy-token` | 反向代理 -> 网关 | 可选的「代理↔网关」互信凭据，取值为 `config/aegis_proxy_token.key`（首启自动生成，权限 `0600`）。校验通过时，非 token 的 `/v1/...` 与 `/v2/...` 请求**不再检查来源 IP 是否内网**，直接按 `AEGIS_UPSTREAM_BASE_URL` 转发——即它会解除下文 §2.0 的「仅内网」限制。该 key 等价于放行公网直连 `/v1` 的凭据，需与网关密钥同等保管与轮换，且绝不能下发给客户端。用法见 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。 |
+| `x-aegis-proxy-token` | 反向代理 -> 网关 | 可选的「代理↔网关」互信凭据，取值为 `config/aegis_proxy_token.key`（首启自动生成，权限 `0600`）。校验通过时，非 token 的 `/v1/...` 与 `/v2/...` 请求**不再检查来源 IP 是否内网**，直接按 `AEGIS_UPSTREAM_BASE_URL` 转发——即它会解除下文 §2.0 的「仅内网」限制。该 key 等价于放行公网直连 `/v1` 的凭据，需与网关密钥同等保管与轮换，且绝不能下发给客户端。控制台轮换在写文件成功后对网关进程立即生效；Caddy 仍只在启动时读一次，因此 Caddy 转发的请求在 Caddy 重载前不会自动换成新 token。用法见 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。 |
 
 补充：
 
@@ -649,6 +649,8 @@ UI:  http://127.0.0.1:18080/__ui__/login
 ```
 
 > **登录说明**：本地 UI 默认仅允许 loopback 访问，登录密码为 `config/aegis_gateway.key` 文件内容；如需允许内网访问，显式设置 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK=true`。
+>
+> **密钥轮换**：控制台轮换 `config/aegis_proxy_token.key` 时，网关进程内的 proxy token 在写文件成功后立即生效。Caddy 仍只在启动时读一次该 token，因此 Caddy 转发的请求在 Caddy 重载前不会自动换成新 token。已设置 `AEGIS_ENCRYPTION_KEY` 时控制台拒绝轮换 Fernet 密钥（运行时读的是环境变量，写文件不会生效）；上一把 Fernet 密钥保存失败时轮换中止，当前密钥文件保持不变。
 
 说明：
 
