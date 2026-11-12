@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（messages 流式 ping 不再提前放行未探测内容）
+
+- **`/v1/messages` 流式遇到 ping 时，不再把尚未探测的缓冲帧发给客户端。**
+  Anthropic 的 keepalive（`event: ping`，以及带 `data: {"type":"ping"}` 的同名事件）以前走非内容帧分支，会先把 holdback 里的 `message_*` / `content_block_*` 整段冲出去，探测留到后面。扫描间隔内还没被扫到的文本会先到达客户端。
+  ping 本身仍立即转发。没有 ping 的流、以及 ping 以外的事件，放行和探测节奏不变。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
