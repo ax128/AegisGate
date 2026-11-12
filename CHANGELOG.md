@@ -16,7 +16,8 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   现在写文件成功后立即生效。Caddy 仍只在启动时读一次 token，因此 Caddy 转发的请求在
   Caddy 重载前不会自动换成新 token。
 - **密钥文件写失败不再回退到 `/tmp/aegisgate`。** 加载器不读那个目录，重启后轮换会悄悄失效。
-  现在写失败返回 500，磁盘上的密钥保持原样。
+  现在写失败返回 500，磁盘上的密钥保持原样。控制台的密钥列表和单个密钥读取也不再查看
+  `/tmp/aegisgate`：只存在于那里的文件不再显示。
 - **Fernet 轮换在无法保存上一把密钥时中止**，当前密钥文件不变，避免旧密文立刻解不开。
   设置了 `AEGIS_ENCRYPTION_KEY` 时拒绝轮换：运行时读的是环境变量，写文件会被盖掉。
 
