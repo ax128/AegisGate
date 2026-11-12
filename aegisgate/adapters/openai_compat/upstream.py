@@ -62,11 +62,18 @@ def _upstream_http_limits() -> httpx.Limits:
     )
 
 
+# Acquiring a connection is not an LLM read. A saturated pool must fail this
+# quickly instead of holding the caller for the whole read budget (default 600s).
+_UPSTREAM_POOL_TIMEOUT_SECONDS = 10.0
+
+
 def _upstream_http_timeout() -> httpx.Timeout:
     timeout = float(settings.upstream_timeout_seconds)
-    # connect is capped at 30s; read/write/pool use the full timeout for long-running LLM requests
+    # connect is capped at 30s; read/write use the full timeout for long-running LLM requests.
+    # Pool wait is a separate, shorter budget, and never longer than the configured timeout.
     connect = min(timeout, 30.0)
-    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=timeout)
+    pool = min(timeout, _UPSTREAM_POOL_TIMEOUT_SECONDS)
+    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=pool)
 
 
 async def _get_upstream_async_client() -> httpx.AsyncClient:

@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（上游连接池等待不再等于读超时）
+
+- **OpenAI 兼容上游的连接池等待超时改为最多 10 秒，不再跟随 `AEGIS_UPSTREAM_TIMEOUT_SECONDS`（默认 600 秒）。**
+  连接打满时，排队请求此前要等满读超时才失败。读超时、写超时和故障转移未改。
+  若把上游超时配得小于 10 秒，池等待仍不超过该配置。v2 代理的池等待策略未改。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
