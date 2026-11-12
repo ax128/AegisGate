@@ -300,7 +300,12 @@
     }
   });
 
-  loadSummary();
-  loadAudit(false);
-  loadSampleDates();
+  // Summary and the first page are separate reverse walks, each allowed to
+  // read 8MB. Keeping them behind the panel gate means the overview does not
+  // pay for either walk. refreshLazyPanels runs after this file, so a #audit
+  // link still fills the panel.
+  registerPanelLoader("audit", function () {
+    return Promise.all([loadSummary(), loadAudit(false), loadSampleDates()]);
+  });
+  refreshLazyPanels();
 })();

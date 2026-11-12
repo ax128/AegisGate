@@ -9,6 +9,11 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（控制台首屏不再拉取全部面板）
+
+- 打开控制台时只请求概览状态、配置（侧栏和概览字段链接靠这一份数据生成）以及视口里的面板。统计、审计、规则、请求侧脱敏、转发、文档、密钥、Compose 改为锚点打开或滚进视口后再加载，这些面板仍可从侧栏进入。
+- 审计查询和汇总仍各自倒序读取，单次最多 8MB，但不再随首屏各走一遍。只有打开审计面板时才会发起这两次请求。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
