@@ -9,6 +9,15 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（绑定 IP 故障转移：请求已经发出后不再重发）
+
+- **绑定多个 IP 时，请求一旦发出就不再换下一个 IP 重发。**
+  `_forward_json_pinned` 与 `_forward_stream_lines_pinned` 此前捕获全部 `httpx.HTTPError` 后对下一个 IP 重新 POST。
+  流式已经向下游交出半截回答再遇到 `ReadError`，或 JSON 遇到 `ReadTimeout`，上游都可能已经在生成并计费，客户端还会再收到一份完整回答。
+  现在只有 `ConnectError` 和 `ConnectTimeout`（连接还没建立，请求确定没发出）才切换目标；其余错误立刻以 `upstream_unreachable:` 抛出。
+  流式只要已经 yield 过字节，就不再换 IP。`PoolTimeout` 不切换：池耗尽时换 IP 用的仍是同一个池。
+  `AEGIS_STREAM_BOOTSTRAP_RETRIES` 大于 0 时，外层也不会把绑定 IP 上已经发出、并以 `upstream_unreachable` 抛出的传输失败再 POST 一遍。连接还没建立的失败、未绑定 IP 的首字节前重试，以及拿到 HTTP 状态后对 401/403/408/429/5xx 的重试，仍按该设置工作。默认值仍是 0。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

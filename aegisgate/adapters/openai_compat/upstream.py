@@ -549,6 +549,26 @@ def _normalized_host_for_sni(host_header: str) -> str | None:
         return normalized
 
 
+# 请求确定未发出。PoolTimeout 不在此列：池耗尽时换 IP 用的仍是同一个池。
+_FAILOVER_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+def _pinned_unreachable(exc: httpx.HTTPError) -> RuntimeError:
+    detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
+    return RuntimeError(f"upstream_unreachable: {detail}")
+
+
+def _request_already_sent(exc: BaseException) -> bool:
+    """True when this failure happened after the POST left the gateway.
+
+    ConnectError / ConnectTimeout are the only transport errors that mean the
+    request was definitely not sent. The stream bootstrap retry uses this so it
+    does not POST a pinned target again.
+    """
+    cause = exc.__cause__
+    return isinstance(cause, httpx.HTTPError) and not isinstance(cause, _FAILOVER_ERRORS)
+
+
 def _bound_connect_request(
     headers: Mapping[str, str],
     *,
@@ -612,6 +632,9 @@ async def _forward_json_pinned(
                 connect_url,
                 str(exc) or "connection_failed_or_timeout",
             )
+            # ReadTimeout 说明请求已经发出，换 IP 就是再计费一次。
+            if not isinstance(exc, _FAILOVER_ERRORS):
+                raise _pinned_unreachable(exc) from exc
     detail = (
         (str(last_error) or "").strip() if last_error is not None else ""
     ) or "connection_failed_or_timeout"
@@ -678,6 +701,7 @@ async def _forward_stream_lines_pinned(
     )
     client = await _get_upstream_async_client()
     last_error: httpx.HTTPError | None = None
+    yielded_any = False
     for connect_url in connect_urls:
         try:
             bound_headers, extensions = _bound_connect_request(
@@ -703,6 +727,7 @@ async def _forward_stream_lines_pinned(
                     raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
                 async for chunk in resp.aiter_bytes():
                     if chunk:
+                        yielded_any = True
                         yield chunk
                 return
         except httpx.HTTPError as exc:
@@ -713,6 +738,9 @@ async def _forward_stream_lines_pinned(
                 connect_url,
                 str(exc) or "connection_failed_or_timeout",
             )
+            # 已经向下游交出过字节，或请求已经发出，都不能换下一个 IP。
+            if yielded_any or not isinstance(exc, _FAILOVER_ERRORS):
+                raise _pinned_unreachable(exc) from exc
     detail = (
         (str(last_error) or "").strip() if last_error is not None else ""
     ) or "connection_failed_or_timeout"
