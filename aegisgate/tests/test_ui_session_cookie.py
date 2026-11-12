@@ -27,6 +27,31 @@ def _cookie_path(set_cookie: str) -> str:
     return match.group(1).strip().strip('"')
 
 
+def _cookies_by_path(set_cookies: list[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for header in set_cookies:
+        path = _cookie_path(header)
+        assert path not in found, header
+        found[path] = header
+    return found
+
+
+def _assert_issues_ui_session_and_expires_legacy_root(set_cookies: list[str]) -> str:
+    """A new Path=/__ui__ session plus Max-Age=0 on the pre-upgrade Path=/ cookie."""
+    by_path = _cookies_by_path(set_cookies)
+    assert set(by_path) == {_UI_COOKIE_PATH, "/"}, (
+        "expected a Path=/__ui__ session and an expired Path=/ cookie, "
+        f"got paths {sorted(by_path)}"
+    )
+    session = by_path[_UI_COOKIE_PATH]
+    legacy = by_path["/"]
+    assert session.split("=", 1)[0] == _UI_SESSION_COOKIE
+    assert "Max-Age=0" not in session
+    assert legacy.split("=", 1)[0] == _UI_SESSION_COOKIE
+    assert "Max-Age=0" in legacy, "legacy Path=/ cookie was not expired"
+    return session.split(";", 1)[0].split("=", 1)[1]
+
+
 def _ui_app(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     import aegisgate.core.gateway_keys as gateway_keys
     from aegisgate.config.settings import settings
@@ -42,10 +67,9 @@ def test_login_set_cookie_is_scoped_to_ui_path(monkeypatch: pytest.MonkeyPatch) 
     with _ui_app(monkeypatch) as client:
         response = client.post("/__ui__/api/login", json={"password": _FAKE_PASSWORD})
     assert response.status_code == 200
-    cookies = response.headers.get_list("set-cookie")
-    assert len(cookies) == 1
-    assert cookies[0].split("=", 1)[0] == _UI_SESSION_COOKIE
-    assert _cookie_path(cookies[0]) == _UI_COOKIE_PATH
+    _assert_issues_ui_session_and_expires_legacy_root(
+        response.headers.get_list("set-cookie")
+    )
 
 
 def test_logout_clears_ui_path_and_legacy_root_cookie(
@@ -79,10 +103,45 @@ def test_gateway_key_rotation_reissues_session_cookie_on_ui_path(
     with TestClient(app) as client:
         response = client.post("/__ui__/api/keys/gateway/rotate")
     assert response.status_code == 200, response.text
-    cookies = response.headers.get_list("set-cookie")
-    assert len(cookies) == 1
-    assert cookies[0].split("=", 1)[0] == _UI_SESSION_COOKIE
-    assert _cookie_path(cookies[0]) == _UI_COOKIE_PATH
+    _assert_issues_ui_session_and_expires_legacy_root(
+        response.headers.get_list("set-cookie")
+    )
+
+
+def test_request_with_legacy_and_new_cookie_authenticates_as_the_new_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browsers send Path=/__ui__ before the shorter Path=/ cookie.
+
+    Starlette keeps the last duplicate name, so a legacy value after the new
+    session must not be the one that authenticates.
+    """
+    import aegisgate.core.gateway_keys as gateway_keys
+    from aegisgate.config.settings import settings
+    from aegisgate.core.gateway import app
+    from aegisgate.core.gateway_auth import _ui_csrf_token
+
+    monkeypatch.setattr(settings, "gateway_key", _FAKE_PASSWORD)
+    monkeypatch.setattr(gateway_keys, "_gateway_key_cached", _FAKE_PASSWORD)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        login = client.post("/__ui__/api/login", json={"password": _FAKE_PASSWORD})
+        assert login.status_code == 200, login.text
+        issued = [
+            header
+            for header in login.headers.get_list("set-cookie")
+            if "Max-Age=0" not in header
+        ]
+        assert len(issued) == 1
+        new_value = issued[0].split(";", 1)[0].split("=", 1)[1]
+        # Longer path first, legacy Path=/ last. The fake value is not a session.
+        cookie = (
+            f"{_UI_SESSION_COOKIE}={new_value}; "
+            f"{_UI_SESSION_COOKIE}={_FAKE_SESSION}"
+        )
+        client.cookies.clear()
+        response = client.get("/__ui__/api/bootstrap", headers={"Cookie": cookie})
+    assert response.status_code == 200, response.text
+    assert response.json()["ui"]["csrf_token"] == _ui_csrf_token(new_value)
 
 
 def _post_chat_and_capture_upstream_headers(

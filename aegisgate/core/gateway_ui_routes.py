@@ -30,6 +30,7 @@ from aegisgate.core.gateway_auth import (
     _gateway_token_base_url,
     _string_field,
     _ui_csrf_token,
+    _ui_session_token,
     _UI_SESSION_COOKIE,
 )
 from aegisgate.core.gateway_keys import (
@@ -409,9 +410,20 @@ def _forward_write_error(exc: Exception) -> JSONResponse | None:
 
 
 # Browser default for a cookie with no Path is `/`, so the console session used
-# to be attached to /v1 and /v2 as well. Keep it on the console prefix. Logout
-# also expires the legacy Path=/ cookie so an already-open session is cleared.
+# to be attached to /v1 and /v2 as well. Keep new sessions on the console prefix
+# and expire that legacy Path=/ cookie whenever one is issued or cleared.
 _UI_SESSION_COOKIE_PATH = "/__ui__"
+_LEGACY_UI_SESSION_COOKIE_PATH = "/"
+
+
+def _expire_ui_session_cookie(response: Response, path: str) -> None:
+    response.delete_cookie(
+        _UI_SESSION_COOKIE,
+        path=path,
+        httponly=True,
+        samesite="lax",
+        secure=settings.local_ui_secure_cookie,
+    )
 
 
 def _set_ui_session_cookie(response: Response, value: str) -> None:
@@ -424,17 +436,15 @@ def _set_ui_session_cookie(response: Response, value: str) -> None:
         secure=settings.local_ui_secure_cookie,
         path=_UI_SESSION_COOKIE_PATH,
     )
+    # The old Path=/ cookie is sent after Path=/__ui__. Leaving it in the jar
+    # makes the next request authenticate as the pre-upgrade session, and
+    # logout then 401s for the rest of the TTL.
+    _expire_ui_session_cookie(response, _LEGACY_UI_SESSION_COOKIE_PATH)
 
 
 def _clear_ui_session_cookie(response: Response) -> None:
-    for path in (_UI_SESSION_COOKIE_PATH, "/"):
-        response.delete_cookie(
-            _UI_SESSION_COOKIE,
-            path=path,
-            httponly=True,
-            samesite="lax",
-            secure=settings.local_ui_secure_cookie,
-        )
+    for path in (_UI_SESSION_COOKIE_PATH, _LEGACY_UI_SESSION_COOKIE_PATH):
+        _expire_ui_session_cookie(response, path)
 
 
 def register_ui_routes(app: FastAPI) -> None:
@@ -2162,7 +2172,7 @@ def _get_boot_time() -> float:
 
 
 def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "") if request is not None else ""
+    session_token = _ui_session_token(request) if request is not None else ""
     return {
         "app_name": settings.app_name,
         "status": "running",
