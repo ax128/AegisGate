@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（镜像构建：依赖层缓存、健康检查、文档白名单）
+
+- **镜像先安装依赖，再复制源码。** 构建只先复制 `pyproject.toml`，安装项目依赖和 `semantic` extra，然后再复制应用源码并安装项目本身（不再重装依赖）。改源码不再让依赖层重新安装。没有锁文件，安装清单仍来自 `pyproject.toml`。
+- **镜像增加 `HEALTHCHECK`，探测 `/health`。** 端口使用 `AEGIS_PORT`，缺省 `18080`，与容器启动命令一致。
+- **镜像只复制控制台文档白名单。** 不再把仓库根目录全部 Markdown 拷进镜像，只复制 `aegisgate/core/gateway_ui_config.py` 里 `_UI_DOCS` 列出的文档。`.dockerignore` 排除测试目录、`docs/`、本地笔记和构建产物。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
