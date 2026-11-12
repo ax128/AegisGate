@@ -62,15 +62,25 @@ def _is_passthrough_read_path(path: str) -> bool:
     return path == "/__ui__" or path.startswith("/__ui__/")
 
 
-def _is_public_ui_path(path: str) -> bool:
-    import posixpath
+def _path_has_dot_segment(path: str) -> bool:
+    """True when a decoded path segment is ``.`` or ``..``.
 
-    normalized = posixpath.normpath(path)
-    return normalized in {
+    The router matches ``scope["path"]`` as sent. Collapsing those segments
+    before the auth check would name a different route than the one that runs.
+    """
+    return any(segment in {".", ".."} for segment in path.split("/"))
+
+
+def _is_public_ui_path(path: str) -> bool:
+    # Same string the router matches. ``normpath`` would turn a path the
+    # router still binds to one route into a different public page.
+    if _path_has_dot_segment(path):
+        return False
+    return path in {
         "/__ui__/login",
         "/__ui__/health",
         "/__ui__/api/login",
-    } or normalized.startswith("/__ui__/assets/")
+    } or path.startswith("/__ui__/assets/")
 
 
 def _apply_ui_security_headers(response: Response) -> Response:

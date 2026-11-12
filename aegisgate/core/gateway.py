@@ -83,6 +83,7 @@ from aegisgate.core.gateway_auth import (  # noqa: F401
     _gateway_token_base_url,
     _is_passthrough_read_path,
     _is_public_ui_path,
+    _path_has_dot_segment,
     _is_ui_authenticated,
     _is_valid_ui_session,
     _public_base_url,
@@ -1061,14 +1062,29 @@ async def security_boundary_middleware(request: Request, call_next):
             )
             return finish(response)
 
-        if request.url.path.startswith("/__ui__"):
+        # Boundary decisions use the path string the router matches. Dot
+        # segments are rejected first so collapsing them cannot select a
+        # different route from the one auth just allowed.
+        request_path = str(request.scope.get("path") or "/")
+        if _path_has_dot_segment(request_path):
+            boundary["rejected_reason"] = "invalid_path"
+            response = _blocked_response(
+                status_code=400,
+                reason="invalid_path",
+                detail="path segments '.' and '..' are not allowed",
+            )
+            if request_path.startswith("/__ui__"):
+                response = _apply_ui_security_headers(response)
+            return finish(response)
+
+        if request_path.startswith("/__ui__"):
             client_ip, ui_allowed = _ui_network_allowed_after_xff_downgrade(request)
             if not ui_allowed:
                 boundary["rejected_reason"] = "local_ui_network_restricted"
                 logger.warning(
                     "boundary reject local ui host=%s path=%s",
                     client_ip,
-                    request.url.path,
+                    request_path,
                 )
                 detail = (
                     "local ui only allowed from internal network"
@@ -1084,7 +1100,7 @@ async def security_boundary_middleware(request: Request, call_next):
                         )
                     )
                 )
-            if request.url.path == "/__ui__/api/login" and method == "POST":
+            if request_path == "/__ui__/api/login" and method == "POST":
                 if not _UI_LOGIN_RATE_LIMITER.is_allowed(client_ip):
                     boundary["rejected_reason"] = "ui_login_rate_limited"
                     return finish(
@@ -1098,12 +1114,12 @@ async def security_boundary_middleware(request: Request, call_next):
                             )
                         )
                     )
-            if _is_public_ui_path(request.url.path):
+            if _is_public_ui_path(request_path):
                 response = await call_next(request)
                 return finish(_apply_ui_security_headers(response))
             if not _is_ui_authenticated(request):
                 boundary["rejected_reason"] = "ui_auth_required"
-                if request.url.path.startswith("/__ui__/api/"):
+                if request_path.startswith("/__ui__/api/"):
                     return finish(
                         _apply_ui_security_headers(
                             JSONResponse(
@@ -1119,10 +1135,10 @@ async def security_boundary_middleware(request: Request, call_next):
                         RedirectResponse(url="/__ui__/login", status_code=303)
                     )
                 )
-            if method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith(
+            if method not in {"GET", "HEAD", "OPTIONS"} and request_path.startswith(
                 "/__ui__/api/"
             ):
-                if request.url.path != "/__ui__/api/login" and not _verify_ui_csrf(
+                if request_path != "/__ui__/api/login" and not _verify_ui_csrf(
                     request
                 ):
                     boundary["rejected_reason"] = "ui_csrf_invalid"
@@ -1140,7 +1156,7 @@ async def security_boundary_middleware(request: Request, call_next):
             response = await call_next(request)
             return finish(_apply_ui_security_headers(response))
 
-        if request.url.path in _PASSTHROUGH_PATHS and method in {"GET", "HEAD"}:
+        if request_path in _PASSTHROUGH_PATHS and method in {"GET", "HEAD"}:
             return finish(await call_next(request))
 
         logger.debug(
@@ -1157,7 +1173,7 @@ async def security_boundary_middleware(request: Request, call_next):
                 )
                 return await finish_drain("loopback_only_reject", 403)
 
-        if request.url.path in _ADMIN_ENDPOINTS and method == "POST":
+        if request_path in _ADMIN_ENDPOINTS and method == "POST":
             client_ip, admin_internal = _internal_after_xff_downgrade(request)
             if not _admin_rate_limiter.is_allowed(client_ip):
                 logger.warning(
@@ -1182,8 +1198,8 @@ async def security_boundary_middleware(request: Request, call_next):
                     "admin endpoint only allowed from internal network",
                 )
 
-        protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
-        protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
+        protected_v1 = request_path == "/v1" or request_path.startswith("/v1/")
+        protected_v2 = request_path == "/v2" or request_path.startswith("/v2/")
 
         if not bool(request.scope.get("aegis_token_authenticated")) and (
             protected_v1 or protected_v2

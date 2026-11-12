@@ -504,6 +504,8 @@ def test_public_ui_paths_are_explicit() -> None:
     assert _is_public_ui_path("/__ui__/assets/app.js")
     assert not _is_public_ui_path("/__ui__/api/tokens")
     assert not _is_public_ui_path("/__ui__/api/login/../tokens")
+    assert not _is_public_ui_path("/__ui__/./login")
+    assert not _is_public_ui_path("/__ui__/api/compose/../../login")
 
 
 def test_ui_login_and_rules_crud(
