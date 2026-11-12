@@ -9,6 +9,11 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（SSE 帧：跨 chunk 的 CRLF 仍是一帧）
+
+- **被拆开的一对 CRLF 仍是一个换行，前后的 SSE 行留在同一帧里。** `_iter_sse_frames` 以前先把当前 chunk 末尾的 `\r` 换成 `\n`。下一个 chunk 以 `\n` 开头时，这个提前换成的换行和后到的 `\n` 凑成空行，`event:` 和 `data:` 被拆成两帧。现在 chunk 末尾的 `\r` 留到下一个 chunk，再和后到的 `\n` 一起替换。
+- **单个大帧按线性时间解析。** 缓冲改为 `bytearray`，查找帧尾的空行从上一块长度减一的位置开始，不再每个 chunk 都拷贝并从头重扫整段缓冲。一次送齐的 CRLF 帧、以及本来就该分开的两帧，结果不变。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
