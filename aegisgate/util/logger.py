@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TextIO
 
 from aegisgate.config.settings import settings
+from aegisgate.util.secure_file import open_append_0600
 
 LOG_BASE_DIR = Path("logs") / "aegisgate"
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -26,8 +29,54 @@ def _normalize_level(raw: str | None) -> int:
     }.get(candidate, logging.INFO)
 
 
+def _is_managed_log_file(path: Path) -> bool:
+    """True for ``DD.log`` and the ``DD.log.<n>`` files rotation leaves behind."""
+    suffix = path.suffix
+    if suffix == ".log":
+        return True
+    return suffix.startswith(".") and suffix[1:].isdigit() and path.stem.endswith(".log")
+
+
+def _restrict_existing_log_files(base_dir: Path) -> None:
+    """Force 0600 on logs already on disk.
+
+    ``open()`` does not change the mode of an existing file, and a previous
+    process may have created the active file or an older day at 0644.
+    A failure here must not turn file logging off.
+    """
+    try:
+        candidates = base_dir.rglob("*")
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if _is_managed_log_file(path):
+                os.chmod(path, 0o600)
+        except OSError:
+            continue
+
+
+class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    """Size-rotating handler that keeps the active file at mode 0600.
+
+    ``FileHandler`` uses builtin ``open()``, so the created mode is ``0o666``
+    masked by umask (0644 when umask is 022). Rollover opens the file again,
+    so the restriction has to live in ``_open``.
+    """
+
+    def _open(self) -> TextIO:
+        encoding = self.encoding or "utf-8"
+        return open_append_0600(Path(self.baseFilename), encoding=encoding)
+
+
 class DailyRotatingFileHandler(logging.Handler):
-    """Log to ``logs/aegisgate/YY/MM/DD.log``, rotating at *MAX_BYTES*."""
+    """Log to ``logs/aegisgate/YY/MM/DD.log``, rotating at *MAX_BYTES*.
+
+    The active file, its size backups, and older day files under the same
+    base directory are mode 0600.
+    """
 
     def __init__(
         self,
@@ -66,7 +115,7 @@ class DailyRotatingFileHandler(logging.Handler):
         log_file = log_path.with_suffix(".log")
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
-            self._inner = RotatingFileHandler(
+            self._inner = _OwnerOnlyRotatingFileHandler(
                 log_file,
                 maxBytes=self._max_bytes,
                 backupCount=self._backup_count,
@@ -75,6 +124,8 @@ class DailyRotatingFileHandler(logging.Handler):
         except (OSError, PermissionError):
             self._use_fallback = True
             self._inner = None
+        else:
+            _restrict_existing_log_files(self._base_dir)
         if self.formatter and self._inner is not None:
             self._inner.setFormatter(self.formatter)
         if self._inner is not None:

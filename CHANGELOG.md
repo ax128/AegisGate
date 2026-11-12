@@ -9,6 +9,10 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（应用日志文件权限）
+
+- **应用日志改为仅所有者可读写（0600）。** `logs/aegisgate/YY/MM/DD.log` 原本就按 10MB、最多 10 个备份做大小轮转，但文件由标准库 `open()` 创建：umask 为 022 时模式是 0644，同机其他用户能读到日志。现在每次打开（含按大小轮转后重新打开）都强制 0600；进程开始写当天日志时，同一目录里已经存在的 `*.log` 和 `*.log.<n>` 也会收成 0600。按天分目录的旧文件仍会保留，这次不删除它们。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
