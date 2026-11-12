@@ -1417,6 +1417,7 @@ def register_ui_routes(app: FastAPI) -> None:
         """
         from aegisgate.core.regex_probe import (
             ProbeInputError,
+            keyword_dense_samples,
             normalize_probe_input,
             probe,
         )
@@ -1430,6 +1431,7 @@ def register_ui_routes(app: FastAPI) -> None:
         except ProbeInputError as exc:
             return JSONResponse(status_code=400, content={"error": "invalid_probe_input", "detail": str(exc)})
 
+        samples = [*samples, *keyword_dense_samples(regex)]
         outcome = await asyncio.to_thread(probe, regex, samples)
         if outcome.get("error"):
             return JSONResponse(status_code=400, content={"error": "probe_failed", "detail": outcome["error"]})

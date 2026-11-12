@@ -11,6 +11,7 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.storage.kv import KVStore
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 
 
 class RestorationFilter(BaseFilter):
@@ -27,12 +28,12 @@ class RestorationFilter(BaseFilter):
         placeholder_regex = restoration_rules.get("placeholder_regex", r"\{\{AG_[A-Z0-9]+_[A-Z0-9_]+_\d+\}\}")
         self._placeholder_re = re.compile(placeholder_regex)
 
-        suspicious_patterns: list[re.Pattern[str]] = []
+        suspicious_patterns: list[RulePattern] = []
         for item in restoration_rules.get("suspicious_context_patterns", []):
             regex = item.get("regex")
             if not regex:
                 continue
-            suspicious_patterns.append(re.compile(regex, re.IGNORECASE))
+            suspicious_patterns.append(compile_rule_regex(regex, re.IGNORECASE))
         self._suspicious_patterns = suspicious_patterns
 
         restore_policy = restoration_rules.get("restore_policy", {})

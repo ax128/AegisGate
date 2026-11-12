@@ -47,7 +47,7 @@ from aegisgate.config.field_patterns import (
 )
 from aegisgate.config.security_rules import resolve_rules_file, rule_enabled
 from aegisgate.core.audit import write_audit
-from aegisgate.core.regex_probe import MAX_REGEX_LEN, probe
+from aegisgate.core.regex_probe import MAX_REGEX_LEN, keyword_dense_samples, probe
 from aegisgate.core.ui_etag import ABSENT_ETAG, etag_for_bytes
 from aegisgate.util.logger import logger
 
@@ -467,7 +467,7 @@ def _probe_changed_regexes(changed: list[tuple[str, str]]) -> None:
                 f"规则 {key} 的正则超过 {MAX_REGEX_LEN} 字符",
                 status=400,
             )
-        outcome = probe(regex, list(_ADVERSARIAL_PROBE_SAMPLES))
+        outcome = probe(regex, [*_ADVERSARIAL_PROBE_SAMPLES, *keyword_dense_samples(regex)])
         if outcome.get("error"):
             raise RulesWriteError(
                 "invalid_regex",

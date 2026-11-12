@@ -16,6 +16,7 @@ from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 from aegisgate.util.risk_scoring import points_to_score, weighted_nonlinear_score
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import build_haystacks, pattern_hits_in
 
 
@@ -47,13 +48,13 @@ class AnomalyDetector(BaseFilter):
         self._bidi_chars = set(unicode_rules.get("bidi_chars", ["\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"]))
         self._invisible_char_threshold = apply_count(int(unicode_rules.get("invisible_char_threshold", 6)), level=level, minimum=1)
 
-        self._command_patterns: list[tuple[str, re.Pattern[str]]] = []
+        self._command_patterns: list[tuple[str, RulePattern]] = []
         for item in rules.get("command_patterns", []):
             pattern_id = str(item.get("id", "cmd_rule"))
             regex = item.get("regex")
             if not regex:
                 continue
-            self._command_patterns.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            self._command_patterns.append((pattern_id, compile_rule_regex(regex, re.IGNORECASE)))
 
         self._point_values = {str(key): float(value) for key, value in (rules.get("points", {}) or {}).items()}
         self._point_buckets = {str(key): str(value) for key, value in (rules.get("point_buckets", {}) or {}).items()}

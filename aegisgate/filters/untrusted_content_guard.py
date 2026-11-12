@@ -12,6 +12,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 
 
 class UntrustedContentGuard(BaseFilter):
@@ -44,12 +45,12 @@ class UntrustedContentGuard(BaseFilter):
         self._risk_score = float(guard_rules.get("risk_score", 0.88))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
-        patterns: list[re.Pattern[str]] = []
+        patterns: list[RulePattern] = []
         for item in guard_rules.get("instructional_patterns", []):
             regex = item.get("regex")
             if not regex:
                 continue
-            patterns.append(re.compile(regex, re.IGNORECASE))
+            patterns.append(compile_rule_regex(regex, re.IGNORECASE))
         self._instructional_patterns = patterns
 
     def _is_untrusted_source(self, source: str, metadata: dict) -> tuple[bool, float]:

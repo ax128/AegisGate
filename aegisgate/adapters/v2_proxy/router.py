@@ -35,6 +35,7 @@ from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
     protected_spans_for_text,
@@ -377,7 +378,7 @@ def _compile_patterns(
     *,
     legacy_string_ids: bool = False,
     honour_enabled: bool = False,
-) -> list[tuple[str, re.Pattern[str]]]:
+) -> list[tuple[str, RulePattern]]:
     """Compile *fallback* plus the configured *items*.
 
     ``items`` comes straight from YAML, so an entry is not guaranteed to be a
@@ -396,10 +397,10 @@ def _compile_patterns(
     ``sanitizer.command_patterns`` shares this loop and has no such flag on the
     V1 side. Field lists no longer go through this function.
     """
-    compiled: list[tuple[str, re.Pattern[str]]] = []
+    compiled: list[tuple[str, RulePattern]] = []
     for pattern_id, regex in fallback:
         try:
-            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(regex, re.IGNORECASE)))
         except re.error:
             continue
     for index, item in enumerate(items or [], start=1):
@@ -420,14 +421,14 @@ def _compile_patterns(
         if not isinstance(regex_value, str) or not regex_value.strip():
             continue
         try:
-            compiled.append((pattern_id, re.compile(regex_value, re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(regex_value, re.IGNORECASE)))
         except re.error as exc:
             logger.warning("v2 pattern compile skipped id=%s error=%s", pattern_id, exc)
     return compiled
 
 
 @lru_cache(maxsize=1)
-def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_redaction_patterns() -> list[tuple[str, RulePattern]]:
     rules = load_security_rules().get("redaction", {})
     pii_patterns = rules.get("pii_patterns")
     compiled = _compile_patterns(
@@ -444,7 +445,7 @@ def _normalize_pattern_id(pattern_id: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_relaxed_redaction_patterns() -> list[tuple[str, RulePattern]]:
     """The patterns V2 request redaction actually runs.
 
     Two layers, and they are gated differently — the same split V1 uses:
@@ -458,8 +459,8 @@ def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
       ``sanitize``. The three layers share ``compile_field_value_patterns``.
     """
     pii_ids = _pii_pattern_ids()
-    pii_layer: list[tuple[str, re.Pattern[str]]] = []
-    field_layer: list[tuple[str, re.Pattern[str]]] = []
+    pii_layer: list[tuple[str, RulePattern]] = []
+    field_layer: list[tuple[str, RulePattern]] = []
     for pattern_id, pattern in _v2_redaction_patterns():
         target = pii_layer if _normalize_pattern_id(pattern_id) in pii_ids else field_layer
         target.append((pattern_id, pattern))
@@ -515,7 +516,7 @@ def v2_effective_pii_ids() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
-def _v2_dangerous_command_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_dangerous_command_patterns() -> list[tuple[str, RulePattern]]:
     sanitizer_rules = load_security_rules().get("sanitizer", {})
     command_rules = sanitizer_rules.get("command_patterns")
     return _compile_patterns(
@@ -766,9 +767,9 @@ def _detect_dangerous_commands(text: str) -> list[str]:
     ]
 
 
-def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, re.Pattern[str]]]:
+def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, RulePattern]]:
     raw_matches: list[str] = []
-    raw_patterns: list[tuple[str, re.Pattern[str]]] = []
+    raw_patterns: list[tuple[str, RulePattern]] = []
     seen: set[str] = set()
     for pattern_id, pattern in _v2_dangerous_command_patterns():
         if pattern.search(text):
