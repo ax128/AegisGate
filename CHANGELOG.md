@@ -9,6 +9,14 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（流式上游错误：首帧前透传状态码，401/403 不重试）
+
+- **流式上游在还没向客户端发出任何帧时返回 HTTP 错误，网关使用该状态码，不再包成 HTTP 200 的 SSE 错误帧。**
+  响应体与非流式的 `upstream_http_error` 相同。连接失败没有上游状态码，仍是 SSE 错误帧。
+  已经向客户端发出首帧之后的错误不改状态码。
+  成功的流式响应会先等到上游的第一个字节（或这次错误），再提交网关的状态行。
+- **`AEGIS_STREAM_BOOTSTRAP_RETRIES` 不再重试 401 和 403。** 408、429 和 5xx 仍只在首字节之前重试。默认次数仍是 0。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

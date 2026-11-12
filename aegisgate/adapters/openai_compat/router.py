@@ -370,7 +370,124 @@ def _is_retryable_stream_bootstrap_error(detail: str) -> bool:
         status_code = int(parts[1].strip())
     except ValueError:
         return False
-    return status_code in {401, 403, 408, 429} or status_code >= 500
+    # 401/403 are the caller's credentials or permission. Retrying them only
+    # repeats a request the upstream has already rejected.
+    return status_code in {408, 429} or status_code >= 500
+
+
+def _split_upstream_http_error(detail: str) -> tuple[int, str] | None:
+    """Status and body from ``upstream_http_error:<status>:<body>``, if that is the shape."""
+    text = (detail or "").strip()
+    prefix = "upstream_http_error:"
+    if not text.lower().startswith(prefix):
+        return None
+    status_text, sep, tail = text[len(prefix) :].partition(":")
+    try:
+        status_code = int(status_text.strip())
+    except ValueError:
+        return None
+    body = tail.strip() if sep else ""
+    return status_code, body or text
+
+
+async def _aclose_stream(stream: AsyncGenerator[bytes, None]) -> None:
+    try:
+        await stream.aclose()
+    except Exception:
+        logger.debug("closing upstream stream after bootstrap failed", exc_info=True)
+
+
+async def _empty_byte_stream() -> AsyncGenerator[bytes, None]:
+    if False:  # pragma: no cover - marks this as an async generator
+        yield b""
+
+
+async def _raise_byte_stream(exc: BaseException) -> AsyncGenerator[bytes, None]:
+    raise exc
+    yield b""  # pragma: no cover
+
+
+async def _prepend_byte_stream(
+    first: bytes, rest: AsyncGenerator[bytes, None]
+) -> AsyncGenerator[bytes, None]:
+    try:
+        yield first
+        async for chunk in rest:
+            yield chunk
+    finally:
+        await _aclose_stream(rest)
+
+
+async def _prime_forward_stream(
+    stream: AsyncGenerator[bytes, None],
+    *,
+    ctx: RequestContext,
+    boundary: dict | None,
+) -> AsyncGenerator[bytes, None] | JSONResponse:
+    """Take the upstream outcome before a streaming response commits its status.
+
+    ``StreamingResponse`` sends the status line before the body runs, so an
+    HTTP error discovered only inside the generator can no longer change it.
+    An error that arrives before any byte still can: return that status.
+    Once a byte has been produced, hand it back and leave the status at 200.
+    """
+    try:
+        first = await stream.__anext__()
+    except StopAsyncIteration:
+        await _aclose_stream(stream)
+        return _empty_byte_stream()
+    except RuntimeError as exc:
+        parsed = _split_upstream_http_error(str(exc))
+        await _aclose_stream(stream)
+        if parsed is None:
+            return _raise_byte_stream(exc)
+        status_code, detail = parsed
+        logger.warning(
+            "stream upstream http error before first frame request_id=%s status=%s detail=%s",
+            ctx.request_id,
+            status_code,
+            detail,
+        )
+        response = _error_response(
+            status_code=status_code,
+            reason="upstream_http_error",
+            detail=detail,
+            ctx=ctx,
+            boundary=boundary,
+        )
+        ctx.redaction_mapping.clear()
+        return response
+    except Exception as exc:
+        await _aclose_stream(stream)
+        return _raise_byte_stream(exc)
+    except BaseException:
+        await _aclose_stream(stream)
+        raise
+
+    return _prepend_byte_stream(first, stream)
+
+
+async def _open_pinned_stream(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: Mapping[str, str],
+    connect_urls: tuple[str, ...],
+    host_header: str,
+    ctx: RequestContext,
+    boundary: dict | None,
+) -> AsyncGenerator[bytes, None] | JSONResponse:
+    return await _prime_forward_stream(
+        _iter_forward_stream_with_pinning(
+            url=url,
+            payload=payload,
+            headers=headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+        ),
+        ctx=ctx,
+        boundary=boundary,
+    )
 
 
 async def _iter_forward_stream_with_pinning(
@@ -632,7 +749,7 @@ async def _forward_json_passthrough(
     return on_success(upstream_body)
 
 
-def _build_passthrough_stream_response(
+async def _build_passthrough_stream_response(
     *,
     ctx: RequestContext,
     payload: dict[str, Any],
@@ -642,22 +759,27 @@ def _build_passthrough_stream_response(
     host_header: str = "",
     boundary: dict | None,
     log_label: str,
-) -> StreamingResponse:
+) -> StreamingResponse | JSONResponse:
     ctx.enforcement_actions.append("filter_mode:passthrough_direct")
     logger.info(
         "%s bypassed filters request_id=%s mode=passthrough", log_label, ctx.request_id
     )
     uses_messages_sse = ctx.route == "/v1/messages"
+    opened = await _open_pinned_stream(
+        url=upstream_url,
+        payload=payload,
+        headers=forward_headers,
+        connect_urls=connect_urls,
+        host_header=host_header,
+        ctx=ctx,
+        boundary=boundary,
+    )
+    if isinstance(opened, JSONResponse):
+        return opened
 
     async def passthrough_generator() -> AsyncGenerator[bytes, None]:
         try:
-            async for line in _iter_forward_stream_with_pinning(
-                url=upstream_url,
-                payload=payload,
-                headers=forward_headers,
-                connect_urls=connect_urls,
-                host_header=host_header,
-            ):
+            async for line in opened:
                 yield line
         except RuntimeError as exc:
             detail = str(exc)
@@ -3083,18 +3205,6 @@ async def _execute_chat_stream_once(
     host_header = transport.host_header
     forward_headers = transport.forward_headers
 
-    def _iter_transport_lines(
-        prepared: stream_transport.PreparedStreamTransport,
-        forward_payload: dict[str, Any],
-    ) -> AsyncGenerator[bytes, None]:
-        return _iter_forward_stream_with_pinning(
-            url=prepared.upstream_url,
-            payload=forward_payload,
-            headers=prepared.forward_headers,
-            connect_urls=prepared.connect_urls,
-            host_header=prepared.host_header,
-        )
-
     def _runtime_error_chunks(detail: str, reason: str) -> tuple[bytes, bytes]:
         return (
             _stream_error_sse_chunk(detail, code=reason),
@@ -3107,10 +3217,10 @@ async def _execute_chat_stream_once(
             _stream_done_sse_chunk(),
         )
 
-    def _build_passthrough_response(
+    async def _build_passthrough_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        return _build_passthrough_stream_response(
+    ) -> StreamingResponse | JSONResponse:
+        return await _build_passthrough_stream_response(
             ctx=ctx,
             payload=passthrough_payload,
             upstream_url=prepared.upstream_url,
@@ -3121,17 +3231,27 @@ async def _execute_chat_stream_once(
             log_label="chat stream",
         )
 
-    def _build_whitelist_response(
+    async def _build_whitelist_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        def _on_before_stream() -> None:
-            ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
-            ctx.security_tags.add("upstream_whitelist_bypass")
-            logger.info(
-                "chat stream bypassed filters request_id=%s upstream=%s",
-                ctx.request_id,
-                prepared.upstream_base,
-            )
+    ) -> StreamingResponse | JSONResponse:
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        logger.info(
+            "chat stream bypassed filters request_id=%s upstream=%s",
+            ctx.request_id,
+            prepared.upstream_base,
+        )
+        opened_bypass = await _open_pinned_stream(
+            url=prepared.upstream_url,
+            payload=payload,
+            headers=prepared.forward_headers,
+            connect_urls=prepared.connect_urls,
+            host_header=prepared.host_header,
+            ctx=ctx,
+            boundary=boundary,
+        )
+        if isinstance(opened_bypass, JSONResponse):
+            return opened_bypass
 
         return stream_transport.build_bypass_stream_response(
             ctx=ctx,
@@ -3139,17 +3259,16 @@ async def _execute_chat_stream_once(
             transport=prepared,
             audit=audit_once,
             build_streaming_response=_build_streaming_response,
-            iter_forward_stream=_iter_transport_lines,
+            iter_forward_stream=lambda _prepared, _forward_payload: opened_bypass,
             stream_runtime_reason=_stream_runtime_reason,
             runtime_error_chunks=_runtime_error_chunks,
             internal_error_chunks=_internal_error_chunks,
-            on_before_stream=_on_before_stream,
             unexpected_failure_logger=lambda request_id: logger.exception(
                 "chat stream unexpected failure request_id=%s", request_id
             ),
         )
 
-    bypass_response = stream_transport.maybe_build_bypass_stream_response(
+    bypass_response = await stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
         is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
@@ -3218,6 +3337,18 @@ async def _execute_chat_stream_once(
             )
         raise
 
+    opened = await _open_pinned_stream(
+        url=upstream_url,
+        payload=upstream_payload,
+        headers=forward_headers,
+        connect_urls=connect_urls,
+        host_header=host_header,
+        ctx=ctx,
+        boundary=boundary,
+    )
+    if isinstance(opened, JSONResponse):
+        return opened
+
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         pending_frames: list[bytes] = []
@@ -3231,15 +3362,7 @@ async def _execute_chat_stream_once(
         stream_end_reason = "upstream_eof_no_done"
         blocked_reason: str | None = None
         try:
-            async for line in _iter_sse_frames(
-                _iter_forward_stream_with_pinning(
-                    url=upstream_url,
-                    payload=upstream_payload,
-                    headers=forward_headers,
-                    connect_urls=connect_urls,
-                    host_header=host_header,
-                )
-            ):
+            async for line in _iter_sse_frames(opened):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     if blocked_reason:
@@ -3663,18 +3786,6 @@ async def _execute_responses_stream_once(
     host_header = transport.host_header
     forward_headers = transport.forward_headers
 
-    def _iter_transport_lines(
-        prepared: stream_transport.PreparedStreamTransport,
-        forward_payload: dict[str, Any],
-    ) -> AsyncGenerator[bytes, None]:
-        return _iter_forward_stream_with_pinning(
-            url=prepared.upstream_url,
-            payload=forward_payload,
-            headers=prepared.forward_headers,
-            connect_urls=prepared.connect_urls,
-            host_header=prepared.host_header,
-        )
-
     def _runtime_error_chunks(detail: str, reason: str) -> tuple[bytes, bytes]:
         return (
             _stream_error_sse_chunk(detail, code=reason),
@@ -3687,10 +3798,10 @@ async def _execute_responses_stream_once(
             _stream_done_sse_chunk(),
         )
 
-    def _build_passthrough_response(
+    async def _build_passthrough_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        return _build_passthrough_stream_response(
+    ) -> StreamingResponse | JSONResponse:
+        return await _build_passthrough_stream_response(
             ctx=ctx,
             payload=passthrough_payload,
             upstream_url=prepared.upstream_url,
@@ -3701,17 +3812,27 @@ async def _execute_responses_stream_once(
             log_label="responses stream",
         )
 
-    def _build_whitelist_response(
+    async def _build_whitelist_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        def _on_before_stream() -> None:
-            ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
-            ctx.security_tags.add("upstream_whitelist_bypass")
-            logger.info(
-                "responses stream bypassed filters request_id=%s upstream=%s",
-                ctx.request_id,
-                prepared.upstream_base,
-            )
+    ) -> StreamingResponse | JSONResponse:
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        logger.info(
+            "responses stream bypassed filters request_id=%s upstream=%s",
+            ctx.request_id,
+            prepared.upstream_base,
+        )
+        opened_bypass = await _open_pinned_stream(
+            url=prepared.upstream_url,
+            payload=payload,
+            headers=prepared.forward_headers,
+            connect_urls=prepared.connect_urls,
+            host_header=prepared.host_header,
+            ctx=ctx,
+            boundary=boundary,
+        )
+        if isinstance(opened_bypass, JSONResponse):
+            return opened_bypass
 
         return stream_transport.build_bypass_stream_response(
             ctx=ctx,
@@ -3719,17 +3840,16 @@ async def _execute_responses_stream_once(
             transport=prepared,
             audit=audit_once,
             build_streaming_response=_build_streaming_response,
-            iter_forward_stream=_iter_transport_lines,
+            iter_forward_stream=lambda _prepared, _forward_payload: opened_bypass,
             stream_runtime_reason=_stream_runtime_reason,
             runtime_error_chunks=_runtime_error_chunks,
             internal_error_chunks=_internal_error_chunks,
-            on_before_stream=_on_before_stream,
             unexpected_failure_logger=lambda request_id: logger.exception(
                 "responses stream unexpected failure request_id=%s", request_id
             ),
         )
 
-    bypass_response = stream_transport.maybe_build_bypass_stream_response(
+    bypass_response = await stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
         is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
@@ -3812,6 +3932,18 @@ async def _execute_responses_stream_once(
         _payload_bytes,
     )
 
+    opened = await _open_pinned_stream(
+        url=upstream_url,
+        payload=upstream_payload,
+        headers=forward_headers,
+        connect_urls=connect_urls,
+        host_header=host_header,
+        ctx=ctx,
+        boundary=boundary,
+    )
+    if isinstance(opened, JSONResponse):
+        return opened
+
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         pending_frames: list[bytes] = []
@@ -3827,15 +3959,7 @@ async def _execute_responses_stream_once(
         failure_terminal_logged = False
         terminal_no_text_logged = False
         try:
-            async for line in _iter_sse_frames(
-                _iter_forward_stream_with_pinning(
-                    url=upstream_url,
-                    payload=upstream_payload,
-                    headers=forward_headers,
-                    connect_urls=connect_urls,
-                    host_header=host_header,
-                )
-            ):
+            async for line in _iter_sse_frames(opened):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     if blocked_reason:
@@ -5055,28 +5179,16 @@ async def _execute_messages_stream_once(
     host_header = transport.host_header
     forward_headers = transport.forward_headers
 
-    def _iter_transport_lines(
-        prepared: stream_transport.PreparedStreamTransport,
-        forward_payload: dict[str, Any],
-    ) -> AsyncGenerator[bytes, None]:
-        return _iter_forward_stream_with_pinning(
-            url=prepared.upstream_url,
-            payload=forward_payload,
-            headers=prepared.forward_headers,
-            connect_urls=prepared.connect_urls,
-            host_header=prepared.host_header,
-        )
-
     def _runtime_error_chunks(detail: str, reason: str) -> tuple[bytes]:
         return (_stream_messages_error_sse_chunk(detail, code=reason),)
 
     def _internal_error_chunks(detail: str) -> tuple[bytes]:
         return (_stream_messages_error_sse_chunk(detail, code="gateway_internal_error"),)
 
-    def _build_passthrough_response(
+    async def _build_passthrough_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        return _build_passthrough_stream_response(
+    ) -> StreamingResponse | JSONResponse:
+        return await _build_passthrough_stream_response(
             ctx=ctx,
             payload=passthrough_payload,
             upstream_url=prepared.upstream_url,
@@ -5087,12 +5199,22 @@ async def _execute_messages_stream_once(
             log_label="messages stream",
         )
 
-    def _build_whitelist_response(
+    async def _build_whitelist_response(
         prepared: stream_transport.PreparedStreamTransport,
-    ) -> StreamingResponse:
-        def _on_before_stream() -> None:
-            ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
-            ctx.security_tags.add("upstream_whitelist_bypass")
+    ) -> StreamingResponse | JSONResponse:
+        ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
+        ctx.security_tags.add("upstream_whitelist_bypass")
+        opened_bypass = await _open_pinned_stream(
+            url=prepared.upstream_url,
+            payload=passthrough_payload,
+            headers=prepared.forward_headers,
+            connect_urls=prepared.connect_urls,
+            host_header=prepared.host_header,
+            ctx=ctx,
+            boundary=boundary,
+        )
+        if isinstance(opened_bypass, JSONResponse):
+            return opened_bypass
 
         return stream_transport.build_bypass_stream_response(
             ctx=ctx,
@@ -5100,17 +5222,16 @@ async def _execute_messages_stream_once(
             transport=prepared,
             audit=audit_once,
             build_streaming_response=_build_streaming_response,
-            iter_forward_stream=_iter_transport_lines,
+            iter_forward_stream=lambda _prepared, _forward_payload: opened_bypass,
             stream_runtime_reason=_stream_runtime_reason,
             runtime_error_chunks=_runtime_error_chunks,
             internal_error_chunks=_internal_error_chunks,
-            on_before_stream=_on_before_stream,
             unexpected_failure_logger=lambda request_id: logger.exception(
                 "messages stream unexpected failure request_id=%s", request_id
             ),
         )
 
-    bypass_response = stream_transport.maybe_build_bypass_stream_response(
+    bypass_response = await stream_transport.maybe_build_bypass_stream_response(
         transport=transport,
         filter_mode=filter_mode,
         is_upstream_whitelisted=lambda base: _should_bypass_filters_for_whitelist(
@@ -5163,6 +5284,18 @@ async def _execute_messages_stream_once(
         raise
     base_reports = list(ctx.report_items)
 
+    opened = await _open_pinned_stream(
+        url=upstream_url,
+        payload=upstream_payload,
+        headers=forward_headers,
+        connect_urls=connect_urls,
+        host_header=host_header,
+        ctx=ctx,
+        boundary=boundary,
+    )
+    if isinstance(opened, JSONResponse):
+        return opened
+
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         chunk_count = 0
@@ -5189,15 +5322,7 @@ async def _execute_messages_stream_once(
             return frame
 
         try:
-            async for line in _iter_sse_frames(
-                _iter_forward_stream_with_pinning(
-                    url=upstream_url,
-                    payload=upstream_payload,
-                    headers=forward_headers,
-                    connect_urls=connect_urls,
-                    host_header=host_header,
-                )
-            ):
+            async for line in _iter_sse_frames(opened):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     while pending_frames:
@@ -5872,7 +5997,7 @@ async def _execute_generic_stream_once(
     )
 
     if filter_mode == "passthrough":
-        return _build_passthrough_stream_response(
+        return await _build_passthrough_stream_response(
             ctx=ctx,
             payload=payload,
             upstream_url=upstream_url,
@@ -5886,16 +6011,21 @@ async def _execute_generic_stream_once(
     if _should_bypass_filters_for_whitelist(upstream_base, boundary):
         ctx.enforcement_actions.append("upstream_whitelist:direct_allow")
         ctx.security_tags.add("upstream_whitelist_bypass")
+        opened_bypass = await _open_pinned_stream(
+            url=upstream_url,
+            payload=payload,
+            headers=forward_headers,
+            connect_urls=connect_urls,
+            host_header=host_header,
+            ctx=ctx,
+            boundary=boundary,
+        )
+        if isinstance(opened_bypass, JSONResponse):
+            return opened_bypass
 
         async def whitelist_generator() -> AsyncGenerator[bytes, None]:
             try:
-                async for line in _iter_forward_stream_with_pinning(
-                    url=upstream_url,
-                    payload=payload,
-                    headers=forward_headers,
-                    connect_urls=connect_urls,
-                    host_header=host_header,
-                ):
+                async for line in opened_bypass:
                     yield line
             except RuntimeError as exc:
                 detail = str(exc)
@@ -5993,6 +6123,18 @@ async def _execute_generic_stream_once(
 
     base_reports = list(ctx.report_items)
 
+    opened = await _open_pinned_stream(
+        url=upstream_url,
+        payload=upstream_payload,
+        headers=forward_headers,
+        connect_urls=connect_urls,
+        host_header=host_header,
+        ctx=ctx,
+        boundary=boundary,
+    )
+    if isinstance(opened, JSONResponse):
+        return opened
+
     async def guarded_generator() -> AsyncGenerator[bytes, None]:
         stream_window = ""
         chunk_count = 0
@@ -6039,15 +6181,7 @@ async def _execute_generic_stream_once(
             ]
 
         try:
-            async for line in _iter_sse_frames(
-                _iter_forward_stream_with_pinning(
-                    url=upstream_url,
-                    payload=upstream_payload,
-                    headers=forward_headers,
-                    connect_urls=connect_urls,
-                    host_header=host_header,
-                )
-            ):
+            async for line in _iter_sse_frames(opened):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
                     yield line
