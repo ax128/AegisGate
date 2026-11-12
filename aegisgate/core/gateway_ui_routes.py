@@ -408,6 +408,35 @@ def _forward_write_error(exc: Exception) -> JSONResponse | None:
     return None
 
 
+# Browser default for a cookie with no Path is `/`, so the console session used
+# to be attached to /v1 and /v2 as well. Keep it on the console prefix. Logout
+# also expires the legacy Path=/ cookie so an already-open session is cleared.
+_UI_SESSION_COOKIE_PATH = "/__ui__"
+
+
+def _set_ui_session_cookie(response: Response, value: str) -> None:
+    response.set_cookie(
+        key=_UI_SESSION_COOKIE,
+        value=value,
+        max_age=settings.local_ui_session_ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.local_ui_secure_cookie,
+        path=_UI_SESSION_COOKIE_PATH,
+    )
+
+
+def _clear_ui_session_cookie(response: Response) -> None:
+    for path in (_UI_SESSION_COOKIE_PATH, "/"):
+        response.delete_cookie(
+            _UI_SESSION_COOKIE,
+            path=path,
+            httponly=True,
+            samesite="lax",
+            secure=settings.local_ui_secure_cookie,
+        )
+
+
 def register_ui_routes(app: FastAPI) -> None:
     """Register all UI, key management, rules CRUD, and compose endpoints on *app*."""
 
@@ -560,20 +589,13 @@ def register_ui_routes(app: FastAPI) -> None:
         if not key_ok:
             return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
         response = JSONResponse(content={"ok": True})
-        response.set_cookie(
-            key=_UI_SESSION_COOKIE,
-            value=_create_ui_session_token(request),
-            max_age=settings.local_ui_session_ttl_seconds,
-            httponly=True,
-            samesite="lax",
-            secure=settings.local_ui_secure_cookie,
-        )
+        _set_ui_session_cookie(response, _create_ui_session_token(request))
         return response
 
     @app.post("/__ui__/api/logout")
     async def local_ui_logout() -> JSONResponse:
         response = JSONResponse(content={"ok": True})
-        response.delete_cookie(_UI_SESSION_COOKIE)
+        _clear_ui_session_cookie(response)
         return response
 
     # ------------------------------------------------------------------
@@ -868,14 +890,7 @@ def register_ui_routes(app: FastAPI) -> None:
                 "ok": True, "type": key_type, "rotated": True,
                 "csrf_token": new_csrf,
             })
-            response.set_cookie(
-                key=_UI_SESSION_COOKIE,
-                value=new_session,
-                max_age=settings.local_ui_session_ttl_seconds,
-                httponly=True,
-                samesite="lax",
-                secure=settings.local_ui_secure_cookie,
-            )
+            _set_ui_session_cookie(response, new_session)
             write_audit({
                 "event": "ui_key_rotated",
                 "route": f"/__ui__/api/keys/{key_type}/rotate",

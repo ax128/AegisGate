@@ -9,6 +9,14 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（控制台会话 cookie 限定在 /__ui__）
+
+- **控制台会话 cookie 限定在 `/__ui__`，并在每次转发给上游之前剥离。**
+  登录和网关密钥轮换签发的 `aegis_ui_session` 此前没有 `Path`，浏览器按 `/` 保存。
+  同一浏览器再访问 `/v1/*` 或 `/v2/*` 时，会把控制台会话 cookie 发给第三方上游。
+  现在 `Set-Cookie` 带 `Path=/__ui__`。登出同时清除这条，以及升级前已经落在 `Path=/` 的旧 cookie。
+  V1 普通转发、整域名转发、V2 代理在组上游请求头时都会丢掉名为 `aegis_ui_*` 的 cookie；其它 cookie 原样保留。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

@@ -375,6 +375,12 @@ def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
     if not any(name.lower() == "content-type" for name in forwarded):
         forwarded["Content-Type"] = "application/json"
+    # Every V1 upstream send comes through here, including ordinary /v1 calls
+    # that never matched a host-forward rule. The forward-rule branch strips
+    # earlier; this call covers the rest. Other cookies stay.
+    from aegisgate.core.forward_routes import strip_gateway_cookies
+
+    strip_gateway_cookies(forwarded)
     return forwarded
 
 
