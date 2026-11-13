@@ -113,3 +113,61 @@ def test_logout_rejects_replayed_session_cookie(monkeypatch: pytest.MonkeyPatch)
             headers=_replay_headers(other),
         )
         assert survivor.status_code == 200, survivor.text
+
+
+def test_logout_revokes_authenticated_cookie_when_a_later_duplicate_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The header lists the live session first and another session last.
+
+    Starlette's cookie dict keeps the last name. Logout has to revoke the
+    session ``_ui_session_token`` accepted, and leave the other session usable.
+    """
+    _install_fake_gateway_key(monkeypatch)
+    with TestClient(_ui_app(), client=("127.0.0.88", 50000)) as client:
+        first = client.post(
+            "/__ui__/api/login",
+            json={"password": _FAKE_GATEWAY_KEY},
+            headers={"user-agent": _USER_AGENT},
+        )
+        assert first.status_code == 200, first.text
+        live = _session_value(first)
+
+        client.cookies.clear()
+        opened = client.get(
+            "/__ui__/api/bootstrap",
+            headers=_replay_headers(live),
+        )
+        assert opened.status_code == 200, opened.text
+        csrf = opened.json()["ui"]["csrf_token"]
+
+        second = client.post(
+            "/__ui__/api/login",
+            json={"password": _FAKE_GATEWAY_KEY},
+            headers={"user-agent": _USER_AGENT},
+        )
+        assert second.status_code == 200, second.text
+        other = _session_value(second)
+
+        client.cookies.clear()
+        headers = _replay_headers(live, csrf)
+        headers["cookie"] = f"{_SESSION_COOKIE}={live}; {_SESSION_COOKIE}={other}"
+        logged_out = client.post("/__ui__/api/logout", headers=headers)
+        assert logged_out.status_code == 200, logged_out.text
+
+        client.cookies.clear()
+        replay = client.get(
+            "/__ui__/api/bootstrap",
+            headers=_replay_headers(live),
+        )
+        assert replay.status_code == 401, (
+            "authenticated session was not revoked: "
+            f"{replay.status_code} {replay.text}"
+        )
+
+        client.cookies.clear()
+        survivor = client.get(
+            "/__ui__/api/bootstrap",
+            headers=_replay_headers(other),
+        )
+        assert survivor.status_code == 200, survivor.text
