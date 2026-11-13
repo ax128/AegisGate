@@ -99,6 +99,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _forward_multipart_pinned,
     _forward_stream_lines,
     _forward_stream_lines_pinned,
+    _request_already_sent,
     _should_bypass_filters_for_whitelist,
     _resolve_upstream_base,
     _safe_error_detail,
@@ -406,6 +407,10 @@ async def _iter_forward_stream_with_pinning(
         except RuntimeError as exc:
             detail = str(exc)
             if yielded_any:
+                raise
+            # Pinned failover already refused to switch targets because the POST
+            # had left. A bootstrap retry would send that same request again.
+            if connect_urls and _request_already_sent(exc):
                 raise
             if attempt >= max_retries:
                 raise
@@ -906,6 +911,52 @@ def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
     if error:
         return f"[status={status} error={json.dumps(error, ensure_ascii=False)[:300]}]"
     return f"[status={status}]"
+
+
+def _extract_messages_output_text(body: dict[str, Any] | str) -> str:
+    """Assistant text for the non-streaming messages response scan.
+
+    The generic walker stops at ``_GENERIC_EXTRACT_MAX_CHARS`` (16k), so a hit
+    later in the same answer never reached the response filters. Chat and
+    responses already pass the full answer through and let ``_cap_response_text``
+    apply ``max_response_length``. This extractor does that for ``content[]``
+    text and ``tool_use.input`` (JSON). Streaming keeps its own sliding window.
+    """
+    if isinstance(body, str):
+        return body
+    if not isinstance(body, dict):
+        return ""
+    content = body.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    chunks: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            if block:
+                chunks.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip().lower() == "tool_use":
+            if "input" not in block:
+                continue
+            raw_input = block.get("input")
+            if isinstance(raw_input, str):
+                serialized = raw_input
+            elif raw_input is None:
+                serialized = ""
+            else:
+                serialized = json.dumps(raw_input, ensure_ascii=False, default=str)
+            if serialized:
+                chunks.append(serialized)
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+    return "\n".join(chunks)
 
 
 def _coerce_responses_stream_to_chat_stream(
@@ -5752,7 +5803,7 @@ async def _execute_messages_once(
         return execution_common.Continue(upstream_body)
 
     async def response_stage(upstream_body: dict[str, Any] | str):
-        upstream_text = _extract_generic_analysis_text(upstream_body)
+        upstream_text = _extract_messages_output_text(upstream_body)
         capped_upstream_text = _cap_response_text(upstream_text, ctx)
         internal_resp = InternalResponse(
             request_id=req.request_id,

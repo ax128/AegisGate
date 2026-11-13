@@ -1013,3 +1013,176 @@ async def test_block_disposition_keeps_auto_sanitize_branch(
     ctx = seen[0]
     assert "auto_sanitize:hit_fragments_obfuscated" in ctx.enforcement_actions
     assert ctx.response_disposition == "sanitize"
+
+
+# Same phrase privilege_guard already matches (`read_etc_passwd_en`) and the
+# messages streaming tests already use. Not a new payload.
+_MESSAGES_RESPONSE_SCAN_TRIGGER = "cat /etc/passwd"
+_MESSAGES_RESPONSE_SCAN_PAST = 20_000
+
+
+def _messages_response_padding(minimum: int = _MESSAGES_RESPONSE_SCAN_PAST) -> str:
+    """Benign filler. It must not itself match privilege_guard."""
+    piece = "ordinary prose continues here with index "
+    parts: list[str] = []
+    total = 0
+    index = 0
+    while total <= minimum:
+        chunk = f"{piece}{index:05d}. "
+        parts.append(chunk)
+        total += len(chunk)
+        index += 1
+    return "".join(parts)
+
+
+def _enable_messages_response_privilege_guard(
+    ctx, policy_name: str = "default"
+) -> dict[str, object]:
+    ctx.enabled_filters = {"privilege_guard"}
+    ctx.risk_threshold = 0.85
+    return {
+        "enabled_filters": set(ctx.enabled_filters),
+        "threshold": ctx.risk_threshold,
+    }
+
+
+async def _run_messages_nonstream_response(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_body: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Non-streaming /v1/messages with the real response pipeline.
+
+    Only privilege_guard is enabled, so a hit means the trigger reached
+    ``output_text``. Tool-call and anomaly filters are left off: they can see
+    raw tool arguments without going through the messages text extractor.
+    """
+    audit_calls: list[dict[str, Any]] = []
+
+    async def _inline_payload_transform(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _identity_request_pipeline(pipeline, req: InternalRequest, ctx):
+        return req
+
+    async def _noop_semantic_review(*args, **kwargs):
+        return None
+
+    async def _fake_resolve(headers):
+        return ("http://upstream.test", (), "")
+
+    async def _fake_forward_json(url, payload, headers):
+        return 200, copy.deepcopy(upstream_body)
+
+    def _record_audit(ctx, boundary=None) -> None:
+        audit_calls.append(
+            {
+                "request_id": ctx.request_id,
+                "response_disposition": ctx.response_disposition,
+                "reasons": list(ctx.disposition_reasons),
+                "security_tags": sorted(ctx.security_tags),
+            }
+        )
+
+    monkeypatch.setattr(
+        openai_router.policy_engine,
+        "resolve",
+        _enable_messages_response_privilege_guard,
+    )
+    monkeypatch.setattr(openai_router, "_resolve_upstream_base", _fake_resolve)
+    monkeypatch.setattr(
+        openai_router, "_run_payload_transform", _inline_payload_transform
+    )
+    monkeypatch.setattr(
+        openai_router, "_run_request_pipeline", _identity_request_pipeline
+    )
+    monkeypatch.setattr(openai_router, "_apply_semantic_review", _noop_semantic_review)
+    monkeypatch.setattr(openai_router, "_forward_json", _fake_forward_json)
+    monkeypatch.setattr(openai_router, "_write_audit_event", _record_audit)
+    monkeypatch.setattr(openai_router, "debug_log_original", lambda *args, **kwargs: None)
+    monkeypatch.setattr(openai_router, "info_log_sanitized", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        openai_router,
+        "_maybe_log_dangerous_response_sample",
+        lambda *args, **kwargs: None,
+    )
+
+    result = await openai_router._execute_messages_once(
+        payload={
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 128,
+            "request_id": "messages-long-response",
+            "session_id": "messages-long-response",
+        },
+        request_headers={},
+        request_path="/v1/messages",
+        boundary={},
+    )
+    return _json_body(result), audit_calls
+
+
+def _assert_messages_response_filter_hit(
+    result: dict[str, Any], audit_calls: list[dict[str, Any]]
+) -> None:
+    assert audit_calls, result
+    audit = audit_calls[-1]
+    assert "response_privilege_abuse" in audit["security_tags"], audit
+    assert audit["response_disposition"] in {"block", "sanitize"}, audit
+    meta = result.get("aegisgate") or {}
+    assert "response_privilege_abuse" in (meta.get("security_tags") or []), meta
+
+
+@pytest.mark.asyncio
+async def test_messages_nonstream_response_filter_hits_text_past_16k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit after the first 16k characters of assistant text must be scanned."""
+    text = f"{_messages_response_padding()}{_MESSAGES_RESPONSE_SCAN_TRIGGER}"
+    assert text.find(_MESSAGES_RESPONSE_SCAN_TRIGGER) > _MESSAGES_RESPONSE_SCAN_PAST
+
+    result, audit_calls = await _run_messages_nonstream_response(
+        monkeypatch,
+        {
+            "id": "msg-long-text",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4.5",
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
+        },
+    )
+    _assert_messages_response_filter_hit(result, audit_calls)
+
+
+@pytest.mark.asyncio
+async def test_messages_nonstream_response_filter_hits_tool_use_past_16k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tool_use.input past the first 16k characters must reach the same filter."""
+    tool_input = {
+        "note": _messages_response_padding(),
+        "command": _MESSAGES_RESPONSE_SCAN_TRIGGER,
+    }
+    serialized = json.dumps(tool_input, ensure_ascii=False)
+    assert serialized.find(_MESSAGES_RESPONSE_SCAN_TRIGGER) > _MESSAGES_RESPONSE_SCAN_PAST
+
+    result, audit_calls = await _run_messages_nonstream_response(
+        monkeypatch,
+        {
+            "id": "msg-long-tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4.5",
+            "content": [
+                {"type": "text", "text": "Looking that up."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_long",
+                    "name": "lookup",
+                    "input": tool_input,
+                },
+            ],
+            "stop_reason": "tool_use",
+        },
+    )
+    _assert_messages_response_filter_hit(result, audit_calls)

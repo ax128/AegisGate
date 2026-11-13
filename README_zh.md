@@ -326,7 +326,7 @@ AegisGate 是独立的安全代理层，**不管理也不约束上游服务**。
 | `x-aegis-request-id` | 网关 -> 上游 | 网关注入到上游请求中的追踪关联 ID。客户端无需设置，会出现在上游请求头和网关日志中。 |
 | `x-aegis-filter-mode` | 网关内部 | 由 token URL 后缀（`__redact` / `__passthrough`）解析后重新注入。客户端自带该 Header 会被剥离。 |
 | `x-aegis-redaction-whitelist` | 网关内部 | 由 token 绑定中的 `whitelist_key` 生成并注入。客户端自带该 Header 会被剥离或忽略。 |
-| `x-aegis-proxy-token` | 反向代理 -> 网关 | 可选的「代理↔网关」互信凭据，取值为 `config/aegis_proxy_token.key`（首启自动生成，权限 `0600`）。校验通过时，非 token 的 `/v1/...` 与 `/v2/...` 请求**不再检查来源 IP 是否内网**，直接按 `AEGIS_UPSTREAM_BASE_URL` 转发——即它会解除下文 §2.0 的「仅内网」限制。该 key 等价于放行公网直连 `/v1` 的凭据，需与网关密钥同等保管与轮换，且绝不能下发给客户端。用法见 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。 |
+| `x-aegis-proxy-token` | 反向代理 -> 网关 | 可选的「代理↔网关」互信凭据，取值为 `config/aegis_proxy_token.key`（首启自动生成，权限 `0600`）。校验通过时，非 token 的 `/v1/...` 与 `/v2/...` 请求**不再检查来源 IP 是否内网**，直接按 `AEGIS_UPSTREAM_BASE_URL` 转发——即它会解除下文 §2.0 的「仅内网」限制。该 key 等价于放行公网直连 `/v1` 的凭据，需与网关密钥同等保管与轮换，且绝不能下发给客户端。控制台轮换在写文件成功后对网关进程立即生效；Caddy 仍只在启动时读一次，因此 Caddy 转发的请求在 Caddy 重载前不会自动换成新 token。用法见 [Caddyfile.example](Caddyfile.example) 与 `scripts/caddy-entrypoint.sh`。 |
 
 补充：
 
@@ -649,6 +649,8 @@ UI:  http://127.0.0.1:18080/__ui__/login
 ```
 
 > **登录说明**：本地 UI 默认仅允许 loopback 访问，登录密码为 `config/aegis_gateway.key` 文件内容；如需允许内网访问，显式设置 `AEGIS_LOCAL_UI_ALLOW_INTERNAL_NETWORK=true`。
+>
+> **密钥轮换**：控制台轮换 `config/aegis_proxy_token.key` 时，网关进程内的 proxy token 在写文件成功后立即生效。Caddy 仍只在启动时读一次该 token，因此 Caddy 转发的请求在 Caddy 重载前不会自动换成新 token。已设置 `AEGIS_ENCRYPTION_KEY` 时控制台拒绝轮换 Fernet 密钥（运行时读的是环境变量，写文件不会生效）；上一把 Fernet 密钥保存失败时轮换中止，当前密钥文件保持不变。
 
 说明：
 
@@ -803,6 +805,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 
 ## 5. 关键环境变量
 
+`docker-compose.yml` 的 `environment:` 已经设置的键在 `config/.env.example` 里保持注释，复制示例不会给它们赋值，控制台保存时也就不会盖掉 Compose。这些键是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、`AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、`AEGIS_AUDIT_LOG_PATH`。裸机需要不同取值时再取消注释。表中的默认值是键未设置时的代码默认值。`AEGIS_ENFORCE_LOOPBACK_ONLY` 启动后即固定；上面其余键若出现在 `config/.env` 里，热重载会采用文件中的值。
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
@@ -811,7 +814,7 @@ docker run --rm --network $(basename "$PWD")_default curlimages/curl:8.10.1 \
 | `AEGIS_LOG_LEVEL` | 日志等级 | `info` |
 | `AEGIS_LOG_FULL_REQUEST_BODY` | DEBUG 下是否打印完整请求体 | `false` |
 | `AEGIS_ENFORCE_LOOPBACK_ONLY` | 仅允许本机访问 | `true` |
-| `AEGIS_TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔，支持 CIDR 如 `172.16.0.0/12`）；仅这些 IP 的 XFF 会被信任。本机 Caddy 可设 `127.0.0.1`。改此项需重启；`AEGIS_XFF_STRICT_INTERNAL=false` **回滚不了**它对 `_real_client_ip` / 限流键的影响。uvicorn 需带 `--no-proxy-headers` 启动（launcher 与 Dockerfile 已带）：它自己的默认行为信任 127.0.0.1，会在网关之前用 `X-Forwarded-For` 替换对端 | 空 |
+| `AEGIS_TRUSTED_PROXY_IPS` | 可信反向代理 IP（逗号分隔，支持 CIDR 如 `172.16.0.0/12`）；仅这些 IP 的 XFF 会被信任，并且从右向左跳过仍是受信代理的跳。本机 Caddy 可设 `127.0.0.1`。nginx 请写 `proxy_set_header X-Forwarded-For $remote_addr;`（与 Caddy 的 `{remote_host}` 一样覆盖客户端自带的值）。改此项需重启；`AEGIS_XFF_STRICT_INTERNAL=false` **回滚不了**它对 `_real_client_ip` / 限流键的影响。uvicorn 需带 `--no-proxy-headers` 启动（launcher 与 Dockerfile 已带）：它自己的默认行为信任 127.0.0.1，会在网关之前用 `X-Forwarded-For` 替换对端 | 空 |
 | `AEGIS_XFF_STRICT_INTERNAL` | 存在 XFF 且直连非可信代理时，将 admin / 默认 `/v1` / UI / `AEGIS_UPSTREAM_WHITELIST_URL_LIST` 旁路视为公网。置 `false` 可临时回到旧判定。需重启 | `true` |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | 开启 HMAC 验签 | `false` |
 | `AEGIS_UPSTREAM_BASE_URL` | v1 默认上游（仅 localhost / 内网客户端可直连 `/v1/...`） | 空 |
