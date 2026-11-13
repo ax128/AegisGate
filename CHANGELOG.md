@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（热重载不再掐断在途的 V1 上游流）
+
+- **只有上游超时或连接池上限变化时才更换共享的 V1 上游 client，并推迟关闭旧 client。**
+  控制台保存任意配置都会改写 `config/.env`，热重载此前都会立刻 `aclose()` 这条共享连接，把正在传输的 LLM 流一起断开。这条 client 实际只用 `upstream_timeout_seconds`、`upstream_max_connections`、`upstream_max_keepalive_connections`。
+  现在仅这三项发生变化时才摘下旧 client：新请求立刻走新 client，旧 client 在已经生效的 `upstream_timeout_seconds + 5` 秒后再关闭。只改日志级别或其他配置不会动它。
+
 ### Security（UI 鉴权与路由使用同一条路径）
 
 - **带 `.` 或 `..` 路径段的请求直接返回 400 `invalid_path`，公开 UI 判断不再调用 `normpath`。**
