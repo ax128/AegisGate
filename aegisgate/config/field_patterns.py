@@ -16,6 +16,7 @@ from typing import Any
 
 from aegisgate.config.security_rules import rule_enabled
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 
 FIELD_VALUE_MIN_LEN_FLOOR = 8
 DEFAULT_FIELD_VALUE_MIN_LEN = 12
@@ -90,12 +91,12 @@ def field_pattern_entries(
 
 def compile_field_value_patterns(
     rules: Mapping[str, Any] | None,
-) -> list[tuple[str, re.Pattern[str]]]:
+) -> list[tuple[str, RulePattern]]:
     """Compile :func:`field_pattern_entries` with ``re.IGNORECASE``."""
-    compiled: list[tuple[str, re.Pattern[str]]] = []
+    compiled: list[tuple[str, RulePattern]] = []
     for pattern_id, regex in field_pattern_entries(rules):
         try:
-            compiled.append((pattern_id, re.compile(str(regex), re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(str(regex), re.IGNORECASE)))
         except re.error as exc:
             excerpt = str(regex)
             if len(excerpt) > 80:

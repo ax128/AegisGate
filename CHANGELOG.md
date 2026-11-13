@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（规则正则改为线性时间匹配）
+
+- **规则匹配改为线性时间。** 带顶层无界间隔（`.*` / `.+` / `[\s\S]*` 等）的规则由
+  `compile_rule_regex` 按段搜索，不再走 CPython 的多项式回溯。命中判定不变：是否命中，
+  以及 `match.start()`，与原正则一致。命中区间的结束位置改为链条最早凑齐处，不再延伸到
+  贪婪匹配的最远处。遮罩、恢复后替换和注入证据摘录因此变短，拦截决策不变。
+
 ### Security（控制台登出撤销当前会话）
 
 - **`POST /__ui__/api/logout` 会使刚才那枚 UI 会话 cookie 立即不能再通过校验。**
