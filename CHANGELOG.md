@@ -16,6 +16,19 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   长值（例如 JWT）换成短占位符后，后面的密钥会左移进旧区间，从而被原样放行；短值换成更长的占位符时，白名单中的值会右移出旧区间，从而被误脱敏。
   白名单为空时不额外重算，未配置白名单的请求行为不变。
 
+### Security（控制台 .env 写入拒绝换行注入）
+
+- **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
+  字符串此前只做 `strip()`，再按 `KEY=value` 写入。值里一旦含有这三种字符，管理员会话就能把控制台不开放的键写进 `.env`，例如 `AEGIS_GATEWAY_KEY`、`AEGIS_ENFORCE_LOOPBACK_ONLY`。
+  现在这类提交返回 400 `invalid_field_value`（`invalid value for <字段>`），文件不会被改写；落盘前再检查一次。只拒绝这三种字符，其它值的保存行为不变。
+
+### Security（安全披露渠道）
+
+- **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
+  更早的版本不受支持。没有公开安全邮箱；尚未修复的漏洞请经 GitHub Private vulnerability reporting
+  私下报告（https://github.com/ax128/AegisGate/security/advisories/new），不要发到公开 issue。
+  维护者在 7 天内确认收到。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
