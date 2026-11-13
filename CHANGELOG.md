@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（HMAC nonce 在验签通过后才记录）
+
+- **未签名的请求不再占用 nonce。** 此前先把 nonce 写入缓存再验签名，签名错误的请求也会占住这条 nonce：攻击者可以抢先占用合法客户端将要使用的值，或把缓存刷满挤掉真实 nonce，从而打开重放窗口。现在先校验时间戳和签名，通过后才 `check_and_store`。
+- **超过 128 个字符的 nonce 返回 400**（`hmac_nonce_too_long`）。`n-ok`、`n-replay` 这类短 nonce 的通过与重放行为不变。
+- 内存 nonce 缓存只从最旧的一端弹出已过期项，遇到未过期即停止，避免每个请求扫描整张表。容量上限仍会淘汰最旧条目。
+
 ### Fixed（空还原映射不再被 TTL 判过期）
 
 - **空的还原映射不再因 TTL 被判过期。** `redaction_created_at` 默认是上下文创建时间，只在真正写入脱敏映射时重置。以前还原阶段先看这个时间戳：流持续超过 `restore_ttl_seconds`（默认 1800 秒）且 mapping 为空时，会被记上 `restoration_stale_mapping` 并把风险分抬到 0.95，长流因此被拦截。现在只在 mapping 非空时检查 TTL；非空且超过 TTL 的映射仍按 `stale_mapping` 拦截。判定放在解析 mapping 之后，过期拒绝会清掉已经取出的那份，不再把存储副本留到下一次。
