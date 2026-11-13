@@ -166,6 +166,19 @@ def get_proxy_token_value() -> str:
         return _proxy_token_value
 
 
+def set_proxy_token_value(new: str) -> None:
+    """Install *new* as the proxy token enforced by this process.
+
+    Console rotation writes ``aegis_proxy_token.key`` and then calls this.
+    ``get_proxy_token_value`` reads the cache filled at startup, so a file-only
+    rotation left the previous token valid until the process restarted.
+    """
+    global _proxy_token_value
+
+    with _proxy_token_lock:
+        _proxy_token_value = new
+
+
 # ---------------------------------------------------------------------------
 # Shared validation constants (used by gateway.py and gateway_ui_routes.py)
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ from aegisgate.adapters.openai_compat.forwarding_gate import (
 from aegisgate.adapters.openai_compat.offload import (
     run_filter_pipeline_offloop,
     run_payload_transform_offloop,
+    run_request_redaction_offloop,
 )
 from aegisgate.adapters.openai_compat.payload_compat import (
     sanitize_for_chat,
@@ -98,6 +99,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _forward_multipart_pinned,
     _forward_stream_lines,
     _forward_stream_lines_pinned,
+    _request_already_sent,
     _should_bypass_filters_for_whitelist,
     _resolve_upstream_base,
     _safe_error_detail,
@@ -405,6 +407,10 @@ async def _iter_forward_stream_with_pinning(
         except RuntimeError as exc:
             detail = str(exc)
             if yielded_any:
+                raise
+            # Pinned failover already refused to switch targets because the POST
+            # had left. A bootstrap retry would send that same request again.
+            if connect_urls and _request_already_sent(exc):
                 raise
             if attempt >= max_retries:
                 raise
@@ -905,6 +911,52 @@ def _extract_responses_output_text(upstream_body: dict[str, Any] | str) -> str:
     if error:
         return f"[status={status} error={json.dumps(error, ensure_ascii=False)[:300]}]"
     return f"[status={status}]"
+
+
+def _extract_messages_output_text(body: dict[str, Any] | str) -> str:
+    """Assistant text for the non-streaming messages response scan.
+
+    The generic walker stops at ``_GENERIC_EXTRACT_MAX_CHARS`` (16k), so a hit
+    later in the same answer never reached the response filters. Chat and
+    responses already pass the full answer through and let ``_cap_response_text``
+    apply ``max_response_length``. This extractor does that for ``content[]``
+    text and ``tool_use.input`` (JSON). Streaming keeps its own sliding window.
+    """
+    if isinstance(body, str):
+        return body
+    if not isinstance(body, dict):
+        return ""
+    content = body.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    chunks: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            if block:
+                chunks.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip().lower() == "tool_use":
+            if "input" not in block:
+                continue
+            raw_input = block.get("input")
+            if isinstance(raw_input, str):
+                serialized = raw_input
+            elif raw_input is None:
+                serialized = ""
+            else:
+                serialized = json.dumps(raw_input, ensure_ascii=False, default=str)
+            if serialized:
+                chunks.append(serialized)
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+    return "\n".join(chunks)
 
 
 def _coerce_responses_stream_to_chat_stream(
@@ -1613,8 +1665,27 @@ def _iter_chat_stream_finalize(
     yield _stream_done_sse_chunk()
 
 
+# Forward-path request redaction. These builders walk the payload with the
+# same regex set as the filter pipeline, so they share that pool. Mapping
+# helpers (`to_internal_*`) are not in this set and stay on the caller.
+_REQUEST_REDACTION_BUILDERS = frozenset(
+    {
+        _build_chat_upstream_payload,
+        _build_responses_upstream_payload,
+        _build_messages_upstream_payload,
+        _build_generic_upstream_payload,
+    }
+)
+
+
 async def _run_payload_transform(func: Any, *args: Any, **kwargs: Any) -> Any:
-    """Keep payload mapping/sanitization off the event loop."""
+    """Map inline; redact on the filter-pipeline pool.
+
+    Mapping stays on the caller. Request redaction does not: a long walk
+    would pin the event loop for every other request in the process.
+    """
+    if func in _REQUEST_REDACTION_BUILDERS:
+        return await run_request_redaction_offloop(func, *args, **kwargs)
     return await run_payload_transform_offloop(func, *args, **kwargs)
 
 
@@ -5758,7 +5829,7 @@ async def _execute_messages_once(
         return execution_common.Continue(upstream_body)
 
     async def response_stage(upstream_body: dict[str, Any] | str):
-        upstream_text = _extract_generic_analysis_text(upstream_body)
+        upstream_text = _extract_messages_output_text(upstream_body)
         capped_upstream_text = _cap_response_text(upstream_text, ctx)
         internal_resp = InternalResponse(
             request_id=req.request_id,
@@ -6529,6 +6600,58 @@ async def _execute_generic_once(
     return _passthrough_any_response(rendered)
 
 
+def _redact_multipart_text_fields(
+    fields: list[tuple[Any, str]],
+    *,
+    whitelist_keys: set[str] | None,
+    request_path: str,
+) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
+    """Redact multipart text fields. File bytes are not in ``fields``.
+
+    One call covers the whole form so the event loop yields once per request,
+    not once per field.
+    """
+    cleaned: list[tuple[str, str]] = []
+    hits: list[dict[str, Any]] = []
+    for key, raw_text in fields:
+        # Lowercased for the membership test only. The value handed to the
+        # redactors stays the caller's own spelling, so one form key does not
+        # get two different ``field`` values in the audit rows.
+        if str(key).strip().lower() in _MEDIA_LOCATOR_FIELDS:
+            # Same treatment the JSON forward paths give a locator: the
+            # credential-only set, per-parameter query rewriting, and a
+            # whole-value replacement if the result stops being a fetchable
+            # URL. These were scanned for the audit log and then forwarded
+            # verbatim, so a presigned link carrying a credential query left
+            # the gateway intact — multipart was the one surface that fix
+            # did not reach.
+            text, node_hits = _redact_media_locator(
+                raw_text,
+                role="user",
+                path=f"multipart.{key}",
+                field=str(key),
+                whitelist_keys=whitelist_keys,
+            )
+        else:
+            # Derived from the route, like every other forward-path call.
+            # role="user" is in the relaxed-roles set, and falling through to
+            # that default rewrote multipart with the relaxed set while the
+            # pipeline scored the same fields with the full one. These routes
+            # are not on the low-false-positive list, so the answer is the
+            # full set.
+            text, node_hits = _sanitize_text_for_upstream_with_hits(
+                raw_text,
+                role="user",
+                path=f"multipart.{key}",
+                field=str(key),
+                whitelist_keys=whitelist_keys,
+                relaxed_patterns=is_low_false_positive_route(request_path),
+            )
+        hits.extend(node_hits)
+        cleaned.append((str(key), text))
+    return cleaned, hits
+
+
 def _strip_content_type_header(headers: Mapping[str, str]) -> dict[str, str]:
     copied = dict(headers)
     for key in list(copied):
@@ -6580,6 +6703,7 @@ async def _execute_multipart_once(
     files: list[tuple[str, tuple[str, bytes, str]]] = []
     redaction_hits: list[dict[str, Any]] = []
     whitelist_keys = ctx.redaction_whitelist_keys
+    pending_text: list[tuple[Any, str]] = []
 
     async with request.form() as form:
         for key, value in form.multi_items():
@@ -6597,44 +6721,18 @@ async def _execute_multipart_once(
             if filter_mode == "passthrough":
                 data.append((str(key), raw_text))
                 continue
+            pending_text.append((key, raw_text))
 
-            # Lowercased for the membership test only. The value handed to the
-            # redactors stays the caller's own spelling, so one form key does not
-            # get two different ``field`` values in the audit rows depending on
-            # which branch it took.
-            if str(key).strip().lower() in _MEDIA_LOCATOR_FIELDS:
-                # Same treatment the JSON forward paths give a locator: the
-                # credential-only set, per-parameter query rewriting, and a
-                # whole-value replacement if the result stops being a fetchable
-                # URL. These were scanned for the audit log and then forwarded
-                # verbatim, so a presigned link carrying ``?api_key=…`` left the
-                # gateway intact — the multipart route was the one surface the
-                # locator fix did not reach.
-                cleaned, node_hits = _redact_media_locator(
-                    raw_text,
-                    role="user",
-                    path=f"multipart.{key}",
-                    field=str(key),
-                    whitelist_keys=whitelist_keys,
-                )
-            else:
-                cleaned, node_hits = _sanitize_text_for_upstream_with_hits(
-                    raw_text,
-                    role="user",
-                    path=f"multipart.{key}",
-                    field=str(key),
-                    whitelist_keys=whitelist_keys,
-                    # Derived from the route, like every other forward-path call.
-                    # This used to fall through to the role-derived default, and
-                    # role="user" is in the relaxed-roles set — so the multipart
-                    # forward path rewrote with the relaxed set while the pipeline
-                    # scored the very same fields with the full one. The multipart
-                    # routes are not on the low-false-positive list, so the answer
-                    # here is the full set.
-                    relaxed_patterns=is_low_false_positive_route(request_path),
-                )
-            redaction_hits.extend(node_hits)
-            data.append((str(key), cleaned))
+    if pending_text:
+        # Same pool as the JSON builders. The field walk used to run here, on
+        # the event loop, between two awaits.
+        cleaned_fields, redaction_hits = await run_request_redaction_offloop(
+            _redact_multipart_text_fields,
+            pending_text,
+            whitelist_keys=whitelist_keys,
+            request_path=request_path,
+        )
+        data.extend(cleaned_fields)
 
     if filter_mode != "passthrough":
         analysis_parts = [value for _, value in data]
