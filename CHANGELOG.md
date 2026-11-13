@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（安全披露渠道）
+
+- **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
+  更早的版本不受支持。没有公开安全邮箱；尚未修复的漏洞请经 GitHub Private vulnerability reporting
+  私下报告（https://github.com/ax128/AegisGate/security/advisories/new），不要发到公开 issue。
+  维护者在 7 天内确认收到。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
