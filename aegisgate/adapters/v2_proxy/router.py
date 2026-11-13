@@ -1257,75 +1257,83 @@ async def _proxy_v2_streaming(
     upstream_exhausted = False
     sanitized_stream_matches: list[str] = []
     upstream_iter = upstream_response.aiter_bytes()
-    if (
-        settings.v2_enable_response_command_filter
-        and not response_filter_bypassed
-        and is_textual
-    ):
-        max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
-        if is_sse:
-            max_chars = max(
-                256,
-                max_chars,
-                int(settings.v2_sse_filter_probe_max_chars),
-            )
-        probe_window = ""
-        max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
-        inspected_chars = 0
-        matches: list[str] = []
-        async for chunk in upstream_iter:
-            if chunk:
-                buffered_chunks.append(chunk)
-                if inspected_chars < max_chars:
-                    piece = chunk.decode("utf-8", errors="replace")
-                    probe_window, inspected_chars, matches = (
-                        _extend_stream_probe_window(
-                            probe_window,
-                            piece,
-                            inspected_chars=inspected_chars,
-                            max_chars=max_chars,
-                            max_window_chars=max_window_chars,
-                        )
-                    )
-                    if matches:
-                        break
-            if inspected_chars >= max_chars:
-                break
-        else:
-            upstream_exhausted = True
-
-        if matches:
-            buffered_body = b"".join(buffered_chunks)
-            sanitized_body, replacements, sanitized_stream_matches = (
-                _sanitize_v2_response_body(buffered_body, response_content_type)
-            )
-            if replacements > 0:
-                buffered_chunks = [sanitized_body]
-                _apply_v2_response_sanitize_headers(
-                    response_headers,
-                    replacements=replacements,
-                    matched_rules=sanitized_stream_matches,
+    # The probe runs before StreamingResponse owns the exit stack. _iter_body()
+    # is the only other aclose, and it never starts when detection raises here.
+    probe_finished = False
+    try:
+        if (
+            settings.v2_enable_response_command_filter
+            and not response_filter_bypassed
+            and is_textual
+        ):
+            max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
+            if is_sse:
+                max_chars = max(
+                    256,
+                    max_chars,
+                    int(settings.v2_sse_filter_probe_max_chars),
                 )
+            probe_window = ""
+            max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
+            inspected_chars = 0
+            matches: list[str] = []
+            async for chunk in upstream_iter:
+                if chunk:
+                    buffered_chunks.append(chunk)
+                    if inspected_chars < max_chars:
+                        piece = chunk.decode("utf-8", errors="replace")
+                        probe_window, inspected_chars, matches = (
+                            _extend_stream_probe_window(
+                                probe_window,
+                                piece,
+                                inspected_chars=inspected_chars,
+                                max_chars=max_chars,
+                                max_window_chars=max_window_chars,
+                            )
+                        )
+                        if matches:
+                            break
+                if inspected_chars >= max_chars:
+                    break
+            else:
+                upstream_exhausted = True
+
+            if matches:
+                buffered_body = b"".join(buffered_chunks)
+                sanitized_body, replacements, sanitized_stream_matches = (
+                    _sanitize_v2_response_body(buffered_body, response_content_type)
+                )
+                if replacements > 0:
+                    buffered_chunks = [sanitized_body]
+                    _apply_v2_response_sanitize_headers(
+                        response_headers,
+                        replacements=replacements,
+                        matched_rules=sanitized_stream_matches,
+                    )
+                    logger.warning(
+                        "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
+                        request.method,
+                        request.url.path,
+                        _redact_v2_target_url_for_log(target.original_url),
+                        upstream_response.status_code,
+                        replacements,
+                        sanitized_stream_matches,
+                    )
+                else:
+                    sanitized_stream_matches = matches
                 logger.warning(
-                    "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
+                    "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
                     request.method,
                     request.url.path,
                     _redact_v2_target_url_for_log(target.original_url),
                     upstream_response.status_code,
-                    replacements,
-                    sanitized_stream_matches,
+                    matches,
+                    bool(replacements > 0),
                 )
-            else:
-                sanitized_stream_matches = matches
-            logger.warning(
-                "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
-                request.method,
-                request.url.path,
-                _redact_v2_target_url_for_log(target.original_url),
-                upstream_response.status_code,
-                matches,
-                bool(replacements > 0),
-            )
+        probe_finished = True
+    finally:
+        if not probe_finished:
+            await exit_stack.aclose()
 
     async def _iter_body() -> AsyncGenerator[bytes, None]:
         saw_done = False
