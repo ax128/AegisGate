@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（过滤管道超时后工作线程不再改写上下文）
+
+- **过滤管道的取消只作用于这一次调用。请求超时且动作为 `pass` 时，同一次请求后面的响应管道仍会跑。**
+  每次进入请求或响应管道都会换一块新的取消标记。交给工作线程的是随这次调用一起提交的那块对象，不是工作线程稍后启动时 `ctx` 上的那块。超时只取消这一块。`pass` 放行的是这次请求，不是让响应不再过滤。
+  已经在 `process_request` / `process_response` 里的那一次调用返回后，不能盖掉超时处理写下的处置：它若把处置改成 `sanitize` 或再追加原因，调用方读到的仍是超时处理写下的 `block`。还没开始的过滤器不会再跑。默认超时仍是 90 秒。
+
 ### Fixed（请求侧脱敏不再堵住事件循环）
 
 - **转发前的请求侧脱敏改到过滤管线的线程池里执行。** chat / responses / messages / 通用 JSON 的上游 payload 构建，以及 multipart 表单字段脱敏，此前经 `run_payload_transform_offloop` 在事件循环线程上同步跑正则。一次慢脱敏会卡住同一进程里的其它请求。现在它们和过滤管线共用 `aegisgate-filter-pipeline` 线程池。轻量的 payload 映射（`to_internal_*`、安全预览）仍在调用线程上执行。转发规则钉住的精确值开关会随任务上下文带进工作线程，开关语义不变。
