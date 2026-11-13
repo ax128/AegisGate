@@ -152,6 +152,8 @@ from aegisgate.util.redaction_whitelist import normalize_whitelist_keys
 # /v2/__gw__/t/{token}/proxy -> /v2/proxy
 _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+?)(?:__([a-z]+))?(?:/(.*))?$")
 _VALID_FILTER_MODES = frozenset({"redact", "passthrough"})
+# Longer values are rejected before the nonce cache so a client cannot pin a huge key.
+_MAX_HMAC_NONCE_CHARS = 128
 
 _mapping_prune_task: MappingPruneTask | None = None
 _hot_reloader: HotReloader | None = None
@@ -1363,16 +1365,16 @@ async def security_boundary_middleware(request: Request, call_next):
                     )
                 )
 
-            replayed = _nonce_cache.check_and_store(
-                nonce=nonce,
-                now_ts=current_ts,
-                window_seconds=settings.request_replay_window_seconds,
-            )
-            boundary["replay_checked"] = True
-            if replayed:
-                boundary["rejected_reason"] = "replay_nonce_detected"
+            if len(nonce) > _MAX_HMAC_NONCE_CHARS:
+                boundary["rejected_reason"] = "hmac_nonce_too_long"
+                logger.warning(
+                    "boundary reject overlong nonce length=%s max=%s path=%s",
+                    len(nonce),
+                    _MAX_HMAC_NONCE_CHARS,
+                    request.url.path,
+                )
                 return finish(
-                    _blocked_response(status_code=409, reason="replay_nonce_detected")
+                    _blocked_response(status_code=400, reason="hmac_nonce_too_long")
                 )
 
             body = cached_body if cached_body is not None else await request.body()
@@ -1394,6 +1396,20 @@ async def security_boundary_middleware(request: Request, call_next):
                 boundary["rejected_reason"] = "hmac_signature_invalid"
                 return finish(
                     _blocked_response(status_code=401, reason="hmac_signature_invalid")
+                )
+
+            # Only a verified signature may occupy a nonce. Recording earlier let an
+            # unsigned request reserve a victim's nonce or flush the replay cache.
+            replayed = _nonce_cache.check_and_store(
+                nonce=nonce,
+                now_ts=current_ts,
+                window_seconds=settings.request_replay_window_seconds,
+            )
+            boundary["replay_checked"] = True
+            if replayed:
+                boundary["rejected_reason"] = "replay_nonce_detected"
+                return finish(
+                    _blocked_response(status_code=409, reason="replay_nonce_detected")
                 )
 
             boundary["auth_verified"] = True
