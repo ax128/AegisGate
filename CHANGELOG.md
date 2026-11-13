@@ -9,6 +9,10 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（请求侧脱敏不再堵住事件循环）
+
+- **转发前的请求侧脱敏改到过滤管线的线程池里执行。** chat / responses / messages / 通用 JSON 的上游 payload 构建，以及 multipart 表单字段脱敏，此前经 `run_payload_transform_offloop` 在事件循环线程上同步跑正则。一次慢脱敏会卡住同一进程里的其它请求。现在它们和过滤管线共用 `aegisgate-filter-pipeline` 线程池。轻量的 payload 映射（`to_internal_*`、安全预览）仍在调用线程上执行。转发规则钉住的精确值开关会随任务上下文带进工作线程，开关语义不变。
+
 ### Security（非流式 /v1/messages 响应与 chat 同一扫描上限）
 
 - **非流式 `/v1/messages` 响应按与 chat 相同的上限扫描，不再只扫前 16000 个字符。**
