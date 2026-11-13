@@ -11,6 +11,7 @@ from aegisgate.core.exfil_evidence import record_hit as record_exfil_hit
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import (
     build_haystacks,
     normalize_for_match,
@@ -148,31 +149,35 @@ class ToolCallGuard(BaseFilter):
         self._default_action = str(guard_rules.get("default_action", "block"))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
-        self._param_rules: dict[tuple[str, str], re.Pattern[str]] = {}
+        self._param_rules: dict[tuple[str, str], RulePattern] = {}
         for item in guard_rules.get("parameter_rules", []):
             tool = str(item.get("tool", ""))
             param = str(item.get("param", ""))
             regex = item.get("regex")
             if not tool or not param or not regex:
                 continue
-            self._param_rules[(tool, param)] = re.compile(regex)
+            self._param_rules[(tool, param)] = compile_rule_regex(regex)
 
-        self._dangerous_param_patterns: list[tuple[str, re.Pattern[str]]] = []
-        self._dangerous_param_patterns_exec_only: list[tuple[str, re.Pattern[str]]] = []
+        self._dangerous_param_patterns: list[tuple[str, RulePattern]] = []
+        self._dangerous_param_patterns_exec_only: list[tuple[str, RulePattern]] = []
         for item in guard_rules.get("dangerous_param_patterns", []):
             regex = item.get("regex")
             if not regex:
                 continue
             rule_id = str(item.get("id", ""))
-            compiled = re.compile(regex, re.IGNORECASE)
+            compiled = compile_rule_regex(regex, re.IGNORECASE)
             self._dangerous_param_patterns.append((rule_id, compiled))
             if rule_id not in _PATH_REFERENCE_PATTERN_IDS:
                 self._dangerous_param_patterns_exec_only.append((rule_id, compiled))
-        self._semantic_patterns = [
-            re.compile(item.get("regex"), re.IGNORECASE)
-            for item in guard_rules.get("semantic_approval_patterns", [])
-            if item.get("regex")
-        ]
+        self._semantic_patterns: list[tuple[str, RulePattern]] = []
+        for item in guard_rules.get("semantic_approval_patterns", []):
+            regex = item.get("regex")
+            if not regex:
+                continue
+            rule_id = str(item.get("id") or "semantic_review")
+            self._semantic_patterns.append(
+                (rule_id, compile_rule_regex(regex, re.IGNORECASE))
+            )
 
     def _apply_action(
         self, ctx: RequestContext, key: str, default: str | None = None
@@ -253,7 +258,27 @@ class ToolCallGuard(BaseFilter):
 
         if not tool_name and arguments in ({}, "", None):
             return None
-        return {"name": tool_name, "arguments": arguments}
+        normalized: dict[str, object] = {"name": tool_name, "arguments": arguments}
+        # Only the chat-stream probe sets this. Non-streaming dicts stay
+        # ``{name, arguments}``.
+        call_key = tool_call.get("_stream_call_key")
+        if isinstance(call_key, str) and call_key:
+            normalized["_stream_call_key"] = call_key
+        return normalized
+
+    @staticmethod
+    def _claim_counted_hit(ctx: RequestContext, call_key: str, rule_id: str) -> bool:
+        """True the first time this call and rule are seen.
+
+        Later stream fragments are still scanned. A different ``rule_id`` that
+        shows up only in a later fragment is recorded. The same rule on the
+        same call is not recorded again when its match text grows.
+        """
+        identity = (call_key, rule_id)
+        if identity in ctx.counted_tool_arg_hits:
+            return False
+        ctx.counted_tool_arg_hits.add(identity)
+        return True
 
     def _extract_tool_calls(self, resp: InternalResponse) -> list[dict[str, object]]:
         raw_tool_calls = resp.metadata.get("tool_calls")
@@ -317,7 +342,7 @@ class ToolCallGuard(BaseFilter):
         violations: list[str] = []
         blocked = False
 
-        for tool_call in tool_calls:
+        for call_ordinal, tool_call in enumerate(tool_calls):
             if not isinstance(tool_call, dict):
                 continue
 
@@ -326,21 +351,26 @@ class ToolCallGuard(BaseFilter):
             args_text = self._as_text(args)
             args_norm = normalize_for_match(args_text)
             tool_norm = normalize_for_match(tool_name)
+            raw_key = tool_call.get("_stream_call_key")
+            call_key = (
+                raw_key if isinstance(raw_key, str) and raw_key else f"#{call_ordinal}"
+            )
 
             if (
                 self._tool_whitelist
                 and tool_name
                 and tool_name not in self._tool_whitelist
             ):
-                violations.append(f"disallowed_tool:{tool_name}")
-                action = self._apply_action(ctx, "disallowed_tool")
-                blocked = blocked or action == "block"
-                logger.debug(
-                    "disallowed_tool hit request_id=%s tool=%s action=%s",
-                    ctx.request_id,
-                    tool_name,
-                    action,
-                )
+                if self._claim_counted_hit(ctx, call_key, "disallowed_tool"):
+                    violations.append(f"disallowed_tool:{tool_name}")
+                    action = self._apply_action(ctx, "disallowed_tool")
+                    blocked = blocked or action == "block"
+                    logger.debug(
+                        "disallowed_tool hit request_id=%s tool=%s action=%s",
+                        ctx.request_id,
+                        tool_name,
+                        action,
+                    )
 
             # H-10: Blacklist check — applies even when no whitelist is configured.
             lowered_name = tool_name.lower()
@@ -348,15 +378,16 @@ class ToolCallGuard(BaseFilter):
                 lowered_name in _DANGEROUS_TOOL_NAMES or tool_norm in _DANGEROUS_TOOL_NAMES
             ):
                 if not self._tool_whitelist or tool_name not in self._tool_whitelist:
-                    violations.append(f"dangerous_tool_name:{tool_name}")
-                    action = self._apply_action(ctx, "disallowed_tool")
-                    blocked = blocked or action == "block"
-                    logger.warning(
-                        "dangerous_tool_name blocked request_id=%s tool=%s action=%s",
-                        ctx.request_id,
-                        tool_name,
-                        action,
-                    )
+                    if self._claim_counted_hit(ctx, call_key, "dangerous_tool_name"):
+                        violations.append(f"dangerous_tool_name:{tool_name}")
+                        action = self._apply_action(ctx, "disallowed_tool")
+                        blocked = blocked or action == "block"
+                        logger.warning(
+                            "dangerous_tool_name blocked request_id=%s tool=%s action=%s",
+                            ctx.request_id,
+                            tool_name,
+                            action,
+                        )
             is_read_only = (
                 lowered_name in _READ_ONLY_CONTENT_TOOLS
                 or tool_norm in _READ_ONLY_CONTENT_TOOLS
@@ -388,7 +419,12 @@ class ToolCallGuard(BaseFilter):
                         continue
                     raw_match = pattern.search(args_text)
                     match = raw_match or pattern.search(args_norm)
-                    matched_text = (match.group(0) if match else args_norm)[:120]
+                    matched_full = match.group(0) if match else args_norm
+                    # Same rule on this call was already recorded, even if the
+                    # match span has grown. Keep scanning later rules.
+                    if not self._claim_counted_hit(ctx, call_key, rule_id):
+                        continue
+                    matched_text = matched_full[:120]
                     violations.append(f"{param_key}:{tool_name or 'unknown'}")
                     # The rule identity is otherwise dropped here; the audit record
                     # needs it to say *which* link of the exfiltration chain fired.
@@ -418,7 +454,11 @@ class ToolCallGuard(BaseFilter):
                         pattern.pattern[:60],
                         matched_text,
                     )
-                    break
+                    # The finish probe does not receive the accumulated tool
+                    # calls, so a streamed call must finish this rule table now.
+                    # A call without ``_stream_call_key`` keeps the one-rule stop.
+                    if not tool_call.get("_stream_call_key"):
+                        break
 
             if isinstance(args, dict):
                 for (rule_tool, rule_param), rule_pattern in self._param_rules.items():
@@ -430,16 +470,25 @@ class ToolCallGuard(BaseFilter):
                     if not rule_pattern.match(value) and not rule_pattern.match(
                         normalize_for_match(value)
                     ):
+                        if not self._claim_counted_hit(
+                            ctx,
+                            call_key,
+                            f"invalid_param:{rule_tool}.{rule_param}",
+                        ):
+                            continue
                         violations.append(f"invalid_param:{tool_name}.{rule_param}")
                         action = self._apply_action(ctx, "invalid_param")
                         blocked = blocked or action == "block"
 
             semantic_input = f"{tool_name} {args_text}"
             semantic_norm = normalize_for_match(semantic_input)
-            for pattern in self._semantic_patterns:
+            for rule_id, pattern in self._semantic_patterns:
                 match = pattern.search(semantic_input) or pattern.search(semantic_norm)
                 if match:
-                    matched_text = match.group(0)[:120]
+                    matched_full = match.group(0)
+                    if not self._claim_counted_hit(ctx, call_key, rule_id):
+                        continue
+                    matched_text = matched_full[:120]
                     violations.append(f"semantic_review:{tool_name or 'unknown'}")
                     action = self._apply_action(ctx, "semantic_review")
                     blocked = blocked or action == "block"
@@ -450,7 +499,12 @@ class ToolCallGuard(BaseFilter):
                         pattern.pattern[:60],
                         matched_text,
                     )
-                    break
+                    # Same rule as the dangerous-parameter table: a streamed
+                    # probe must finish this table, because the finish probe
+                    # does not receive the accumulated tool calls. A call
+                    # without ``_stream_call_key`` still stops at the first hit.
+                    if not tool_call.get("_stream_call_key"):
+                        break
 
         if violations:
             ctx.security_tags.add("tool_call_violation")

@@ -7,9 +7,36 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md /app/
-# Every Markdown doc at the repo root, shown on the built-in UI docs page (_EXCLUDED_ROOT_DOCS controls which are hidden)
-COPY *.md /app/
+# Dependency layer. Copy only project metadata so a source edit does not
+# rebuild wheels. There is no lockfile: base dependencies and the semantic
+# extra are read from pyproject.toml. The project itself is installed after
+# the source copy below, without reinstalling those dependencies, so the
+# process still imports the installed package the way it does today.
+COPY pyproject.toml /app/pyproject.toml
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && printf '%s\n' \
+        'import subprocess' \
+        'import sys' \
+        'import tomllib' \
+        'from pathlib import Path' \
+        'project = tomllib.loads(Path("/app/pyproject.toml").read_text(encoding="utf-8"))["project"]' \
+        'deps = list(project["dependencies"])' \
+        'deps.extend(project["optional-dependencies"]["semantic"])' \
+        'subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", *deps])' \
+        > /tmp/install-aegisgate-deps.py \
+    && python /tmp/install-aegisgate-deps.py \
+    && rm -f /tmp/install-aegisgate-deps.py
+
+# Operator guides the console may serve. Allow-list: _UI_DOCS in
+# aegisgate/core/gateway_ui_config.py. Root markdown that is not on that
+# list stays out of the image.
+COPY README.md \
+    README_zh.md \
+    WEBUI-QUICKSTART.md \
+    UPSTREAM-QUICKSTART.md \
+    OTHER_TERMINAL_CLIENTS_USAGE.md \
+    SKILL.md \
+    /app/
 COPY aegisgate /app/aegisgate
 # On first start, init_config copies .env and the policy YAML from this path into the mounted directory (when missing)
 COPY config/.env.example /app/config/.env.example
@@ -19,8 +46,8 @@ COPY aegisgate/policies/rules /app/bootstrap/rules
 COPY aegisgate/models /app/aegisgate/models
 COPY www /app/www
 
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir ".[semantic]" \
+RUN python -m pip install --no-cache-dir --no-deps ".[semantic]" \
+    && rm -rf /app/build /app/*.egg-info \
     && useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/logs \
     && chown -R appuser:appuser /app
@@ -30,6 +57,12 @@ USER appuser
 # Documentation only — it does not publish anything and does not follow AEGIS_PORT.
 # Change the compose `ports:`/`expose:` entries when you change AEGIS_PORT.
 EXPOSE 18080
+
+# Liveness, not readiness: /health answers during startup, /ready does not.
+# The port follows AEGIS_PORT, same as the command below. python:3.11-slim has
+# no curl, so the probe uses the stdlib client.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; port = os.environ.get('AEGIS_PORT', '18080'); urllib.request.urlopen('http://127.0.0.1:' + port + '/health', timeout=4)"]
 
 # The port follows AEGIS_PORT so a compose override actually moves the listener.
 # It used to be hard-coded, which meant setting AEGIS_PORT (as the docs told you
