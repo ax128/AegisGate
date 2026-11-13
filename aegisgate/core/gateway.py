@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -154,6 +155,18 @@ _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+?)(?:__([a-z]+))?(?:/(
 _VALID_FILTER_MODES = frozenset({"redact", "passthrough"})
 # Longer values are rejected before the nonce cache so a client cannot pin a huge key.
 _MAX_HMAC_NONCE_CHARS = 128
+
+
+def _token_rest_has_dot_segment(rest: str) -> bool:
+    """True when the token-route suffix contains a '.' or '..' segment.
+
+    ``scope["path"]`` is usually percent-decoded already, but a scope can still
+    carry ``%2e`` / ``%2e%2e`` (or ``%2f`` hiding a slash). httpx normalizes
+    either form, so the rewritten path would leave the upstream base.
+    """
+    decoded = unquote(rest)
+    return any(segment in {".", ".."} for segment in decoded.split("/"))
+
 
 _mapping_prune_task: MappingPruneTask | None = None
 _hot_reloader: HotReloader | None = None
@@ -724,6 +737,37 @@ class GWTokenRewriteMiddleware:
                         filter_mode or "default",
                         rest,
                     )
+
+        # Reject before concatenation. A rest of ``..`` or ``%2e%2e`` rewrites
+        # to a path httpx then normalizes out of the upstream base.
+        if rest and _token_rest_has_dot_segment(rest):
+            logger.warning(
+                "gw_token rejected dot segment token=%s… rest=%s",
+                token[:6],
+                rest,
+            )
+            with trace_span(
+                "gateway.request",
+                http_method=method,
+                http_route=route_label,
+            ) as span:
+                response = JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "invalid_path",
+                        "detail": "path segments '.' and '..' are not allowed",
+                    },
+                )
+                _record_request_observability(
+                    method=method,
+                    route_label=route_label,
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    reject_reason="invalid_path",
+                    span=span,
+                )
+                await response(scope, receive, send)
+                return
 
         # When rest carries its own version prefix, use it and drop the gateway version
         # e.g. /v1/__gw__/t/tok/v2/messages -> /v2/messages (not /v1/v2/messages)
