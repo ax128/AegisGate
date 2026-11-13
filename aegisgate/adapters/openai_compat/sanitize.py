@@ -26,6 +26,7 @@ from aegisgate.config.security_rules import (
     select_relaxed_pii_patterns,
 )
 from aegisgate.util.checksums import enforced_validator_rejects, pattern_keeps_a_match
+from aegisgate.util.rule_regex import RulePattern
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -242,8 +243,8 @@ def _sanitize_payload_for_log(value: Any) -> Any:
 
 def _compile_pii_redaction_patterns(
     redaction_rules: dict[str, Any],
-) -> list[tuple[str, re.Pattern[str]]]:
-    compiled: list[tuple[str, re.Pattern[str]]] = []
+) -> list[tuple[str, RulePattern]]:
+    compiled: list[tuple[str, RulePattern]] = []
     for item in redaction_rules.get("pii_patterns", []):
         if not isinstance(item, dict):
             continue
@@ -262,7 +263,7 @@ def _compile_pii_redaction_patterns(
 
 @lru_cache(maxsize=1)
 def _responses_function_output_redaction_patterns() -> tuple[
-    tuple[str, re.Pattern[str]], ...
+    tuple[str, RulePattern], ...
 ]:
     redaction_rules = load_security_rules().get("redaction", {})
     return tuple(
@@ -272,7 +273,7 @@ def _responses_function_output_redaction_patterns() -> tuple[
 
 
 @lru_cache(maxsize=1)
-def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+def _responses_relaxed_redaction_patterns() -> tuple[tuple[str, RulePattern], ...]:
     """Relaxed PII plus the whole field layer.
 
     Field ids are not members of the default ``relaxed_pii_ids`` set. Filtering
@@ -295,7 +296,7 @@ def _field_value_pattern_ids() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
-def _credential_only_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+def _credential_only_patterns() -> tuple[tuple[str, RulePattern], ...]:
     """The fixed credential-class rule set for surfaces that must not lose paths.
 
     Deliberately **not** ``relaxed_patterns=True``: the relaxed set resolves
@@ -355,7 +356,7 @@ def _absolute_url(text: str) -> SplitResult | None:
 
 
 @lru_cache(maxsize=1)
-def _url_token_query_pattern() -> re.Pattern[str] | None:
+def _url_token_query_pattern() -> RulePattern | None:
     """The shipped ``URL_TOKEN_QUERY`` rule, reused rather than re-declared.
 
     The query-parameter names that count as credential-bearing live inside that
@@ -515,8 +516,8 @@ def _preserves_url_shape(original: str, rewritten: str) -> bool:
 
 def _redact_leaf_with_patterns(
     text: str,
-    patterns: tuple[tuple[str, re.Pattern[str]], ...]
-    | list[tuple[str, re.Pattern[str]]],
+    patterns: tuple[tuple[str, RulePattern], ...]
+    | list[tuple[str, RulePattern]],
     *,
     role: str,
     path: str,

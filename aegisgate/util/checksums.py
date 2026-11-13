@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from aegisgate.util.rule_regex import RulePattern
+
 _SEPARATORS = str.maketrans("", "", "- ")
 
 # GB11643-1999 uses ISO 7064 MOD 11-2: weights are 2^(n-1) mod 11 over the 17
@@ -164,7 +166,7 @@ def enforced_validator_rejects(validator_name: str | None, value: str) -> bool:
 
 
 def pattern_keeps_a_match(
-    pattern: re.Pattern[str],
+    pattern: RulePattern,
     validator_name: str | None,
     haystacks: Sequence[str],
 ) -> bool:

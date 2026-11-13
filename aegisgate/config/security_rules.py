@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 
@@ -1118,11 +1118,14 @@ def _relaxed_pii_ids(rules: dict[str, Any]) -> tuple[frozenset[str] | None, bool
     return frozenset(ids), True
 
 
+_PatternT = TypeVar("_PatternT")
+
+
 def select_relaxed_pii_patterns(
-    patterns: Sequence[tuple[str, re.Pattern[str]]],
+    patterns: Sequence[tuple[str, _PatternT]],
     *,
     redaction_rules: dict[str, Any] | None = None,
-) -> list[tuple[str, re.Pattern[str]]]:
+) -> list[tuple[str, _PatternT]]:
     """Filter compiled patterns down to the ids allowed on relaxed surfaces."""
     rules = redaction_rules if isinstance(redaction_rules, dict) else load_security_rules().get("redaction", {})
     if not isinstance(rules, dict):

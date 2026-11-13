@@ -11,6 +11,8 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 
+from aegisgate.util.rule_regex import RulePattern
+
 _WHITESPACE_RE = re.compile(r"\s+")
 
 DEFAULT_INVISIBLE_CHARS: frozenset[str] = frozenset(
@@ -142,18 +144,18 @@ def build_haystacks(text: str) -> tuple[str, ...]:
 
 
 def any_pattern_hits(
-    patterns: Iterable[re.Pattern[str]], haystacks: Sequence[str]
+    patterns: Iterable[RulePattern], haystacks: Sequence[str]
 ) -> bool:
     """True if any pattern matches any prebuilt haystack."""
     return any(pattern.search(hay) for pattern in patterns for hay in haystacks)
 
 
-def pattern_hits_in(pattern: re.Pattern[str], haystacks: Sequence[str]) -> bool:
+def pattern_hits_in(pattern: RulePattern, haystacks: Sequence[str]) -> bool:
     """True if *pattern* matches any prebuilt haystack."""
     return any(pattern.search(hay) for hay in haystacks)
 
 
-def pattern_hits(pattern: re.Pattern[str], text: str) -> bool:
+def pattern_hits(pattern: RulePattern, text: str) -> bool:
     """True if *pattern* matches the original or either normalized form.
 
     Single-shot convenience wrapper. In a loop over patterns, build the
@@ -165,7 +167,7 @@ def pattern_hits(pattern: re.Pattern[str], text: str) -> bool:
 
 def apply_rewrite_conservatively(
     text: str,
-    patterns: Iterable[re.Pattern[str]],
+    patterns: Iterable[RulePattern],
     replacement: str,
 ) -> str:
     """Rewrite *text* without ever emitting NFKC/lowercased content.

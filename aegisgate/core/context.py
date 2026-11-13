@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
+from typing import SupportsIndex
 from dataclasses import dataclass, field
 from time import time
 
@@ -87,12 +88,12 @@ class _DispositionReasonList(list[str]):
             return
         super().extend(items)
 
-    def insert(self, index: int, item: str) -> None:
+    def insert(self, index: SupportsIndex, item: str) -> None:
         if _worker_must_keep_timeout_disposition():
             return
         super().insert(index, item)
 
-    def __iadd__(self, items: Iterable[str]) -> _DispositionReasonList:
+    def __iadd__(self, items: Iterable[str]) -> _DispositionReasonList:  # type: ignore[override, misc]
         if _worker_must_keep_timeout_disposition():
             return self
         super().__iadd__(items)
