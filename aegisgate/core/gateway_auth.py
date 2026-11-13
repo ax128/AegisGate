@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import threading
 import time
 
 from fastapi import Request
@@ -21,6 +22,13 @@ from aegisgate.core.gateway_network import (
 
 
 _UI_SESSION_COOKIE = "aegis_ui_session"
+
+# sha256(cookie) -> issued_at. One entry per logged-out cookie, dropped once
+# that cookie would fail the TTL check. Not a generation counter: logging out
+# one browser must not sign out any other session. Process-local, same as the
+# UI login rate limiter — a restart forgets the table.
+_revoked_ui_sessions: dict[str, int] = {}
+_revoked_ui_sessions_lock = threading.Lock()
 
 
 def _blocked_response(status_code: int, reason: str, detail: str | None = None) -> JSONResponse:
@@ -135,6 +143,64 @@ def _create_ui_session_token(request: Request) -> str:
     return f"{issued_at}.{nonce}.{_ui_session_signature(issued_at, fingerprint, nonce)}"
 
 
+def _ui_session_issued_at(token: str) -> int | None:
+    if not token or "." not in token:
+        return None
+    try:
+        issued_at = int(token.split(".", 1)[0])
+    except ValueError:
+        return None
+    if issued_at <= 0:
+        return None
+    return issued_at
+
+
+def _ui_session_revocation_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _ui_session_revocation_expired(issued_at: int, now: float) -> bool:
+    # Same boundary as _is_valid_ui_session: the cookie is already dead when
+    # this is true, so the revocation entry no longer changes the answer.
+    return now - issued_at > settings.local_ui_session_ttl_seconds
+
+
+def _drop_expired_ui_session_revocations(now: float) -> None:
+    """Caller holds ``_revoked_ui_sessions_lock``."""
+    expired = [
+        key
+        for key, issued_at in _revoked_ui_sessions.items()
+        if _ui_session_revocation_expired(issued_at, now)
+    ]
+    for key in expired:
+        del _revoked_ui_sessions[key]
+
+
+def revoke_ui_session(token: str) -> None:
+    """Make this exact UI cookie fail validation until its own TTL elapses."""
+    value = (token or "").strip()
+    issued_at = _ui_session_issued_at(value)
+    if issued_at is None:
+        return
+    now = time.time()
+    if _ui_session_revocation_expired(issued_at, now):
+        return
+    key = _ui_session_revocation_key(value)
+    with _revoked_ui_sessions_lock:
+        _drop_expired_ui_session_revocations(now)
+        _revoked_ui_sessions[key] = issued_at
+
+
+def _ui_session_is_revoked(token: str) -> bool:
+    if _ui_session_issued_at(token) is None:
+        return False
+    now = time.time()
+    key = _ui_session_revocation_key(token)
+    with _revoked_ui_sessions_lock:
+        _drop_expired_ui_session_revocations(now)
+        return key in _revoked_ui_sessions
+
+
 def _ui_csrf_token(session_token: str) -> str:
     secret = _ensure_gateway_key().encode("utf-8")
     return hmac.new(secret, f"csrf:{session_token}".encode("utf-8"), hashlib.sha256).hexdigest()
@@ -163,7 +229,9 @@ def _is_valid_ui_session(token: str, request: Request) -> bool:
     if time.time() - issued_at > settings.local_ui_session_ttl_seconds:
         return False
     expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request), nonce)
-    return hmac.compare_digest(signature, expected)
+    if not hmac.compare_digest(signature, expected):
+        return False
+    return not _ui_session_is_revoked(value)
 
 
 def _ui_session_candidates(request: Request) -> list[str]:

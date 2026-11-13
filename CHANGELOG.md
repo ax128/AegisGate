@@ -9,6 +9,15 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（控制台登出撤销当前会话）
+
+- **`POST /__ui__/api/logout` 会使刚才那枚 UI 会话 cookie 立即不能再通过校验。**
+  会话仍是绑定客户端指纹的 HMAC，默认 12 小时过期。此前登出只让浏览器删除 cookie，
+  持有同一枚 cookie 的一方在到期前重放，服务端仍会接受。现在登出把这枚 cookie 记入
+  进程内撤销表，直到它自己的到期时间；同一次登出不会签出其他已登录会话。
+  撤销表与登录限流一样只活在当前进程：重启后、或 `--workers` 大于 1 时落在别的进程上的请求，
+  未过期的旧 cookie 会重新有效。
+
 ### Fixed（控制台轮换 proxy token 立即生效，并去掉无效的 /tmp 回退）
 
 - **控制台轮换 `proxy_token` 后，当前网关进程立刻改用新 token。** 此前只写

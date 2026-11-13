@@ -32,6 +32,7 @@ from aegisgate.core.gateway_auth import (
     _ui_csrf_token,
     _ui_session_token,
     _UI_SESSION_COOKIE,
+    revoke_ui_session,
 )
 from aegisgate.core.gateway_keys import (
     _ensure_gateway_key,
@@ -604,7 +605,11 @@ def register_ui_routes(app: FastAPI) -> None:
         return response
 
     @app.post("/__ui__/api/logout")
-    async def local_ui_logout() -> JSONResponse:
+    async def local_ui_logout(request: Request) -> JSONResponse:
+        # Revoke the session that authenticated this request. Starlette keeps
+        # the last duplicate cookie name, which is the legacy Path=/ value when
+        # both are present. Auth uses the first valid value in the header.
+        revoke_ui_session(_ui_session_token(request))
         response = JSONResponse(content={"ok": True})
         _clear_ui_session_cookie(response)
         return response
