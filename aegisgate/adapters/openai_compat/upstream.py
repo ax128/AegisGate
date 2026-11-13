@@ -9,7 +9,7 @@ import asyncio
 import ipaddress
 import json
 from typing import Any, AsyncGenerator, Mapping
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import hashlib
 import httpx
@@ -301,6 +301,10 @@ def _build_upstream_url(request_path: str, upstream_base: str) -> str:
         route_path = route_path[len(GATEWAY_PREFIX) :]
     if not route_path.startswith("/"):
         route_path = f"/{route_path}"
+    # Same rule as the token middleware: httpx would normalize these and leave
+    # the upstream base. Callers already turn ValueError into HTTP 400.
+    if any(segment in {".", ".."} for segment in unquote(route_path).split("/")):
+        raise ValueError("invalid_path")
     url = f"{upstream_base}{route_path}"
     if query:
         return f"{url}?{query}"
