@@ -30,12 +30,15 @@ from aegisgate.core.gateway_auth import (
     _gateway_token_base_url,
     _string_field,
     _ui_csrf_token,
+    _ui_session_token,
     _UI_SESSION_COOKIE,
+    revoke_ui_session,
 )
 from aegisgate.core.gateway_keys import (
     _ensure_gateway_key,
     _is_forbidden_upstream_base_example,
     _normalize_input_upstream_base,
+    set_proxy_token_value,
     upstream_base_error,
 )
 from aegisgate.core.gateway_ui_config import (
@@ -408,6 +411,44 @@ def _forward_write_error(exc: Exception) -> JSONResponse | None:
     return None
 
 
+# Browser default for a cookie with no Path is `/`, so the console session used
+# to be attached to /v1 and /v2 as well. Keep new sessions on the console prefix
+# and expire that legacy Path=/ cookie whenever one is issued or cleared.
+_UI_SESSION_COOKIE_PATH = "/__ui__"
+_LEGACY_UI_SESSION_COOKIE_PATH = "/"
+
+
+def _expire_ui_session_cookie(response: Response, path: str) -> None:
+    response.delete_cookie(
+        _UI_SESSION_COOKIE,
+        path=path,
+        httponly=True,
+        samesite="lax",
+        secure=settings.local_ui_secure_cookie,
+    )
+
+
+def _set_ui_session_cookie(response: Response, value: str) -> None:
+    response.set_cookie(
+        key=_UI_SESSION_COOKIE,
+        value=value,
+        max_age=settings.local_ui_session_ttl_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=settings.local_ui_secure_cookie,
+        path=_UI_SESSION_COOKIE_PATH,
+    )
+    # The old Path=/ cookie is sent after Path=/__ui__. Leaving it in the jar
+    # makes the next request authenticate as the pre-upgrade session, and
+    # logout then 401s for the rest of the TTL.
+    _expire_ui_session_cookie(response, _LEGACY_UI_SESSION_COOKIE_PATH)
+
+
+def _clear_ui_session_cookie(response: Response) -> None:
+    for path in (_UI_SESSION_COOKIE_PATH, _LEGACY_UI_SESSION_COOKIE_PATH):
+        _expire_ui_session_cookie(response, path)
+
+
 def register_ui_routes(app: FastAPI) -> None:
     """Register all UI, key management, rules CRUD, and compose endpoints on *app*."""
 
@@ -560,20 +601,17 @@ def register_ui_routes(app: FastAPI) -> None:
         if not key_ok:
             return JSONResponse(status_code=403, content={"error": "ui_login_failed", "detail": "invalid password"})
         response = JSONResponse(content={"ok": True})
-        response.set_cookie(
-            key=_UI_SESSION_COOKIE,
-            value=_create_ui_session_token(request),
-            max_age=settings.local_ui_session_ttl_seconds,
-            httponly=True,
-            samesite="lax",
-            secure=settings.local_ui_secure_cookie,
-        )
+        _set_ui_session_cookie(response, _create_ui_session_token(request))
         return response
 
     @app.post("/__ui__/api/logout")
-    async def local_ui_logout() -> JSONResponse:
+    async def local_ui_logout(request: Request) -> JSONResponse:
+        # Revoke the session that authenticated this request. Starlette keeps
+        # the last duplicate cookie name, which is the legacy Path=/ value when
+        # both are present. Auth uses the first valid value in the header.
+        revoke_ui_session(_ui_session_token(request))
         response = JSONResponse(content={"ok": True})
-        response.delete_cookie(_UI_SESSION_COOKIE)
+        _clear_ui_session_cookie(response)
         return response
 
     # ------------------------------------------------------------------
@@ -731,9 +769,6 @@ def register_ui_routes(app: FastAPI) -> None:
         """
         return config_dir() / _KEY_FILES[key_type]
 
-    def _key_fallback_path(key_type: str) -> Path:
-        return Path("/tmp/aegisgate") / _KEY_FILES[key_type]
-
     def _is_regular_key_file(path: Path) -> bool:
         try:
             return path.is_file() and not path.is_symlink()
@@ -741,14 +776,14 @@ def register_ui_routes(app: FastAPI) -> None:
             return False
 
     def _read_key_file(key_type: str) -> str | None:
-        for candidate in (_key_path(key_type), _key_fallback_path(key_type)):
-            if candidate.is_symlink():
-                logger.warning("ignoring symlinked key file path=%s", candidate)
-                continue
-            if _is_regular_key_file(candidate):
-                v = candidate.read_text(encoding="utf-8").strip()
-                if v:
-                    return v
+        candidate = _key_path(key_type)
+        if candidate.is_symlink():
+            logger.warning("ignoring symlinked key file path=%s", candidate)
+            return None
+        if _is_regular_key_file(candidate):
+            v = candidate.read_text(encoding="utf-8").strip()
+            if v:
+                return v
         return None
 
     def _key_fingerprint(value: str) -> str:
@@ -787,24 +822,16 @@ def register_ui_routes(app: FastAPI) -> None:
             raise
 
     def _write_key_file(key_type: str, value: str) -> None:
-        primary = _key_path(key_type)
-        try:
-            _write_key_file_safe(primary, value)
-        except PermissionError:
-            fallback = _key_fallback_path(key_type)
-            _write_key_file_safe(fallback, value)
-            logger.warning(
-                "key file written to fallback path=%s (primary %s not writable)",
-                fallback, primary,
-            )
+        # A /tmp/aegisgate copy used to stand in for a failed primary write.
+        # Nothing that enforces the key reads that directory, so the console
+        # reported success and the next restart silently kept the old key.
+        _write_key_file_safe(_key_path(key_type), value)
 
     @app.get("/__ui__/api/keys")
     async def local_ui_keys_list() -> JSONResponse:
         result = []
         for key_type, filename in _KEY_FILES.items():
-            primary = _key_path(key_type)
-            fallback = _key_fallback_path(key_type)
-            exists = _is_regular_key_file(primary) or _is_regular_key_file(fallback)
+            exists = _is_regular_key_file(_key_path(key_type))
             result.append({"type": key_type, "filename": filename, "exists": exists})
         return JSONResponse(content={"items": result})
 
@@ -831,32 +858,82 @@ def register_ui_routes(app: FastAPI) -> None:
             }
         )
 
+    def _audit_key_rotation(key_type: str, request: Request, new_key: str) -> None:
+        write_audit({
+            "event": "ui_key_rotated",
+            "route": f"/__ui__/api/keys/{key_type}/rotate",
+            "actor_ip": request.client.host if request.client else "unknown",
+            "key_type": key_type,
+            "key_fingerprint": _key_fingerprint(new_key),
+        })
+
+    def _fernet_rotation_key() -> str | JSONResponse:
+        """New Fernet key, or a response that refuses to rotate.
+
+        ``AEGIS_ENCRYPTION_KEY`` wins over the file inside ``crypto``, so
+        rewriting the file would report success and change nothing. Saving the
+        previous key has to succeed first: otherwise the new key replaces the
+        only copy that can still open existing ciphertext.
+        """
+        from aegisgate.storage import crypto as crypto_module
+
+        if crypto_module.encryption_key_from_env():
+            logger.warning("fernet rotation refused: AEGIS_ENCRYPTION_KEY is set")
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "fernet_key_from_env",
+                    "detail": "已设置 AEGIS_ENCRYPTION_KEY，文件轮换会被环境变量覆盖，已拒绝",
+                },
+            )
+        from cryptography.fernet import Fernet
+
+        # H-17: keep the current key so MultiFernet can still open old ciphertext.
+        current_raw = _read_key_file("fernet")
+        if current_raw:
+            try:
+                crypto_module.save_prev_key(current_raw.encode("utf-8"))
+            except Exception:
+                logger.warning("fernet rotation aborted: previous key was not saved")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "prev_key_save_failed",
+                        "detail": "旧 Fernet 密钥未能保存，轮换已中止，当前密钥未改",
+                    },
+                )
+        return Fernet.generate_key().decode("utf-8")
+
+    def _drop_fernet_cache() -> None:
+        from aegisgate.storage import crypto as crypto_module
+
+        crypto_module._fernet_instance = None
+
     @app.post("/__ui__/api/keys/{key_type}/rotate")
     async def local_ui_key_rotate(key_type: str, request: Request) -> JSONResponse:
         if key_type not in _KEY_FILES:
             return JSONResponse(status_code=404, content={"error": "unknown_key_type"})
         if key_type == "fernet":
-            from cryptography.fernet import Fernet
-            from aegisgate.storage import crypto as _crypto_mod
-            # H-17: Save current key to history before rotation so existing
-            # ciphertext remains decodable via MultiFernet during the transition.
-            current_raw = _read_key_file("fernet")
-            if current_raw:
-                _crypto_mod.save_prev_key(current_raw.encode("utf-8"))
-            new_key = Fernet.generate_key().decode("utf-8")
+            prepared = _fernet_rotation_key()
+            if isinstance(prepared, JSONResponse):
+                return prepared
+            new_key = prepared
+        else:
+            new_key = secrets.token_urlsafe(32)
+        try:
             _write_key_file(key_type, new_key)
-            _crypto_mod._fernet_instance = None
-            write_audit({
-                "event": "ui_key_rotated",
-                "route": f"/__ui__/api/keys/{key_type}/rotate",
-                "actor_ip": request.client.host if request.client else "unknown",
-                "key_type": key_type,
-                "key_fingerprint": _key_fingerprint(new_key),
-            })
-            return JSONResponse(content={"ok": True, "type": key_type, "rotated": True})
-        new_key = secrets.token_urlsafe(32)
-        _write_key_file(key_type, new_key)
-        if key_type == "gateway":
+        except OSError:
+            logger.warning("key file write failed type=%s", key_type)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "key_write_failed",
+                    "detail": "密钥文件写入失败，未回退到临时目录",
+                },
+            )
+        if key_type == "fernet":
+            _drop_fernet_cache()
+        elif key_type == "gateway":
             import aegisgate.core.gateway_keys as _keys_mod
             _keys_mod._gateway_key_cached = new_key
             settings.gateway_key = new_key
@@ -868,29 +945,14 @@ def register_ui_routes(app: FastAPI) -> None:
                 "ok": True, "type": key_type, "rotated": True,
                 "csrf_token": new_csrf,
             })
-            response.set_cookie(
-                key=_UI_SESSION_COOKIE,
-                value=new_session,
-                max_age=settings.local_ui_session_ttl_seconds,
-                httponly=True,
-                samesite="lax",
-                secure=settings.local_ui_secure_cookie,
-            )
-            write_audit({
-                "event": "ui_key_rotated",
-                "route": f"/__ui__/api/keys/{key_type}/rotate",
-                "actor_ip": request.client.host if request.client else "unknown",
-                "key_type": key_type,
-                "key_fingerprint": _key_fingerprint(new_key),
-            })
+            _set_ui_session_cookie(response, new_session)
+            _audit_key_rotation(key_type, request, new_key)
             return response
-        write_audit({
-            "event": "ui_key_rotated",
-            "route": f"/__ui__/api/keys/{key_type}/rotate",
-            "actor_ip": request.client.host if request.client else "unknown",
-            "key_type": key_type,
-            "key_fingerprint": _key_fingerprint(new_key),
-        })
+        elif key_type == "proxy_token":
+            # The file is the source of truth only after this publish. A 200
+            # before it used to leave the process enforcing the previous token.
+            set_proxy_token_value(new_key)
+        _audit_key_rotation(key_type, request, new_key)
         return JSONResponse(content={"ok": True, "type": key_type, "rotated": True})
 
     # ------------------------------------------------------------------
@@ -2149,7 +2211,7 @@ def _get_boot_time() -> float:
 
 
 def _ui_bootstrap_payload(request: Request | None = None) -> dict[str, object]:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "") if request is not None else ""
+    session_token = _ui_session_token(request) if request is not None else ""
     return {
         "app_name": settings.app_name,
         "status": "running",

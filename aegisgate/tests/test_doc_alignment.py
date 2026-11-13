@@ -849,3 +849,64 @@ def test_readme_zh_does_not_call_the_enabled_subset_the_constructed_list() -> No
         "the overview bullet claims to be the constructed list but omits the "
         "guards _build_pipeline() constructs"
     )
+
+
+def _active_env_assignments(text: str) -> set[str]:
+    """Keys given an uncommented KEY=value in an env example file."""
+    assigned: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, _value = line.partition("=")
+        key = key.strip()
+        if sep and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            assigned.add(key)
+    return assigned
+
+
+def _compose_service_environment_keys(compose_text: str) -> set[str]:
+    """Keys assigned under services.aegisgate.environment in docker-compose.yml."""
+    document = yaml.safe_load(compose_text)
+    environment = document["services"]["aegisgate"]["environment"]
+    if isinstance(environment, dict):
+        return {str(key) for key in environment}
+    if isinstance(environment, list):
+        keys: set[str] = set()
+        for item in environment:
+            key, sep, _value = str(item).partition("=")
+            if not sep or not key.strip():
+                raise AssertionError(
+                    "docker-compose.yml environment entry is not a mapping "
+                    f"or KEY=VALUE: {item!r}"
+                )
+            keys.add(key.strip())
+        return keys
+    raise AssertionError(
+        "docker-compose.yml services.aegisgate.environment must be a mapping or a list"
+    )
+
+
+def test_env_example_does_not_assign_compose_environment_keys() -> None:
+    """Copying the example must not set keys that Compose already injects.
+
+    Hot reload copies keys present in config/.env onto the running settings.
+    Fields pinned at startup stay as they were; every other key in that file
+    replaces the process value. An uncommented line in config/.env.example
+    therefore overrides docker-compose.yml ``environment:`` for those mutable
+    keys the first time the example is copied and the console saves. Keep the
+    overlapping keys commented, and uncomment one only when Compose is not
+    supplying it.
+    """
+    example = (_REPO_ROOT / "config" / ".env.example").read_text(encoding="utf-8")
+    compose = (_REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    conflicts = sorted(
+        _active_env_assignments(example) & _compose_service_environment_keys(compose)
+    )
+    assert not conflicts, (
+        "config/.env.example assigns keys that docker-compose.yml environment "
+        f"also sets: {conflicts}. Comment those lines so copying the example "
+        "does not override Compose on hot reload."
+    )

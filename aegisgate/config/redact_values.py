@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import threading
+import unicodedata
 from collections.abc import Iterable, Sequence
 from contextvars import ContextVar
 from pathlib import Path
@@ -21,6 +22,11 @@ from cryptography.fernet import InvalidToken
 from aegisgate.config.paths import config_dir
 from aegisgate.storage.crypto import _get_fernet
 from aegisgate.util.logger import logger
+from aegisgate.util.text_normalize import (
+    DEFAULT_BIDI_CHARS,
+    DEFAULT_INVISIBLE_CHARS,
+    strip_invisibles,
+)
 
 _PLACEHOLDER = "[REDACTED:EXACT_VALUE]"
 _MIN_VALUE_LENGTH = 10
@@ -288,6 +294,197 @@ def _exact_value_pattern(values: tuple[str, ...]) -> re.Pattern[str] | None:
     return pattern
 
 
+# Same single-slot rule as _pattern_cache. Populated only when some value
+# changes under the fold, and dropped once the value list moves on.
+_folded_pattern_cache: tuple[tuple[str, ...], re.Pattern[str] | None] | None = None
+
+# The redaction filter's detection copy is NFKC plus these controls. Zero-width
+# characters are not removed by NFKC itself, so the strip has to be part of the
+# same fold or U+200B still hides a configured value.
+_EXACT_INVISIBLE = DEFAULT_INVISIBLE_CHARS | DEFAULT_BIDI_CHARS
+
+
+def _fold_char(char: str) -> str:
+    """One code point the way exact-value detection sees it.
+
+    Per code point, not the whole string: a match span has to map back to the
+    original characters, and NFKC of a whole buffer would compose across
+    neighbours and lose that correspondence. Fullwidth forms and inserted
+    controls fold one character at a time.
+    """
+    folded = unicodedata.normalize("NFKC", char)
+    if not folded or folded in _EXACT_INVISIBLE:
+        return ""
+    if len(folded) == 1:
+        return folded
+    return "".join(part for part in folded if part not in _EXACT_INVISIBLE)
+
+
+def _fold_exact_string(text: str) -> str:
+    if not text or text.isascii():
+        return text
+    return "".join(_fold_char(char) for char in text)
+
+
+def _text_needs_fold(text: str) -> bool:
+    """True when a detection copy would differ from *text*.
+
+    ASCII leaves — including the multi-megabyte data URIs on this path — stay
+    on the raw alternation. ``strip_invisibles`` is identity when nothing in
+    the set occurs, and NFKC of an already-normalized string compares equal.
+    """
+    if text.isascii():
+        return False
+    if strip_invisibles(text) is not text:
+        return True
+    return unicodedata.normalize("NFKC", text) != text
+
+
+def _values_need_fold(values: tuple[str, ...]) -> bool:
+    for value in values:
+        if value and not value.isascii() and _fold_exact_string(value) != value:
+            return True
+    return False
+
+
+def _fold_text_map(text: str) -> tuple[str, list[int]] | None:
+    """Detection copy, plus the original index of each of its code points.
+
+    ``None`` means the copy would be identical, so the caller keeps raw spans.
+    """
+    parts: list[str] = []
+    origins: list[int] = []
+    changed = False
+    for index, char in enumerate(text):
+        folded = _fold_char(char)
+        if folded != char:
+            changed = True
+        if not folded:
+            continue
+        parts.append(folded)
+        origins.extend([index] * len(folded))
+    if not changed:
+        return None
+    return "".join(parts), origins
+
+
+def _pattern_spans(
+    pattern: re.Pattern[str] | None, text: str
+) -> list[tuple[int, int]]:
+    if pattern is None or not text:
+        return []
+    return [(match.start(), match.end()) for match in pattern.finditer(text)]
+
+
+def _map_span(
+    origins: list[int], start: int, end: int
+) -> tuple[int, int] | None:
+    if end <= start or start >= len(origins):
+        return None
+    last = min(end, len(origins)) - 1
+    origin_start = origins[start]
+    origin_end = origins[last] + 1
+    if origin_end <= origin_start:
+        return None
+    return origin_start, origin_end
+
+
+def _merge_exact_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Overlap collapses; adjacent spans do not.
+
+    The raw scan and the folded scan report the same plaintext hit twice.
+    Two secrets sitting next to each other must stay two replacements, so a
+    span that merely touches the previous one is not merged into it.
+    """
+    if not spans:
+        return []
+    ordered = sorted(spans)
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if end <= start:
+            continue
+        if not merged or start >= merged[-1][1]:
+            merged.append((start, end))
+            continue
+        previous_start, previous_end = merged[-1]
+        merged[-1] = (previous_start, max(previous_end, end))
+    return merged
+
+
+def _apply_exact_spans(text: str, spans: list[tuple[int, int]]) -> tuple[str, int]:
+    merged = _merge_exact_spans(spans)
+    if not merged:
+        return text, 0
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        pieces.append(text[cursor:start])
+        pieces.append(_PLACEHOLDER)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces), len(merged)
+
+
+def _drop_stale_folded_pattern(values: tuple[str, ...]) -> None:
+    global _folded_pattern_cache
+
+    cached = _folded_pattern_cache
+    if cached is not None and cached[0] != values:
+        _folded_pattern_cache = None
+
+
+def _folded_exact_pattern(values: tuple[str, ...]) -> re.Pattern[str] | None:
+    """Alternation of values after the same fold applied to the leaf."""
+    global _folded_pattern_cache
+
+    cached = _folded_pattern_cache
+    if cached is not None and cached[0] == values:
+        return cached[1]
+
+    usable: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        folded = value if value.isascii() else _fold_exact_string(value)
+        if folded:
+            usable.add(folded)
+    ordered = sorted(usable, key=len, reverse=True)
+    pattern = (
+        re.compile("|".join(re.escape(value) for value in ordered)) if ordered else None
+    )
+    _folded_pattern_cache = (values, pattern)
+    return pattern
+
+
+def _replace_exact_values_folded(
+    text: str,
+    values: tuple[str, ...],
+    raw_pattern: re.Pattern[str],
+    *,
+    values_fold: bool,
+    text_folds: bool,
+) -> tuple[str, int]:
+    """Raw hits plus hits that exist only after the fold, spliced into *text*.
+
+    The folded string is never returned. Callers include the V2 request body
+    as one buffer; writing NFKC back would rewrite every fullwidth punctuation
+    mark in that body, and replacing the whole buffer would drop the JSON
+    around a single secret.
+    """
+    spans = _pattern_spans(raw_pattern, text)
+    folded_pattern = _folded_exact_pattern(values) if values_fold else raw_pattern
+    folded = _fold_text_map(text) if text_folds else None
+    if folded is not None:
+        folded_text, origins = folded
+        for start, end in _pattern_spans(folded_pattern, folded_text):
+            span = _map_span(origins, start, end)
+            if span is not None:
+                spans.append(span)
+    elif values_fold:
+        spans.extend(_pattern_spans(folded_pattern, text))
+    return _apply_exact_spans(text, spans)
+
+
 def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, int]:
     """Replace every entry of *values* in *text*.
 
@@ -295,20 +492,39 @@ def replace_exact_values_from(text: str, values: Sequence[str]) -> tuple[str, in
     string leaves can resolve the list **once** instead of re-reading it (and
     re-``stat``-ing the file behind it) per leaf. An empty list returns the text
     unchanged and untouched.
+
+    Matching also runs on a detection copy: NFKC, then the same zero-width and
+    bidi controls the redaction filter strips. A hit there is replaced in the
+    original, over the span that folded into the match. Case and whitespace
+    stay significant.
     """
     if not values or not text:
         return text, 0
 
-    pattern = _exact_value_pattern(tuple(values))
+    key = tuple(values)
+    pattern = _exact_value_pattern(key)
     if pattern is None:
         return text, 0
-    return pattern.subn(_PLACEHOLDER, text)
+    values_fold = _values_need_fold(key)
+    text_folds = _text_needs_fold(text)
+    if not values_fold:
+        _drop_stale_folded_pattern(key)
+    if not values_fold and not text_folds:
+        return pattern.subn(_PLACEHOLDER, text)
+    return _replace_exact_values_folded(
+        text,
+        key,
+        pattern,
+        values_fold=values_fold,
+        text_folds=text_folds,
+    )
 
 
 def replace_exact_values(text: str) -> tuple[str, int]:
     """Replace all configured exact values in *text*.
 
     Returns ``(replaced_text, replacement_count)``.  Values are matched
-    longest-first to avoid partial replacements.
+    longest-first to avoid partial replacements. A zero-width character or a
+    fullwidth form of a configured value is replaced in the original text.
     """
     return replace_exact_values_from(text, load_redact_values())

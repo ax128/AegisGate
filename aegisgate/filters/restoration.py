@@ -69,23 +69,6 @@ class RestorationFilter(BaseFilter):
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
         self._report = {"filter": self.name, "hit": False, "risk_score": 0.0}
 
-        # TTL guard: do not restore old mappings.
-        if self._restore_ttl_seconds > 0:
-            mapping_age = time.time() - ctx.redaction_created_at
-            if mapping_age > self._restore_ttl_seconds:
-                ctx.security_tags.add("restoration_stale_mapping")
-                self._apply_action(ctx, "stale_mapping")
-                self._report = {
-                    "filter": self.name,
-                    "hit": True,
-                    "risk_score": ctx.risk_score,
-                    "action": "blocked_due_to_stale_mapping",
-                    "mapping_age_seconds": round(mapping_age, 2),
-                }
-                logger.info("restoration skipped stale mapping request_id=%s age=%.2f", ctx.request_id, mapping_age)
-                self._forget_mapping(ctx)
-                return resp
-
         mapping = dict(ctx.redaction_mapping)
 
         # One-time consume prevents stale mappings from being applied in future requests.
@@ -106,6 +89,26 @@ class RestorationFilter(BaseFilter):
 
         if not mapping:
             return resp
+
+        # TTL guard: do not restore old mappings. Checked only when a mapping
+        # exists. redaction_created_at defaults to context creation and is reset
+        # only when a redaction mapping is stored, so a long stream that never
+        # redacted anything is not a stale restore.
+        if self._restore_ttl_seconds > 0:
+            mapping_age = time.time() - ctx.redaction_created_at
+            if mapping_age > self._restore_ttl_seconds:
+                ctx.security_tags.add("restoration_stale_mapping")
+                self._apply_action(ctx, "stale_mapping")
+                self._report = {
+                    "filter": self.name,
+                    "hit": True,
+                    "risk_score": ctx.risk_score,
+                    "action": "blocked_due_to_stale_mapping",
+                    "mapping_age_seconds": round(mapping_age, 2),
+                }
+                logger.info("restoration skipped stale mapping request_id=%s age=%.2f", ctx.request_id, mapping_age)
+                self._forget_mapping(ctx)
+                return resp
 
         placeholders_in_output = self._placeholder_re.findall(resp.output_text)
         placeholder_count = len(placeholders_in_output)

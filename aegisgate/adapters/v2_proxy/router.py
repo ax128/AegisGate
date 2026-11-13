@@ -1115,6 +1115,11 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
         if lowered.startswith("x-aegis-") or lowered.startswith("x_aegis_"):
             continue
         headers[key] = value
+    # V2 never went through the host-forward strip. A console session cookie
+    # still on Path=/ (or attached by the client) must not reach the target.
+    from aegisgate.core.forward_routes import strip_gateway_cookies
+
+    strip_gateway_cookies(headers)
     return headers
 
 
