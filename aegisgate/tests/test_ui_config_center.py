@@ -293,6 +293,24 @@ class TestConfigRoute:
         assert response.json()["error"] == "invalid_field_value"
         assert "AEGIS_RISK_SCORE_THRESHOLD" not in client.env_path.read_text(encoding="utf-8")
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "staging\nINJECTED_KEY=sk-test-0000",
+            "staging\rINJECTED_KEY=sk-test-0000",
+            "staging\x00sk-test-0000",
+        ],
+        ids=["lf", "cr", "nul"],
+    )
+    def test_control_character_in_string_value_is_rejected(self, client, value: str) -> None:
+        """CR, LF, or NUL must be rejected before config/.env is rewritten."""
+        before = client.env_path.read_bytes()
+        response = client.post("/__ui__/api/config", json={"values": {"env": value}})
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_field_value"
+        assert response.json()["detail"] == "invalid value for env"
+        assert client.env_path.read_bytes() == before
+
     def test_unknown_field_is_rejected(self, client) -> None:
         response = client.post("/__ui__/api/config", json={"values": {"nope": "1"}})
         assert response.status_code == 400
@@ -302,3 +320,30 @@ class TestConfigRoute:
         sections = client.get("/__ui__/api/bootstrap").json()["config_sections"]
         assert isinstance(sections, list)
         assert [s["id"] for s in sections] == [s["id"] for s in _UI_CONFIG_SECTIONS]
+
+
+class TestEnvWriteGuard:
+    """``_write_env_updates`` must refuse the same characters even if a caller
+    skips ``_coerce_config_value``."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "staging\nINJECTED_KEY=sk-test-0000",
+            "staging\rINJECTED_KEY=sk-test-0000",
+            "staging\x00sk-test-0000",
+        ],
+        ids=["lf", "cr", "nul"],
+    )
+    def test_write_env_updates_rejects_control_characters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        env_path = tmp_path / ".env"
+        original = b"AEGIS_LOG_LEVEL=info\n"
+        env_path.write_bytes(original)
+        monkeypatch.setattr(ui_config, "_ENV_PATH", env_path)
+
+        with pytest.raises(ValueError, match="invalid value for AEGIS_ENV"):
+            ui_config._write_env_updates({"AEGIS_ENV": value})
+
+        assert env_path.read_bytes() == original
