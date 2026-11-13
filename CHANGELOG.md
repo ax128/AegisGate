@@ -16,6 +16,41 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   折叠只用于检测：命中时只替换原文里折进这次匹配的那一段，旁边的全角标点和段外的零宽字符保持原样；
   没有命中的文本原样返回。大小写和空白仍然敏感，PII 正则未改。纯 ASCII 的文本和配置值仍走原来的字面替换。
 
+### Security（受信代理的 X-Forwarded-For 改为从右向左取客户端）
+
+- **直连对端在 `AEGIS_TRUSTED_PROXY_IPS` 中时，不再把 `X-Forwarded-For` 的最左值当作客户端 IP。**
+  最左值由客户端决定。nginx 常见的 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  是追加：客户端发送 `X-Forwarded-For: localhost` 或 `127.0.0.1`，修复前会被判成内网，从而打开
+  passthrough、管理端点、默认上游和控制台网络门。
+  现在把多个同名头按出现顺序拼在一起，从右向左解析每一跳（含 IPv4-mapped），跳过仍是受信代理的地址，
+  取第一跳非受信 IP。某一跳不是合法 IP 时记为 `unknown`，`_is_internal_ip` 与 `_is_loopback_ip` 都为 false；
+  登录限流和审计会共用这个键。没有 XFF，或每一跳都是受信代理时，回退到最左一跳（解析失败则用直连地址）。
+  直连对端不是受信代理时仍只返回直连地址；该地址不是合法 IP（例如测试客户端的 `testclient`）时保留原始字符串。
+  - 参考配置里的 Caddy 用 `{remote_host}` 覆盖 XFF，本来就不受影响。README 的 nginx 建议改为
+    `proxy_set_header X-Forwarded-For $remote_addr;`。已经用追加写法、且该 nginx 已列入可信代理的部署，
+    修复后取到的是右侧非受信跳，而不是客户端伪造的最左值。
+  - `X-Forwarded-Host` 仍取第一个值，本次未改。`AEGIS_XFF_STRICT_INTERNAL` 的降级逻辑未改。
+
+### Security（脱敏白名单区间跟随替换后的文本）
+
+- **配置了脱敏白名单时，一条规则只要改写了文本，就按新文本重算保护区间。**
+  `RedactionFilter` 原先只在原文上计算一次白名单区间，随后的 PII / 字段规则却在已经被替换、长度已经变化的文本上匹配。
+  长值（例如 JWT）换成短占位符后，后面的密钥会左移进旧区间，从而被原样放行；短值换成更长的占位符时，白名单中的值会右移出旧区间，从而被误脱敏。
+  白名单为空时不额外重算，未配置白名单的请求行为不变。
+
+### Security（控制台 .env 写入拒绝换行注入）
+
+- **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
+  字符串此前只做 `strip()`，再按 `KEY=value` 写入。值里一旦含有这三种字符，管理员会话就能把控制台不开放的键写进 `.env`，例如 `AEGIS_GATEWAY_KEY`、`AEGIS_ENFORCE_LOOPBACK_ONLY`。
+  现在这类提交返回 400 `invalid_field_value`（`invalid value for <字段>`），文件不会被改写；落盘前再检查一次。只拒绝这三种字符，其它值的保存行为不变。
+
+### Security（安全披露渠道）
+
+- **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
+  更早的版本不受支持。没有公开安全邮箱；尚未修复的漏洞请经 GitHub Private vulnerability reporting
+  私下报告（https://github.com/ax128/AegisGate/security/advisories/new），不要发到公开 issue。
+  维护者在 7 天内确认收到。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
