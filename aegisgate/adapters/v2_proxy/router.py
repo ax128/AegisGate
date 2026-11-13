@@ -22,9 +22,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from aegisgate.config.field_patterns import compile_field_value_patterns
 from aegisgate.config.security_rules import (
     load_security_rules,
+    pii_validator_names,
     rule_enabled,
     select_relaxed_pii_patterns,
 )
+from aegisgate.util.checksums import enforced_validator_rejects, pattern_keeps_a_match
 from aegisgate.util.ip_safety import (
     resolve_public_ips,
     bound_connect_url,
@@ -35,6 +37,7 @@ from aegisgate.config.settings import settings
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.redaction_whitelist import (
     normalize_whitelist_keys,
     protected_spans_for_text,
@@ -42,7 +45,6 @@ from aegisgate.util.redaction_whitelist import (
 )
 from aegisgate.util.text_normalize import (
     build_haystacks,
-    pattern_hits_in,
     strip_invisibles,
 )
 
@@ -377,7 +379,7 @@ def _compile_patterns(
     *,
     legacy_string_ids: bool = False,
     honour_enabled: bool = False,
-) -> list[tuple[str, re.Pattern[str]]]:
+) -> list[tuple[str, RulePattern]]:
     """Compile *fallback* plus the configured *items*.
 
     ``items`` comes straight from YAML, so an entry is not guaranteed to be a
@@ -396,10 +398,10 @@ def _compile_patterns(
     ``sanitizer.command_patterns`` shares this loop and has no such flag on the
     V1 side. Field lists no longer go through this function.
     """
-    compiled: list[tuple[str, re.Pattern[str]]] = []
+    compiled: list[tuple[str, RulePattern]] = []
     for pattern_id, regex in fallback:
         try:
-            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(regex, re.IGNORECASE)))
         except re.error:
             continue
     for index, item in enumerate(items or [], start=1):
@@ -420,14 +422,14 @@ def _compile_patterns(
         if not isinstance(regex_value, str) or not regex_value.strip():
             continue
         try:
-            compiled.append((pattern_id, re.compile(regex_value, re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(regex_value, re.IGNORECASE)))
         except re.error as exc:
             logger.warning("v2 pattern compile skipped id=%s error=%s", pattern_id, exc)
     return compiled
 
 
 @lru_cache(maxsize=1)
-def _v2_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_redaction_patterns() -> list[tuple[str, RulePattern]]:
     rules = load_security_rules().get("redaction", {})
     pii_patterns = rules.get("pii_patterns")
     compiled = _compile_patterns(
@@ -444,7 +446,7 @@ def _normalize_pattern_id(pattern_id: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_relaxed_redaction_patterns() -> list[tuple[str, RulePattern]]:
     """The patterns V2 request redaction actually runs.
 
     Two layers, and they are gated differently — the same split V1 uses:
@@ -458,8 +460,8 @@ def _v2_relaxed_redaction_patterns() -> list[tuple[str, re.Pattern[str]]]:
       ``sanitize``. The three layers share ``compile_field_value_patterns``.
     """
     pii_ids = _pii_pattern_ids()
-    pii_layer: list[tuple[str, re.Pattern[str]]] = []
-    field_layer: list[tuple[str, re.Pattern[str]]] = []
+    pii_layer: list[tuple[str, RulePattern]] = []
+    field_layer: list[tuple[str, RulePattern]] = []
     for pattern_id, pattern in _v2_redaction_patterns():
         target = pii_layer if _normalize_pattern_id(pattern_id) in pii_ids else field_layer
         target.append((pattern_id, pattern))
@@ -515,7 +517,7 @@ def v2_effective_pii_ids() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
-def _v2_dangerous_command_patterns() -> list[tuple[str, re.Pattern[str]]]:
+def _v2_dangerous_command_patterns() -> list[tuple[str, RulePattern]]:
     sanitizer_rules = load_security_rules().get("sanitizer", {})
     command_rules = sanitizer_rules.get("command_patterns")
     return _compile_patterns(
@@ -588,6 +590,7 @@ def _redact_text(
     # moves. Plain ASCII normalizes back to itself, so it comes out empty and no
     # rule pays for a second search.
     normalized_forms: tuple[str, ...] | None = None
+    validators = pii_validator_names()
 
     def _record(pattern_id: str, *, masked: str) -> None:
         if pattern_id in hit_set or len(hit_ids) >= _V2_MAX_MATCH_IDS:
@@ -601,8 +604,13 @@ def _redact_text(
         protected_spans = protected_spans_for_text(value, whitelist)
         matched_here = 0
         protected_here = 0
+        validator_name = validators.get(str(pattern_id).upper())
 
-        def _repl(m: re.Match[str], _pid: str = pattern_id) -> str:
+        def _repl(
+            m: re.Match[str],
+            _pid: str = pattern_id,
+            _validator: str | None = validator_name,
+        ) -> str:
             nonlocal replacement_count, matched_here, protected_here
             if protected_spans and range_overlaps_protected(
                 protected_spans,
@@ -610,6 +618,10 @@ def _redact_text(
                 end=m.end(),
             ):
                 protected_here += 1
+                return m.group(0)
+            # Same gate as the V1 filter and the forward path. Not counted, so
+            # a rejected luhn match cannot become a whole-leaf replacement.
+            if enforced_validator_rejects(_validator, m.group(0)):
                 return m.group(0)
             replacement_count += 1
             matched_here += 1
@@ -640,7 +652,7 @@ def _redact_text(
             )
         if not normalized_forms:
             continue
-        if not pattern_hits_in(pattern, normalized_forms):
+        if not pattern_keeps_a_match(pattern, validator_name, normalized_forms):
             continue
         # Not ``mask_for_log(value)``: there is no fragment to mask, and the
         # leaf is unbounded. See util.masking.NORMALIZED_MATCH_MASK.
@@ -766,9 +778,9 @@ def _detect_dangerous_commands(text: str) -> list[str]:
     ]
 
 
-def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, re.Pattern[str]]]:
+def _matching_v2_dangerous_patterns(text: str) -> list[tuple[str, RulePattern]]:
     raw_matches: list[str] = []
-    raw_patterns: list[tuple[str, re.Pattern[str]]] = []
+    raw_patterns: list[tuple[str, RulePattern]] = []
     seen: set[str] = set()
     for pattern_id, pattern in _v2_dangerous_command_patterns():
         if pattern.search(text):
@@ -1114,6 +1126,11 @@ def _build_forward_headers(request: Request) -> dict[str, str]:
         if lowered.startswith("x-aegis-") or lowered.startswith("x_aegis_"):
             continue
         headers[key] = value
+    # V2 never went through the host-forward strip. A console session cookie
+    # still on Path=/ (or attached by the client) must not reach the target.
+    from aegisgate.core.forward_routes import strip_gateway_cookies
+
+    strip_gateway_cookies(headers)
     return headers
 
 
@@ -1251,75 +1268,83 @@ async def _proxy_v2_streaming(
     upstream_exhausted = False
     sanitized_stream_matches: list[str] = []
     upstream_iter = upstream_response.aiter_bytes()
-    if (
-        settings.v2_enable_response_command_filter
-        and not response_filter_bypassed
-        and is_textual
-    ):
-        max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
-        if is_sse:
-            max_chars = max(
-                256,
-                max_chars,
-                int(settings.v2_sse_filter_probe_max_chars),
-            )
-        probe_window = ""
-        max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
-        inspected_chars = 0
-        matches: list[str] = []
-        async for chunk in upstream_iter:
-            if chunk:
-                buffered_chunks.append(chunk)
-                if inspected_chars < max_chars:
-                    piece = chunk.decode("utf-8", errors="replace")
-                    probe_window, inspected_chars, matches = (
-                        _extend_stream_probe_window(
-                            probe_window,
-                            piece,
-                            inspected_chars=inspected_chars,
-                            max_chars=max_chars,
-                            max_window_chars=max_window_chars,
-                        )
-                    )
-                    if matches:
-                        break
-            if inspected_chars >= max_chars:
-                break
-        else:
-            upstream_exhausted = True
-
-        if matches:
-            buffered_body = b"".join(buffered_chunks)
-            sanitized_body, replacements, sanitized_stream_matches = (
-                _sanitize_v2_response_body(buffered_body, response_content_type)
-            )
-            if replacements > 0:
-                buffered_chunks = [sanitized_body]
-                _apply_v2_response_sanitize_headers(
-                    response_headers,
-                    replacements=replacements,
-                    matched_rules=sanitized_stream_matches,
+    # The probe runs before StreamingResponse owns the exit stack. _iter_body()
+    # is the only other aclose, and it never starts when detection raises here.
+    probe_finished = False
+    try:
+        if (
+            settings.v2_enable_response_command_filter
+            and not response_filter_bypassed
+            and is_textual
+        ):
+            max_chars = max(1_000, int(settings.v2_response_filter_max_chars))
+            if is_sse:
+                max_chars = max(
+                    256,
+                    max_chars,
+                    int(settings.v2_sse_filter_probe_max_chars),
                 )
+            probe_window = ""
+            max_window_chars = max(1_024, min(max_chars, _V2_STREAM_PROBE_WINDOW_CHARS))
+            inspected_chars = 0
+            matches: list[str] = []
+            async for chunk in upstream_iter:
+                if chunk:
+                    buffered_chunks.append(chunk)
+                    if inspected_chars < max_chars:
+                        piece = chunk.decode("utf-8", errors="replace")
+                        probe_window, inspected_chars, matches = (
+                            _extend_stream_probe_window(
+                                probe_window,
+                                piece,
+                                inspected_chars=inspected_chars,
+                                max_chars=max_chars,
+                                max_window_chars=max_window_chars,
+                            )
+                        )
+                        if matches:
+                            break
+                if inspected_chars >= max_chars:
+                    break
+            else:
+                upstream_exhausted = True
+
+            if matches:
+                buffered_body = b"".join(buffered_chunks)
+                sanitized_body, replacements, sanitized_stream_matches = (
+                    _sanitize_v2_response_body(buffered_body, response_content_type)
+                )
+                if replacements > 0:
+                    buffered_chunks = [sanitized_body]
+                    _apply_v2_response_sanitize_headers(
+                        response_headers,
+                        replacements=replacements,
+                        matched_rules=sanitized_stream_matches,
+                    )
+                    logger.warning(
+                        "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
+                        request.method,
+                        request.url.path,
+                        _redact_v2_target_url_for_log(target.original_url),
+                        upstream_response.status_code,
+                        replacements,
+                        sanitized_stream_matches,
+                    )
+                else:
+                    sanitized_stream_matches = matches
                 logger.warning(
-                    "v2 response sanitized stream method=%s path=%s target=%s status=%s replacements=%s matches=%s",
+                    "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
                     request.method,
                     request.url.path,
                     _redact_v2_target_url_for_log(target.original_url),
                     upstream_response.status_code,
-                    replacements,
-                    sanitized_stream_matches,
+                    matches,
+                    bool(replacements > 0),
                 )
-            else:
-                sanitized_stream_matches = matches
-            logger.warning(
-                "v2 response stream probe matched method=%s path=%s target=%s status=%s matches=%s passthrough_after_sanitize=%s",
-                request.method,
-                request.url.path,
-                _redact_v2_target_url_for_log(target.original_url),
-                upstream_response.status_code,
-                matches,
-                bool(replacements > 0),
-            )
+        probe_finished = True
+    finally:
+        if not probe_finished:
+            await exit_stack.aclose()
 
     async def _iter_body() -> AsyncGenerator[bytes, None]:
         saw_done = False

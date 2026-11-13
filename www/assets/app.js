@@ -2945,7 +2945,7 @@ async function rotateKey(keyType) {
   const warnings = {
     fernet: "⚠️ 更换 Fernet 密钥后，历史脱敏映射将永久无法解密（可能影响上下文还原）。\n\n确认更换？",
     gateway: "更换网关密钥后，已注册的 Token 路由仍有效，但旧的 AEGIS_GATEWAY_KEY 将失效，需更新客户端配置。\n\n确认更换？",
-    proxy_token: "更换代理令牌后 Caddy ↔ AegisGate 自动配对将失效，需重启服务重新配对。\n\n确认更换？",
+    proxy_token: "更换后，网关进程会在密钥文件写成功时立即改用新令牌。Caddy 只在启动时读取令牌，它转发的请求要等 Caddy 重载后才会带上新令牌。\n\n确认更换？",
   };
   const ok = await AegisUI.confirm({
     title: "更换密钥",

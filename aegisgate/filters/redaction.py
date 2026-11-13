@@ -25,7 +25,7 @@ from aegisgate.core.models import InternalRequest
 from aegisgate.filters.base import BaseFilter
 from aegisgate.observability.metrics import inc_validator_failure
 from aegisgate.storage.kv import KVStore
-from aegisgate.util.checksums import VALIDATORS as _CHECKSUM_VALIDATORS
+from aegisgate.util.checksums import ENFORCED_VALIDATORS, VALIDATORS as _CHECKSUM_VALIDATORS
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
@@ -192,7 +192,11 @@ class RedactionFilter(BaseFilter):
 
         def replace_in_text(text: str) -> str:
             nonlocal serial
-            protected_spans = protected_spans_for_text(text, ctx.redaction_whitelist_keys)
+            # Closure reads the variable, not a snapshot. Rebind after each
+            # replacement: a shorter placeholder slides the tail left into the
+            # old interval, and a longer one slides a whitelisted value out of it.
+            whitelist = ctx.redaction_whitelist_keys
+            protected_spans = protected_spans_for_text(text, whitelist)
 
             def _replace_match(match: re.Match[str], kind: str, label: str) -> str:
                 nonlocal serial
@@ -213,13 +217,15 @@ class RedactionFilter(BaseFilter):
                 # would only cost time — and it makes the count mean "distinct
                 # values", not "occurrences in the text").
                 #
-                # This does not change what happens to the value: it is redacted
-                # either way. It only records that a rule matching on shape alone
-                # matched something the shape's own check digit rejects.
+                # luhn is a gate: a digit run it rejects is not a card, so it is
+                # not labeled and not counted. Every other validator only records
+                # the failure and still redacts.
                 validator_name = self._pii_validators.get(kind)
                 if validator_name is not None:
                     check = _CHECKSUM_VALIDATORS.get(validator_name)
                     if check is not None and not check(raw_value):
+                        if validator_name in ENFORCED_VALIDATORS:
+                            return raw_value
                         validator_failed[kind] = validator_failed.get(kind, 0) + 1
                         inc_validator_failure(validator_name)
 
@@ -248,10 +254,11 @@ class RedactionFilter(BaseFilter):
                     lambda match: _replace_match(match, kind, label), source_text
                 )
 
-            for kind, pattern in active_pii_patterns:
-                text = _apply_pattern(pattern, kind, text)
-            for kind, pattern in self._field_patterns:
-                text = _apply_pattern(pattern, kind, text)
+            for kind, pattern in (*active_pii_patterns, *self._field_patterns):
+                new_text = _apply_pattern(pattern, kind, text)
+                if whitelist and new_text != text:
+                    protected_spans = protected_spans_for_text(new_text, whitelist)
+                text = new_text
             return text
 
         ctx.redaction_whitelist_keys = set(normalize_whitelist_keys(ctx.redaction_whitelist_keys))
@@ -274,8 +281,9 @@ class RedactionFilter(BaseFilter):
                 # Merged here, not written into self._report from the closure:
                 # the dict above is rebuilt wholesale on every hit, so a key set
                 # earlier would vanish without a trace. A non-empty
-                # validator_failed implies a non-empty mapping, because a failing
-                # value is still redacted and so still produces one.
+                # validator_failed implies a non-empty mapping, because an
+                # observational failure is still redacted. A luhn reject does
+                # not land here: that value is left in place.
                 **({"validator_failed": dict(validator_failed)} if validator_failed else {}),
             }
             ctx.security_tags.add("redaction_applied")

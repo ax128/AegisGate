@@ -716,3 +716,183 @@ class TestExactValueAlternation:
         assert count == 1
         # ...and the same value must not match what the regex would have.
         assert replace_exact_values_from("aXbYcZdWeQf", ["a.b*c[d]e+f"])[1] == 0
+
+
+def _fullwidth(text: str) -> str:
+    """Fullwidth ASCII, the form NFKC folds back to the original."""
+    return "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in text)
+
+
+class TestExactValueMatchedAfterNormalize:
+    """Exact values are matched on the normalized leaf, then replaced in the original.
+
+    A zero-width character or a fullwidth letter inside an operator-configured
+    secret used to miss the literal scan. Normalization is a detection copy:
+    fullwidth punctuation next to the secret stays as the client sent it, and
+    a leaf with nothing to redact is returned unchanged.
+    """
+
+    _SECRET = "sk-test-0000"
+
+    def test_a_zero_width_character_inside_the_secret_is_redacted(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = f"{self._SECRET[:7]}\u200b{self._SECRET[7:]}"
+        text = f"参数（可选）：{leaked} 完毕"
+        out, count = replace_exact_values_from(text, [self._SECRET])
+
+        assert leaked not in out
+        assert self._SECRET not in out
+        assert out == "参数（可选）：[REDACTED:EXACT_VALUE] 完毕"
+        assert count == 1
+
+    def test_the_fullwidth_form_of_the_secret_is_redacted(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = _fullwidth(self._SECRET)
+        text = f"参数（可选）：{leaked} 完毕"
+        out, count = replace_exact_values_from(text, [self._SECRET])
+
+        assert leaked not in out
+        assert out == "参数（可选）：[REDACTED:EXACT_VALUE] 完毕"
+        assert count == 1
+
+    def test_a_fullwidth_configured_value_matches_the_ascii_secret(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            f"prefix {self._SECRET} suffix",
+            [_fullwidth(self._SECRET)],
+        )
+
+        assert out == "prefix [REDACTED:EXACT_VALUE] suffix"
+        assert count == 1
+
+    def test_a_raw_occurrence_and_a_split_one_are_both_counted(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = f"{self._SECRET[:7]}\u200b{self._SECRET[7:]}"
+        out, count = replace_exact_values_from(
+            f"{self._SECRET} / {leaked}",
+            [self._SECRET],
+        )
+
+        assert out == "[REDACTED:EXACT_VALUE] / [REDACTED:EXACT_VALUE]"
+        assert count == 2
+
+    def test_a_zero_width_character_outside_the_secret_stays(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = f"{self._SECRET[:7]}\u200b{self._SECRET[7:]}"
+        text = f"\u200b参数（可选）：{leaked} 完毕"
+        out, count = replace_exact_values_from(text, [self._SECRET])
+
+        assert out == "\u200b参数（可选）：[REDACTED:EXACT_VALUE] 完毕"
+        assert count == 1
+
+    def test_a_plaintext_secret_keeps_the_surrounding_fullwidth_text(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        text = f"参数（可选）：{self._SECRET} 完毕"
+        out, count = replace_exact_values_from(text, [self._SECRET])
+
+        assert out == "参数（可选）：[REDACTED:EXACT_VALUE] 完毕"
+        assert count == 1
+
+    def test_a_leaf_with_nothing_to_redact_is_returned_unchanged(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        text = "参数（可选）：请在配置文件里填写，然后重启。\u200b"
+        assert replace_exact_values_from(text, [self._SECRET]) == (text, 0)
+
+    def test_folding_does_not_make_the_match_case_insensitive(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        text = "参数（可选）：SK-TEST-0000 完毕"
+        assert replace_exact_values_from(text, [self._SECRET]) == (text, 0)
+
+    def test_a_value_that_folds_away_does_not_match_everywhere(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        assert replace_exact_values_from("ordinary text", ["\u200b" * 10]) == (
+            "ordinary text",
+            0,
+        )
+
+    def test_metacharacters_stay_literal_on_a_folded_leaf(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        value = "a.b*c[d]e+f"
+        assert replace_exact_values_from(f"（{value}）", [value]) == (
+            "（[REDACTED:EXACT_VALUE]）",
+            1,
+        )
+        untouched = "（aXbYcZdWeQf）"
+        assert replace_exact_values_from(untouched, [value]) == (untouched, 0)
+
+    def test_a_newline_inside_the_secret_is_not_folded_into_a_match(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        text = f"参数（可选）：{self._SECRET[:7]}\n{self._SECRET[7:]} 完毕"
+        assert replace_exact_values_from(text, [self._SECRET]) == (text, 0)
+
+    def test_longer_values_still_win_on_a_folded_leaf(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            "（x SECRETVALUE1234567 y）",
+            ["SECRETVALUE1234567", "SECRETVALUE12"],
+        )
+
+        assert out == "（x [REDACTED:EXACT_VALUE] y）"
+        assert count == 1
+
+    def test_the_placeholder_is_not_rescanned_on_a_folded_leaf(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        out, count = replace_exact_values_from(
+            "（ABCDEFGHIJ）",
+            ["ABCDEFGHIJ", "REDACTED:E"],
+        )
+
+        assert out == "（[REDACTED:EXACT_VALUE]）"
+        assert count == 1
+
+    def test_a_zero_width_character_between_two_secrets_stays(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        secret = self._SECRET
+        text = f"{secret}\u200b{secret}"
+        out, count = replace_exact_values_from(text, [secret])
+
+        assert out == "[REDACTED:EXACT_VALUE]\u200b[REDACTED:EXACT_VALUE]"
+        assert count == 2
+
+    def test_a_fullwidth_value_in_fullwidth_text_is_one_replacement(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = _fullwidth(self._SECRET)
+        out, count = replace_exact_values_from(f"前{leaked}后", [leaked])
+
+        assert out == "前[REDACTED:EXACT_VALUE]后"
+        assert count == 1
+
+    def test_a_bidi_override_inside_the_secret_is_redacted(self) -> None:
+        from aegisgate.config.redact_values import replace_exact_values_from
+
+        leaked = f"{self._SECRET[:7]}\u202e{self._SECRET[7:]}"
+        text = f"参数（可选）：{leaked} 完毕"
+        out, count = replace_exact_values_from(text, [self._SECRET])
+
+        assert out == "参数（可选）：[REDACTED:EXACT_VALUE] 完毕"
+        assert count == 1
+
+    def test_a_superseded_folded_secret_is_dropped(self) -> None:
+        from aegisgate.config import redact_values
+
+        folded = _fullwidth(self._SECRET)
+        redact_values.replace_exact_values_from(folded, [folded])
+        redact_values.replace_exact_values_from("x", ["NEWSKTEST0000"])
+
+        cached = redact_values._folded_pattern_cache
+        assert cached is None or cached[0] == ("NEWSKTEST0000",)
