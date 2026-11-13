@@ -938,18 +938,18 @@ async function refreshOverview() {
   return data;
 }
 
-async function loadBootstrap() {
-  await refreshOverview();
-
+async function loadConfigPanels() {
   const configData = await fetchJson("/__ui__/api/config", { resource: "config" });
   renderConfig(configData);
+}
 
-  // The catalogue does not change while the console is open, and reloading it
-  // on every refresh threw away the document the user was reading.
-  if (!docsLoaded) {
-    await loadDocs();
-    docsLoaded = true;
-  }
+// Overview status plus the config payload. The payload is one request and it
+// builds the sidebar entries the overview's field links point at, so the first
+// screen can still open those panels. Docs and the other panels wait until
+// they are actually on screen.
+async function loadFirstScreen() {
+  await refreshOverview();
+  await loadConfigPanels();
 }
 
 function getModalFocusableElements(container) {
@@ -1959,7 +1959,9 @@ function bindActions() {
     // The getting-started card is derived from the token list too, so a manual
     // refresh has to pick that up or it reports stale progress.
     loadTokens();
-    loadBootstrap().catch((error) => {
+    // Status and the config payload only. Docs and the other panels stay on
+    // their own loaders; this button used to reach them through loadBootstrap.
+    loadFirstScreen().catch((error) => {
       const output = document.getElementById("bootstrap-output");
       if (output) output.textContent = `加载失败: ${error.message}`;
       updateHeaderStatus("error");
@@ -2039,6 +2041,116 @@ function bindKeyboardShortcuts() {
   });
 }
 
+// Off-screen panels each have their own request. The audit panel has two, and
+// each is allowed to walk 8MB of the log. Starting all of them with the
+// overview made the first paint wait on panels the reader had not opened.
+// A panel loads when its anchor is the page hash or when it sits in the
+// viewport. Config is not in this set: loadFirstScreen fetches it so the
+// sidebar and the overview field links can still open those panels.
+const LAZY_PANEL_IDS = new Set([
+  "overview",
+  "stats",
+  "audit",
+  "request-redaction",
+  "rules",
+  "tokens",
+  "forwards",
+  "docs",
+  "keys",
+  "compose",
+  "logs",
+]);
+const panelLoaders = new Map();
+
+function registerPanelLoader(id, fn) {
+  panelLoaders.set(id, { fn: fn, loaded: false, inflight: null });
+}
+
+function ensurePanelLoaded(id) {
+  const entry = panelLoaders.get(id);
+  if (!entry || entry.loaded || entry.inflight) return;
+  entry.inflight = Promise.resolve()
+    .then(function () { return entry.fn(); })
+    .then(function () { entry.loaded = true; })
+    .catch(function () { entry.inflight = null; });
+}
+
+function panelIntersectsViewport(node) {
+  const rect = node.getBoundingClientRect();
+  const height = window.innerHeight || document.documentElement.clientHeight || 0;
+  // Any overlap counted the audit heading (~700px) as opened on a 900–1200px
+  // desktop window, so the first screen still walked the audit log. A panel
+  // counts as reached only when its top is in the upper half. Stats (~180px)
+  // still qualifies; the audit heading does not, unless the window is tall
+  // enough that 700px really is the upper half.
+  return height > 0 && rect.top < height * 0.5 && rect.bottom > 0;
+}
+
+function panelIdFromHash() {
+  return (window.location.hash || "").replace(/^#/, "");
+}
+
+function activateLazyPanelFromLocation() {
+  const id = panelIdFromHash();
+  if (!id || id === "overview") {
+    ensurePanelLoaded("overview");
+    return;
+  }
+  // Static panels only. A config section id is not a loader: that payload
+  // arrives with the first screen, and the anchor scrolls once it exists.
+  if (LAZY_PANEL_IDS.has(id) && panelLoaders.has(id)) ensurePanelLoaded(id);
+}
+
+function loadVisiblePanels() {
+  panelLoaders.forEach(function (_entry, id) {
+    const node = document.getElementById(id);
+    if (node && panelIntersectsViewport(node)) ensurePanelLoaded(id);
+  });
+}
+
+function scheduleVisiblePanelLoad() {
+  clearTimeout(scheduleVisiblePanelLoad.timer);
+  // While a deep link is still scrolling, intermediate panels pass through
+  // the viewport. Wait until the scroll settles before fetching those.
+  scheduleVisiblePanelLoad.timer = setTimeout(loadVisiblePanels, 160);
+}
+
+function refreshLazyPanels() {
+  activateLazyPanelFromLocation();
+  const id = panelIdFromHash();
+  // #audit is a lazy panel: load that panel only, not every panel scrolled
+  // past on the way. #security and #general are config anchors. A refresh of
+  // those still shows the top of the page, so the upper half (stats, tokens,
+  // the onboarding card) has to load.
+  if (!id || !LAZY_PANEL_IDS.has(id)) loadVisiblePanels();
+}
+
+function bootLazyPanels() {
+  registerPanelLoader("overview", loadTokens);
+  registerPanelLoader("stats", loadStats);
+  registerPanelLoader("request-redaction", function () {
+    return Promise.all([loadRequestRedaction(), loadRedactValues()]);
+  });
+  registerPanelLoader("rules", function () { return loadRuleSections(); });
+  registerPanelLoader("tokens", loadTokens);
+  registerPanelLoader("forwards", loadForwards);
+  registerPanelLoader("docs", function () {
+    if (docsLoaded) return null;
+    // loadDocs clears the catalogue before the request returns. A failure
+    // used to leave the placeholder up. This catch is the docs pane only;
+    // an overview or config failure must not write there.
+    return loadDocs().then(function () { docsLoaded = true; }).catch(showDocError);
+  });
+  registerPanelLoader("keys", loadKeys);
+  registerPanelLoader("compose", loadComposeList);
+  window.addEventListener("hashchange", function () {
+    activateLazyPanelFromLocation();
+    scheduleVisiblePanelLoad();
+  });
+  window.addEventListener("scroll", scheduleVisiblePanelLoad, { passive: true });
+  refreshLazyPanels();
+}
+
 bindActions();
 bindTokenModal();
 bindForwardModal();
@@ -2047,16 +2159,6 @@ bindConfigSearch();
 bindOverviewLinks();
 bindDocLinks();
 bindKeyboardShortcuts();
-honourInitialHash();
-initScrollSpy();
-loadTokens();
-loadForwards();
-loadBootstrap().catch((error) => {
-  const output = document.getElementById("bootstrap-output");
-  if (output) output.textContent = `加载失败: ${error.message}`;
-  updateHeaderStatus("error");
-  showDocError(error);
-});
 
 // ─── Exact Value Redaction ─────────────────────
 
@@ -2207,7 +2309,6 @@ function bindRedactUI() {
       }
     });
   }
-  loadRedactValues();
 }
 
 bindRedactUI();
@@ -2776,7 +2877,6 @@ function bindRulesUI() {
       }
     });
   }
-  loadRuleSections();
 }
 
 // ─── Key Management ───────────────────────────
@@ -2902,7 +3002,6 @@ function bindKeysUI() {
       }
     });
   }
-  loadKeys();
 }
 
 // ─── Stats Dashboard ─────────────────────
@@ -2986,7 +3085,6 @@ function bindStatsUI() {
       AegisUI.toast(describeWriteError(err, "清除失败"), "err");
     }
   });
-  loadStats();
 }
 
 // ─── Docker Compose Editor ────────────────────
@@ -3071,7 +3169,6 @@ function bindComposeUI() {
       handleWriteError(err, function () { loadComposeContent(currentComposeFile, true); }, "保存失败");
     }
   });
-  loadComposeList();
 }
 
 // ─── Restart ──────────────────────────────────
@@ -3933,8 +4030,6 @@ function bindRequestRedactionUI() {
     }
     await rrPatch({ values: { request_prefix_max_len: value } }, "保存失败");
   });
-
-  loadRequestRedaction();
 }
 
 // ─── Init new UI modules ─────────────────────
@@ -3970,3 +4065,14 @@ bindRestartButton();
   });
   updateIcon();
 })();
+
+// After every panel loader and its state exist. Calling this earlier can run a
+// loader before a `let` it closes over has been initialised.
+bootLazyPanels();
+honourInitialHash();
+initScrollSpy();
+loadFirstScreen().catch((error) => {
+  const output = document.getElementById("bootstrap-output");
+  if (output) output.textContent = `加载失败: ${error.message}`;
+  updateHeaderStatus("error");
+});
