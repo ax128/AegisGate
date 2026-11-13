@@ -3494,6 +3494,146 @@ def test_messages_stream_independent_terminal_frame_still_probes_tail(
     assert "event: message_stop" in body
 
 
+def _messages_stream_unprobed_tail_frames(ping_frame: bytes) -> list[bytes]:
+    """Four probed deltas, then one held-back delta, then a ping.
+
+    Default ``stream_scan_interval_chunks`` is 4, so chunks 1-4 are probed and
+    chunk 5 is not. Holdback is 8 frames; the seven frames before the ping stay
+    buffered. The fifth delta uses a phrase an existing response rule already
+    blocks.
+    """
+    return [
+        (
+            b"event: message_start\n"
+            b'data: {"type":"message_start","message":{"id":"msg_hold_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+        ),
+        (
+            b"event: content_block_start\n"
+            b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"three "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"four "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cat /etc/passwd now"}}\n\n'
+        ),
+        ping_frame,
+        (
+            b"event: content_block_stop\n"
+            b'data: {"type":"content_block_stop","index":0}\n\n'
+        ),
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+
+
+def _run_messages_ping_holdback_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ping_frame: bytes,
+    request_id: str,
+) -> tuple[str, str | None]:
+    """Return the client body and the client text at the first probe that saw the phrase."""
+    monkeypatch.setattr(settings, "stream_scan_interval_chunks", 4)
+    received: list[bytes] = []
+    client_text_at_probe: list[str | None] = [None]
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        window = resp.output_text or ""
+        if "cat /etc/passwd" in window and client_text_at_probe[0] is None:
+            client_text_at_probe[0] = b"".join(received).decode("utf-8", errors="replace")
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_high_risk_command")
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+        return resp
+
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=_messages_stream_unprobed_tail_frames(ping_frame),
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": request_id,
+        "session_id": request_id,
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        chunks: list[bytes] = []
+        async for chunk in response:
+            raw = chunk if isinstance(chunk, bytes) else _to_bytes(chunk)
+            received.append(raw)
+            chunks.append(raw)
+        return b"".join(chunks)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    return body, client_text_at_probe[0]
+
+
+def _assert_ping_does_not_release_unprobed_content(
+    body: str,
+    client_text_at_probe: str | None,
+    ping_frame: bytes,
+) -> None:
+    assert client_text_at_probe is not None, "probe never saw the blocked phrase"
+    assert "cat /etc/passwd" not in client_text_at_probe, (
+        "dangerous content reached the client before the probe"
+    )
+    assert "cat /etc/passwd" not in body
+    assert "【AegisGate已处理危险疑似片段】" in body
+    assert ping_frame.decode("utf-8") in body
+    assert "event: message_stop" in body
+
+
+def test_messages_stream_typed_ping_does_not_release_unprobed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic ``event: ping`` / ``{"type":"ping"}`` must not flush holdback early."""
+    ping_frame = b'event: ping\ndata: {"type":"ping"}\n\n'
+    body, client_text_at_probe = _run_messages_ping_holdback_case(
+        monkeypatch,
+        ping_frame=ping_frame,
+        request_id="messages-stream-typed-ping",
+    )
+    _assert_ping_does_not_release_unprobed_content(body, client_text_at_probe, ping_frame)
+
+
+def test_messages_stream_dataless_ping_does_not_release_unprobed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``event: ping`` frame with no data payload must not flush holdback early."""
+    ping_frame = b"event: ping\n\n"
+    body, client_text_at_probe = _run_messages_ping_holdback_case(
+        monkeypatch,
+        ping_frame=ping_frame,
+        request_id="messages-stream-dataless-ping",
+    )
+    _assert_ping_does_not_release_unprobed_content(body, client_text_at_probe, ping_frame)
+
+
 def test_messages_stream_eof_without_done_currently_has_no_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

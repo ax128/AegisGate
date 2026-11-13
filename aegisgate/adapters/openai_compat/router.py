@@ -70,6 +70,7 @@ from aegisgate.adapters.openai_compat.stream_utils import (
     _build_streaming_response,
     _extract_sse_data_payload,
     _extract_sse_data_payload_from_chunk,
+    _extract_sse_event_name,
     _extract_stream_event_type,
     _extract_stream_text_from_event,
     _iter_sse_frames,
@@ -5422,6 +5423,11 @@ async def _execute_messages_stream_once(
             async for line in _iter_sse_frames(opened):
                 payload_text = _extract_sse_data_payload_from_chunk(line)
                 if payload_text is None:
+                    # `event: ping` with no data line is a keepalive. Flushing
+                    # holdback here sends frames the response probe has not seen.
+                    if _extract_sse_event_name(line) == "ping":
+                        yield line
+                        continue
                     while pending_frames:
                         yield _mark_flushed_messages_frame(pending_frames.pop(0))
                     yield line
@@ -5515,6 +5521,11 @@ async def _execute_messages_stream_once(
                     break
 
                 event_type = _extract_stream_event_type(payload_text)
+                if event_type == "ping":
+                    # Typed keepalive (`{"type":"ping"}`). Forward it and leave
+                    # holdback for the next probe; do not release unsampled text.
+                    yield line
+                    continue
                 try:
                     event_payload = json.loads(payload_text)
                 except json.JSONDecodeError:

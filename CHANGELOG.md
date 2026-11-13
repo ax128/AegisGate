@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（messages 流式 ping 不再提前放行未探测内容）
+
+- **`/v1/messages` 流式遇到 ping 时，不再把尚未探测的缓冲帧发给客户端。**
+  Anthropic 的 keepalive（`event: ping`，以及带 `data: {"type":"ping"}` 的同名事件）以前走非内容帧分支，会先把 holdback 里的 `message_*` / `content_block_*` 整段冲出去，探测留到后面。扫描间隔内还没被扫到的文本会先到达客户端。
+  ping 本身仍立即转发。没有 ping 的流、以及 ping 以外的事件，放行和探测节奏不变。
+
 ### Fixed（流式上游错误：首帧前透传状态码，401/403 不重试）
 
 - **流式上游在还没向客户端发出任何帧时返回 HTTP 错误，网关使用该状态码，不再包成 HTTP 200 的 SSE 错误帧。**

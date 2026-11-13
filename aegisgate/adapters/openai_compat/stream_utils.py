@@ -426,6 +426,17 @@ def _extract_sse_data_payload_from_chunk(chunk: bytes) -> str | None:
     return "\n".join(payload_lines)
 
 
+def _extract_sse_event_name(chunk: bytes) -> str:
+    """Lowercased SSE ``event:`` field, or empty when the frame has none."""
+    normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for raw_line in normalized.split(b"\n"):
+        stripped = raw_line.strip()
+        if len(stripped) < 6 or stripped[:6].lower() != b"event:":
+            continue
+        return stripped[6:].strip().decode("utf-8", errors="replace").lower()
+    return ""
+
+
 def _build_sse_frame(lines: list[bytes]) -> bytes:
     frame = b"".join(lines)
     if not frame.endswith(b"\n"):
