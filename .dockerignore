@@ -14,3 +14,15 @@ config/.admin_initialized
 .env
 .planning/
 coverage.xml
+
+# Image context: tests, local notes, and build artifacts are not runtime files.
+aegisgate/tests
+docs/
+notes.md
+task_plan.md
+.venv
+.venv310
+.git
+*.egg-info
+__pycache__
+.coverage
