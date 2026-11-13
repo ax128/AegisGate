@@ -20,8 +20,8 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
 | `model_map.json` | compat 模式的全局模型映射 + `allowed_models` 扩展 | 是 | **否，需重启** | 否 |
 | `stats.json` | 请求统计持久化（`core/stats.py` 运行时写入） | 否 | — | 否 |
 | `aegis_gateway.key` | 网关密钥 / UI 登录密码，首启生成 `0600` | 否 | 否 | **是** |
-| `aegis_fernet.key` | 脱敏映射加密密钥（Fernet），首启生成 `0600` | 否 | 否 | **是** |
-| `aegis_proxy_token.key` | 反向代理互信凭据（见 [README_zh.md §1.7](../README_zh.md#17-自定义-http-头)），首启生成 `0600` | 否 | 否 | **是** |
+| `aegis_fernet.key` | 脱敏映射加密密钥（Fernet），首启生成 `0600`。控制台轮换会先把当前密钥写入 `aegis_fernet_prev.key`，这一步失败则中止且当前文件不变。设置了 `AEGIS_ENCRYPTION_KEY` 时拒绝轮换 | 否 | 否 | **是** |
+| `aegis_proxy_token.key` | 反向代理互信凭据（见 [README_zh.md §1.7](../README_zh.md#17-自定义-http-头)），首启生成 `0600`。控制台轮换在写文件成功后对当前网关进程立即生效；Caddy 仍只在启动时读一次，重载前不会自动换成新 token。手改文件不会热加载 | 否 | 否 | **是** |
 
 以下按四类展开说明。
 
@@ -95,6 +95,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
   cp config/.env.example config/.env
   ```
 - 复制后可编辑 `config/.env`；更多可调项见 `config/.env.example` 内注释。
+- `docker-compose.yml` 的 `environment:` 已经设置的键在 `config/.env.example` 里保持注释，复制或自动生成的 `.env` 不会给它们赋值。可热更新的那些键（`AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、`AEGIS_AUDIT_LOG_PATH`）因此不会在控制台保存时盖掉 Compose。`AEGIS_ENFORCE_LOOPBACK_ONLY` 启动后即固定，注释掉是为了不让示例里留下与 Compose 相反的赋值。裸机需要不同取值时再取消注释。
 
 常用示例：
 

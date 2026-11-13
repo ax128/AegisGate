@@ -98,6 +98,7 @@ from aegisgate.adapters.openai_compat.upstream import (
     _forward_multipart_pinned,
     _forward_stream_lines,
     _forward_stream_lines_pinned,
+    _request_already_sent,
     _should_bypass_filters_for_whitelist,
     _resolve_upstream_base,
     _safe_error_detail,
@@ -405,6 +406,10 @@ async def _iter_forward_stream_with_pinning(
         except RuntimeError as exc:
             detail = str(exc)
             if yielded_any:
+                raise
+            # Pinned failover already refused to switch targets because the POST
+            # had left. A bootstrap retry would send that same request again.
+            if connect_urls and _request_already_sent(exc):
                 raise
             if attempt >= max_retries:
                 raise

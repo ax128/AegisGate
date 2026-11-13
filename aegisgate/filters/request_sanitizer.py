@@ -15,6 +15,7 @@ from aegisgate.core.models import InternalRequest, is_derived_scan_message
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import (
     any_pattern_hits,
     apply_rewrite_conservatively,
@@ -152,8 +153,8 @@ class RequestSanitizer(BaseFilter):
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
     @staticmethod
-    def _compile_patterns(items: list[dict] | list[str]) -> list[re.Pattern[str]]:
-        compiled: list[re.Pattern[str]] = []
+    def _compile_patterns(items: list[dict] | list[str]) -> list[RulePattern]:
+        compiled: list[RulePattern] = []
         for item in items:
             if isinstance(item, dict):
                 regex = item.get("regex")
@@ -161,14 +162,14 @@ class RequestSanitizer(BaseFilter):
                 regex = item
             if not regex:
                 continue
-            compiled.append(re.compile(str(regex), re.IGNORECASE))
+            compiled.append(compile_rule_regex(str(regex), re.IGNORECASE))
         return compiled
 
     @staticmethod
     def _compile_tagged_patterns(
         items: list[dict] | list[str], default_category: str
-    ) -> list[tuple[str, re.Pattern[str]]]:
-        compiled: list[tuple[str, re.Pattern[str]]] = []
+    ) -> list[tuple[str, RulePattern]]:
+        compiled: list[tuple[str, RulePattern]] = []
         for item in items:
             category = default_category
             regex = None
@@ -179,10 +180,10 @@ class RequestSanitizer(BaseFilter):
                 regex = item
             if not regex:
                 continue
-            compiled.append((category, re.compile(str(regex), re.IGNORECASE)))
+            compiled.append((category, compile_rule_regex(str(regex), re.IGNORECASE)))
         return compiled
 
-    def _matches_any(self, text: str, patterns: list[re.Pattern[str]]) -> bool:
+    def _matches_any(self, text: str, patterns: list[RulePattern]) -> bool:
         return any_pattern_hits(patterns, build_haystacks(text))
 
     def _matched_categories(self, text: str) -> set[str]:
