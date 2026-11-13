@@ -524,6 +524,34 @@ def test_stream_block_reason_uses_response_disposition_first() -> None:
     assert _stream_block_reason(ctx) == "response_sanitized"
 
 
+def test_review_score_below_stream_floor_does_not_end_the_stream() -> None:
+    """OutputSanitizer's response_high_risk at 0.86 is the non-stream mark.
+
+    The stream floor is 0.9. A tool-call review must not be upgraded into a
+    cut just because that filter also wrote ``response_disposition = block``.
+    """
+    ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/chat/completions")
+    ctx.risk_threshold = 0.85
+    ctx.risk_score = 0.86
+    ctx.response_disposition = "block"
+    ctx.disposition_reasons.append("response_high_risk")
+    ctx.requires_human_review = True
+    ctx.security_tags.add("tool_call_violation")
+    ctx.enforcement_actions.append("tool_call_guard:dangerous_param:review")
+
+    assert _stream_block_reason(ctx) is None
+
+
+def test_block_action_score_still_ends_the_stream() -> None:
+    ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/chat/completions")
+    ctx.risk_threshold = 0.85
+    ctx.risk_score = 0.96
+    ctx.response_disposition = "block"
+    ctx.disposition_reasons.append("response_high_risk")
+
+    assert _stream_block_reason(ctx) == "response_high_risk"
+
+
 def test_stream_block_reason_high_risk_command_tag_requires_confirmation() -> None:
     ctx = RequestContext(request_id="r1", session_id="s1", route="/v1/chat/completions")
     ctx.security_tags.add("response_anomaly_high_risk_command")
@@ -2462,8 +2490,6 @@ def _chat_two_choice_tool_frame(left: str, right: str) -> bytes:
 def _run_chat_tool_call_stream(
     monkeypatch: pytest.MonkeyPatch,
     frames: list[bytes],
-    *,
-    keep_scanning: bool = False,
 ) -> tuple[str, list[str], list[list[str]], list[int], list[list[str]], list[list[str]]]:
     """Drive a chat stream with the real response pipeline.
 
@@ -2472,16 +2498,10 @@ def _run_chat_tool_call_stream(
     exfil rule ids recorded so far after each probe, and the counted tool-rule
     ids (``counted_tool_arg_hits``) after each probe.
 
-    ``keep_scanning`` leaves the stream open after a hit so a later tool delta
-    is still probed. The default policy turns this phrase's review score into
-    a stream stop, which would hide whether that later fragment is counted again.
+    Default review (0.86) does not stop the stream, so a later delta is still
+    probed. A block action (0.96) still stops it.
     """
     _install_inline_payload_transform(monkeypatch)
-    if keep_scanning:
-        monkeypatch.setattr(
-            "aegisgate.adapters.openai_compat.router._stream_block_reason",
-            lambda ctx: None,
-        )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._build_streaming_response",
         lambda generator: generator,
@@ -2691,7 +2711,6 @@ def test_chat_stream_later_fragment_does_not_recount_the_same_hit(
             _chat_tool_finish_frame(),
             b"data: [DONE]\n\n",
         ],
-        keep_scanning=True,
     )
 
     assert any(joined + extra in fragment for group in probed for fragment in group), (
@@ -2749,7 +2768,6 @@ def test_chat_stream_growing_exfil_match_is_counted_once(
             _chat_tool_finish_frame(),
             b"data: [DONE]\n\n",
         ],
-        keep_scanning=True,
     )
 
     assert any(head + tail in fragment for group in probed for fragment in group), probed

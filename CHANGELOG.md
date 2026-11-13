@@ -18,7 +18,9 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   命中之后后续分片仍会扫描。同一条流式调用上的同一条规则只记一次，即使匹配文本被后续分片拉长，
   enforcement action 和 `exfil_hit_count` 也不再增加；同一次探针里排在后面、这时才成立的另一条规则仍会记上。
   单个 delta 里已经包含完整参数时，送检内容与原来相同。
-  发给客户端的仍是原来的分片；默认 `review` 仍然不会中断这条流。messages 非流式抽取未改。
+  发给客户端的仍是原来的分片。默认 `review` 把风险分设为 0.86，`OutputSanitizer` 会因此记下
+  `response_high_risk`，非流式回答仍整段混淆。流式闸门的门槛是 0.9，这条分数不再把流截断；
+  动作为 `block`（0.96）时流仍然中断。messages 非流式抽取未改。
 
 ### Security（上游白名单旁路补上 XFF 降级）
 
