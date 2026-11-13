@@ -21,9 +21,11 @@ from aegisgate.config.security_rules import (
     DEFAULT_RELAXED_PII_IDS,
     is_low_false_positive_route,
     load_security_rules,
+    pii_validator_names,
     rule_enabled,
     select_relaxed_pii_patterns,
 )
+from aegisgate.util.checksums import enforced_validator_rejects, pattern_keeps_a_match
 from aegisgate.util.base64_detect import looks_like_base64_blob
 from aegisgate.util.masking import NORMALIZED_MATCH_MASK, mask_for_log
 from aegisgate.util.redaction_whitelist import (
@@ -33,7 +35,6 @@ from aegisgate.util.redaction_whitelist import (
 )
 from aegisgate.util.text_normalize import (
     build_haystacks,
-    pattern_hits_in,
     strip_invisibles,
 )
 
@@ -606,12 +607,14 @@ def _redact_leaf_with_patterns(
     # the expensive half. Plain ASCII normalizes back to itself, so the tuple
     # comes out empty and no rule pays for a second search.
     normalized_forms: tuple[str, ...] | None = None
+    validators = pii_validator_names()
     for pattern_id, pattern in patterns:
         match_count = 0
         protected_count = 0
         first_raw = ""
+        validator_name = validators.get(str(pattern_id).upper())
 
-        def _repl(match: re.Match[str]) -> str:
+        def _repl(match: re.Match[str], _validator: str | None = validator_name) -> str:
             nonlocal match_count, protected_count, first_raw
             if protected_spans and range_overlaps_protected(
                 protected_spans,
@@ -619,6 +622,11 @@ def _redact_leaf_with_patterns(
                 end=match.end(),
             ):
                 protected_count += 1
+                return match.group(0)
+            # Same gate as RedactionFilter. A rejected luhn match must not bump
+            # match_count: that would label the digits and also skip the
+            # normalized probe below.
+            if enforced_validator_rejects(_validator, match.group(0)):
                 return match.group(0)
             if not first_raw:
                 first_raw = match.group(0)
@@ -657,7 +665,7 @@ def _redact_leaf_with_patterns(
             )
         if not normalized_forms:
             continue
-        if not pattern_hits_in(pattern, normalized_forms):
+        if not pattern_keeps_a_match(pattern, validator_name, normalized_forms):
             continue
         hits.append(
             {

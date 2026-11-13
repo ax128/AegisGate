@@ -27,10 +27,14 @@ class NonceReplayCache:
         self._lock = Lock()
 
     def _prune(self, now_ts: int, window_seconds: int) -> None:
+        # Insertion order matches store time, so expired entries are a prefix.
+        # Stop at the first live one: each entry is popped at most once.
         expiry = now_ts - max(1, int(window_seconds))
-        stale = [n for n, ts in self._cache.items() if ts < expiry]
-        for nonce in stale:
-            self._cache.pop(nonce, None)
+        while self._cache:
+            oldest_ts = next(iter(self._cache.values()))
+            if oldest_ts >= expiry:
+                break
+            self._cache.popitem(last=False)
 
         while len(self._cache) > self.max_entries:
             self._cache.popitem(last=False)

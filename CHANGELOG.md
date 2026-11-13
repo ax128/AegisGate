@@ -16,6 +16,226 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   依赖审计（pip-audit）和镜像构建（只构建、不推送）都是必过检查。
   `ruff`、`mypy`、`pip-audit` 只加在 `dev` extras 里。
 
+### Fixed（控制台首屏不再拉取全部面板）
+
+- 桌面首屏不再因为审计标题落在窗口下半部分就扫描审计日志。统计标题大约在 180px，800–1400px 高的窗口仍会加载；审计标题大约在 700px，900–1200px 高的窗口不会因此发起审计查询和汇总。窗口高到 700px 已经落在上半部分时，审计面板仍会加载。
+- 刷新落在配置锚点（如 `#security`、`#general`）时，页面停在顶部，视口上半部分里的面板（统计、Token、入门卡片）仍会加载。指向已注册面板的锚点（如 `#audit`）只加载该面板，不预取沿途面板。
+- 文档目录请求失败时只在文档区提示。概览或配置加载失败不会写进文档区。
+- 打开控制台时只请求概览状态、配置（侧栏和概览字段链接靠这一份数据生成）以及视口上半部分里的面板。统计、审计、规则、请求侧脱敏、转发、文档、密钥、Compose 改为锚点打开或进入视口上半部分后再加载，这些面板仍可从侧栏进入。
+- 审计查询和汇总仍各自倒序读取，单次最多 8MB，但不再随首屏各走一遍。只有打开审计面板时才会发起这两次请求。
+
+### Fixed（PII 误报：时钟、git SHA、未过 Luhn 的数字）
+
+- **全量 PII 集不再把 `12:34:56` 标成 `IPV6`。** 规则改为至少六个十六进制组。三组是时钟；未压缩地址是八组；六组留给冒号 MAC 的回落（`mac:00:1a:…` 过不了 MAC 的后顾，以前靠 IPV6 接住）。压缩写法 `::` 本来就不匹配。
+- **40 位十六进制的 git 对象 id 不再标成 `CRYPTO_BTC_ADDR`。** 以 `1`、`3` 或 `bc1` 开头的 SHA-1 会落进原来的长度窗口。负向预查只排除整整 40 位 hex；更短的 base58 形状和现有 `bc1q…` 样本仍会脱敏。
+- **`CARD` 的 Luhn 改为门闩。** 13–16 位数字过不了 Luhn 就保持原文，不再打成 `CARD`。请求管道、转发层和 V2 用同一条规则。身份证、IBAN、德国增值税号、奥地利社保号仍然是校验失败也脱敏，只记一笔。对话路由的 relaxed 集本来不含这三条，行为不变。
+
+### Fixed（V2 流式探测失败时关闭上游连接）
+
+- V2 流式代理在返回 `StreamingResponse` 之前探测响应正文。探测抛错时，原先只写在响应体迭代器里的 `aclose` 不会执行，上游 exit stack 一直占着连接。现在探测段用 `try/finally`：探测没跑完就关闭上游；探测成功时仍由响应体结束时关闭，不提前掐断流。
+
+### Security（chat 流式工具参数拼齐后再扫描）
+
+- **`/v1/chat/completions` 流式响应里，`tool_calls[].function.arguments` 按 choice 与工具 index 拼成完整参数后再送进 `tool_call_guard`。**
+  同一条流里每个 choice 的工具 index 各自从 0 开始，参数按 `(choice index, tool index)` 分开拼接，
+  不会把两条回复拼成两边都没有的字符串。上游把参数拆成多个 delta。此前每个 delta 单独送检：
+  分隔符和后面的命令落在不同分片时，已有的危险参数规则匹配不到完整参数。
+  命中之后后续分片仍会扫描。同一条流式调用上的同一条规则只记一次，即使匹配文本被后续分片拉长，
+  enforcement action 和 `exfil_hit_count` 也不再增加；同一次探针里排在后面、这时才成立的另一条规则仍会记上。
+  单个 delta 里已经包含完整参数时，送检内容与原来相同。
+  发给客户端的仍是原来的分片。默认 `review` 把风险分设为 0.86，`OutputSanitizer` 会因此记下
+  `response_high_risk`，非流式回答仍整段混淆。流式闸门的门槛是 0.9，这条分数不再把流截断；
+  动作为 `block`（0.96）时流仍然中断。messages 非流式抽取未改。
+
+### Security（messages 流式 ping 不再提前放行未探测内容）
+
+- **`/v1/messages` 流式遇到 ping 时，不再把尚未探测的缓冲帧发给客户端。**
+  Anthropic 的 keepalive（`event: ping`，以及带 `data: {"type":"ping"}` 的同名事件）以前走非内容帧分支，会先把 holdback 里的 `message_*` / `content_block_*` 整段冲出去，探测留到后面。扫描间隔内还没被扫到的文本会先到达客户端。
+  ping 本身仍立即转发。没有 ping 的流、以及 ping 以外的事件，放行和探测节奏不变。
+
+### Fixed（流式上游错误：首帧前透传状态码，401/403 不重试）
+
+- **流式上游在还没向客户端发出任何帧时返回 HTTP 错误，网关使用该状态码，不再包成 HTTP 200 的 SSE 错误帧。**
+  响应体与非流式的 `upstream_http_error` 相同。连接失败没有上游状态码，仍是 SSE 错误帧。
+  已经向客户端发出首帧之后的错误不改状态码。
+  成功的流式响应会先等到上游的第一个字节（或这次错误），再提交网关的状态行。
+- **`AEGIS_STREAM_BOOTSTRAP_RETRIES` 不再重试 401 和 403。** 408、429 和 5xx 仍只在首字节之前重试。默认次数仍是 0。
+
+### Fixed（SSE 帧：跨 chunk 的 CRLF 仍是一帧）
+
+- **被拆开的一对 CRLF 仍是一个换行，前后的 SSE 行留在同一帧里。** `_iter_sse_frames` 以前先把当前 chunk 末尾的 `\r` 换成 `\n`。下一个 chunk 以 `\n` 开头时，这个提前换成的换行和后到的 `\n` 凑成空行，`event:` 和 `data:` 被拆成两帧。现在 chunk 末尾的 `\r` 留到下一个 chunk，再和后到的 `\n` 一起替换。
+- **单个大帧按线性时间解析。** 缓冲改为 `bytearray`，查找帧尾的空行从上一块长度减一的位置开始，不再每个 chunk 都拷贝并从头重扫整段缓冲。一次送齐的 CRLF 帧、以及本来就该分开的两帧，结果不变。
+
+### Security（过滤管道超时后工作线程不再改写上下文）
+
+- **过滤管道的取消只作用于这一次调用。请求超时且动作为 `pass` 时，同一次请求后面的响应管道仍会跑。**
+  每次进入请求或响应管道都会换一块新的取消标记。交给工作线程的是随这次调用一起提交的那块对象，不是工作线程稍后启动时 `ctx` 上的那块。超时只取消这一块。`pass` 放行的是这次请求，不是让响应不再过滤。
+  已经在 `process_request` / `process_response` 里的那一次调用返回后，不能盖掉超时处理写下的处置：它若把处置改成 `sanitize` 或再追加原因，调用方读到的仍是超时处理写下的 `block`。还没开始的过滤器不会再跑。默认超时仍是 90 秒。
+
+### Fixed（请求侧脱敏不再堵住事件循环）
+
+- **转发前的请求侧脱敏改到过滤管线的线程池里执行。** chat / responses / messages / 通用 JSON 的上游 payload 构建，以及 multipart 表单字段脱敏，此前经 `run_payload_transform_offloop` 在事件循环线程上同步跑正则。一次慢脱敏会卡住同一进程里的其它请求。现在它们和过滤管线共用 `aegisgate-filter-pipeline` 线程池。轻量的 payload 映射（`to_internal_*`、安全预览）仍在调用线程上执行。转发规则钉住的精确值开关会随任务上下文带进工作线程，开关语义不变。
+
+### Security（非流式 /v1/messages 响应与 chat 同一扫描上限）
+
+- **非流式 `/v1/messages` 响应按与 chat 相同的上限扫描，不再只扫前 16000 个字符。**
+  该路径此前走通用抽取，上限 16000 个字符；同一回答走流式是全量滑窗，走非流式时第 16000 个字符之后的正文不进响应侧过滤。
+  现在抽取 `content[]` 的 `text` 和 `tool_use.input`（JSON 序列化），再用与 chat 相同的响应长度上限截断（`max_response_length`，默认 200 万字符）。流式扫描策略未改。
+
+### Fixed（绑定 IP 故障转移：请求已经发出后不再重发）
+
+- **绑定多个 IP 时，请求一旦发出就不再换下一个 IP 重发。**
+  `_forward_json_pinned` 与 `_forward_stream_lines_pinned` 此前捕获全部 `httpx.HTTPError` 后对下一个 IP 重新 POST。
+  流式已经向下游交出半截回答再遇到 `ReadError`，或 JSON 遇到 `ReadTimeout`，上游都可能已经在生成并计费，客户端还会再收到一份完整回答。
+  现在只有 `ConnectError` 和 `ConnectTimeout`（连接还没建立，请求确定没发出）才切换目标；其余错误立刻以 `upstream_unreachable:` 抛出。
+  流式只要已经 yield 过字节，就不再换 IP。`PoolTimeout` 不切换：池耗尽时换 IP 用的仍是同一个池。
+  `AEGIS_STREAM_BOOTSTRAP_RETRIES` 大于 0 时，外层也不会把绑定 IP 上已经发出、并以 `upstream_unreachable` 抛出的传输失败再 POST 一遍。连接还没建立的失败、未绑定 IP 的首字节前重试，以及拿到 HTTP 状态后对 401/403/408/429/5xx 的重试，仍按该设置工作。默认值仍是 0。
+
+### Security（规则正则改为线性时间匹配）
+
+- **规则匹配改为线性时间。** 带顶层无界间隔（`.*` / `.+` / `[\s\S]*` 等）的规则由
+  `compile_rule_regex` 按段搜索，不再走 CPython 的多项式回溯。命中判定不变：是否命中，
+  以及 `match.start()`，与原正则一致。命中区间的结束位置改为链条最早凑齐处，不再延伸到
+  贪婪匹配的最远处。遮罩、恢复后替换和注入证据摘录因此变短，拦截决策不变。
+
+### Security（控制台登出撤销当前会话）
+
+- **`POST /__ui__/api/logout` 会使刚才那枚 UI 会话 cookie 立即不能再通过校验。**
+  会话仍是绑定客户端指纹的 HMAC，默认 12 小时过期。此前登出只让浏览器删除 cookie，
+  持有同一枚 cookie 的一方在到期前重放，服务端仍会接受。现在登出把这枚 cookie 记入
+  进程内撤销表，直到它自己的到期时间；同一次登出不会签出其他已登录会话。
+  撤销表与登录限流一样只活在当前进程：重启后、或 `--workers` 大于 1 时落在别的进程上的请求，
+  未过期的旧 cookie 会重新有效。
+
+### Fixed（控制台轮换 proxy token 立即生效，并去掉无效的 /tmp 回退）
+
+- **控制台轮换 `proxy_token` 后，当前网关进程立刻改用新 token。** 此前只写
+  `aegis_proxy_token.key`，进程内缓存要到重启才更新，旧 token 在重启前一直有效。
+  现在写文件成功后立即生效。Caddy 仍只在启动时读一次 token，因此 Caddy 转发的请求在
+  Caddy 重载前不会自动换成新 token。
+- **密钥文件写失败不再回退到 `/tmp/aegisgate`。** 加载器不读那个目录，重启后轮换会悄悄失效。
+  现在写失败返回 500，磁盘上的密钥保持原样。控制台的密钥列表和单个密钥读取也不再查看
+  `/tmp/aegisgate`：只存在于那里的文件不再显示。
+- **Fernet 轮换在无法保存上一把密钥时中止**，当前密钥文件不变，避免旧密文立刻解不开。
+  设置了 `AEGIS_ENCRYPTION_KEY` 时拒绝轮换：运行时读的是环境变量，写文件会被盖掉。
+
+### Security（控制台会话 cookie 限定在 /__ui__）
+
+- **控制台会话 cookie 限定在 `/__ui__`，并在每次转发给上游之前剥离。**
+  登录和网关密钥轮换签发的 `aegis_ui_session` 此前没有 `Path`，浏览器按 `/` 保存。
+  同一浏览器再访问 `/v1/*` 或 `/v2/*` 时，会把控制台会话 cookie 发给第三方上游。
+  现在 `Set-Cookie` 带 `Path=/__ui__`。登录和网关密钥轮换在签发新 cookie 的同时清除升级前已经落在 `Path=/` 的旧 cookie；登出也会同时清除这两条。
+  浏览器把较短的 `Path=/` 放在 `Path=/__ui__` 后面，同名 cookie 只保留最后一个值；请求里若仍同时带上新旧两个值，认证采用仍然有效的新会话。
+  V1 普通转发、整域名转发、V2 代理在组上游请求头时都会丢掉名为 `aegis_ui_*` 的 cookie；其它 cookie 原样保留。
+
+### Fixed（上游连接池等待不再等于读超时）
+
+- **OpenAI 兼容上游的连接池等待超时改为最多 10 秒，不再跟随 `AEGIS_UPSTREAM_TIMEOUT_SECONDS`（默认 600 秒）。**
+  连接打满时，排队请求此前要等满读超时才失败。读超时、写超时和故障转移未改。
+  若把上游超时配得小于 10 秒，池等待仍不超过该配置。v2 代理的池等待策略未改。
+
+### Fixed（热重载不再掐断在途的 V1 上游流）
+
+- **只有上游超时或连接池上限变化时才更换共享的 V1 上游 client，并推迟关闭旧 client。**
+  控制台保存任意配置都会改写 `config/.env`，热重载此前都会立刻 `aclose()` 这条共享连接，把正在传输的 LLM 流一起断开。这条 client 实际只用 `upstream_timeout_seconds`、`upstream_max_connections`、`upstream_max_keepalive_connections`。
+  现在仅这三项发生变化时才摘下旧 client：新请求立刻走新 client，旧 client 在已经生效的 `upstream_timeout_seconds + 5` 秒后再关闭。只改日志级别或其他配置不会动它。
+
+### Security（UI 鉴权与路由使用同一条路径）
+
+- **带 `.` 或 `..` 路径段的请求直接返回 400 `invalid_path`，公开 UI 判断不再调用 `normpath`。**
+  此前 `_is_public_ui_path` 先把路径折叠再判断，路由仍按原始路径匹配。
+  `GET /__ui__/api/compose/../../login` 会被当成公开的 `/__ui__/login` 而跳过登录，
+  实际进入 compose 接口并返回 `not_allowed`。`POST /__ui__/../v1/chat/completions`
+  则被 UI 门重定向到登录页，并不会进入 `/v1`。现在这两处看到的是同一条未折叠路径；
+  含 `.` / `..` 段时在鉴权和路由之前拒绝。`//__ui__/api/...` 仍按原样 404，不会被收成 UI 接口。
+  已经是公开路径、末尾只多一个 `/` 的请求（`/__ui__/health/`、`/__ui__/api/login/`）仍交给路由，
+  由 `redirect_slashes` 跳到那条公开路径。路径中间的空段（`/__ui__//login`）仍按原始路径判断。
+
+### Security（token 路由拒绝 `.` / `..` 路径段）
+
+- **包含 `.` 或 `..` 路径段的 token 路由请求现在返回 400。**
+  `/v1/__gw__/t/<token>/...` 与 `/v2/__gw__/t/<token>/...` 在改写前拒绝路径段恰好为 `.` 或 `..` 的请求。
+  服务器已经把 `%2e` / `%2e%2e` 解码成点段时同样返回 400；路径里仍带着这两种编码时也返回 400。
+  此前剩余路径会原样拼进上游 URL，httpx 规范化点段后请求会离开 token 配置的上游 base path
+  （例如落到 `/admin`，或绕过 chat 专属过滤走到通用代理）。
+  上游 URL 拼接做了同样的检查，命中时不再拼出带点段的地址，调用方返回 400。
+  `report.pdf`、`.well-known` 这类普通路径的改写不变。
+
+### Changed（镜像构建：依赖层缓存、健康检查、文档白名单）
+
+- **镜像先安装依赖，再复制源码。** 构建只先复制 `pyproject.toml`，安装项目依赖和 `semantic` extra，然后再复制应用源码并安装项目本身（不再重装依赖）。改源码不再让依赖层重新安装。没有锁文件，安装清单仍来自 `pyproject.toml`。
+- **镜像增加 `HEALTHCHECK`，探测 `/health`。** 端口使用 `AEGIS_PORT`，缺省 `18080`，与容器启动命令一致。
+- **镜像只复制控制台文档白名单。** 不再把仓库根目录全部 Markdown 拷进镜像，只复制 `aegisgate/core/gateway_ui_config.py` 里 `_UI_DOCS` 列出的文档。`.dockerignore` 排除测试目录、`docs/`、本地笔记和构建产物。
+
+### Security（HMAC nonce 在验签通过后才记录）
+
+- **未签名的请求不再占用 nonce。** 此前先把 nonce 写入缓存再验签名，签名错误的请求也会占住这条 nonce：攻击者可以抢先占用合法客户端将要使用的值，或把缓存刷满挤掉真实 nonce，从而打开重放窗口。现在先校验时间戳和签名，通过后才 `check_and_store`。
+- **超过 128 个字符的 nonce 返回 400**（`hmac_nonce_too_long`）。`n-ok`、`n-replay` 这类短 nonce 的通过与重放行为不变。
+- 内存 nonce 缓存只从最旧的一端弹出已过期项，遇到未过期即停止，避免每个请求扫描整张表。容量上限仍会淘汰最旧条目。
+
+### Fixed（空还原映射不再被 TTL 判过期）
+
+- **空的还原映射不再因 TTL 被判过期。** `redaction_created_at` 默认是上下文创建时间，只在真正写入脱敏映射时重置。以前还原阶段先看这个时间戳：流持续超过 `restore_ttl_seconds`（默认 1800 秒）且 mapping 为空时，会被记上 `restoration_stale_mapping` 并把风险分抬到 0.95，长流因此被拦截。现在只在 mapping 非空时检查 TTL；非空且超过 TTL 的映射仍按 `stale_mapping` 拦截。判定放在解析 mapping 之后，过期拒绝会清掉已经取出的那份，不再把存储副本留到下一次。
+
+### Fixed（示例配置不再给 Compose 已设置的键赋值）
+
+- **复制 `config/.env.example` 不再设置与 `docker-compose.yml` 的 `environment:` 冲突的键。**
+  改为注释的是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、
+  `AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、
+  `AEGIS_AUDIT_LOG_PATH`。
+  热重载会用 `config/.env` 里出现的键盖过当前进程环境。按文档把示例拷成 `.env`（或首次启动从示例自动生成）之后，
+  控制台第一次保存会把 Compose 已打开的端口路由写成 `false`，并可能把监听地址、端口、SQLite / 审计路径和端口路由 Host 钉回示例值。
+  现在复制示例不会给这些键赋值，Compose 注入的值在保存后仍然保留。已有的 `config/.env` 不会被改写。
+  裸机未取消注释时走代码默认值：`AEGIS_ENV` 因此是 `dev` 而不是示例里原先写死的 `prod`
+  （HMAC 未开启时的生产环境告警只在 `prod` / `production` 下出现；Docker Compose 仍会设置 `AEGIS_ENV=prod`）。
+  进程环境变量与 `.env` 在重载时谁优先没有改。
+
+### Security（应用日志文件权限）
+
+- **应用日志改为仅所有者可读写（0600）。** `logs/aegisgate/YY/MM/DD.log` 原本就按 10MB、最多 10 个备份做大小轮转，但文件由标准库 `open()` 创建：umask 为 022 时模式是 0644，同机其他用户能读到日志。现在每次打开（含按大小轮转后重新打开）都强制 0600；进程开始写当天日志时，会扫描整个 `logs/aegisgate` 目录树（不只是当天那一层目录），把其中已有的 `*.log` 和 `*.log.<n>`，包括更早日期的 `YY/MM/DD.log`，收成 0600。按天分目录的旧文件仍会保留，这次不删除它们。扫描目录时遇到 `OSError`（含目录在扫描中消失）只跳过剩余的 chmod，不再把文件日志关掉。
+
+### Security（精确值脱敏：规范化后再匹配）
+
+- **精确值替换先做 NFKC，并去掉零宽字符和双向控制符，再按对应的原文区间替换。**
+  此前只对原文做字面匹配，配置值中间插入 U+200B，或把值写成全角，精确值脱敏会整段漏掉。
+  折叠只用于检测：命中时只替换原文里折进这次匹配的那一段，旁边的全角标点和段外的零宽字符保持原样；
+  没有命中的文本原样返回。大小写和空白仍然敏感，PII 正则未改。纯 ASCII 的文本和配置值仍走原来的字面替换。
+
+### Security（受信代理的 X-Forwarded-For 改为从右向左取客户端）
+
+- **直连对端在 `AEGIS_TRUSTED_PROXY_IPS` 中时，不再把 `X-Forwarded-For` 的最左值当作客户端 IP。**
+  最左值由客户端决定。nginx 常见的 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  是追加：客户端发送 `X-Forwarded-For: localhost` 或 `127.0.0.1`，修复前会被判成内网，从而打开
+  passthrough、管理端点、默认上游和控制台网络门。
+  现在把多个同名头按出现顺序拼在一起，从右向左解析每一跳（含 IPv4-mapped），跳过仍是受信代理的地址，
+  取第一跳非受信 IP。某一跳不是合法 IP 时记为 `unknown`，`_is_internal_ip` 与 `_is_loopback_ip` 都为 false；
+  登录限流和审计会共用这个键。没有 XFF，或每一跳都是受信代理时，回退到最左一跳（解析失败则用直连地址）。
+  直连对端不是受信代理时仍只返回直连地址；该地址不是合法 IP（例如测试客户端的 `testclient`）时保留原始字符串。
+  - 参考配置里的 Caddy 用 `{remote_host}` 覆盖 XFF，本来就不受影响。README 的 nginx 建议改为
+    `proxy_set_header X-Forwarded-For $remote_addr;`。已经用追加写法、且该 nginx 已列入可信代理的部署，
+    修复后取到的是右侧非受信跳，而不是客户端伪造的最左值。
+  - `X-Forwarded-Host` 仍取第一个值，本次未改。`AEGIS_XFF_STRICT_INTERNAL` 的降级逻辑未改。
+
+### Security（脱敏白名单区间跟随替换后的文本）
+
+- **配置了脱敏白名单时，一条规则只要改写了文本，就按新文本重算保护区间。**
+  `RedactionFilter` 原先只在原文上计算一次白名单区间，随后的 PII / 字段规则却在已经被替换、长度已经变化的文本上匹配。
+  长值（例如 JWT）换成短占位符后，后面的密钥会左移进旧区间，从而被原样放行；短值换成更长的占位符时，白名单中的值会右移出旧区间，从而被误脱敏。
+  白名单为空时不额外重算，未配置白名单的请求行为不变。
+
+### Security（控制台 .env 写入拒绝换行注入）
+
+- **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
+  字符串此前只做 `strip()`，再按 `KEY=value` 写入。值里一旦含有这三种字符，管理员会话就能把控制台不开放的键写进 `.env`，例如 `AEGIS_GATEWAY_KEY`、`AEGIS_ENFORCE_LOOPBACK_ONLY`。
+  现在这类提交返回 400 `invalid_field_value`（`invalid value for <字段>`），文件不会被改写；落盘前再检查一次。只拒绝这三种字符，其它值的保存行为不变。
+
+### Security（安全披露渠道）
+
+- **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
+  更早的版本不受支持。没有公开安全邮箱；尚未修复的漏洞请经 GitHub Private vulnerability reporting
+  私下报告（https://github.com/ax128/AegisGate/security/advisories/new），不要发到公开 issue。
+  维护者在 7 天内确认收到。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**

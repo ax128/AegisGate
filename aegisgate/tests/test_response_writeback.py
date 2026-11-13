@@ -268,7 +268,7 @@ async def test_messages_multi_block_bodies_are_transformed_per_block(
     assert second not in result["content"][0]["text"]
     # Consistency guard: this route's own extractor, run over the written-back
     # body, has to come out as the text the pipeline produced.
-    assert openai_router._extract_generic_analysis_text(result) == pipeline_text[0]
+    assert openai_router._extract_messages_output_text(result) == pipeline_text[0]
 
 
 # ── the restore surface stops at what the guards scanned ───────────────────

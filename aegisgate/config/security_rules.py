@@ -1041,14 +1041,12 @@ def rule_enabled(item: Any) -> bool:
 def rule_validator(item: Any) -> str | None:
     """The rule's optional checksum validator name, or None.
 
-    Deliberately *not* the shared-by-every-compile-site predicate rule_enabled
-    is. pii_patterns is compiled in three places — filters/redaction.py,
-    adapters/openai_compat/sanitize.py and adapters/v2_proxy/router.py — and
-    only the first reads this. That is safe *because this field cannot suppress
-    redaction*: all three keep redacting, and V1 additionally records that the
-    checksum failed. The moment anyone adds an action that skips redaction,
-    this asymmetry becomes a real divergence and all three sites (plus the
-    console's editable-field whitelist) have to be unified first.
+    pii_patterns is compiled in three places — filters/redaction.py,
+    adapters/openai_compat/sanitize.py and adapters/v2_proxy/router.py. ``luhn``
+    is a gate in all three (see :data:`aegisgate.util.checksums.ENFORCED_VALIDATORS`):
+    a match it rejects is not redacted. Every other name still redacts, and the
+    V1 request pipeline additionally records that the checksum failed. The
+    console does not write this field.
 
     An unrecognised name reads as "no validator", so a typo degrades to today's
     behaviour rather than to an exception on the request path.
@@ -1062,6 +1060,26 @@ def rule_validator(item: Any) -> str | None:
         return None
     name = name.strip().lower()
     return name if name in VALIDATORS else None
+
+
+def pii_validator_names() -> dict[str, str]:
+    """Uppercase pattern id -> validator name, for rules that declare one.
+
+    The request filter keeps this map on the instance. The forward path and V2
+    compile patterns without it, and they need the same answer per match or a
+    Luhn reject on one layer is a CARD label on another.
+    """
+    rules = load_security_rules().get("redaction", {})
+    patterns = rules.get("pii_patterns") if isinstance(rules, dict) else None
+    if not isinstance(patterns, list):
+        return {}
+    names: dict[str, str] = {}
+    for item in patterns:
+        validator_name = rule_validator(item)
+        if not validator_name or not isinstance(item, dict):
+            continue
+        names[str(item.get("id", "PII")).strip().upper()] = validator_name
+    return names
 
 
 def configured_redaction_pattern_ids(rules: dict[str, Any]) -> set[str]:

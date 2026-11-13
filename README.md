@@ -180,6 +180,15 @@ Override it with `AEGIS_GATEWAY_KEY` for Docker/CI. Rotate it from the console's
 or by replacing the file contents and restarting. See [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) for
 the full console guide.
 
+The same page rotates `config/aegis_proxy_token.key`. After that file is written successfully, the
+gateway process accepts the new proxy token immediately. Caddy still reads the token only once, at
+startup, so requests Caddy forwards keep the previous token until Caddy is reloaded.
+
+Fernet rotation from that page saves the current key to `config/aegis_fernet_prev.key` first and
+aborts, leaving the current key file unchanged, when that save fails. It also refuses to rotate
+while `AEGIS_ENCRYPTION_KEY` is set, because the process uses the environment variable and a
+rewritten file would not take effect.
+
 Notes:
 
 - The stock `docker-compose.yml` is not a fully standalone "single container only" compose file: it joins external Docker networks for CLIProxyAPI and Sub2API by default.
@@ -669,7 +678,7 @@ Filter pipeline results may also include an `aegisgate` metadata object in succe
 | `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
 | `x-aegis-filter-mode` | Gateway internal | Derived from the token URL suffix (`__redact` / `__passthrough`) and re-injected by the gateway. Client-supplied values are stripped before inner handlers run. |
 | `x-aegis-redaction-whitelist` | Gateway internal | Derived from token `whitelist_key` bindings and injected by the gateway. Client-supplied values are stripped or ignored. |
-| `x-aegis-proxy-token` | Reverse proxy -> Gateway | Optional trust credential between a front reverse proxy and the gateway. Its value is `config/aegis_proxy_token.key` (generated on first start, chmod 600). When it matches, a non-token `/v1/...` or `/v2/...` request is accepted **regardless of client IP** and forwarded to `AEGIS_UPSTREAM_BASE_URL` — i.e. it lifts the internal-only restriction described below. Treat the key as equivalent to opening direct `/v1` access; rotate it like the gateway key and never expose it to clients. See [Caddyfile.example](Caddyfile.example) and `scripts/caddy-entrypoint.sh`. |
+| `x-aegis-proxy-token` | Reverse proxy -> Gateway | Optional trust credential between a front reverse proxy and the gateway. Its value is `config/aegis_proxy_token.key` (generated on first start, chmod 600). When it matches, a non-token `/v1/...` or `/v2/...` request is accepted **regardless of client IP** and forwarded to `AEGIS_UPSTREAM_BASE_URL` — i.e. it lifts the internal-only restriction described below. Treat the key as equivalent to opening direct `/v1` access; rotate it like the gateway key and never expose it to clients. A successful console rotation takes effect in the gateway process immediately; Caddy still reads the token only once at startup, so reload Caddy before forwarded requests use the new token. See [Caddyfile.example](Caddyfile.example) and `scripts/caddy-entrypoint.sh`. |
 
 ### Filter Modes (Passthrough / Redact-Only)
 
@@ -770,6 +779,8 @@ fields alongside them are.
 
 Key environment variables (set in `config/.env`):
 
+Keys that `docker-compose.yml` sets under `environment:` stay commented in [`config/.env.example`](config/.env.example), so copying the example does not assign them and a console save does not replace the Compose values. They are `AEGIS_HOST`, `AEGIS_PORT`, `AEGIS_ENV`, `AEGIS_ENFORCE_LOOPBACK_ONLY`, `AEGIS_ENABLE_LOCAL_PORT_ROUTING`, `AEGIS_LOCAL_PORT_ROUTING_HOST`, `AEGIS_SQLITE_DB_PATH`, and `AEGIS_AUDIT_LOG_PATH`. Uncomment one only for a deploy that does not get that key from Compose. The table lists the code default used when the key is unset. `AEGIS_ENFORCE_LOOPBACK_ONLY` is pinned at startup; the others above are applied on hot reload when present in `config/.env`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AEGIS_HOST` | `127.0.0.1` | Listen address |
@@ -811,7 +822,7 @@ Key environment variables (set in `config/.env`):
 | `AEGIS_COMPAT_ALLOWED_PORTS` | _(empty)_ | Required allowlist for compat token port routing; empty = deny all compat port routing |
 | `AEGIS_ENABLE_RELAY_ENDPOINT` | `false` | Enable optional `POST /relay/generate` relay-compatible endpoint |
 | `AEGIS_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
-| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. Behind Caddy on localhost use `127.0.0.1`. Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it. Run uvicorn with `--no-proxy-headers` (the launcher and Dockerfile do): its own default trusts 127.0.0.1 and replaces the peer with `X-Forwarded-For` before the gateway sees it |
+| `AEGIS_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For. The gateway walks that header from the right and skips hops that are themselves trusted proxies. Behind Caddy on localhost use `127.0.0.1`. nginx should overwrite the header with `proxy_set_header X-Forwarded-For $remote_addr;` (same idea as Caddy's `{remote_host}`). Changing this requires a restart; `AEGIS_XFF_STRICT_INTERNAL=false` does **not** undo it. Run uvicorn with `--no-proxy-headers` (the launcher and Dockerfile do): its own default trusts 127.0.0.1 and replaces the peer with `X-Forwarded-For` before the gateway sees it |
 | `AEGIS_XFF_STRICT_INTERNAL` | `true` | Treat X-Forwarded-For from an untrusted direct peer as a public client (admin, default `/v1`, UI, the `AEGIS_UPSTREAM_WHITELIST_URL_LIST` bypass). Set `false` to restore the old checks without setting trusted proxies. Restart required |
 | `AEGIS_GATEWAY_KEY` | _(file)_ | Overrides `config/aegis_gateway.key` (Docker/CI). Authenticates every `/__gw__/*` admin call and the console login |
 | `AEGIS_ENCRYPTION_KEY` | _(auto)_ | Fernet key for redaction-mapping storage; generated into `config/aegis_fernet.key` (chmod 600) when empty |

@@ -9,7 +9,7 @@ import asyncio
 import ipaddress
 import json
 from typing import Any, AsyncGenerator, Mapping, cast
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import hashlib
 import httpx
@@ -62,11 +62,18 @@ def _upstream_http_limits() -> httpx.Limits:
     )
 
 
+# Acquiring a connection is not an LLM read. A saturated pool must fail this
+# quickly instead of holding the caller for the whole read budget (default 600s).
+_UPSTREAM_POOL_TIMEOUT_SECONDS = 10.0
+
+
 def _upstream_http_timeout() -> httpx.Timeout:
     timeout = float(settings.upstream_timeout_seconds)
-    # connect is capped at 30s; read/write/pool use the full timeout for long-running LLM requests
+    # connect is capped at 30s; read/write use the full timeout for long-running LLM requests.
+    # Pool wait is a separate, shorter budget, and never longer than the configured timeout.
     connect = min(timeout, 30.0)
-    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=timeout)
+    pool = min(timeout, _UPSTREAM_POOL_TIMEOUT_SECONDS)
+    return httpx.Timeout(connect=connect, read=timeout, write=timeout, pool=pool)
 
 
 async def _get_upstream_async_client() -> httpx.AsyncClient:
@@ -92,21 +99,31 @@ async def close_upstream_async_client() -> None:
         await client.aclose()
 
 
-def schedule_close_upstream_async_client() -> None:
-    """Drop the shared upstream client so the next request rebuilds it.
+def schedule_close_upstream_async_client(grace_seconds: float | None = None) -> None:
+    """Detach the shared upstream client so the next request rebuilds it.
 
-    Hot reload is synchronous. If an event loop is already running, close the
-    client on that loop; otherwise drop the handle (tests / startup).
+    Hot reload is synchronous. On a running event loop the previous client stays
+    open through ``grace_seconds`` (default: the upstream read timeout plus five
+    seconds) so an in-flight stream can finish, then it is closed. Without a
+    running loop, drop the handle (tests / startup). Process shutdown still
+    closes the current client via :func:`close_upstream_async_client`; a client
+    already handed to ``call_later`` is released with the loop.
     """
+    global _upstream_async_client
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if loop is not None and loop.is_running():
-        loop.create_task(close_upstream_async_client())
-        return
-    global _upstream_async_client
+    old = _upstream_async_client
     _upstream_async_client = None
+    if old is not None and loop is not None and loop.is_running():
+        if grace_seconds is None:
+            # Hot reload has already applied the new settings. Grace follows the
+            # read timeout now in effect, plus five seconds.
+            grace = float(settings.upstream_timeout_seconds) + 5.0
+        else:
+            grace = float(grace_seconds)
+        loop.call_later(grace, lambda: loop.create_task(old.aclose()))
 
 
 def _normalize_upstream_base(raw_base: str) -> str:
@@ -301,6 +318,10 @@ def _build_upstream_url(request_path: str, upstream_base: str) -> str:
         route_path = route_path[len(GATEWAY_PREFIX) :]
     if not route_path.startswith("/"):
         route_path = f"/{route_path}"
+    # Same rule as the token middleware: httpx would normalize these and leave
+    # the upstream base. Callers already turn ValueError into HTTP 400.
+    if any(segment in {".", ".."} for segment in unquote(route_path).split("/")):
+        raise ValueError("invalid_path")
     url = f"{upstream_base}{route_path}"
     if query:
         return f"{url}?{query}"
@@ -375,6 +396,12 @@ def _build_forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
 
     if not any(name.lower() == "content-type" for name in forwarded):
         forwarded["Content-Type"] = "application/json"
+    # Every V1 upstream send comes through here, including ordinary /v1 calls
+    # that never matched a host-forward rule. The forward-rule branch strips
+    # earlier; this call covers the rest. Other cookies stay.
+    from aegisgate.core.forward_routes import strip_gateway_cookies
+
+    strip_gateway_cookies(forwarded)
     return forwarded
 
 
@@ -552,6 +579,26 @@ def _normalized_host_for_sni(host_header: str) -> str | None:
         return normalized
 
 
+# 请求确定未发出。PoolTimeout 不在此列：池耗尽时换 IP 用的仍是同一个池。
+_FAILOVER_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+def _pinned_unreachable(exc: httpx.HTTPError) -> RuntimeError:
+    detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
+    return RuntimeError(f"upstream_unreachable: {detail}")
+
+
+def _request_already_sent(exc: BaseException) -> bool:
+    """True when this failure happened after the POST left the gateway.
+
+    ConnectError / ConnectTimeout are the only transport errors that mean the
+    request was definitely not sent. The stream bootstrap retry uses this so it
+    does not POST a pinned target again.
+    """
+    cause = exc.__cause__
+    return isinstance(cause, httpx.HTTPError) and not isinstance(cause, _FAILOVER_ERRORS)
+
+
 def _bound_connect_request(
     headers: Mapping[str, str],
     *,
@@ -615,6 +662,9 @@ async def _forward_json_pinned(
                 connect_url,
                 str(exc) or "connection_failed_or_timeout",
             )
+            # ReadTimeout 说明请求已经发出，换 IP 就是再计费一次。
+            if not isinstance(exc, _FAILOVER_ERRORS):
+                raise _pinned_unreachable(exc) from exc
     detail = (
         (str(last_error) or "").strip() if last_error is not None else ""
     ) or "connection_failed_or_timeout"
@@ -681,6 +731,7 @@ async def _forward_stream_lines_pinned(
     )
     client = await _get_upstream_async_client()
     last_error: httpx.HTTPError | None = None
+    yielded_any = False
     for connect_url in connect_urls:
         try:
             bound_headers, extensions = _bound_connect_request(
@@ -706,6 +757,7 @@ async def _forward_stream_lines_pinned(
                     raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
                 async for chunk in resp.aiter_bytes():
                     if chunk:
+                        yielded_any = True
                         yield chunk
                 return
         except httpx.HTTPError as exc:
@@ -716,6 +768,9 @@ async def _forward_stream_lines_pinned(
                 connect_url,
                 str(exc) or "connection_failed_or_timeout",
             )
+            # 已经向下游交出过字节，或请求已经发出，都不能换下一个 IP。
+            if yielded_any or not isinstance(exc, _FAILOVER_ERRORS):
+                raise _pinned_unreachable(exc) from exc
     detail = (
         (str(last_error) or "").strip() if last_error is not None else ""
     ) or "connection_failed_or_timeout"

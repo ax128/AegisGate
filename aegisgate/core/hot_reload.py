@@ -159,6 +159,14 @@ _IMMUTABLE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+# The shared V1 upstream client only embeds these three. Any other hot reload
+# (log level included) must not drop it: aclose() aborts streams mid-transfer.
+_UPSTREAM_CLIENT_FIELDS: tuple[str, ...] = (
+    "upstream_timeout_seconds",
+    "upstream_max_connections",
+    "upstream_max_keepalive_connections",
+)
+
 
 def _parse_runtime_env_values() -> dict[str, str]:
     runtime_env_path = (Path.cwd() / "config" / ".env").resolve()
@@ -252,7 +260,11 @@ def reload_settings() -> None:
                 schedule_close_upstream_async_client,
             )
 
-            schedule_close_upstream_async_client()
+            if any(
+                previous_payload.get(field_name) != incoming.get(field_name)
+                for field_name in _UPSTREAM_CLIENT_FIELDS
+            ):
+                schedule_close_upstream_async_client()
             from aegisgate.adapters.openai_compat.router import (
                 reload_semantic_client_settings,
             )

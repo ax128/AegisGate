@@ -1,8 +1,9 @@
 """Check digits on the PII rules that match on shape alone.
 
-This changes what we *know*, not what we *do*: a value whose checksum fails is
-still redacted. The only new output is a per-rule count on the redaction
-filter's report, plus a metric.
+luhn is a gate: a CARD-shaped value it rejects is left in place, on the
+request filter and on the forward path. Every other validator still redacts
+on failure. That failure is a per-rule count on the redaction filter's report,
+plus a metric. It is not a client-visible tag.
 """
 
 from __future__ import annotations
@@ -199,11 +200,12 @@ def test_non_ascii_digits_cannot_produce_a_wrong_verdict() -> None:
 # ---------------------------------------------------------------------------
 # What the filter does with them
 # ---------------------------------------------------------------------------
-def test_a_failing_checksum_is_still_redacted() -> None:
-    """This change alters what we know, not what we do."""
+def test_a_failing_luhn_is_not_a_card() -> None:
+    """A 15-digit order number matches the CARD shape and fails Luhn."""
     out = _redact("order 123456789012345 shipped")
-    assert "123456789012345" not in out.text
-    assert out.report["validator_failed"] == {"CARD": 1}
+    assert "123456789012345" in out.text
+    assert "CARD" not in _mapping_kinds(out)
+    assert "validator_failed" not in out.report
 
 
 def test_failing_de_vat_checksum_is_still_redacted() -> None:
@@ -249,16 +251,22 @@ def test_a_passing_checksum_is_redacted_without_the_marker() -> None:
 
 def test_a_validator_failure_implies_a_redaction() -> None:
     """The report only carries the counts on the `if mapping:` branch, so a path
-    that failed a checksum without redacting would drop the count silently."""
-    out = _redact("order 123456789012345 shipped")
+    that failed a checksum without redacting would drop the count silently.
+
+    luhn does not take that path: a reject is not a redaction and not a count.
+    The observational validators still do both.
+    """
+    out = _redact("vat DE123456789 on the invoice")
+    assert "DE123456789" not in out.text
     assert out.report["hit"] is True and out.report["replacements"] >= 1
+    assert out.report["validator_failed"] == {"DE_VAT_ID": 1}
 
 
 def test_the_count_is_distinct_values_not_occurrences() -> None:
     """The validator runs after the dedupe cache, so one value repeated in the
     same request is one entry — which is what makes the number comparable."""
-    out = _redact("order 123456789012345 and again 123456789012345 done")
-    assert out.report["validator_failed"] == {"CARD": 1}
+    out = _redact("vat DE123456789 and again DE123456789 done")
+    assert out.report["validator_failed"] == {"DE_VAT_ID": 1}
 
 
 def test_a_whitelisted_value_produces_no_record() -> None:
@@ -272,17 +280,17 @@ def test_a_whitelisted_value_produces_no_record() -> None:
     ctx = RequestContext(
         request_id="req-wl", session_id="sess-wl", route=_FULL_SET_ROUTE
     )
-    ctx.redaction_whitelist_keys = {"order_no"}
+    ctx.redaction_whitelist_keys = {"vat"}
     req = InternalRequest(
         request_id=ctx.request_id,
         session_id=ctx.session_id,
         route=ctx.route,
         model="m",
-        messages=[InternalMessage(role="user", content="order_no: 123456789012345")],
+        messages=[InternalMessage(role="user", content="vat: DE123456789")],
     )
     out = flt.process_request(req, ctx)
     text = " ".join(m.content for m in out.messages)
-    assert "123456789012345" in text, "the whitelist did not exempt the value"
+    assert "DE123456789" in text, "the whitelist did not exempt the value"
     assert "validator_failed" not in flt.report()
 
 
@@ -294,7 +302,7 @@ def test_nothing_reaches_the_client_surface() -> None:
     only by the SSE block frame — so a tag here would be visible on ordinary
     allowed responses. report_items is not in any of those payloads.
     """
-    ctx = _redact("order 123456789012345 shipped").ctx
+    ctx = _redact("vat DE123456789 on the invoice").ctx
     assert not any("validator" in tag for tag in ctx.security_tags)
 
     from aegisgate.adapters.openai_compat.router import _attach_security_metadata
@@ -309,17 +317,26 @@ def test_nothing_reaches_the_client_surface() -> None:
 # ---------------------------------------------------------------------------
 # Guards on the scope of this change
 # ---------------------------------------------------------------------------
-def test_no_rule_can_opt_out_of_redaction() -> None:
-    """The guard against this growing a skip action by accident.
+def test_only_luhn_suppresses_a_match() -> None:
+    """Observational validators still redact. luhn is the one gate.
 
-    A validator that could suppress redaction would have to be consistent across
-    all three pii_patterns compile sites and the console's editable-field
-    whitelist; none of that is in scope here.
+    The gate has to be the same function on all three pii compile sites. A
+    skip that lived only in RedactionFilter would leave the forward path
+    labeling the same digits CARD. There is still no generic per-rule action
+    the console could set.
     """
-    import aegisgate.filters.redaction as mod
+    from aegisgate.util.checksums import ENFORCED_VALIDATORS
 
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    assert "validator_action" not in src
+    assert ENFORCED_VALIDATORS == frozenset({"luhn"})
+    for rel in (
+        "aegisgate/filters/redaction.py",
+        "aegisgate/adapters/openai_compat/sanitize.py",
+        "aegisgate/adapters/v2_proxy/router.py",
+    ):
+        src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "enforced_validator_rejects" in src or "ENFORCED_VALIDATORS" in src
+    redaction_src = (_REPO_ROOT / "aegisgate/filters/redaction.py").read_text(encoding="utf-8")
+    assert "validator_action" not in redaction_src
 
 
 def test_validator_is_not_console_writable() -> None:
@@ -394,8 +411,8 @@ def test_the_relaxed_routes_never_reach_a_validator() -> None:
     )
     assert "/v1/chat/completions" in LOW_FALSE_POSITIVE_V1_ROUTES
 
-    out = _redact("order 123456789012345 shipped", route="/v1/chat/completions")
-    assert "123456789012345" in out.text, "the relaxed set unexpectedly redacted this"
+    out = _redact("vat DE123456789 on the invoice", route="/v1/chat/completions")
+    assert "DE123456789" in out.text, "the relaxed set unexpectedly redacted this"
     assert "validator_failed" not in out.report
 
 

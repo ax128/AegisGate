@@ -10,6 +10,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import (
     any_pattern_hits,
     build_haystacks,
@@ -28,20 +29,20 @@ class PrivilegeGuard(BaseFilter):
         self._response_risk_floor = apply_floor(float(rules.get("response_risk_floor", 0.85)), level=level)
         self._discussion_risk_score = max(0.0, float(rules.get("discussion_risk_score", 0.3)))
 
-        blocked_patterns: list[tuple[str, re.Pattern[str]]] = []
+        blocked_patterns: list[tuple[str, RulePattern]] = []
         for item in rules.get("blocked_patterns", []):
             pattern_id = str(item.get("id", "privilege_rule"))
             regex = item.get("regex")
             if not regex:
                 continue
-            blocked_patterns.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            blocked_patterns.append((pattern_id, compile_rule_regex(regex, re.IGNORECASE)))
         self._blocked_patterns = blocked_patterns
 
-        discussion_patterns: list[re.Pattern[str]] = []
+        discussion_patterns: list[RulePattern] = []
         for regex in rules.get("discussion_context_patterns", []):
             if not regex:
                 continue
-            discussion_patterns.append(re.compile(str(regex), re.IGNORECASE))
+            discussion_patterns.append(compile_rule_regex(str(regex), re.IGNORECASE))
         self._discussion_patterns = discussion_patterns
 
     def _matches(self, text: str) -> list[str]:

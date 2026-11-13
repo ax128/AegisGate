@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import threading
 import time
 
 from fastapi import Request
@@ -21,6 +22,13 @@ from aegisgate.core.gateway_network import (
 
 
 _UI_SESSION_COOKIE = "aegis_ui_session"
+
+# sha256(cookie) -> issued_at. One entry per logged-out cookie, dropped once
+# that cookie would fail the TTL check. Not a generation counter: logging out
+# one browser must not sign out any other session. Process-local, same as the
+# UI login rate limiter — a restart forgets the table.
+_revoked_ui_sessions: dict[str, int] = {}
+_revoked_ui_sessions_lock = threading.Lock()
 
 
 def _blocked_response(status_code: int, reason: str, detail: str | None = None) -> JSONResponse:
@@ -62,15 +70,37 @@ def _is_passthrough_read_path(path: str) -> bool:
     return path == "/__ui__" or path.startswith("/__ui__/")
 
 
-def _is_public_ui_path(path: str) -> bool:
-    import posixpath
+def _path_has_dot_segment(path: str) -> bool:
+    """True when a decoded path segment is ``.`` or ``..``.
 
-    normalized = posixpath.normpath(path)
-    return normalized in {
-        "/__ui__/login",
-        "/__ui__/health",
-        "/__ui__/api/login",
-    } or normalized.startswith("/__ui__/assets/")
+    The router matches ``scope["path"]`` as sent. Collapsing those segments
+    before the auth check would name a different route than the one that runs.
+    """
+    return any(segment in {".", ".."} for segment in path.split("/"))
+
+
+_PUBLIC_UI_PATHS = frozenset({
+    "/__ui__/login",
+    "/__ui__/health",
+    "/__ui__/api/login",
+})
+
+
+def _is_public_ui_path(path: str) -> bool:
+    # Same string the router matches. ``normpath`` would turn a path the
+    # router still binds to one route into a different public page.
+    if _path_has_dot_segment(path):
+        return False
+    if path in _PUBLIC_UI_PATHS or path.startswith("/__ui__/assets/"):
+        return True
+    # One trailing slash is the public route plus the slash FastAPI's
+    # redirect_slashes removes. Internal empty segments stay on the raw path:
+    # ``/__ui__//login`` does not become ``/__ui__/login``.
+    return (
+        path.endswith("/")
+        and not path.endswith("//")
+        and path[:-1] in _PUBLIC_UI_PATHS
+    )
 
 
 def _apply_ui_security_headers(response: Response) -> Response:
@@ -113,6 +143,64 @@ def _create_ui_session_token(request: Request) -> str:
     return f"{issued_at}.{nonce}.{_ui_session_signature(issued_at, fingerprint, nonce)}"
 
 
+def _ui_session_issued_at(token: str) -> int | None:
+    if not token or "." not in token:
+        return None
+    try:
+        issued_at = int(token.split(".", 1)[0])
+    except ValueError:
+        return None
+    if issued_at <= 0:
+        return None
+    return issued_at
+
+
+def _ui_session_revocation_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _ui_session_revocation_expired(issued_at: int, now: float) -> bool:
+    # Same boundary as _is_valid_ui_session: the cookie is already dead when
+    # this is true, so the revocation entry no longer changes the answer.
+    return now - issued_at > settings.local_ui_session_ttl_seconds
+
+
+def _drop_expired_ui_session_revocations(now: float) -> None:
+    """Caller holds ``_revoked_ui_sessions_lock``."""
+    expired = [
+        key
+        for key, issued_at in _revoked_ui_sessions.items()
+        if _ui_session_revocation_expired(issued_at, now)
+    ]
+    for key in expired:
+        del _revoked_ui_sessions[key]
+
+
+def revoke_ui_session(token: str) -> None:
+    """Make this exact UI cookie fail validation until its own TTL elapses."""
+    value = (token or "").strip()
+    issued_at = _ui_session_issued_at(value)
+    if issued_at is None:
+        return
+    now = time.time()
+    if _ui_session_revocation_expired(issued_at, now):
+        return
+    key = _ui_session_revocation_key(value)
+    with _revoked_ui_sessions_lock:
+        _drop_expired_ui_session_revocations(now)
+        _revoked_ui_sessions[key] = issued_at
+
+
+def _ui_session_is_revoked(token: str) -> bool:
+    if _ui_session_issued_at(token) is None:
+        return False
+    now = time.time()
+    key = _ui_session_revocation_key(token)
+    with _revoked_ui_sessions_lock:
+        _drop_expired_ui_session_revocations(now)
+        return key in _revoked_ui_sessions
+
+
 def _ui_csrf_token(session_token: str) -> str:
     secret = _ensure_gateway_key().encode("utf-8")
     return hmac.new(secret, f"csrf:{session_token}".encode("utf-8"), hashlib.sha256).hexdigest()
@@ -141,15 +229,48 @@ def _is_valid_ui_session(token: str, request: Request) -> bool:
     if time.time() - issued_at > settings.local_ui_session_ttl_seconds:
         return False
     expected = _ui_session_signature(issued_at, _ui_client_fingerprint(request), nonce)
-    return hmac.compare_digest(signature, expected)
+    if not hmac.compare_digest(signature, expected):
+        return False
+    return not _ui_session_is_revoked(value)
+
+
+def _ui_session_candidates(request: Request) -> list[str]:
+    """Every ``aegis_ui_session`` value in the Cookie header, in wire order.
+
+    Browsers list the longer ``Path=/__ui__`` cookie before the legacy ``Path=/``
+    cookie. ``request.cookies`` keeps only the last duplicate name, which is the
+    pre-upgrade session.
+    """
+    header = request.headers.get("cookie") or ""
+    found: list[str] = []
+    for chunk in header.split(";"):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        if key.strip() == _UI_SESSION_COOKIE:
+            found.append(value.strip())
+    return found
+
+
+def _ui_session_token(request: Request) -> str:
+    """Session to authenticate: the first value that still validates.
+
+    A request can carry both the new ``Path=/__ui__`` cookie and the legacy
+    ``Path=/`` cookie until the browser applies the expiry. The legacy value is
+    last, so taking the dict entry would lock the console out after key rotation.
+    """
+    for token in _ui_session_candidates(request):
+        if _is_valid_ui_session(token, request):
+            return token
+    return ""
 
 
 def _is_ui_authenticated(request: Request) -> bool:
-    return _is_valid_ui_session(request.cookies.get(_UI_SESSION_COOKIE, ""), request)
+    return _is_valid_ui_session(_ui_session_token(request), request)
 
 
 def _verify_ui_csrf(request: Request) -> bool:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "")
+    session_token = _ui_session_token(request)
     if not _is_valid_ui_session(session_token, request):
         return False
     presented = (request.headers.get("x-aegis-ui-csrf") or "").strip()
