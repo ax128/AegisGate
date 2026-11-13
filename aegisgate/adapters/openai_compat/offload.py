@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import contextvars
 import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -65,10 +66,34 @@ async def run_filter_pipeline_offloop(
     fire at an ``await`` point, so a single catastrophic pattern inside one
     filter is not interruptible by it. That guarantee comes from the static
     ReDoS budget in ``tests/test_redos_guard.py``, not from this function.
+    The caller submits the cancel token armed for this call. The worker uses
+    that object, not whatever is on ctx when the task later starts. An in-flight
+    filter cannot overwrite the timeout disposition after the handler stores it.
     """
     loop = asyncio.get_running_loop()
     executor = _get_filter_pipeline_executor()
     future = executor.submit(func, *args, **kwargs)
+    return await asyncio.wrap_future(future, loop=loop)
+
+
+async def run_request_redaction_offloop(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> T:
+    """Run request-side redaction on the filter-pipeline pool.
+
+    The walk is the same kind of regex work the filter pipeline already
+    refuses to do on the event loop. Payload mapping stays inline
+    (``run_payload_transform_offloop``): those calls are small, and putting
+    them on a pool deadlocked under Python 3.13.
+
+    The caller's context is copied in. A forward rule pins exact-value
+    redaction on a ``ContextVar`` for the request task; a bare ``submit``
+    would drop that pin and redact with the global switch instead.
+    """
+    loop = asyncio.get_running_loop()
+    executor = _get_filter_pipeline_executor()
+    context = contextvars.copy_context()
+    future = executor.submit(context.run, func, *args, **kwargs)
     return await asyncio.wrap_future(future, loop=loop)
 
 

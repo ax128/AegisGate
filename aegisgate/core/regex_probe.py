@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 
 MAX_REGEX_LEN = 500
 MAX_SAMPLES = 5
@@ -25,6 +26,29 @@ MAX_SAMPLE_LEN = 2_000
 MAX_MATCHES_PER_SAMPLE = 20
 MAX_MATCH_PREVIEW_LEN = 120
 PROBE_TIMEOUT_SECONDS = 2.0
+# Filters compile with IGNORECASE. rag_poison_guard also sets DOTALL, and a
+# folded haystack is one line, so a non-DOTALL ``.*`` already crosses the whole
+# text. Probing with both bits measures that runtime shape.
+_RUNTIME_FLAGS = re.IGNORECASE | re.DOTALL
+_ANCHOR_WORD = re.compile(r"[A-Za-z]{2,}|[\u4e00-\u9fff]+")
+_KEYWORD_DENSE_CHARS = 16 * 1024
+
+
+def keyword_dense_samples(regex: str, size: int = _KEYWORD_DENSE_CHARS) -> list[str]:
+    """Three keyword-dense inputs built from *regex*'s own anchors.
+
+    Fixed samples such as ``"a" * 1500`` never enter a rule that starts with a
+    distinctive token, so they miss the polynomial ``A.*B`` shape. The joined
+    form drops the last two anchors so a chain that needs every one does not
+    complete on the first character.
+    """
+    vocab = list(dict.fromkeys(_ANCHOR_WORD.findall(regex))) or ["a"]
+    units = (
+        " ".join(vocab[: max(1, len(vocab) - 2)]) + " ",
+        vocab[0] + " ",
+        vocab[0] + "\n",
+    )
+    return [(unit * (size // len(unit) + 1))[:size] for unit in units]
 
 
 class ProbeInputError(ValueError):
@@ -39,7 +63,7 @@ def normalize_probe_input(raw_regex: object, raw_samples: object) -> tuple[str, 
     if len(regex) > MAX_REGEX_LEN:
         raise ProbeInputError(f"regex 长度超过 {MAX_REGEX_LEN} 字符")
     try:
-        re.compile(regex)
+        compile_rule_regex(regex, _RUNTIME_FLAGS)
     except re.error as exc:
         raise ProbeInputError(f"正则无法编译: {exc}") from exc
 
@@ -88,11 +112,12 @@ def _probe_context() -> Any:
     return _context
 
 
-def _probe_worker(pattern: "re.Pattern[str]", samples: list[str], conn: Any) -> None:
+def _probe_worker(pattern: RulePattern, samples: list[str], conn: Any) -> None:
     """Child-process entry point. Must stay importable at module level.
 
-    Deliberately lock-free: *pattern* arrives already compiled, ``finditer`` is
-    pure C, and ``conn.send`` pickles plain builtins.
+    Deliberately lock-free: *pattern* arrives already compiled (a ``re.Pattern``
+    or a gap-guarded wrapper), ``finditer`` does not take the re cache lock, and
+    ``conn.send`` pickles plain builtins.
     """
     results = []
     for index, sample in enumerate(samples):
@@ -126,7 +151,7 @@ def probe(regex: str, samples: list[str], timeout: float = PROBE_TIMEOUT_SECONDS
     raising when the pattern does not finish inside *timeout*.
     """
     try:
-        pattern = re.compile(regex)
+        pattern = compile_rule_regex(regex, _RUNTIME_FLAGS)
     except re.error as exc:
         return {"timed_out": False, "results": [], "error": str(exc)}
 

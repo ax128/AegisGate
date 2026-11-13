@@ -7,7 +7,12 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from aegisgate.core.context import RequestContext
+from aegisgate.core.context import (
+    PipelineCancelToken,
+    RequestContext,
+    bind_pipeline_call_token,
+    unbind_pipeline_call_token,
+)
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.observability.metrics import inc_filter_error, inc_filter_match
@@ -74,9 +79,37 @@ class Pipeline:
         current: Any,
         filters: list[BaseFilter],
         ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None,
         is_stream: bool = False,
     ) -> Any:
+        # The object submitted with this call. A queued task can start after a
+        # later call has replaced ctx.pipeline_cancel_token, so do not read it.
+        bind_pipeline_call_token(cancel_token)
+        try:
+            return self._run_filters(
+                phase=phase,
+                current=current,
+                filters=filters,
+                ctx=ctx,
+                is_stream=is_stream,
+                token=cancel_token,
+            )
+        finally:
+            unbind_pipeline_call_token()
+
+    def _run_filters(
+        self,
+        *,
+        phase: str,
+        current: Any,
+        filters: list[BaseFilter],
+        ctx: RequestContext,
+        is_stream: bool,
+        token: PipelineCancelToken | None,
+    ) -> Any:
         for plugin in filters:
+            if token is not None and token.cancelled:
+                break
             if not plugin.enabled(ctx):
                 continue
             t0 = time.monotonic()
@@ -94,6 +127,8 @@ class Pipeline:
                     elapsed,
                     ctx.request_id,
                 )
+                if token is not None and token.cancelled:
+                    break
                 ctx.add_report({"filter": plugin.name, "error": True, "hit": False})
                 inc_filter_error(plugin.name, phase)
                 if phase == "request":
@@ -129,6 +164,8 @@ class Pipeline:
                     ctx.disposition_reasons.append("response_filter_error")
                 break
             elapsed = time.monotonic() - t0
+            if token is not None and token.cancelled:
+                break
             report = plugin.report()
             ctx.add_report(report)
             if report.get("hit"):
@@ -162,16 +199,25 @@ class Pipeline:
                 )
         return current
 
-    def run_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+    def run_request(
+        self,
+        req: InternalRequest,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
+    ) -> InternalRequest:
         return self._run_phase(
             phase="request",
             current=req,
             filters=self.request_filters,
             ctx=ctx,
+            cancel_token=cancel_token,
         )
 
     def run_response(
-        self, resp: InternalResponse, ctx: RequestContext
+        self,
+        resp: InternalResponse,
+        ctx: RequestContext,
+        cancel_token: PipelineCancelToken | None = None,
     ) -> InternalResponse:
         is_stream = (
             resp.raw.get("stream", False) if isinstance(resp.raw, dict) else False
@@ -181,5 +227,6 @@ class Pipeline:
             current=resp,
             filters=self.response_filters,
             ctx=ctx,
+            cancel_token=cancel_token,
             is_stream=is_stream,
         )

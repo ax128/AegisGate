@@ -138,7 +138,7 @@ def test_run_request_pipeline_uses_dedicated_offload_helper(
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_request_pipeline_sync",
-        lambda req, ctx: req,
+        lambda req, ctx, cancel_token: req,
     )
 
     req = object()
@@ -199,7 +199,7 @@ def test_run_response_pipeline_uses_dedicated_offload_helper(
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_response_pipeline_sync",
-        lambda resp, ctx: resp,
+        lambda resp, ctx, cancel_token: resp,
     )
 
     resp = InternalResponse(
@@ -1201,6 +1201,286 @@ async def test_iter_forward_stream_does_not_retry_non_retryable_http_error(
             pass
 
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_iter_forward_stream_does_not_retry_upstream_auth_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError(f"upstream_http_error:{status_code}:denied")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        3,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    with pytest.raises(RuntimeError, match=f"upstream_http_error:{status_code}:denied"):
+        async for _ in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/chat/completions",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": f"rq-bootstrap-no-retry-{status_code}"},
+            connect_urls=(),
+            host_header="",
+        ):
+            pass
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [408, 429, 500])
+async def test_iter_forward_stream_retries_transient_upstream_http_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError(f"upstream_http_error:{status_code}:later")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        3,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+
+    with pytest.raises(RuntimeError, match=f"upstream_http_error:{status_code}:later"):
+        async for _ in _iter_forward_stream_with_pinning(
+            url="https://upstream.example.com/v1/chat/completions",
+            payload={"stream": True},
+            headers={"x-aegis-request-id": f"rq-bootstrap-retry-{status_code}"},
+            connect_urls=(),
+            host_header="",
+        ):
+            pass
+
+    assert attempts == 4
+
+
+async def _drive_http_response(response: StreamingResponse | JSONResponse) -> tuple[int, bytes]:
+    """Status and body a client would see, including a streaming response."""
+    body = bytearray()
+    status_holder: list[int] = []
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            status_holder.append(int(message["status"]))  # type: ignore[arg-type]
+        elif message["type"] == "http.response.body":
+            chunk = message.get("body", b"")
+            if isinstance(chunk, bytes) and chunk:
+                body.extend(chunk)
+
+    await response({"type": "http", "asgi": {"spec_version": "2.5"}}, receive, send)
+    assert status_holder, "response did not send a status"
+    return status_holder[0], bytes(body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_chat_stream_upstream_auth_error_before_first_frame_uses_real_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError(f"upstream_http_error:{status_code}:denied")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        2,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    payload = {
+        "request_id": f"r-stream-auth-{status_code}",
+        "session_id": f"s-stream-auth-{status_code}",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    response = await _execute_chat_stream_once(
+        payload=payload,
+        request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+        request_path="/v1/chat/completions",
+        boundary={},
+    )
+    status, body = await _drive_http_response(response)
+
+    assert status == status_code and attempts == 1, (
+        f"status={status} attempts={attempts} body={body[:240]!r}"
+    )
+    assert b"denied" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_upstream_500_before_first_frame_uses_real_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("upstream_http_error:500:later")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        2,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    payload = {
+        "request_id": "r-stream-500",
+        "session_id": "s-stream-500",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    response = await _execute_chat_stream_once(
+        payload=payload,
+        request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+        request_path="/v1/chat/completions",
+        boundary={},
+    )
+    status, body = await _drive_http_response(response)
+
+    assert status == 500 and attempts == 3, (
+        f"status={status} attempts={attempts} body={body[:240]!r}"
+    )
+    assert b"later" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_passthrough_upstream_401_before_first_frame_uses_real_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("upstream_http_error:401:denied")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        2,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    payload = {
+        "request_id": "r-stream-pass-401",
+        "session_id": "s-stream-pass-401",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    response = await _execute_chat_stream_once(
+        payload=payload,
+        request_headers={
+            "X-Upstream-Base": "https://upstream.example.com/v1",
+            "x-aegis-filter-mode": "passthrough",
+        },
+        request_path="/v1/chat/completions",
+        boundary={},
+    )
+    status, body = await _drive_http_response(response)
+
+    assert status == 401 and attempts == 1, (
+        f"status={status} attempts={attempts} body={body[:240]!r}"
+    )
+    assert b"denied" in body
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_upstream_auth_error_after_first_frame_keeps_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_inline_payload_transform(monkeypatch)
+    _install_identity_stream_pipelines(monkeypatch)
+    attempts = 0
+
+    async def fake_forward_stream_lines(url, payload, headers):
+        del url, payload, headers
+        nonlocal attempts
+        attempts += 1
+        # A non-content frame is forwarded immediately, before the later error.
+        yield b": keepalive\n\n"
+        raise RuntimeError("upstream_http_error:401:denied")
+
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router.settings.stream_bootstrap_retries",
+        3,
+    )
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.router._forward_stream_lines",
+        fake_forward_stream_lines,
+    )
+    payload = {
+        "request_id": "r-stream-auth-after-frame",
+        "session_id": "s-stream-auth-after-frame",
+        "model": "test-model",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    response = await _execute_chat_stream_once(
+        payload=payload,
+        request_headers={"X-Upstream-Base": "https://upstream.example.com/v1"},
+        request_path="/v1/chat/completions",
+        boundary={},
+    )
+    status, body = await _drive_http_response(response)
+
+    assert status == 200
+    assert attempts == 1
+    assert b"keepalive" in body
+    assert b"denied" in body
 
 
 def test_messages_stream_harness_avoids_offload_timeout_pattern(
@@ -3687,6 +3967,146 @@ def test_messages_stream_independent_terminal_frame_still_probes_tail(
     assert "cat /etc/passwd now" not in body
     assert "【AegisGate已处理危险疑似片段】" in body
     assert "event: message_stop" in body
+
+
+def _messages_stream_unprobed_tail_frames(ping_frame: bytes) -> list[bytes]:
+    """Four probed deltas, then one held-back delta, then a ping.
+
+    Default ``stream_scan_interval_chunks`` is 4, so chunks 1-4 are probed and
+    chunk 5 is not. Holdback is 8 frames; the seven frames before the ping stay
+    buffered. The fifth delta uses a phrase an existing response rule already
+    blocks.
+    """
+    return [
+        (
+            b"event: message_start\n"
+            b'data: {"type":"message_start","message":{"id":"msg_hold_1","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[]}}\n\n'
+        ),
+        (
+            b"event: content_block_start\n"
+            b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"three "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"four "}}\n\n'
+        ),
+        (
+            b"event: content_block_delta\n"
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cat /etc/passwd now"}}\n\n'
+        ),
+        ping_frame,
+        (
+            b"event: content_block_stop\n"
+            b'data: {"type":"content_block_stop","index":0}\n\n'
+        ),
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+
+
+def _run_messages_ping_holdback_case(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ping_frame: bytes,
+    request_id: str,
+) -> tuple[str, str | None]:
+    """Return the client body and the client text at the first probe that saw the phrase."""
+    monkeypatch.setattr(settings, "stream_scan_interval_chunks", 4)
+    received: list[bytes] = []
+    client_text_at_probe: list[str | None] = [None]
+
+    async def fake_run_response_pipeline(pipeline, resp, ctx):
+        window = resp.output_text or ""
+        if "cat /etc/passwd" in window and client_text_at_probe[0] is None:
+            client_text_at_probe[0] = b"".join(received).decode("utf-8", errors="replace")
+            ctx.response_disposition = "sanitize"
+            ctx.disposition_reasons.append("response_high_risk_command")
+            ctx.security_tags.add("response_anomaly_high_risk_command")
+        return resp
+
+    _install_messages_stream_sanitize_mocks(
+        monkeypatch,
+        upstream_frames=_messages_stream_unprobed_tail_frames(ping_frame),
+        response_pipeline=fake_run_response_pipeline,
+    )
+
+    payload = {
+        "request_id": request_id,
+        "session_id": request_id,
+        "model": "claude-sonnet-4.5",
+        "stream": True,
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def run_case() -> bytes:
+        response = await _execute_messages_stream_once(
+            payload=payload,
+            request_headers={"X-Upstream-Base": "https://upstream.example.com"},
+            request_path="/v1/messages",
+            boundary={},
+        )
+        chunks: list[bytes] = []
+        async for chunk in response:
+            raw = chunk if isinstance(chunk, bytes) else _to_bytes(chunk)
+            received.append(raw)
+            chunks.append(raw)
+        return b"".join(chunks)
+
+    body = asyncio.run(run_case()).decode("utf-8", errors="replace")
+    return body, client_text_at_probe[0]
+
+
+def _assert_ping_does_not_release_unprobed_content(
+    body: str,
+    client_text_at_probe: str | None,
+    ping_frame: bytes,
+) -> None:
+    assert client_text_at_probe is not None, "probe never saw the blocked phrase"
+    assert "cat /etc/passwd" not in client_text_at_probe, (
+        "dangerous content reached the client before the probe"
+    )
+    assert "cat /etc/passwd" not in body
+    assert "【AegisGate已处理危险疑似片段】" in body
+    assert ping_frame.decode("utf-8") in body
+    assert "event: message_stop" in body
+
+
+def test_messages_stream_typed_ping_does_not_release_unprobed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic ``event: ping`` / ``{"type":"ping"}`` must not flush holdback early."""
+    ping_frame = b'event: ping\ndata: {"type":"ping"}\n\n'
+    body, client_text_at_probe = _run_messages_ping_holdback_case(
+        monkeypatch,
+        ping_frame=ping_frame,
+        request_id="messages-stream-typed-ping",
+    )
+    _assert_ping_does_not_release_unprobed_content(body, client_text_at_probe, ping_frame)
+
+
+def test_messages_stream_dataless_ping_does_not_release_unprobed_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``event: ping`` frame with no data payload must not flush holdback early."""
+    ping_frame = b"event: ping\n\n"
+    body, client_text_at_probe = _run_messages_ping_holdback_case(
+        monkeypatch,
+        ping_frame=ping_frame,
+        request_id="messages-stream-dataless-ping",
+    )
+    _assert_ping_does_not_release_unprobed_content(body, client_text_at_probe, ping_frame)
 
 
 def test_messages_stream_eof_without_done_currently_has_no_recovery(

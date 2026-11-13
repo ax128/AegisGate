@@ -11,6 +11,7 @@ from aegisgate.core.exfil_evidence import record_hit as record_exfil_hit
 from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import (
     build_haystacks,
     normalize_for_match,
@@ -148,34 +149,34 @@ class ToolCallGuard(BaseFilter):
         self._default_action = str(guard_rules.get("default_action", "block"))
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
-        self._param_rules: dict[tuple[str, str], re.Pattern[str]] = {}
+        self._param_rules: dict[tuple[str, str], RulePattern] = {}
         for item in guard_rules.get("parameter_rules", []):
             tool = str(item.get("tool", ""))
             param = str(item.get("param", ""))
             regex = item.get("regex")
             if not tool or not param or not regex:
                 continue
-            self._param_rules[(tool, param)] = re.compile(regex)
+            self._param_rules[(tool, param)] = compile_rule_regex(regex)
 
-        self._dangerous_param_patterns: list[tuple[str, re.Pattern[str]]] = []
-        self._dangerous_param_patterns_exec_only: list[tuple[str, re.Pattern[str]]] = []
+        self._dangerous_param_patterns: list[tuple[str, RulePattern]] = []
+        self._dangerous_param_patterns_exec_only: list[tuple[str, RulePattern]] = []
         for item in guard_rules.get("dangerous_param_patterns", []):
             regex = item.get("regex")
             if not regex:
                 continue
             rule_id = str(item.get("id", ""))
-            compiled = re.compile(regex, re.IGNORECASE)
+            compiled = compile_rule_regex(regex, re.IGNORECASE)
             self._dangerous_param_patterns.append((rule_id, compiled))
             if rule_id not in _PATH_REFERENCE_PATTERN_IDS:
                 self._dangerous_param_patterns_exec_only.append((rule_id, compiled))
-        self._semantic_patterns: list[tuple[str, re.Pattern[str]]] = []
+        self._semantic_patterns: list[tuple[str, RulePattern]] = []
         for item in guard_rules.get("semantic_approval_patterns", []):
             regex = item.get("regex")
             if not regex:
                 continue
             rule_id = str(item.get("id") or "semantic_review")
             self._semantic_patterns.append(
-                (rule_id, re.compile(regex, re.IGNORECASE))
+                (rule_id, compile_rule_regex(regex, re.IGNORECASE))
             )
 
     def _apply_action(

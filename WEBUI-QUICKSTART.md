@@ -171,7 +171,8 @@ curl -X POST http://127.0.0.1:18080/__ui__/api/config \
   - 「测试连通性」按钮，见 §4.2
 - 网关转发：按域名（Host）转发，客户端 baseUrl 直接用网关域名，见 §4.4
 - 密钥管理：查看/更换 `aegis_gateway.key`、`aegis_proxy_token.key`、`aegis_fernet.key`
-  - 读写位置与运行时加载密钥的位置是同一个：设了 `AEGIS_CONFIG_DIR` 就用它，否则用 `<工作目录>/config`。轮换 `aegis_fernet.key` 时旧密钥会存到 `aegis_fernet_prev.key`，旧密文在过渡窗口内仍可解
+  - 读写位置与运行时加载密钥的位置是同一个：设了 `AEGIS_CONFIG_DIR` 就用它，否则用 `<工作目录>/config`。轮换 `aegis_fernet.key` 时旧密钥会存到 `aegis_fernet_prev.key`，旧密文在过渡窗口内仍可解。上一把密钥保存失败时本次轮换中止，当前密钥文件不变。已设置 `AEGIS_ENCRYPTION_KEY` 时拒绝轮换，因为运行时用的是环境变量，写文件不会生效
+  - 轮换 `aegis_proxy_token.key` 在写文件成功后对当前网关进程立即生效。Caddy 仍只在启动时读一次该 token，因此 Caddy 转发的请求在 Caddy 重载前不会自动换成新 token
 - Docker Compose 配置文件在线编辑
 - 一键重启网关（SIGTERM，配合 Docker `restart: unless-stopped` 自动恢复）
 - 阅读仓库内嵌 Markdown 文档（支持表格与链接渲染；默认打开本篇）

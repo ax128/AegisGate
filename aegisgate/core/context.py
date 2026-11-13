@@ -2,8 +2,101 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from time import time
+
+
+class PipelineCancelToken:
+    """Cancel flag for a single request or response pipeline call."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+class _CallTokenState(threading.local):
+    bound: bool = False
+    token: PipelineCancelToken | None = None
+
+
+_call_token_state = _CallTokenState()
+
+
+def bind_pipeline_call_token(token: PipelineCancelToken | None) -> None:
+    """Remember this call's token on the worker that is inside it.
+
+    ``_run_phase`` binds the token it copied at entry. In-flight ``process_*``
+    writes then see that object, not a token a later call stored on ``ctx``.
+    """
+
+    _call_token_state.bound = True
+    _call_token_state.token = token
+
+
+def unbind_pipeline_call_token() -> None:
+    _call_token_state.bound = False
+    _call_token_state.token = None
+
+
+def pipeline_call_cancelled(ctx: RequestContext) -> bool:
+    """Whether the pipeline call visible to this thread has been cancelled.
+
+    On the worker, the token bound at the start of the call wins. A newer
+    token installed on ``ctx`` for the next call must not clear it. Outside a
+    call, the token currently stored on ``ctx`` is the one that counts.
+    """
+
+    if _call_token_state.bound:
+        token = _call_token_state.token
+    else:
+        token = ctx.pipeline_cancel_token
+    return token is not None and token.cancelled
+
+
+def _worker_must_keep_timeout_disposition() -> bool:
+    """Drop disposition writes from a worker whose own call was cancelled.
+
+    The timeout handler runs on the event-loop thread and is not bound, so it
+    can still store ``block`` after cancelling the token.
+    """
+
+    if not _call_token_state.bound:
+        return False
+    token = _call_token_state.token
+    return token is not None and token.cancelled
+
+
+class _DispositionReasonList(list[str]):
+    """``disposition_reasons`` that ignores appends from a cancelled call."""
+
+    def append(self, item: str) -> None:
+        if _worker_must_keep_timeout_disposition():
+            return
+        super().append(item)
+
+    def extend(self, items: Iterable[str]) -> None:
+        if _worker_must_keep_timeout_disposition():
+            return
+        super().extend(items)
+
+    def insert(self, index: int, item: str) -> None:
+        if _worker_must_keep_timeout_disposition():
+            return
+        super().insert(index, item)
+
+    def __iadd__(self, items: Iterable[str]) -> _DispositionReasonList:
+        if _worker_must_keep_timeout_disposition():
+            return self
+        super().__iadd__(items)
+        return self
 
 
 @dataclass(slots=True)
@@ -36,7 +129,7 @@ class RequestContext:
     enforcement_actions: list[str] = field(default_factory=list)
     request_disposition: str = "allow"
     response_disposition: str = "allow"
-    disposition_reasons: list[str] = field(default_factory=list)
+    disposition_reasons: list[str] = field(default_factory=_DispositionReasonList)
     untrusted_input_detected: bool = False
     requires_human_review: bool = False
     redaction_whitelist_keys: set[str] = field(default_factory=set)
@@ -57,6 +150,23 @@ class RequestContext:
     # this dataclass uses slots=True and the assignment would otherwise raise —
     # which, from inside a metrics guard, means the counter silently never moves.
     disposition_counted: bool = False
+    # Replaced at the start of every request/response pipeline call, before the
+    # worker is submitted. Only that call's timeout handler cancels it.
+    # compare/repr stay off so the event object does not leak into equality or logs.
+    pipeline_cancel_token: PipelineCancelToken | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # An in-flight process_* keeps running after wait_for returns. Once this
+        # call's token is cancelled, its disposition writes must not replace the
+        # timeout handler's block. The handler itself is on another thread.
+        if (
+            name in {"request_disposition", "response_disposition", "disposition_reasons"}
+            and _worker_must_keep_timeout_disposition()
+        ):
+            return
+        object.__setattr__(self, name, value)
 
     def add_report(self, item: dict) -> None:
         self.report_items.append(item)

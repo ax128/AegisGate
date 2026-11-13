@@ -22,6 +22,7 @@ from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
 from aegisgate.util.risk_scoring import clamp01, weighted_nonlinear_score
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import normalize_for_match
 
 
@@ -224,7 +225,7 @@ class PromptInjectionDetector(BaseFilter):
         # Families re-run over decoded payloads, paired with the signal bucket a
         # plaintext hit would have used. Built here so the scan loop does not
         # rebuild it per candidate.
-        self._decoded_rescan_families: tuple[tuple[str, dict[str, re.Pattern[str]]], ...] = (
+        self._decoded_rescan_families: tuple[tuple[str, dict[str, RulePattern]], ...] = (
             ("direct", self._direct_patterns),
             ("system_exfil", self._system_exfil_patterns),
             (
@@ -278,27 +279,27 @@ class PromptInjectionDetector(BaseFilter):
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
     @staticmethod
-    def _compile_rule_patterns(items: list[dict]) -> dict[str, re.Pattern[str]]:
-        compiled: dict[str, re.Pattern[str]] = {}
+    def _compile_rule_patterns(items: list[dict]) -> dict[str, RulePattern]:
+        compiled: dict[str, RulePattern] = {}
         for item in items:
             rule_id = str(item.get("id", "rule"))
             regex = item.get("regex")
             if not regex:
                 continue
             try:
-                compiled[rule_id] = re.compile(regex, re.IGNORECASE)
+                compiled[rule_id] = compile_rule_regex(regex, re.IGNORECASE)
             except re.error as exc:
                 logger.warning("injection_detector: invalid regex in rule %s: %s", rule_id, exc)
         return compiled
 
     @staticmethod
-    def _compile_pattern_list(items: list[str]) -> list[re.Pattern[str]]:
-        compiled: list[re.Pattern[str]] = []
+    def _compile_pattern_list(items: list[str]) -> list[RulePattern]:
+        compiled: list[RulePattern] = []
         for item in items:
             if not item:
                 continue
             try:
-                compiled.append(re.compile(str(item), re.IGNORECASE))
+                compiled.append(compile_rule_regex(str(item), re.IGNORECASE))
             except re.error as exc:
                 logger.warning("injection_detector: invalid pattern %r: %s", item, exc)
         return compiled
