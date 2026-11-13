@@ -9,6 +9,14 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（流式上游错误：首帧前透传状态码，401/403 不重试）
+
+- **流式上游在还没向客户端发出任何帧时返回 HTTP 错误，网关使用该状态码，不再包成 HTTP 200 的 SSE 错误帧。**
+  响应体与非流式的 `upstream_http_error` 相同。连接失败没有上游状态码，仍是 SSE 错误帧。
+  已经向客户端发出首帧之后的错误不改状态码。
+  成功的流式响应会先等到上游的第一个字节（或这次错误），再提交网关的状态行。
+- **`AEGIS_STREAM_BOOTSTRAP_RETRIES` 不再重试 401 和 403。** 408、429 和 5xx 仍只在首字节之前重试。默认次数仍是 0。
+
 ### Fixed（SSE 帧：跨 chunk 的 CRLF 仍是一帧）
 
 - **被拆开的一对 CRLF 仍是一个换行，前后的 SSE 行留在同一帧里。** `_iter_sse_frames` 以前先把当前 chunk 末尾的 `\r` 换成 `\n`。下一个 chunk 以 `\n` 开头时，这个提前换成的换行和后到的 `\n` 凑成空行，`event:` 和 `data:` 被拆成两帧。现在 chunk 末尾的 `\r` 留到下一个 chunk，再和后到的 `\n` 一起替换。
