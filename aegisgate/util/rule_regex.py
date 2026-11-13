@@ -208,12 +208,13 @@ class GapGuardedPattern:
             cached = cache[index]
             if cached is None:
                 continue
-            # ``True`` is not stored. ``isinstance`` drops it so ``<`` is a pair of windows.
-            if cached is False or (isinstance(cached, tuple) and cached[0] < pos):
+            # ``True`` is never stored. The ignores keep this comparison on the
+            # fast path; an ``isinstance`` check here blew the 100 ms budget.
+            if cached is False or cached[0] < pos:  # type: ignore[index, operator]
                 cached = self._branch_window(branch, text, pos, end)
                 cache[index] = cached
-            if isinstance(cached, tuple) and (best is None or cached < best):
-                best = cached
+            if cached is not None and (best is None or cached < best):  # type: ignore[operator]
+                best = cached  # type: ignore[assignment]
         if best is None:
             return None
         return self._compiled.search(text, best[0], best[1])
