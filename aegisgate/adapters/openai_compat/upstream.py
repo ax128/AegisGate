@@ -9,7 +9,7 @@ import asyncio
 import ipaddress
 import json
 from typing import Any, AsyncGenerator, Mapping
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import hashlib
 import httpx
@@ -99,21 +99,31 @@ async def close_upstream_async_client() -> None:
         await client.aclose()
 
 
-def schedule_close_upstream_async_client() -> None:
-    """Drop the shared upstream client so the next request rebuilds it.
+def schedule_close_upstream_async_client(grace_seconds: float | None = None) -> None:
+    """Detach the shared upstream client so the next request rebuilds it.
 
-    Hot reload is synchronous. If an event loop is already running, close the
-    client on that loop; otherwise drop the handle (tests / startup).
+    Hot reload is synchronous. On a running event loop the previous client stays
+    open through ``grace_seconds`` (default: the upstream read timeout plus five
+    seconds) so an in-flight stream can finish, then it is closed. Without a
+    running loop, drop the handle (tests / startup). Process shutdown still
+    closes the current client via :func:`close_upstream_async_client`; a client
+    already handed to ``call_later`` is released with the loop.
     """
+    global _upstream_async_client
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if loop is not None and loop.is_running():
-        loop.create_task(close_upstream_async_client())
-        return
-    global _upstream_async_client
+    old = _upstream_async_client
     _upstream_async_client = None
+    if old is not None and loop is not None and loop.is_running():
+        if grace_seconds is None:
+            # Hot reload has already applied the new settings. Grace follows the
+            # read timeout now in effect, plus five seconds.
+            grace = float(settings.upstream_timeout_seconds) + 5.0
+        else:
+            grace = float(grace_seconds)
+        loop.call_later(grace, lambda: loop.create_task(old.aclose()))
 
 
 def _normalize_upstream_base(raw_base: str) -> str:
@@ -308,6 +318,10 @@ def _build_upstream_url(request_path: str, upstream_base: str) -> str:
         route_path = route_path[len(GATEWAY_PREFIX) :]
     if not route_path.startswith("/"):
         route_path = f"/{route_path}"
+    # Same rule as the token middleware: httpx would normalize these and leave
+    # the upstream base. Callers already turn ValueError into HTTP 400.
+    if any(segment in {".", ".."} for segment in unquote(route_path).split("/")):
+        raise ValueError("invalid_path")
     url = f"{upstream_base}{route_path}"
     if query:
         return f"{url}?{query}"
