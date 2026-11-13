@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（非流式 /v1/messages 响应与 chat 同一扫描上限）
+
+- **非流式 `/v1/messages` 响应按与 chat 相同的上限扫描，不再只扫前 16000 个字符。**
+  该路径此前走通用抽取，上限 16000 个字符；同一回答走流式是全量滑窗，走非流式时第 16000 个字符之后的正文不进响应侧过滤。
+  现在抽取 `content[]` 的 `text` 和 `tool_use.input`（JSON 序列化），再用与 chat 相同的响应长度上限截断（`max_response_length`，默认 200 万字符）。流式扫描策略未改。
+
 ### Fixed（绑定 IP 故障转移：请求已经发出后不再重发）
 
 - **绑定多个 IP 时，请求一旦发出就不再换下一个 IP 重发。**
