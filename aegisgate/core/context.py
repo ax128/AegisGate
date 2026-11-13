@@ -139,6 +139,12 @@ class RequestContext:
     # fragment — the audit sink these reach does not redact (see exfil_evidence).
     exfil_evidence: list[dict] = field(default_factory=list)
     exfil_hit_count: int = 0
+    # Streaming probes resubmit joined tool arguments on every later delta.
+    # ``(call key, rule id)`` already recorded for this request. The matched
+    # text is not part of the identity: an exfil span grows as the secret
+    # streams in, and that must not count the same rule again.
+    # A declared field: this dataclass is slots=True.
+    counted_tool_arg_hits: set[tuple[str, str]] = field(default_factory=set)
     # Set the first time this request's disposition reaches the metrics. A
     # declared field rather than an attribute stuck on in the router, because
     # this dataclass uses slots=True and the assignment would otherwise raise —

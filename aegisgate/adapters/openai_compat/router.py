@@ -2739,6 +2739,124 @@ def _sanitize_stream_event_line(
     return output
 
 
+# A hostile index must not allocate a slot per integer. Same bound as the
+# chat→responses accumulator.
+_MAX_STREAM_TOOL_CALL_INDEX = 256
+
+
+def _argument_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _bounded_stream_index(raw: Any, fallback: int) -> int:
+    try:
+        index = int(raw) if raw is not None else fallback
+    except (TypeError, ValueError):
+        index = fallback
+    if index < 0 or index > _MAX_STREAM_TOOL_CALL_INDEX:
+        return fallback
+    return index
+
+
+def _append_chat_tool_call_delta(
+    accumulated: dict[tuple[int, int], dict[str, Any]],
+    *,
+    choice_index: int,
+    delta: dict[str, Any],
+    ordinal: int,
+) -> None:
+    """Append one tool-call delta into the ``(choice, tool)`` slot."""
+    tool_index = _bounded_stream_index(delta.get("index"), ordinal)
+    key = (choice_index, tool_index)
+    current = accumulated.get(key)
+    if current is None:
+        current = {
+            "index": tool_index,
+            "type": "function",
+            "function": {"name": "", "arguments": ""},
+            # Probe-only identity. Upstream ids can arrive on a later delta;
+            # the choice and tool index do not.
+            "_stream_call_key": f"{choice_index}:{tool_index}",
+        }
+        accumulated[key] = current
+    call_id = delta.get("id")
+    if call_id:
+        current["id"] = str(call_id)
+    item_type = delta.get("type")
+    if item_type:
+        current["type"] = str(item_type)
+    stored = current.get("function")
+    if not isinstance(stored, dict):
+        stored = {"name": "", "arguments": ""}
+        current["function"] = stored
+    function = delta.get("function")
+    source = function if isinstance(function, dict) else delta
+    name = source.get("name")
+    if name:
+        stored["name"] = str(name)
+    piece = _argument_text(source.get("arguments"))
+    if piece is not None:
+        stored["arguments"] = f"{stored.get('arguments', '')}{piece}"
+
+
+def _merged_chat_tool_calls(
+    accumulated: dict[tuple[int, int], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [copy.deepcopy(accumulated[key]) for key in sorted(accumulated)]
+
+
+def _merge_chat_stream_tool_call_arguments(
+    accumulated: dict[tuple[int, int], dict[str, Any]],
+    payload_text: str,
+) -> list[dict[str, Any]]:
+    """Join streamed ``function.arguments`` per choice and tool index.
+
+    Chat deltas carry a piece of the argument string. Probing that piece alone
+    misses a match that exists only after the pieces are concatenated. Tool
+    indexes are unique only inside one choice, so ``n>1`` must not join choice
+    0's index 0 with choice 1's index 0. The objects stay in the chat delta
+    shape (``type`` / ``function``) and are for the probe, not the client frames.
+    ``_extract_stream_tool_calls`` is left unchanged and is not the source of
+    the choice index.
+    """
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return _merged_chat_tool_calls(accumulated)
+    if not isinstance(payload, dict):
+        return _merged_chat_tool_calls(accumulated)
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return _merged_chat_tool_calls(accumulated)
+    for choice_ordinal, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        choice_index = _bounded_stream_index(choice.get("index"), choice_ordinal)
+        for node_key in ("delta", "message"):
+            node = choice.get(node_key)
+            if not isinstance(node, dict):
+                continue
+            tool_calls = node.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_ordinal, delta in enumerate(tool_calls):
+                if isinstance(delta, dict):
+                    _append_chat_tool_call_delta(
+                        accumulated,
+                        choice_index=choice_index,
+                        delta=delta,
+                        ordinal=tool_ordinal,
+                    )
+    return _merged_chat_tool_calls(accumulated)
+
+
 def _extract_stream_tool_calls(
     payload_text: str, *, route: str
 ) -> list[dict[str, Any]]:
@@ -3454,6 +3572,7 @@ async def _execute_chat_stream_once(
         emitted_content_chunks = 0
         last_probed_chunk = 0
         saw_tool_call_chunk = False
+        accumulated_tool_calls: dict[tuple[int, int], dict[str, Any]] = {}
         saw_terminal_chunk = False
         saw_done = False
         last_finish_reason = ""
@@ -3531,6 +3650,11 @@ async def _execute_chat_stream_once(
 
                 if tool_calls:
                     saw_tool_call_chunk = True
+                    # Scan the joined arguments, not this delta's fragment.
+                    # Re-read the chunk so each choice keeps its own tool index.
+                    tool_calls = _merge_chat_stream_tool_call_arguments(
+                        accumulated_tool_calls, payload_text
+                    )
 
                 if is_content_event:
                     pending_frames.append(line)

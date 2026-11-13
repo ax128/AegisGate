@@ -137,9 +137,16 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         return "response_high_risk_command"
 
     if ctx.response_disposition == "block":
-        if ctx.disposition_reasons:
-            return ctx.disposition_reasons[-1]
-        return "response_blocked"
+        reason = (
+            ctx.disposition_reasons[-1] if ctx.disposition_reasons else "response_blocked"
+        )
+        # OutputSanitizer records response_high_risk for any score at or above
+        # the policy threshold (tool_call_guard's default review is 0.86).
+        # Non-streaming still obfuscates that answer. The stream floor is 0.9,
+        # so the same mark must not cut the stream; a block action scores 0.96
+        # and still returns here.
+        if reason != "response_high_risk" or ctx.risk_score >= max(ctx.risk_threshold, 0.9):
+            return reason
     if ctx.response_disposition == "sanitize":
         return "response_sanitized"
     # tool_call_violation only stops the stream on an actual block action; review does not
