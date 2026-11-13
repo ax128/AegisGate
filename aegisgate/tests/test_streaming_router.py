@@ -136,7 +136,7 @@ def test_run_request_pipeline_uses_dedicated_offload_helper(
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_request_pipeline_sync",
-        lambda req, ctx: req,
+        lambda req, ctx, cancel_token: req,
     )
 
     req = object()
@@ -197,7 +197,7 @@ def test_run_response_pipeline_uses_dedicated_offload_helper(
     )
     monkeypatch.setattr(
         "aegisgate.adapters.openai_compat.router._run_response_pipeline_sync",
-        lambda resp, ctx: resp,
+        lambda resp, ctx, cancel_token: resp,
     )
 
     resp = InternalResponse(

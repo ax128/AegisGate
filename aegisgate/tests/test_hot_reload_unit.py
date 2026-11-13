@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -500,3 +501,196 @@ class TestEveryRulesDerivedCacheIsCleared:
             f"rules-derived caches in {module_name} never cleared on reload: "
             f"{sorted(missing)}. Add them to _clear_openai_lru_caches."
         )
+
+
+def _stub_reload_collaborators(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep reload_settings on the path under test.
+
+    It swallows its own exceptions, so a failure in feature flags, storage, or
+    the semantic client would look like "the upstream client was not closed".
+    """
+    import aegisgate.adapters.openai_compat.pipeline_runtime as pipeline_runtime
+    import aegisgate.adapters.openai_compat.router as router
+    import aegisgate.config.feature_flags as feature_flags
+    import aegisgate.init_config as init_config
+
+    monkeypatch.setattr(feature_flags, "refresh_feature_flags", lambda: None)
+    monkeypatch.setattr(init_config, "ensure_runtime_storage_paths", lambda: None)
+    monkeypatch.setattr(
+        pipeline_runtime, "reload_runtime_dependencies", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(router, "reload_semantic_client_settings", lambda: None)
+
+
+def _watch_upstream_close(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "aegisgate.adapters.openai_compat.upstream.schedule_close_upstream_async_client",
+        lambda *args, **kwargs: calls.append(1),
+    )
+    return calls
+
+
+def _write_env(tmp_path: Path, body: str) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(body, encoding="utf-8")
+
+
+def test_log_level_reload_does_not_schedule_upstream_client_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Saving a log-level edit rewrites .env. That must not drop the V1 pool."""
+    monkeypatch.chdir(tmp_path)
+    _write_env(tmp_path, "AEGIS_LOG_LEVEL=debug\n")
+    _stub_reload_collaborators(monkeypatch)
+    calls = _watch_upstream_close(monkeypatch)
+
+    from aegisgate.config.settings import settings as runtime_settings
+
+    snapshot = dict(hot_reload._mutable_settings_payload(runtime_settings))
+    root_logger = logging.getLogger()
+    original_root_level = root_logger.level
+    original_aegis_level = logger.level
+    runtime_settings.log_level = "warning"
+    try:
+        hot_reload.reload_settings()
+        assert runtime_settings.log_level == "debug"
+        assert calls == []
+    finally:
+        hot_reload._apply_settings_payload(runtime_settings, snapshot)
+        root_logger.setLevel(original_root_level)
+        logger.setLevel(original_aegis_level)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "field_name", "previous", "expected"),
+    [
+        ("AEGIS_UPSTREAM_TIMEOUT_SECONDS", "upstream_timeout_seconds", 600.0, 30.0),
+        ("AEGIS_UPSTREAM_MAX_CONNECTIONS", "upstream_max_connections", 300, 40),
+        (
+            "AEGIS_UPSTREAM_MAX_KEEPALIVE_CONNECTIONS",
+            "upstream_max_keepalive_connections",
+            100,
+            12,
+        ),
+    ],
+)
+def test_upstream_pool_setting_reload_schedules_one_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_name: str,
+    field_name: str,
+    previous: float,
+    expected: float,
+) -> None:
+    """The shared client only depends on timeout and the two pool limits."""
+    monkeypatch.chdir(tmp_path)
+    _write_env(tmp_path, f"{env_name}={expected}\n")
+    _stub_reload_collaborators(monkeypatch)
+    calls = _watch_upstream_close(monkeypatch)
+
+    from aegisgate.config.settings import settings as runtime_settings
+
+    snapshot = dict(hot_reload._mutable_settings_payload(runtime_settings))
+    setattr(runtime_settings, field_name, previous)
+    try:
+        hot_reload.reload_settings()
+        assert getattr(runtime_settings, field_name) == expected
+        assert calls == [1]
+    finally:
+        hot_reload._apply_settings_payload(runtime_settings, snapshot)
+
+
+def _schedule_upstream_close(grace_seconds: float | None = None) -> None:
+    """Pass a grace when the production function accepts one.
+
+    The pre-fix function closed immediately and took no grace argument. Calling
+    that version with the keyword errored before the assertion that records the
+    immediate ``aclose``. With the argument present, the test injects the grace.
+    """
+    import aegisgate.adapters.openai_compat.upstream as upstream
+
+    schedule = upstream.schedule_close_upstream_async_client
+    if (
+        grace_seconds is not None
+        and "grace_seconds" in inspect.signature(schedule).parameters
+    ):
+        schedule(grace_seconds=grace_seconds)
+        return
+    schedule()
+
+
+class _Closeable:
+    def __init__(self, closed: list[object]) -> None:
+        self._closed = closed
+
+    async def aclose(self) -> None:
+        self._closed.append(self)
+
+
+def _capture_call_later(monkeypatch: pytest.MonkeyPatch):
+    """Record ``call_later`` without arming the timer.
+
+    The grace under test can be zero. A real timer at delay 0 would close the
+    client on the next loop turn and hide the bug the assertion is there for.
+    """
+    recorded: list[tuple[float, object, tuple]] = []
+
+    class _Handle:
+        def cancel(self) -> None:
+            return None
+
+    def wrapped(delay, callback, *args, **kwargs):
+        recorded.append((float(delay), callback, args))
+        return _Handle()
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", wrapped)
+    return recorded
+
+
+async def test_replaced_upstream_client_is_not_aclosed_during_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detaching the pool must not abort streams that are still reading."""
+    import aegisgate.adapters.openai_compat.upstream as upstream
+
+    closed: list[object] = []
+    old = _Closeable(closed)
+    monkeypatch.setattr(upstream, "_upstream_async_client", old)
+    recorded = _capture_call_later(monkeypatch)
+    grace_seconds = 0.0
+    _schedule_upstream_close(grace_seconds)
+    # One loop turn runs the old create_task(aclose) path. The deferred
+    # callback is not armed, so a grace of 0 still has not fired.
+    await asyncio.sleep(0)
+    assert closed == [], "old upstream client was aclosed before the grace elapsed"
+    assert upstream._upstream_async_client is None
+    assert recorded, "close was not deferred with call_later"
+    delay, callback, args = recorded[0]
+    assert delay == grace_seconds
+    assert "grace_seconds" in inspect.signature(
+        upstream.schedule_close_upstream_async_client
+    ).parameters
+    callback(*args)
+    await asyncio.sleep(0)
+    assert closed == [old]
+
+
+async def test_default_upstream_client_grace_is_timeout_plus_five(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-flight reads use upstream_timeout_seconds; close no earlier than that plus 5s."""
+    import aegisgate.adapters.openai_compat.upstream as upstream
+    from aegisgate.config.settings import settings as runtime_settings
+
+    closed: list[object] = []
+    old = _Closeable(closed)
+    monkeypatch.setattr(upstream, "_upstream_async_client", old)
+    monkeypatch.setattr(runtime_settings, "upstream_timeout_seconds", 12.5)
+    recorded = _capture_call_later(monkeypatch)
+    upstream.schedule_close_upstream_async_client()
+    await asyncio.sleep(0)
+    assert closed == [], "old upstream client was aclosed before the grace elapsed"
+    assert recorded, "close was not deferred with call_later"
+    assert recorded[0][0] == 17.5

@@ -17,6 +17,7 @@ from aegisgate.adapters.v2_proxy.router import _DEFAULT_DANGEROUS_COMMAND_PATTER
 from aegisgate.config.field_patterns import FIELD_FALLBACK_TEMPLATES
 from aegisgate.config.security_rules import _DEFAULT_RULES
 from aegisgate.init_config import migrate_http_smuggling_regex
+from aegisgate.util.rule_regex import compile_rule_regex
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _YAML_RULES = _REPO_ROOT / "aegisgate" / "policies" / "rules" / "security_filters.yaml"
@@ -29,9 +30,15 @@ _SKIP_DIR_NAMES = {
     "htmlcov",
     "node_modules",
     ".venv",
+    ".venv310",
     "venv",
 }
 _BUDGET_SECONDS = 0.1
+# Same flags the request path and rag_poison_guard compile with. Folded haystacks
+# are single-line, so IGNORECASE|DOTALL is the runtime shape ``.*`` actually sees.
+_RUNTIME_FLAGS = re.IGNORECASE | re.DOTALL
+_DENSE_CHARS = 16 * 1024
+_WORD = re.compile(r"[A-Za-z]{2,}|[\u4e00-\u9fff]+")
 # Hundreds of chars is enough to catch exponential backtracking (the old te_te
 # shape already blew up at ~160 bytes). Keep this modest so linear PII patterns
 # such as EMAIL stay under the 100ms CI budget on CPython.
@@ -152,8 +159,20 @@ def _smuggling_regexes() -> list[tuple[str, str]]:
     return found
 
 
+def _keyword_dense_inputs(pattern: str) -> list[str]:
+    vocab = list(dict.fromkeys(_WORD.findall(pattern))) or ["a"]
+    texts: list[str] = []
+    for unit in (
+        " ".join(vocab[: max(1, len(vocab) - 2)]) + " ",
+        vocab[0] + " ",
+        vocab[0] + "\n",
+    ):
+        texts.append((unit * (_DENSE_CHARS // len(unit) + 1))[:_DENSE_CHARS])
+    return texts
+
+
 def _assert_search_budget(pattern: str, text: str) -> None:
-    compiled = re.compile(pattern)
+    compiled = compile_rule_regex(pattern, _RUNTIME_FLAGS)
     started = time.perf_counter()
     compiled.search(text)
     elapsed = time.perf_counter() - started
@@ -164,6 +183,8 @@ def _assert_search_budget(pattern: str, text: str) -> None:
 def test_every_security_regex_returns_within_budget(label: str, pattern: str) -> None:
     del label
     _assert_search_budget(pattern, _LARGE_INPUT)
+    for text in _keyword_dense_inputs(pattern):
+        _assert_search_budget(pattern, text)
 
 
 @pytest.mark.parametrize("label,pattern", _smuggling_regexes())

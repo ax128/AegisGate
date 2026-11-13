@@ -670,7 +670,7 @@
               </div>
               <div class="panel-head-info">
                 <h2>密钥管理</h2>
-                <p class="panel-desc">查看或更换三个密钥文件；更换后重启服务生效。<strong class="u-required">Fernet 密钥更换后历史脱敏映射将无法解密。</strong></p>
+                <p class="panel-desc">查看或更换三个密钥文件。更换代理令牌后，网关进程在密钥文件写成功时立即改用新 token；Caddy 仍只在启动时读取，重载前不会自动换成新 token。<strong class="u-required">Fernet 密钥更换后历史脱敏映射将无法解密。</strong></p>
               </div>
             </div>
             <div id="keys-grid" class="keys-grid">
