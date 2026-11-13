@@ -9,6 +9,19 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（示例配置不再给 Compose 已设置的键赋值）
+
+- **复制 `config/.env.example` 不再设置与 `docker-compose.yml` 的 `environment:` 冲突的键。**
+  改为注释的是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、
+  `AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、
+  `AEGIS_AUDIT_LOG_PATH`。
+  热重载会用 `config/.env` 里出现的键盖过当前进程环境。按文档把示例拷成 `.env`（或首次启动从示例自动生成）之后，
+  控制台第一次保存会把 Compose 已打开的端口路由写成 `false`，并可能把监听地址、端口、SQLite / 审计路径和端口路由 Host 钉回示例值。
+  现在复制示例不会给这些键赋值，Compose 注入的值在保存后仍然保留。已有的 `config/.env` 不会被改写。
+  裸机未取消注释时走代码默认值：`AEGIS_ENV` 因此是 `dev` 而不是示例里原先写死的 `prod`
+  （HMAC 未开启时的生产环境告警只在 `prod` / `production` 下出现；Docker Compose 仍会设置 `AEGIS_ENV=prod`）。
+  进程环境变量与 `.env` 在重载时谁优先没有改。
+
 ### Security（应用日志文件权限）
 
 - **应用日志改为仅所有者可读写（0600）。** `logs/aegisgate/YY/MM/DD.log` 原本就按 10MB、最多 10 个备份做大小轮转，但文件由标准库 `open()` 创建：umask 为 022 时模式是 0644，同机其他用户能读到日志。现在每次打开（含按大小轮转后重新打开）都强制 0600；进程开始写当天日志时，会扫描整个 `logs/aegisgate` 目录树（不只是当天那一层目录），把其中已有的 `*.log` 和 `*.log.<n>`，包括更早日期的 `YY/MM/DD.log`，收成 0600。按天分目录的旧文件仍会保留，这次不删除它们。扫描目录时遇到 `OSError`（含目录在扫描中消失）只跳过剩余的 chmod，不再把文件日志关掉。

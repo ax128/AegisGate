@@ -770,6 +770,8 @@ fields alongside them are.
 
 Key environment variables (set in `config/.env`):
 
+Keys that `docker-compose.yml` sets under `environment:` stay commented in [`config/.env.example`](config/.env.example), so copying the example does not assign them and a console save does not replace the Compose values. They are `AEGIS_HOST`, `AEGIS_PORT`, `AEGIS_ENV`, `AEGIS_ENFORCE_LOOPBACK_ONLY`, `AEGIS_ENABLE_LOCAL_PORT_ROUTING`, `AEGIS_LOCAL_PORT_ROUTING_HOST`, `AEGIS_SQLITE_DB_PATH`, and `AEGIS_AUDIT_LOG_PATH`. Uncomment one only for a deploy that does not get that key from Compose. The table lists the code default used when the key is unset. `AEGIS_ENFORCE_LOOPBACK_ONLY` is pinned at startup; the others above are applied on hot reload when present in `config/.env`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AEGIS_HOST` | `127.0.0.1` | Listen address |
