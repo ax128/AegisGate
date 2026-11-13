@@ -166,12 +166,43 @@ def _is_valid_ui_session(token: str, request: Request) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
+def _ui_session_candidates(request: Request) -> list[str]:
+    """Every ``aegis_ui_session`` value in the Cookie header, in wire order.
+
+    Browsers list the longer ``Path=/__ui__`` cookie before the legacy ``Path=/``
+    cookie. ``request.cookies`` keeps only the last duplicate name, which is the
+    pre-upgrade session.
+    """
+    header = request.headers.get("cookie") or ""
+    found: list[str] = []
+    for chunk in header.split(";"):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        if key.strip() == _UI_SESSION_COOKIE:
+            found.append(value.strip())
+    return found
+
+
+def _ui_session_token(request: Request) -> str:
+    """Session to authenticate: the first value that still validates.
+
+    A request can carry both the new ``Path=/__ui__`` cookie and the legacy
+    ``Path=/`` cookie until the browser applies the expiry. The legacy value is
+    last, so taking the dict entry would lock the console out after key rotation.
+    """
+    for token in _ui_session_candidates(request):
+        if _is_valid_ui_session(token, request):
+            return token
+    return ""
+
+
 def _is_ui_authenticated(request: Request) -> bool:
-    return _is_valid_ui_session(request.cookies.get(_UI_SESSION_COOKIE, ""), request)
+    return _is_valid_ui_session(_ui_session_token(request), request)
 
 
 def _verify_ui_csrf(request: Request) -> bool:
-    session_token = request.cookies.get(_UI_SESSION_COOKIE, "")
+    session_token = _ui_session_token(request)
     if not _is_valid_ui_session(session_token, request):
         return False
     presented = (request.headers.get("x-aegis-ui-csrf") or "").strip()
