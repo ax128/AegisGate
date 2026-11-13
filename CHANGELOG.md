@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（控制台 .env 写入拒绝换行注入）
+
+- **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
+  字符串此前只做 `strip()`，再按 `KEY=value` 写入。值里一旦含有这三种字符，管理员会话就能把控制台不开放的键写进 `.env`，例如 `AEGIS_GATEWAY_KEY`、`AEGIS_ENFORCE_LOOPBACK_ONLY`。
+  现在这类提交返回 400 `invalid_field_value`（`invalid value for <字段>`），文件不会被改写；落盘前再检查一次。只拒绝这三种字符，其它值的保存行为不变。
+
 ### Security（安全披露渠道）
 
 - **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
