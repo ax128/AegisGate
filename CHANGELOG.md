@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（脱敏白名单区间跟随替换后的文本）
+
+- **配置了脱敏白名单时，一条规则只要改写了文本，就按新文本重算保护区间。**
+  `RedactionFilter` 原先只在原文上计算一次白名单区间，随后的 PII / 字段规则却在已经被替换、长度已经变化的文本上匹配。
+  长值（例如 JWT）换成短占位符后，后面的密钥会左移进旧区间，从而被原样放行；短值换成更长的占位符时，白名单中的值会右移出旧区间，从而被误脱敏。
+  白名单为空时不额外重算，未配置白名单的请求行为不变。
+
 ### Security（控制台 .env 写入拒绝换行注入）
 
 - **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
