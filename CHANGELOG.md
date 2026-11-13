@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Security（精确值脱敏：规范化后再匹配）
+
+- **精确值替换先做 NFKC，并去掉零宽字符和双向控制符，再按对应的原文区间替换。**
+  此前只对原文做字面匹配，配置值中间插入 U+200B，或把值写成全角，精确值脱敏会整段漏掉。
+  折叠只用于检测：命中时只替换原文里折进这次匹配的那一段，旁边的全角标点和段外的零宽字符保持原样；
+  没有命中的文本原样返回。大小写和空白仍然敏感，PII 正则未改。纯 ASCII 的文本和配置值仍走原来的字面替换。
+
 ### Security（受信代理的 X-Forwarded-For 改为从右向左取客户端）
 
 - **直连对端在 `AEGIS_TRUSTED_PROXY_IPS` 中时，不再把 `X-Forwarded-For` 的最左值当作客户端 IP。**
