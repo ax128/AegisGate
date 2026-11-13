@@ -192,7 +192,11 @@ class RedactionFilter(BaseFilter):
 
         def replace_in_text(text: str) -> str:
             nonlocal serial
-            protected_spans = protected_spans_for_text(text, ctx.redaction_whitelist_keys)
+            # Closure reads the variable, not a snapshot. Rebind after each
+            # replacement: a shorter placeholder slides the tail left into the
+            # old interval, and a longer one slides a whitelisted value out of it.
+            whitelist = ctx.redaction_whitelist_keys
+            protected_spans = protected_spans_for_text(text, whitelist)
 
             def _replace_match(match: re.Match[str], kind: str, label: str) -> str:
                 nonlocal serial
@@ -250,10 +254,11 @@ class RedactionFilter(BaseFilter):
                     lambda match: _replace_match(match, kind, label), source_text
                 )
 
-            for kind, pattern in active_pii_patterns:
-                text = _apply_pattern(pattern, kind, text)
-            for kind, pattern in self._field_patterns:
-                text = _apply_pattern(pattern, kind, text)
+            for kind, pattern in (*active_pii_patterns, *self._field_patterns):
+                new_text = _apply_pattern(pattern, kind, text)
+                if whitelist and new_text != text:
+                    protected_spans = protected_spans_for_text(new_text, whitelist)
+                text = new_text
             return text
 
         ctx.redaction_whitelist_keys = set(normalize_whitelist_keys(ctx.redaction_whitelist_keys))

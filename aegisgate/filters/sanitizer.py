@@ -14,6 +14,7 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import (
     any_pattern_hits,
     apply_rewrite_conservatively,
@@ -83,8 +84,8 @@ class OutputSanitizer(BaseFilter):
             ctx.requires_human_review = True
 
     @staticmethod
-    def _compile_patterns(items: list[dict]) -> list[re.Pattern[str]]:
-        compiled: list[re.Pattern[str]] = []
+    def _compile_patterns(items: list[dict]) -> list[RulePattern]:
+        compiled: list[RulePattern] = []
         for item in items:
             if isinstance(item, dict):
                 regex = item.get("regex")
@@ -92,12 +93,12 @@ class OutputSanitizer(BaseFilter):
                 regex = item
             if not regex:
                 continue
-            compiled.append(re.compile(regex, re.IGNORECASE))
+            compiled.append(compile_rule_regex(regex, re.IGNORECASE))
         return compiled
 
     @staticmethod
-    def _compile_id_patterns(items: list[dict]) -> list[tuple[str, re.Pattern[str]]]:
-        compiled: list[tuple[str, re.Pattern[str]]] = []
+    def _compile_id_patterns(items: list[dict]) -> list[tuple[str, RulePattern]]:
+        compiled: list[tuple[str, RulePattern]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -105,15 +106,15 @@ class OutputSanitizer(BaseFilter):
             if not regex:
                 continue
             pattern_id = str(item.get("id", "force_block_command"))
-            compiled.append((pattern_id, re.compile(regex, re.IGNORECASE)))
+            compiled.append((pattern_id, compile_rule_regex(regex, re.IGNORECASE)))
         return compiled
 
     @staticmethod
-    def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
+    def _matches_any(text: str, patterns: list[RulePattern]) -> bool:
         return any_pattern_hits(patterns, build_haystacks(text))
 
     @staticmethod
-    def _matched_pattern_ids(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
+    def _matched_pattern_ids(text: str, patterns: list[tuple[str, RulePattern]]) -> list[str]:
         hits: list[str] = []
         haystacks = build_haystacks(text)
         for pattern_id, pattern in patterns:
@@ -122,7 +123,7 @@ class OutputSanitizer(BaseFilter):
         return sorted(set(hits))
 
     @staticmethod
-    def _collect_replacement_spans(text: str, patterns: list[re.Pattern[str]]) -> list[tuple[int, int]]:
+    def _collect_replacement_spans(text: str, patterns: list[RulePattern]) -> list[tuple[int, int]]:
         spans: list[tuple[int, int]] = []
         for pattern in patterns:
             for match in pattern.finditer(text):
@@ -136,7 +137,7 @@ class OutputSanitizer(BaseFilter):
         ctx: RequestContext,
         *,
         text_len: int,
-        patterns: list[tuple[str, re.Pattern[str]]] | None = None,
+        patterns: list[tuple[str, RulePattern]] | None = None,
     ) -> None:
         """Name the exfiltration rules that fired, with spans but no fragments.
 
@@ -357,7 +358,7 @@ class OutputSanitizer(BaseFilter):
 
             def _apply(
                 current: str,
-                patterns: list[re.Pattern[str]],
+                patterns: list[RulePattern],
                 replacement: str,
                 enabled: bool,
             ) -> str:

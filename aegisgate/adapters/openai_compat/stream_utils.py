@@ -5,7 +5,7 @@ Streaming SSE and chunk construction. Split out of router for maintainability an
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from typing import Any, AsyncIterable, Iterable
 
 from fastapi.responses import StreamingResponse
@@ -137,9 +137,16 @@ def _stream_block_reason(ctx: RequestContext) -> str | None:
         return "response_high_risk_command"
 
     if ctx.response_disposition == "block":
-        if ctx.disposition_reasons:
-            return ctx.disposition_reasons[-1]
-        return "response_blocked"
+        reason = (
+            ctx.disposition_reasons[-1] if ctx.disposition_reasons else "response_blocked"
+        )
+        # OutputSanitizer records response_high_risk for any score at or above
+        # the policy threshold (tool_call_guard's default review is 0.86).
+        # Non-streaming still obfuscates that answer. The stream floor is 0.9,
+        # so the same mark must not cut the stream; a block action scores 0.96
+        # and still returns here.
+        if reason != "response_high_risk" or ctx.risk_score >= max(ctx.risk_threshold, 0.9):
+            return reason
     if ctx.response_disposition == "sanitize":
         return "response_sanitized"
     # tool_call_violation only stops the stream on an actual block action; review does not
@@ -426,6 +433,17 @@ def _extract_sse_data_payload_from_chunk(chunk: bytes) -> str | None:
     return "\n".join(payload_lines)
 
 
+def _extract_sse_event_name(chunk: bytes) -> str:
+    """Lowercased SSE ``event:`` field, or empty when the frame has none."""
+    normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for raw_line in normalized.split(b"\n"):
+        stripped = raw_line.strip()
+        if len(stripped) < 6 or stripped[:6].lower() != b"event:":
+            continue
+        return stripped[6:].strip().decode("utf-8", errors="replace").lower()
+    return ""
+
+
 def _build_sse_frame(lines: list[bytes]) -> bytes:
     frame = b"".join(lines)
     if not frame.endswith(b"\n"):
@@ -438,29 +456,67 @@ def _build_sse_frame(lines: list[bytes]) -> bytes:
 _SSE_MAX_BUFFER_BYTES = 10 * 1024 * 1024  # 10 MB — safety limit per stream.
 
 
+def _reject_oversized_sse_buffer(buffer: bytearray, extra: int = 0) -> None:
+    if len(buffer) + extra > _SSE_MAX_BUFFER_BYTES:
+        raise RuntimeError(
+            f"SSE buffer exceeded {_SSE_MAX_BUFFER_BYTES} bytes without frame delimiter"
+        )
+
+
+def _iter_complete_sse_frames(buffer: bytearray, search_from: int) -> Iterator[bytes]:
+    """Yield each blank-line-terminated frame and drop it from ``buffer``.
+
+    ``search_from`` is ``max(0, previous_length - 1)``. One byte of overlap
+    is enough for a two-byte delimiter that straddles the previous chunk, so
+    bytes already scanned are not scanned again.
+    """
+    while True:
+        split_at = buffer.find(b"\n\n", search_from)
+        if split_at < 0:
+            return
+        frame_body = bytes(buffer[:split_at])
+        del buffer[: split_at + 2]
+        # The tail is compacted to index 0, so the next delimiter may start there.
+        search_from = 0
+        if not frame_body:
+            continue
+        frame_lines = [line + b"\n" for line in frame_body.split(b"\n") if line]
+        if frame_lines:
+            yield _build_sse_frame(frame_lines)
+
+
 async def _iter_sse_frames(chunks: AsyncIterable[bytes]) -> AsyncGenerator[bytes, None]:
-    buffer = b""
+    buffer = bytearray()
+    held_cr = False
     async for chunk in chunks:
         if not chunk:
             continue
-        buffer += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        if len(buffer) > _SSE_MAX_BUFFER_BYTES:
-            raise RuntimeError(
-                f"SSE buffer exceeded {_SSE_MAX_BUFFER_BYTES} bytes without frame delimiter"
-            )
-        while True:
-            split_at = buffer.find(b"\n\n")
-            if split_at < 0:
-                break
-            frame_body = buffer[:split_at]
-            buffer = buffer[split_at + 2 :]
-            if not frame_body:
-                continue
-            frame_lines = [line + b"\n" for line in frame_body.split(b"\n") if line]
-            if frame_lines:
-                yield _build_sse_frame(frame_lines)
+        if held_cr:
+            chunk = b"\r" + chunk
+            held_cr = False
+        # A CR at the end of this chunk may be the first half of CRLF. Replacing
+        # it before the next chunk arrives turns that pair into an extra blank line.
+        if chunk.endswith(b"\r"):
+            held_cr = True
+            chunk = chunk[:-1]
+        if not chunk:
+            _reject_oversized_sse_buffer(buffer, extra=1)
+            continue
+        normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        search_from = max(0, len(buffer) - 1)
+        buffer.extend(normalized)
+        pending = 1 if held_cr else 0
+        _reject_oversized_sse_buffer(buffer, extra=pending)
+        for frame in _iter_complete_sse_frames(buffer, search_from):
+            yield frame
+    if held_cr:
+        search_from = max(0, len(buffer) - 1)
+        buffer.extend(b"\n")
+        _reject_oversized_sse_buffer(buffer)
+        for frame in _iter_complete_sse_frames(buffer, search_from):
+            yield frame
     if buffer.strip():
-        frame_lines = [line + b"\n" for line in buffer.split(b"\n") if line]
+        frame_lines = [line + b"\n" for line in bytes(buffer).split(b"\n") if line]
         if frame_lines:
             yield _build_sse_frame(frame_lines)
 

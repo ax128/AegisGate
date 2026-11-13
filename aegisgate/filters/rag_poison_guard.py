@@ -10,6 +10,7 @@ from aegisgate.core.context import RequestContext
 from aegisgate.core.models import InternalRequest, InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 from aegisgate.util.text_normalize import build_haystacks, pattern_hits_in
 
 
@@ -47,8 +48,8 @@ class RagPoisonGuard(BaseFilter):
         self._action_map = {str(key): str(value) for key, value in action_map.items()}
 
     @staticmethod
-    def _compile_patterns(items: list[dict] | list[str]) -> dict[str, re.Pattern[str]]:
-        compiled: dict[str, re.Pattern[str]] = {}
+    def _compile_patterns(items: list[dict] | list[str]) -> dict[str, RulePattern]:
+        compiled: dict[str, RulePattern] = {}
         for idx, item in enumerate(items):
             rule_id = f"rule_{idx + 1}"
             regex: str | None = None
@@ -59,10 +60,10 @@ class RagPoisonGuard(BaseFilter):
                 regex = str(item)
             if not regex:
                 continue
-            compiled[rule_id] = re.compile(regex, re.IGNORECASE | re.DOTALL)
+            compiled[rule_id] = compile_rule_regex(regex, re.IGNORECASE | re.DOTALL)
         return compiled
 
-    def _match_signals(self, text: str, patterns: dict[str, re.Pattern[str]]) -> list[str]:
+    def _match_signals(self, text: str, patterns: dict[str, RulePattern]) -> list[str]:
         if not text:
             return []
         hits: list[str] = []
@@ -254,10 +255,12 @@ class RagPoisonGuard(BaseFilter):
         return req
 
     def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+        # Propagation only matters after a poisoned retrieval was recorded.
+        # Scanning first paid for the slow patterns and then threw the result away.
+        if not ctx.poison_traceback:
+            return resp
         propagation_signals = self._match_signals(resp.output_text, self._propagation_patterns)
         if not propagation_signals:
-            return resp
-        if not ctx.poison_traceback:
             return resp
 
         ctx.security_tags.add("response_rag_poison_propagation")
