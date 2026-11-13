@@ -9,6 +9,12 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Fixed（PII 误报：时钟、git SHA、未过 Luhn 的数字）
+
+- **全量 PII 集不再把 `12:34:56` 标成 `IPV6`。** 规则改为至少六个十六进制组。三组是时钟；未压缩地址是八组；六组留给冒号 MAC 的回落（`mac:00:1a:…` 过不了 MAC 的后顾，以前靠 IPV6 接住）。压缩写法 `::` 本来就不匹配。
+- **40 位十六进制的 git 对象 id 不再标成 `CRYPTO_BTC_ADDR`。** 以 `1`、`3` 或 `bc1` 开头的 SHA-1 会落进原来的长度窗口。负向预查只排除整整 40 位 hex；更短的 base58 形状和现有 `bc1q…` 样本仍会脱敏。
+- **`CARD` 的 Luhn 改为门闩。** 13–16 位数字过不了 Luhn 就保持原文，不再打成 `CARD`。请求管道、转发层和 V2 用同一条规则。身份证、IBAN、德国增值税号、奥地利社保号仍然是校验失败也脱敏，只记一笔。对话路由的 relaxed 集本来不含这三条，行为不变。
+
 ### Fixed（V2 流式探测失败时关闭上游连接）
 
 - V2 流式代理在返回 `StreamingResponse` 之前探测响应正文。探测抛错时，原先只写在响应体迭代器里的 `aclose` 不会执行，上游 exit stack 一直占着连接。现在探测段用 `try/finally`：探测没跑完就关闭上游；探测成功时仍由响应体结束时关闭，不提前掐断流。

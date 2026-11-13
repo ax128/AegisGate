@@ -1,18 +1,23 @@
 """Check-digit validators for the PII patterns that match on shape alone.
 
 The CARD rule matches any 13-16 digit run, so a 15-digit order number or a
-timestamp is a card as far as the regex is concerned. Rule ordering decided
-which *label* such a value got; it never decided whether the value was really
-one. These functions answer that second question.
+timestamp is a card as far as the regex is concerned. These functions answer
+whether the value is really one.
 
-They are pure and dependency-free, and they only ever *observe*: the redaction
-filter still redacts a value whose checksum fails, and records that it failed.
+``luhn`` is a gate (:data:`ENFORCED_VALIDATORS`): a value it rejects is not
+labeled and not redacted. The other functions stay observational — the caller
+still redacts and records the failure. All three pattern compile sites have to
+honour that split; a gate that lived in only one of them would keep labeling
+the same digits on the other two.
 
 Separators are stripped before validation because the patterns match them:
 ``4111 1111 1111 1111`` and ``4111-1111-1111-1111`` are the same number.
 """
 
 from __future__ import annotations
+
+import re
+from collections.abc import Sequence
 
 _SEPARATORS = str.maketrans("", "", "- ")
 
@@ -144,3 +149,36 @@ VALIDATORS = {
 """Name -> function. The keys are the only values a rule's ``validator`` may
 take; anything else reads as "no validator", so a typo degrades to today's
 behaviour rather than to an exception on the request path."""
+
+# A failing luhn means "not a card". The others mean "redact it anyway and
+# remember that the check digit disagreed" — a bad CN_ID is still ID-shaped.
+ENFORCED_VALIDATORS = frozenset({"luhn"})
+
+
+def enforced_validator_rejects(validator_name: str | None, value: str) -> bool:
+    """True when this match must be left in place instead of labeled."""
+    if not validator_name or validator_name not in ENFORCED_VALIDATORS:
+        return False
+    check = VALIDATORS.get(validator_name)
+    return check is not None and not check(value)
+
+
+def pattern_keeps_a_match(
+    pattern: re.Pattern[str],
+    validator_name: str | None,
+    haystacks: Sequence[str],
+) -> bool:
+    """True when some haystack match would still be labeled.
+
+    Observational validators, and rules with no validator, keep the old
+    "any hit" answer. An enforced validator that rejects every hit does not
+    count: otherwise a digit run Luhn already refused on the raw text would
+    be redacted again as a whole leaf once the normalized copy is searched.
+    """
+    if validator_name not in ENFORCED_VALIDATORS:
+        return any(pattern.search(hay) for hay in haystacks)
+    for hay in haystacks:
+        for match in pattern.finditer(hay):
+            if not enforced_validator_rejects(validator_name, match.group(0)):
+                return True
+    return False
