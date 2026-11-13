@@ -107,18 +107,22 @@ def build_bypass_stream_response(
     return build_streaming_response(bypass_generator())
 
 
-def maybe_build_bypass_stream_response(
+async def maybe_build_bypass_stream_response(
     *,
     transport: PreparedStreamTransport,
     filter_mode: str | None,
     is_upstream_whitelisted: Callable[[str], bool],
-    build_passthrough_response: Callable[[PreparedStreamTransport], StreamingResponse],
-    build_whitelist_response: Callable[[PreparedStreamTransport], StreamingResponse],
-) -> StreamingResponse | None:
+    build_passthrough_response: Callable[
+        [PreparedStreamTransport], Awaitable[StreamingResponse | JSONResponse]
+    ],
+    build_whitelist_response: Callable[
+        [PreparedStreamTransport], Awaitable[StreamingResponse | JSONResponse]
+    ],
+) -> StreamingResponse | JSONResponse | None:
     if filter_mode == "passthrough":
-        return build_passthrough_response(transport)
+        return await build_passthrough_response(transport)
     if is_upstream_whitelisted(transport.upstream_base):
-        return build_whitelist_response(transport)
+        return await build_whitelist_response(transport)
     return None
 
 
