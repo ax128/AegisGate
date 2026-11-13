@@ -180,6 +180,15 @@ Override it with `AEGIS_GATEWAY_KEY` for Docker/CI. Rotate it from the console's
 or by replacing the file contents and restarting. See [WEBUI-QUICKSTART.md](WEBUI-QUICKSTART.md) for
 the full console guide.
 
+The same page rotates `config/aegis_proxy_token.key`. After that file is written successfully, the
+gateway process accepts the new proxy token immediately. Caddy still reads the token only once, at
+startup, so requests Caddy forwards keep the previous token until Caddy is reloaded.
+
+Fernet rotation from that page saves the current key to `config/aegis_fernet_prev.key` first and
+aborts, leaving the current key file unchanged, when that save fails. It also refuses to rotate
+while `AEGIS_ENCRYPTION_KEY` is set, because the process uses the environment variable and a
+rewritten file would not take effect.
+
 Notes:
 
 - The stock `docker-compose.yml` is not a fully standalone "single container only" compose file: it joins external Docker networks for CLIProxyAPI and Sub2API by default.
@@ -669,7 +678,7 @@ Filter pipeline results may also include an `aegisgate` metadata object in succe
 | `x-aegis-request-id` | Gateway -> Upstream | Injected by the gateway into upstream-bound requests for tracing correlation. Not set by clients — appears in upstream headers and gateway logs. |
 | `x-aegis-filter-mode` | Gateway internal | Derived from the token URL suffix (`__redact` / `__passthrough`) and re-injected by the gateway. Client-supplied values are stripped before inner handlers run. |
 | `x-aegis-redaction-whitelist` | Gateway internal | Derived from token `whitelist_key` bindings and injected by the gateway. Client-supplied values are stripped or ignored. |
-| `x-aegis-proxy-token` | Reverse proxy -> Gateway | Optional trust credential between a front reverse proxy and the gateway. Its value is `config/aegis_proxy_token.key` (generated on first start, chmod 600). When it matches, a non-token `/v1/...` or `/v2/...` request is accepted **regardless of client IP** and forwarded to `AEGIS_UPSTREAM_BASE_URL` — i.e. it lifts the internal-only restriction described below. Treat the key as equivalent to opening direct `/v1` access; rotate it like the gateway key and never expose it to clients. See [Caddyfile.example](Caddyfile.example) and `scripts/caddy-entrypoint.sh`. |
+| `x-aegis-proxy-token` | Reverse proxy -> Gateway | Optional trust credential between a front reverse proxy and the gateway. Its value is `config/aegis_proxy_token.key` (generated on first start, chmod 600). When it matches, a non-token `/v1/...` or `/v2/...` request is accepted **regardless of client IP** and forwarded to `AEGIS_UPSTREAM_BASE_URL` — i.e. it lifts the internal-only restriction described below. Treat the key as equivalent to opening direct `/v1` access; rotate it like the gateway key and never expose it to clients. A successful console rotation takes effect in the gateway process immediately; Caddy still reads the token only once at startup, so reload Caddy before forwarded requests use the new token. See [Caddyfile.example](Caddyfile.example) and `scripts/caddy-entrypoint.sh`. |
 
 ### Filter Modes (Passthrough / Redact-Only)
 
