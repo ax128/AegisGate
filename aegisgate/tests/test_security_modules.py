@@ -236,6 +236,26 @@ def test_nonce_replay_cache_detects_reuse_inside_window() -> None:
     assert cache.check_and_store("n1", now_ts=2_000, window_seconds=300) is False
 
 
+def test_nonce_prune_pops_expired_prefix_and_stops() -> None:
+    """Expired entries are a prefix of insertion order; a later expired tail stays.
+
+    A full-table scan would also delete ``expired-tail``. Stopping at the first
+    live entry (timestamp exactly at the window edge still counts as live) leaves it.
+    """
+    cache = NonceReplayCache(max_entries=1000)
+    window = 300
+    assert cache.check_and_store("old-a", now_ts=1_000, window_seconds=window) is False
+    assert cache.check_and_store("old-b", now_ts=1_010, window_seconds=window) is False
+    # Probe runs at t=1500, so expiry is 1200. This entry is exactly on that edge.
+    assert cache.check_and_store("boundary", now_ts=1_200, window_seconds=window) is False
+    assert cache.check_and_store("fresh", now_ts=1_300, window_seconds=window) is False
+    assert cache.check_and_store("expired-tail", now_ts=1_000, window_seconds=window) is False
+
+    assert cache.check_and_store("probe", now_ts=1_500, window_seconds=window) is False
+
+    assert list(cache._cache) == ["boundary", "fresh", "expired-tail", "probe"]
+
+
 def test_redis_nonce_cache_fail_closed_and_nx_replay() -> None:
     class _FailClient:
         def set(self, **kwargs: object) -> None:
@@ -504,6 +524,12 @@ def test_public_ui_paths_are_explicit() -> None:
     assert _is_public_ui_path("/__ui__/assets/app.js")
     assert not _is_public_ui_path("/__ui__/api/tokens")
     assert not _is_public_ui_path("/__ui__/api/login/../tokens")
+    assert _is_public_ui_path("/__ui__/health/")
+    assert _is_public_ui_path("/__ui__/api/login/")
+    assert not _is_public_ui_path("/__ui__/./login")
+    assert not _is_public_ui_path("/__ui__/api/compose/../../login")
+    assert not _is_public_ui_path("/__ui__//login")
+    assert not _is_public_ui_path("/__ui__/health//")
 
 
 def test_ui_login_and_rules_crud(

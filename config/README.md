@@ -95,6 +95,7 @@ Docker 运行时挂载本目录。当前版本已支持对部分文件做轮询�
   cp config/.env.example config/.env
   ```
 - 复制后可编辑 `config/.env`；更多可调项见 `config/.env.example` 内注释。
+- `docker-compose.yml` 的 `environment:` 已经设置的键在 `config/.env.example` 里保持注释，复制或自动生成的 `.env` 不会给它们赋值。可热更新的那些键（`AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、`AEGIS_AUDIT_LOG_PATH`）因此不会在控制台保存时盖掉 Compose。`AEGIS_ENFORCE_LOOPBACK_ONLY` 启动后即固定，注释掉是为了不让示例里留下与 Compose 相反的赋值。裸机需要不同取值时再取消注释。
 
 常用示例：
 

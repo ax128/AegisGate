@@ -406,6 +406,18 @@ def _check_range(meta: dict[str, object], value: float) -> None:
         raise ValueError(f"{meta['field']} must be <= {maximum}")
 
 
+def _reject_forbidden_env_chars(label: str, text: str) -> None:
+    """Reject CR, LF, and NUL before text is written as one ``KEY=value`` line.
+
+    ``strip()`` only drops breaks at the ends, so a trailing break used to
+    disappear while a break in the middle was written as another assignment,
+    including keys the console does not expose. Any occurrence is rejected.
+    NUL is included because downstream env parsers treat it as a terminator.
+    """
+    if "\r" in text or "\n" in text or "\0" in text:
+        raise ValueError(f"invalid value for {label}")
+
+
 def _coerce_config_value(meta: dict[str, object], raw_value: object) -> object:
     kind = str(meta["type"])
     if kind == "bool":
@@ -428,7 +440,9 @@ def _coerce_config_value(meta: dict[str, object], raw_value: object) -> object:
             raise ValueError(f"invalid number for {meta['field']}") from exc
         _check_range(meta, parsed)
         return parsed
-    value = str(raw_value or "").strip()
+    raw_text = str(raw_value or "")
+    _reject_forbidden_env_chars(str(meta["field"]), raw_text)
+    value = raw_text.strip()
     if kind == "enum":
         raw_options = meta.get("options")
         options = (
@@ -448,6 +462,13 @@ def _read_env_lines() -> list[str]:
 
 
 def _write_env_updates(updates: dict[str, str]) -> None:
+    # Checked again at the write boundary. Coercion is the request path; this
+    # still refuses a caller that hands in a raw value and would otherwise
+    # splice a second assignment into config/.env.
+    for key, value in updates.items():
+        rendered_key = str(key)
+        _reject_forbidden_env_chars(rendered_key, rendered_key)
+        _reject_forbidden_env_chars(rendered_key, str(value))
     existing_lines = _read_env_lines()
     consumed: set[str] = set()
     new_lines: list[str] = []
