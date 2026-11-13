@@ -902,6 +902,103 @@ async def test_hmac_invalid_signature_rejected(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_hmac_invalid_signature_does_not_consume_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected signature must leave the nonce free for a later valid request."""
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    nonce = "n-bad-then-ok"
+    bad_headers = _hmac_headers(
+        body=body, path="/v1/responses", secret=secret, nonce=nonce
+    )
+    bad_headers["x-aegis-signature"] = "0" * 64
+    bad_request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=bad_headers,
+        body=body,
+    )
+
+    bad_response = await gateway.security_boundary_middleware(bad_request, _allow_next)
+
+    assert bad_response.status_code == 401
+    assert _response_json(bad_response)["error"]["code"] == "hmac_signature_invalid"
+
+    good_headers = _hmac_headers(
+        body=body, path="/v1/responses", secret=secret, nonce=nonce
+    )
+    good_request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=good_headers,
+        body=body,
+    )
+    good_response = await gateway.security_boundary_middleware(good_request, _allow_next)
+
+    assert good_response.status_code == 200
+    assert good_request.state.security_boundary["auth_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_hmac_nonce_longer_than_128_chars_returns_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    nonce = "n" * 129
+    headers = _hmac_headers(body=body, path="/v1/responses", secret=secret, nonce=nonce)
+
+    def _request() -> Request:
+        return _build_request(
+            "/v1/responses",
+            token_authenticated=True,
+            headers=headers,
+            body=body,
+        )
+
+    first = await gateway.security_boundary_middleware(_request(), _allow_next)
+    second = await gateway.security_boundary_middleware(_request(), _allow_next)
+
+    assert first.status_code == 400
+    assert _response_json(first)["error"]["code"] == "hmac_nonce_too_long"
+    # The overlong nonce must not be stored, so the retry is still a 400.
+    assert second.status_code == 400
+    assert _response_json(second)["error"]["code"] == "hmac_nonce_too_long"
+
+
+@pytest.mark.asyncio
+async def test_hmac_nonce_of_128_chars_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "unit-hmac-secret"
+    monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)
+    monkeypatch.setattr(gateway.settings, "request_hmac_secret", secret)
+    monkeypatch.setattr(gateway, "_nonce_cache", NonceReplayCache())
+    body = {"input": "hello"}
+    headers = _hmac_headers(
+        body=body, path="/v1/responses", secret=secret, nonce="n" * 128
+    )
+    request = _build_request(
+        "/v1/responses",
+        token_authenticated=True,
+        headers=headers,
+        body=body,
+    )
+
+    response = await gateway.security_boundary_middleware(request, _allow_next)
+
+    assert response.status_code == 200
+    assert request.state.security_boundary["auth_verified"] is True
+
+
+@pytest.mark.asyncio
 async def test_hmac_replayed_nonce_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     secret = "unit-hmac-secret"
     monkeypatch.setattr(gateway.settings, "enable_request_hmac_auth", True)

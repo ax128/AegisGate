@@ -15,6 +15,102 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
   控制台保存任意配置都会改写 `config/.env`，热重载此前都会立刻 `aclose()` 这条共享连接，把正在传输的 LLM 流一起断开。这条 client 实际只用 `upstream_timeout_seconds`、`upstream_max_connections`、`upstream_max_keepalive_connections`。
   现在仅这三项发生变化时才摘下旧 client：新请求立刻走新 client，旧 client 在已经生效的 `upstream_timeout_seconds + 5` 秒后再关闭。只改日志级别或其他配置不会动它。
 
+### Security（UI 鉴权与路由使用同一条路径）
+
+- **带 `.` 或 `..` 路径段的请求直接返回 400 `invalid_path`，公开 UI 判断不再调用 `normpath`。**
+  此前 `_is_public_ui_path` 先把路径折叠再判断，路由仍按原始路径匹配。
+  `GET /__ui__/api/compose/../../login` 会被当成公开的 `/__ui__/login` 而跳过登录，
+  实际进入 compose 接口并返回 `not_allowed`。`POST /__ui__/../v1/chat/completions`
+  则被 UI 门重定向到登录页，并不会进入 `/v1`。现在这两处看到的是同一条未折叠路径；
+  含 `.` / `..` 段时在鉴权和路由之前拒绝。`//__ui__/api/...` 仍按原样 404，不会被收成 UI 接口。
+  已经是公开路径、末尾只多一个 `/` 的请求（`/__ui__/health/`、`/__ui__/api/login/`）仍交给路由，
+  由 `redirect_slashes` 跳到那条公开路径。路径中间的空段（`/__ui__//login`）仍按原始路径判断。
+
+### Security（token 路由拒绝 `.` / `..` 路径段）
+
+- **包含 `.` 或 `..` 路径段的 token 路由请求现在返回 400。**
+  `/v1/__gw__/t/<token>/...` 与 `/v2/__gw__/t/<token>/...` 在改写前拒绝路径段恰好为 `.` 或 `..` 的请求。
+  服务器已经把 `%2e` / `%2e%2e` 解码成点段时同样返回 400；路径里仍带着这两种编码时也返回 400。
+  此前剩余路径会原样拼进上游 URL，httpx 规范化点段后请求会离开 token 配置的上游 base path
+  （例如落到 `/admin`，或绕过 chat 专属过滤走到通用代理）。
+  上游 URL 拼接做了同样的检查，命中时不再拼出带点段的地址，调用方返回 400。
+  `report.pdf`、`.well-known` 这类普通路径的改写不变。
+
+### Changed（镜像构建：依赖层缓存、健康检查、文档白名单）
+
+- **镜像先安装依赖，再复制源码。** 构建只先复制 `pyproject.toml`，安装项目依赖和 `semantic` extra，然后再复制应用源码并安装项目本身（不再重装依赖）。改源码不再让依赖层重新安装。没有锁文件，安装清单仍来自 `pyproject.toml`。
+- **镜像增加 `HEALTHCHECK`，探测 `/health`。** 端口使用 `AEGIS_PORT`，缺省 `18080`，与容器启动命令一致。
+- **镜像只复制控制台文档白名单。** 不再把仓库根目录全部 Markdown 拷进镜像，只复制 `aegisgate/core/gateway_ui_config.py` 里 `_UI_DOCS` 列出的文档。`.dockerignore` 排除测试目录、`docs/`、本地笔记和构建产物。
+
+### Security（HMAC nonce 在验签通过后才记录）
+
+- **未签名的请求不再占用 nonce。** 此前先把 nonce 写入缓存再验签名，签名错误的请求也会占住这条 nonce：攻击者可以抢先占用合法客户端将要使用的值，或把缓存刷满挤掉真实 nonce，从而打开重放窗口。现在先校验时间戳和签名，通过后才 `check_and_store`。
+- **超过 128 个字符的 nonce 返回 400**（`hmac_nonce_too_long`）。`n-ok`、`n-replay` 这类短 nonce 的通过与重放行为不变。
+- 内存 nonce 缓存只从最旧的一端弹出已过期项，遇到未过期即停止，避免每个请求扫描整张表。容量上限仍会淘汰最旧条目。
+
+### Fixed（空还原映射不再被 TTL 判过期）
+
+- **空的还原映射不再因 TTL 被判过期。** `redaction_created_at` 默认是上下文创建时间，只在真正写入脱敏映射时重置。以前还原阶段先看这个时间戳：流持续超过 `restore_ttl_seconds`（默认 1800 秒）且 mapping 为空时，会被记上 `restoration_stale_mapping` 并把风险分抬到 0.95，长流因此被拦截。现在只在 mapping 非空时检查 TTL；非空且超过 TTL 的映射仍按 `stale_mapping` 拦截。判定放在解析 mapping 之后，过期拒绝会清掉已经取出的那份，不再把存储副本留到下一次。
+
+### Fixed（示例配置不再给 Compose 已设置的键赋值）
+
+- **复制 `config/.env.example` 不再设置与 `docker-compose.yml` 的 `environment:` 冲突的键。**
+  改为注释的是 `AEGIS_HOST`、`AEGIS_PORT`、`AEGIS_ENV`、`AEGIS_ENFORCE_LOOPBACK_ONLY`、
+  `AEGIS_ENABLE_LOCAL_PORT_ROUTING`、`AEGIS_LOCAL_PORT_ROUTING_HOST`、`AEGIS_SQLITE_DB_PATH`、
+  `AEGIS_AUDIT_LOG_PATH`。
+  热重载会用 `config/.env` 里出现的键盖过当前进程环境。按文档把示例拷成 `.env`（或首次启动从示例自动生成）之后，
+  控制台第一次保存会把 Compose 已打开的端口路由写成 `false`，并可能把监听地址、端口、SQLite / 审计路径和端口路由 Host 钉回示例值。
+  现在复制示例不会给这些键赋值，Compose 注入的值在保存后仍然保留。已有的 `config/.env` 不会被改写。
+  裸机未取消注释时走代码默认值：`AEGIS_ENV` 因此是 `dev` 而不是示例里原先写死的 `prod`
+  （HMAC 未开启时的生产环境告警只在 `prod` / `production` 下出现；Docker Compose 仍会设置 `AEGIS_ENV=prod`）。
+  进程环境变量与 `.env` 在重载时谁优先没有改。
+
+### Security（应用日志文件权限）
+
+- **应用日志改为仅所有者可读写（0600）。** `logs/aegisgate/YY/MM/DD.log` 原本就按 10MB、最多 10 个备份做大小轮转，但文件由标准库 `open()` 创建：umask 为 022 时模式是 0644，同机其他用户能读到日志。现在每次打开（含按大小轮转后重新打开）都强制 0600；进程开始写当天日志时，会扫描整个 `logs/aegisgate` 目录树（不只是当天那一层目录），把其中已有的 `*.log` 和 `*.log.<n>`，包括更早日期的 `YY/MM/DD.log`，收成 0600。按天分目录的旧文件仍会保留，这次不删除它们。扫描目录时遇到 `OSError`（含目录在扫描中消失）只跳过剩余的 chmod，不再把文件日志关掉。
+
+### Security（精确值脱敏：规范化后再匹配）
+
+- **精确值替换先做 NFKC，并去掉零宽字符和双向控制符，再按对应的原文区间替换。**
+  此前只对原文做字面匹配，配置值中间插入 U+200B，或把值写成全角，精确值脱敏会整段漏掉。
+  折叠只用于检测：命中时只替换原文里折进这次匹配的那一段，旁边的全角标点和段外的零宽字符保持原样；
+  没有命中的文本原样返回。大小写和空白仍然敏感，PII 正则未改。纯 ASCII 的文本和配置值仍走原来的字面替换。
+
+### Security（受信代理的 X-Forwarded-For 改为从右向左取客户端）
+
+- **直连对端在 `AEGIS_TRUSTED_PROXY_IPS` 中时，不再把 `X-Forwarded-For` 的最左值当作客户端 IP。**
+  最左值由客户端决定。nginx 常见的 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  是追加：客户端发送 `X-Forwarded-For: localhost` 或 `127.0.0.1`，修复前会被判成内网，从而打开
+  passthrough、管理端点、默认上游和控制台网络门。
+  现在把多个同名头按出现顺序拼在一起，从右向左解析每一跳（含 IPv4-mapped），跳过仍是受信代理的地址，
+  取第一跳非受信 IP。某一跳不是合法 IP 时记为 `unknown`，`_is_internal_ip` 与 `_is_loopback_ip` 都为 false；
+  登录限流和审计会共用这个键。没有 XFF，或每一跳都是受信代理时，回退到最左一跳（解析失败则用直连地址）。
+  直连对端不是受信代理时仍只返回直连地址；该地址不是合法 IP（例如测试客户端的 `testclient`）时保留原始字符串。
+  - 参考配置里的 Caddy 用 `{remote_host}` 覆盖 XFF，本来就不受影响。README 的 nginx 建议改为
+    `proxy_set_header X-Forwarded-For $remote_addr;`。已经用追加写法、且该 nginx 已列入可信代理的部署，
+    修复后取到的是右侧非受信跳，而不是客户端伪造的最左值。
+  - `X-Forwarded-Host` 仍取第一个值，本次未改。`AEGIS_XFF_STRICT_INTERNAL` 的降级逻辑未改。
+
+### Security（脱敏白名单区间跟随替换后的文本）
+
+- **配置了脱敏白名单时，一条规则只要改写了文本，就按新文本重算保护区间。**
+  `RedactionFilter` 原先只在原文上计算一次白名单区间，随后的 PII / 字段规则却在已经被替换、长度已经变化的文本上匹配。
+  长值（例如 JWT）换成短占位符后，后面的密钥会左移进旧区间，从而被原样放行；短值换成更长的占位符时，白名单中的值会右移出旧区间，从而被误脱敏。
+  白名单为空时不额外重算，未配置白名单的请求行为不变。
+
+### Security（控制台 .env 写入拒绝换行注入）
+
+- **控制台保存字符串配置时，拒绝包含回车（CR）、换行（LF）或空字节（NUL）的值，并保持 `config/.env` 字节不变。**
+  字符串此前只做 `strip()`，再按 `KEY=value` 写入。值里一旦含有这三种字符，管理员会话就能把控制台不开放的键写进 `.env`，例如 `AEGIS_GATEWAY_KEY`、`AEGIS_ENFORCE_LOOPBACK_ONLY`。
+  现在这类提交返回 400 `invalid_field_value`（`invalid value for <字段>`），文件不会被改写；落盘前再检查一次。只拒绝这三种字符，其它值的保存行为不变。
+
+### Security（安全披露渠道）
+
+- **仓库根目录新增 `SECURITY.md`。** 安全修复只覆盖 `pyproject.toml` 的 0.1.x（含默认分支），
+  更早的版本不受支持。没有公开安全邮箱；尚未修复的漏洞请经 GitHub Private vulnerability reporting
+  私下报告（https://github.com/ax128/AegisGate/security/advisories/new），不要发到公开 issue。
+  维护者在 7 天内确认收到。
+
 ### Security（上游白名单旁路补上 XFF 降级）
 
 - **`security_boundary.client_is_internal` 改用与 admin / 默认 `/v1` / UI 相同的 XFF 降级判定。**
