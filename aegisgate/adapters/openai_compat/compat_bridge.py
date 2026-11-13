@@ -565,6 +565,10 @@ def _convert_responses_stream_payload_to_chat_chunk(
 
     chunks: list[bytes] = []
     aegis_meta = _copy_aegis_meta(payload)
+    # One name is assigned in several branches: an index, or None when the
+    # delta has no mapped tool call. Without the annotation mypy freezes it
+    # as int after the first assignment.
+    tc_idx: int | None
 
     # ------------------------------------------------------------------
     # Incremental tool-call events from the Responses API stream

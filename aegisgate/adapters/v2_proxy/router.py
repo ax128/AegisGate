@@ -994,7 +994,7 @@ async def _extract_target_url(
     hostname = (parsed.hostname or "").strip().lower()
     if not _is_v2_target_allowlisted(hostname):
         return None, "target url host is not in v2 target allowlist"
-    connect_urls = (value,)
+    connect_urls: tuple[str, ...] = (value,)
     sni_hostname: str | None = None
     if settings.v2_block_internal_targets:
         resolved, error = await _resolve_public_target_ips(hostname)

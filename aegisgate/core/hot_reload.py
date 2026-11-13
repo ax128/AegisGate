@@ -44,7 +44,9 @@ class HotReloader:
 
     def __init__(self, poll_seconds: float = _DEFAULT_POLL_SECONDS) -> None:
         self._poll_seconds = max(1.0, float(poll_seconds))
-        self._watches: list[tuple[_WatchedFile, Callable[[], None]]] = []
+        # Return values are ignored. reload_security_rules returns a layer
+        # report for the console writer; the watcher only calls the callback.
+        self._watches: list[tuple[_WatchedFile, Callable[[], Any]]] = []
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._degraded: bool = False
@@ -60,7 +62,7 @@ class HotReloader:
         """Label of the watch whose callback last failed, or empty string."""
         return self._last_error_label
 
-    def watch(self, path: str | Path, label: str, callback: Callable[[], None]) -> None:
+    def watch(self, path: str | Path, label: str, callback: Callable[[], Any]) -> None:
         """Register a file to watch. *callback* is invoked (sync) when mtime changes."""
         resolved = Path(path).resolve()
         self._watches.append((_WatchedFile(resolved, label), callback))

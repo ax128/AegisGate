@@ -1114,14 +1114,14 @@ async def security_boundary_middleware(request: Request, call_next):
         request_path = str(request.scope.get("path") or "/")
         if _path_has_dot_segment(request_path):
             boundary["rejected_reason"] = "invalid_path"
-            response = _blocked_response(
+            blocked = _blocked_response(
                 status_code=400,
                 reason="invalid_path",
                 detail="path segments '.' and '..' are not allowed",
             )
             if request_path.startswith("/__ui__"):
-                response = _apply_ui_security_headers(response)
-            return finish(response)
+                return finish(_apply_ui_security_headers(blocked))
+            return finish(blocked)
 
         if request_path.startswith("/__ui__"):
             client_ip, ui_allowed = _ui_network_allowed_after_xff_downgrade(request)

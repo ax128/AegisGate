@@ -11,7 +11,6 @@ from aegisgate.storage.crypto import (
 )
 from aegisgate.storage.kv import KVStore
 
-redis_module: Any
 try:
     import redis as redis_module
 except ImportError:  # pragma: no cover - optional dependency

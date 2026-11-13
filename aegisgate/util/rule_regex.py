@@ -208,14 +208,26 @@ class GapGuardedPattern:
             cached = cache[index]
             if cached is None:
                 continue
-            if cached is False or cached[0] < pos:  # type: ignore[index]
+            # ``True`` is never stored. The ignores keep this comparison on the
+            # fast path; an ``isinstance`` check here blew the 100 ms budget.
+            if cached is False or cached[0] < pos:  # type: ignore[index, operator]
                 cached = self._branch_window(branch, text, pos, end)
                 cache[index] = cached
-            if cached is not None and (best is None or cached < best):
+            if cached is not None and (best is None or cached < best):  # type: ignore[operator]
                 best = cached  # type: ignore[assignment]
         if best is None:
             return None
         return self._compiled.search(text, best[0], best[1])
+
+    def match(self, text: str, pos: int = 0, endpos: int | None = None) -> re.Match[str] | None:
+        """Anchored match on the original regex.
+
+        Param rules call ``match`` for a full-value check. That stays the
+        unwrapped engine: the linear window is for ``search`` / ``finditer`` /
+        ``sub``, and a gapped rule used here must not raise ``AttributeError``.
+        """
+        end = len(text) if endpos is None else endpos
+        return self._compiled.match(text, pos, end)
 
     def search(self, text: str, pos: int = 0, endpos: int | None = None) -> re.Match[str] | None:
         end = len(text) if endpos is None else min(endpos, len(text))

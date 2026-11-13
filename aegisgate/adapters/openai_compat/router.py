@@ -6158,11 +6158,13 @@ async def _execute_messages_once(
         )
         # Returning upstream_body verbatim here discarded every pipeline rewrite
         # this route had just made.
-        rendered = _apply_pipeline_text_to_body(
+        # Earlier branches bind ``rendered`` as a dict and return. This path
+        # can also be plain text, so it uses its own name.
+        passthrough_body = _apply_pipeline_text_to_body(
             "/v1/messages", upstream_body, internal_resp, ctx
         )
         ctx.redaction_mapping.clear()
-        return _passthrough_any_response(rendered)
+        return _passthrough_any_response(passthrough_body)
 
     return await execution_common.run_once_execution(
         request_stage=request_stage,

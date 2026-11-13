@@ -6,9 +6,10 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
+from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TextIO
+from typing import Any, cast
 
 from aegisgate.config.settings import settings
 from aegisgate.util.secure_file import open_append_0600
@@ -68,9 +69,13 @@ class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
     so the restriction has to live in ``_open``.
     """
 
-    def _open(self) -> TextIO:
+    def _open(self) -> TextIOWrapper[Any]:
         encoding = self.encoding or "utf-8"
-        return open_append_0600(Path(self.baseFilename), encoding=encoding)
+        # ``fdopen`` returns a wrapper. The helper is annotated as ``TextIO``.
+        return cast(
+            "TextIOWrapper[Any]",
+            open_append_0600(Path(self.baseFilename), encoding=encoding),
+        )
 
 
 class DailyRotatingFileHandler(logging.Handler):

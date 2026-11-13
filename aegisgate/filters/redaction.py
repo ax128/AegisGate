@@ -26,6 +26,7 @@ from aegisgate.filters.base import BaseFilter
 from aegisgate.observability.metrics import inc_validator_failure
 from aegisgate.storage.kv import KVStore
 from aegisgate.util.checksums import ENFORCED_VALIDATORS, VALIDATORS as _CHECKSUM_VALIDATORS
+from aegisgate.util.rule_regex import RulePattern
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
 from aegisgate.util.masking import mask_for_log
@@ -245,7 +246,7 @@ class RedactionFilter(BaseFilter):
                     )
                 return placeholder
 
-            def _apply_pattern(pattern: re.Pattern[str], kind: str, source_text: str) -> str:
+            def _apply_pattern(pattern: RulePattern, kind: str, source_text: str) -> str:
                 # Resolved once per pattern, not per match: this runs over every
                 # message of every request. The log marker below keeps the id as
                 # configured, so an admin can still recognise their own rule.

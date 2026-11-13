@@ -67,6 +67,9 @@ dev = [
   "pytest-cov>=5.0.0",
   "pytest-asyncio>=0.23.0",
   "pytest-timeout>=2.3.0",
+  "ruff>=0.17.4",
+  "mypy>=2.4.1",
+  "pip-audit>=2.10.1",
 ]
 redis = [
   "redis>=5.0.0",
@@ -97,13 +100,21 @@ source = ["aegisgate"]
 omit = ["aegisgate/tests/*"]
 
 [tool.coverage.report]
-fail_under = 50
+fail_under = 75
 show_missing = true
 skip_empty = true
 
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Syntax errors and undefined names only. Widen this in a later change.
+select = ["E9", "F63", "F7", "F82"]
+
 [tool.mypy]
 # Exclude packaged build artifacts so `mypy .` only checks source modules and
-# does not fail on duplicate package names under build/lib.
+# does not fail on duplicate package names under build/lib. Tests are not
+# part of the required gate; `aegisgate/tests` is excluded on the CI command.
 exclude = '^(build/|dist/|scripts/)'
 
 [[tool.mypy.overrides]]
@@ -116,6 +127,7 @@ module = [
   "opentelemetry.*",
   "prometheus_client",
   "psycopg",
+  "psycopg_pool",
   "redis",
   "sklearn.*",
   "yaml",

@@ -52,15 +52,77 @@ jobs:
 
       - name: Check coverage floor
         if: matrix.python-version == '3.12'
-        # Temporary: reports pyproject.toml's fail_under=50 against the measured
-        # number without failing the job, so the real figure is visible before a
-        # floor is committed to. Drop continue-on-error once it is enforced.
-        continue-on-error: true
+        # Enforces [tool.coverage.report] fail_under in pyproject.toml (75).
         run: coverage report
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
-          file: coverage.xml
+          files: coverage.xml
           fail_ci_if_error: false
+
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        timeout-minutes: 8
+        run: pip install -e ".[dev,semantic]"
+
+      - name: Ruff
+        run: ruff check --select E9,F63,F7,F82 .
+
+  mypy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        timeout-minutes: 8
+        run: pip install -e ".[dev,semantic]"
+
+      - name: Mypy
+        # Tests are excluded: this gate is the production-module error list.
+        run: mypy . --exclude aegisgate/tests
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        timeout-minutes: 8
+        run: pip install -e ".[dev,semantic]"
+
+      - name: Audit installed dependencies
+        run: pip-audit
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        # Build only. Do not push.
+        run: docker build --tag aegisgate:ci .

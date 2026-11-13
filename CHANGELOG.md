@@ -9,6 +9,13 @@ each. Collapsing those into dated releases is tracked in [ROADMAP.md](ROADMAP.md
 
 ## [Unreleased]
 
+### Changed（CI 质量门禁）
+
+- **覆盖率低于 75% 现在会让构建失败。** `fail_under` 从 50 调到 75，覆盖率检查不再
+  `continue-on-error`。lint（ruff，只开 `E9,F63,F7,F82`）、类型检查（mypy）、
+  依赖审计（pip-audit）和镜像构建（只构建、不推送）都是必过检查。
+  `ruff`、`mypy`、`pip-audit` 只加在 `dev` extras 里。
+
 ### Fixed（控制台首屏不再拉取全部面板）
 
 - 桌面首屏不再因为审计标题落在窗口下半部分就扫描审计日志。统计标题大约在 180px，800–1400px 高的窗口仍会加载；审计标题大约在 700px，900–1200px 高的窗口不会因此发起审计查询和汇总。窗口高到 700px 已经落在上半部分时，审计面板仍会加载。

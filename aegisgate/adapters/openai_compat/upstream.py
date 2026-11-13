@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
-from typing import Any, AsyncGenerator, Mapping
+from typing import Any, AsyncGenerator, Mapping, cast
 from urllib.parse import unquote, urlparse, urlunparse
 
 import hashlib
@@ -478,7 +478,9 @@ async def _forward_multipart(
     try:
         response = await client.post(
             url=url,
-            data=data or None,
+            # httpx annotates data as a Mapping. Callers pass a list of tuples
+            # so repeated field names survive; leave that value as-is.
+            data=cast(Any, data or None),
             files=files or None,
             headers=dict(headers),
         )
@@ -528,7 +530,8 @@ async def _forward_multipart_pinned(
             )
             response = await client.post(
                 url=connect_url,
-                data=data or None,
+                # Same list-of-tuples form body as the unpinned path.
+                data=cast(Any, data or None),
                 files=files or None,
                 headers=bound_headers,
                 extensions=extensions,
