@@ -17,6 +17,7 @@ from aegisgate.core.models import InternalResponse
 from aegisgate.filters.base import BaseFilter
 from aegisgate.util.debug_excerpt import debug_log_original
 from aegisgate.util.logger import logger
+from aegisgate.util.rule_regex import RulePattern, compile_rule_regex
 
 
 class PostRestoreGuard(BaseFilter):
@@ -54,8 +55,8 @@ class PostRestoreGuard(BaseFilter):
     @staticmethod
     def _compile_patterns(
         items: Sequence[dict[str, Any] | str | None],
-    ) -> list[re.Pattern[str]]:
-        compiled: list[re.Pattern[str]] = []
+    ) -> list[RulePattern]:
+        compiled: list[RulePattern] = []
         for item in items:
             if isinstance(item, dict):
                 regex = item.get("regex")
@@ -63,11 +64,11 @@ class PostRestoreGuard(BaseFilter):
                 regex = item
             if not regex:
                 continue
-            compiled.append(re.compile(str(regex), re.IGNORECASE))
+            compiled.append(compile_rule_regex(str(regex), re.IGNORECASE))
         return compiled
 
     @staticmethod
-    def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
+    def _matches_any(text: str, patterns: list[RulePattern]) -> bool:
         return any(pattern.search(text) for pattern in patterns)
 
     def _apply_action(self, ctx: RequestContext, key: str, fallback: str) -> str:
