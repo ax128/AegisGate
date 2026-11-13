@@ -10,6 +10,8 @@ from aegisgate.config.settings import settings
 from aegisgate.util.logger import logger
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# Not an IP, so _is_internal_ip and _is_loopback_ip are both false.
+_UNKNOWN_CLIENT = "unknown"
 
 # ---------------------------------------------------------------------------
 # Trusted proxy handling
@@ -69,17 +71,54 @@ def _is_trusted_proxy(ip_str: str) -> bool:
     return False
 
 
+def _parse_hop(value: str) -> str | None:
+    """Return a normalized IP, or None when ``value`` is not an address.
+
+    IPv4-mapped IPv6 (``::ffff:10.0.0.2``) is unwrapped so it matches an IPv4
+    trusted-proxy entry. ``localhost`` is intentionally not an IP: a client can
+    type it into X-Forwarded-For, and it must not count as loopback.
+    """
+    try:
+        ip = ipaddress.ip_address(_normalize_ip_host(value))
+    except ValueError:
+        return None
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return str(mapped or ip)
+
+
 def _real_client_ip(request: Request) -> str:
+    """Client IP, trusting X-Forwarded-For only from a trusted proxy.
+
+    An appending proxy keeps whatever the client put on the left, so the
+    leftmost hop is not the client. Walk from the right, skip hops that are
+    themselves trusted proxies, and stop at the first other address. A hop that
+    is not an IP is ``unknown`` rather than internal. No header, or a chain of
+    only trusted proxies, falls back to the leftmost parsed hop, then the
+    direct peer.
+
+    A direct peer that does not parse (TestClient's ``testclient``) is returned
+    unchanged so callers keep seeing that raw host.
     """
-    Determine the real client IP.
-    Only trust X-Forwarded-For when the direct connection comes from a trusted proxy.
-    """
-    direct_ip = (request.client.host if request.client else "").strip()
+    raw_direct = request.client.host if request.client else ""
+    direct_ip = _parse_hop(raw_direct)
+    if direct_ip is None:
+        return (raw_direct or "").strip()
     if not _is_trusted_proxy(direct_ip):
         return direct_ip
-    xff = (request.headers.get("x-forwarded-for") or "").strip()
-    if xff:
-        return xff.split(",", 1)[0].strip()
+    hops = [
+        hop.strip()
+        for raw in request.headers.getlist("x-forwarded-for")
+        for hop in raw.split(",")
+        if hop.strip()
+    ]
+    for hop in reversed(hops):
+        ip = _parse_hop(hop)
+        if ip is None:
+            return _UNKNOWN_CLIENT
+        if not _is_trusted_proxy(ip):
+            return ip
+    if hops:
+        return _parse_hop(hops[0]) or direct_ip
     return direct_ip
 
 
